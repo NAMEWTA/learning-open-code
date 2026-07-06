@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 静态分片：按参数范围切割任务</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .chain { font-family: Consolas, monospace; font-size: 0.82rem; background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; margin: 0.6rem 0; line-height: 1.6; }
+  .warn { background: #fff3f3; border-left: 3px solid #e34c4c; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn b { color: #c0392b; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 静态分片：按参数范围切割任务 <span class="tag">模式 4</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：学完你能讲清静态分片的原理——服务端通过 <code>jobArgs.getJobParams()</code> 下发分片参数（如 ID 范围），每个执行器各取一段数据独立处理，并理解它和下一课「动态分片（Map）」的本质区别。
+</div>
+
+<p>想象你要对 100 万用户做数据加密。单机跑通宵，分 10 台机器各跑 10 万条就快多了。静态分片就是干这个的：<strong>服务端定义分片规则 → 下发分片参数给执行器 → 各执行器按参数处理自己那一段</strong>。</p>
+
+<h2>一、TestStaticShardingJob — 服务端告诉我范围，我干我的</h2>
+
+<div class="region">
+<h3>源码拆解</h3>
+<span class="where">ruoyi-job/src/main/java/org/dromara/job/snailjob/TestStaticShardingJob.java</span>
+<pre><code>@Component
+@JobExecutor(name = "testStaticShardingJob")
+public class TestStaticShardingJob {
+
+    public ExecuteResult jobExecute(JobArgs jobArgs) {
+        // ① 从服务端获取分片参数
+        String jobParams = Convert.toStr(jobArgs.getJobParams());
+        SnailJobLog.LOCAL.info("开始执行分片任务,参数:{}", jobParams);
+
+        // ② 解析分片范围（格式: "fromId,toId"）
+        String[] split = jobParams.split(",");
+        Long fromId = Long.parseLong(split[0]);
+        Long toId = Long.parseLong(split[1]);
+
+        // ③ 模拟数据库操作：对 fromId ~ toId 范围进行加密
+        try {
+            SnailJobLog.REMOTE.info("开始对id范围:{}进行加密处理", fromId + "-" + toId);
+            Thread.sleep(3000);  // 模拟耗时处理
+            SnailJobLog.REMOTE.info("对id范围:{}进行加密处理完成", fromId + "-" + toId);
+        } catch (InterruptedException e) {
+            return ExecuteResult.failure("任务执行失败");
+        }
+        return ExecuteResult.success("执行分片任务完成");
+    }
+}</code></pre>
+
+<p>「静态分片」的「静态」体现在：<strong>分片规则在服务端创建任务时就固定了</strong>——比如在 SnailJob 后台配置 3 个分片，参数分别为 <code>"1,10000"</code>、<code>"10001,20000"</code>、<code>"20001,30000"</code>。调度时服务端把这 3 组分片参数分别发给 3 个执行器实例（或分多次发给同一个实例）。</p>
+</div>
+
+<h2>二、静态分片的执行模型</h2>
+
+<div class="flow">SnailJob 服务端（任务已配置 3 个分片）
+│
+│  分片 0: jobParams = "1,33333"
+│  分片 1: jobParams = "33334,66666"
+│  分片 2: jobParams = "66667,100000"
+│
+│  调度时分配：
+│
+├──→ 实例 A (端口 28080) 拿到 "1,33333"       → 加密 ID 1~33333
+├──→ 实例 B (端口 28081) 拿到 "33334,66666"   → 加密 ID 33334~66666
+└──→ 实例 C (端口 28082) 拿到 "66667,100000"  → 加密 ID 66667~100000
+
+关键点：分片参数在<strong>服务端</strong>定义，执行器只管「接参数→干活→返回」
+→ 如果要改分片数，在后台改，不需要改代码</div>
+
+<div class="why"><b>为什么叫「静态」？</b>因为分片的数量和每片的参数在服务端任务配置里是<strong>预先写死</strong>的。比如你写了 3 片就是 3 片。与之对应的是下节课的 Map 任务「动态分片」——分片数量和内容由执行器代码<strong>在运行时动态决定</strong>。静态 = 服务端定规则，动态 = 客户端定规则。</div>
+
+<h2>三、分片参数的设计模式</h2>
+
+<p><code>TestStaticShardingJob</code> 用了最简单的格式——逗号分隔的起止 ID。但在实际项目中，<code>jobParams</code> 可以是任意字符串，常见的包括：</p>
+
+<div class="chain">
+<b>常见的 jobParams 格式：</b>
+├── "1,10000"                          ← 起止范围（本课用）
+├── '{"startDate":"2026-01","endDate":"2026-06"}'  ← JSON 日期范围
+├── "shard:0,total:3"                  ← 分片索引 + 总数（执行器自己算范围）
+├── "TABLE_0,TABLE_1"                   ← 分表名（按表分片）
+└── "province:guangdong"                ← 业务维度（按地区分片）
+</div>
+
+<p><strong>分片设计的第一原则：每片的数据量大致相等</strong>，避免「某些片跑完了、某个片还在跑」的倾斜。</p>
+
+<h2>四、静态分片 vs 广播任务（容易混淆）</h2>
+
+<table>
+<tr><th>维度</th><th>广播任务</th><th>静态分片</th></tr>
+<tr><td>各实例执行的内容</td><td><strong>相同</strong>（都跑同一段逻辑）</td><td><strong>不同</strong>（各跑不同数据范围）</td></tr>
+<tr><td>参数来源</td><td>无特殊参数（或全局统一参数）</td><td>服务端为每个分片单独配置参数</td></tr>
+<tr><td>典型场景</td><td>清缓存、刷配置、采指标</td><td>批量加密、数据迁移、大批量推送</td></tr>
+<tr><td>数据重复处理</td><td>会（每个实例都处理全量）</td><td>不会（各处理一片，理论无重叠）</td></tr>
+</table>
+
+<div class="warn"><b>⚠️ 分片重叠陷阱</b>：如果静态分片参数写成了 <code>"1,10000"</code> 和 <code>"5000,15000"</code>——ID 5000~10000 被两个分片重复处理！分片参数必须<strong>不重不漏</strong>。这是最容易出错的地方。</div>
+
+<h2>五、静态分片的局限</h2>
+
+<ul>
+<li><strong>分片数固定</strong>：要改分片数就得去 SnailJob 后台改配置。数据量暴增 10 倍 → 手动改 10 个分片参数？麻烦。</li>
+<li><strong>不能动态调整</strong>：如果某片数据特别多（如 ID 1~10000 有 9000 条数据，10001~20000 只有 100 条），会严重倾斜。</li>
+<li><strong>分片失败处理</strong>：如果执行分片 1 的实例挂了，服务端需要重试机制——这不是代码能解决的，依赖服务端配置。</li>
+</ul>
+
+<p>这些局限正是下一课 Map 任务（动态分片）要解决的问题。</p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 静态分片的「分片参数」是在哪里定义的？</p>
+<span class="opt">A. 在执行器的 Java 代码中硬编码</span>
+<span class="opt">B. 在 SnailJob 服务端后台创建任务时配置的 jobParams</span>
+<span class="opt">C. 在执行器的 yml 配置文件中</span>
+<span class="opt">D. 由执行器在运行时自己生成</span>
+<details><summary>看答案</summary><b>B</b>。静态分片的分片参数在 SnailJob 服务端后台配置（创建任务 → 选择分片路由 → 填写每个分片的 jobParams）。执行器通过 <code>jobArgs.getJobParams()</code> 获取自己该处理哪一段。这是「静态」的含义来源。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 如果需要处理 100 万条数据，配置了 10 个静态分片，但只有 3 个实例在线，会发生什么？</p>
+<span class="opt">A. 只有 3 个分片被执行，其余 7 个丢失</span>
+<span class="opt">B. 10 个分片任务排队，3 个实例逐个认领执行——有些实例会执行多个分片</span>
+<span class="opt">C. 报错，因为分片数和实例数不匹配</span>
+<span class="opt">D. 服务端自动合并成 3 个分片</span>
+<details><summary>看答案</summary><b>B</b>。分片数和实例数不需要相等。服务端会把 10 个分片任务放入队列，3 个在线实例各自认领——快的实例多领几个。分片是逻辑概念，实例是物理概念，两者解耦。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>jobArgs.getJobParams()</code> 返回的是什么类型？</p>
+<span class="opt">A. 直接返回 String，不需要转换</span>
+<span class="opt">B. 返回 Object，需要 Convert.toStr() 转成 String</span>
+<span class="opt">C. 返回 Map&lt;String, Object&gt;，按 key 取</span>
+<span class="opt">D. 返回 byte[]，需要反序列化</span>
+<details><summary>看答案</summary><b>B</b>。注意代码中用的是 <code>Convert.toStr(jobArgs.getJobParams())</code>（Hutool 的 Convert 工具），说明原始返回类型是 Object。这是因为服务端可能下发不同类型的数据。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 静态分片和动态分片（Map 任务）最本质的区别是什么？</p>
+<span class="opt">A. 静态分片用 XML 配置，动态分片用注解</span>
+<span class="opt">B. 静态分片的分片规则在服务端预先定义，动态分片的分片规则由执行器代码在运行时决定</span>
+<span class="opt">C. 静态分片只能处理数字，动态分片可以处理任意类型</span>
+<span class="opt">D. 没有本质区别，只是两种不同的 API 写法</span>
+<details><summary>看答案</summary><b>B</b>。静态分片 = 服务端定规则（改分片要改后台配置），动态分片 = 客户端定规则（改分片改代码即可）。这是理解后续 Map/MapReduce 任务的前置知识。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://juejin.cn/post/7426232375703896101" target="_blank">掘金：SnailJob 静态分片任务教程</a>，以及 <a href="https://snailjob.io/docs/quick_start/client" target="_blank">SnailJob 官方文档 · 任务参数配置</a>。配套速查见 <code>reference/0004.html</code>，术语见 <code>GLOSSARY.md</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「静态分片和广播+分片组合有什么区别？」「服务端怎么保证分片不重复下发给两个实例？」「如果执行到一半实例宕机，分片会自动转移到其他实例吗？」下一课我们进入动态分片：<strong>Map 任务——执行器自己拆分数据、只分不汇总</strong>。</div>
+
+<div class="nav">课程 0004 / 使命：全面读懂 ruoyi-job 任务调度模块 · 上一课：<a href="0003.html">广播任务</a> · 下一课预告：Map 任务（动态分片）</div>
+
+</body>
+</html>

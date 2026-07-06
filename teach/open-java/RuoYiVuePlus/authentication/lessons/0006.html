@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · 接口加解密在登录链路中的位置</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 6 课 · 接口加解密在登录链路中的位置 <span class="tag">传输安全</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #7）</b>：说清接口加解密（<code>@ApiEncrypt</code> + AES/RSA）在登录链路中的<strong>位置与作用</strong>。这是<a href="0001.html">第 1 课</a>全景图里被一笔带过的「第 2.5 步」，也是前端 <code>isEncrypt</code> 标记的归宿。
+</div>
+
+<p>登录接口的请求头里有 <code>isEncrypt: true</code>。意味着：账号密码<strong>不是明文上网的</strong>。这一课讲清这套「混合加密」怎么运作，以及它和密码 BCrypt、token 是三件完全不同的事。</p>
+
+<h2>一、先厘清三种「加密」，别再混淆</h2>
+<table>
+<tr><th>名字</th><th>解决什么</th><th>算法</th><th>在哪</th></tr>
+<tr><td>密码存储</td><td>库被脱也拿不到明文密码</td><td>BCrypt（单向哈希）</td><td>注册/登录校验（第 5 课）</td></tr>
+<tr><td>token</td><td>身份凭证、可验签</td><td>JWT 签名</td><td>签发/校验（第 3 课）</td></tr>
+<tr><td><b>接口加解密</b></td><td>请求/响应体在传输中不被窃听</td><td>AES + RSA 混合</td><td>本课，CryptoFilter</td></tr>
+</table>
+<p>本课只讲第三种。它和前两种正交——一次登录请求会<strong>同时</strong>用到全部三种。</p>
+
+<h2>二、为什么是「AES + RSA 混合」而不是单用一种？</h2>
+<ul>
+<li><b>AES</b>（对称）：加解密快，适合加密大的请求体；但密钥怎么安全送给对方是难题。</li>
+<li><b>RSA</b>（非对称）：公钥加密、私钥解密，适合传密钥；但慢，不适合加密大数据。</li>
+</ul>
+<div class="why">
+✅ <b>混合方案取两者之长</b>：用一次性 AES 密钥加密请求体（快），再用 RSA 公钥加密这个 AES 密钥（安全传钥）。这正是 HTTPS / TLS 的经典思路。RuoYi 把它做在应用层，即便没上 HTTPS 或想多一层防护时也能用。
+</div>
+
+<h2>三、前端做了什么（request.ts + crypto.ts）</h2>
+<pre><code>// plus-ui-vue/src/utils/request.ts:155
+if (isEncrypt && (method==='post' || method==='put')) {
+    const aesKey = generateAesKey();                       // ① 随机生成一次性 AES 密钥
+    config.headers['encrypt-key'] = encrypt(encryptBase64(aesKey)); // ② RSA 公钥加密 AES 密钥，放头
+    config.data = encryptWithAes(JSON.stringify(config.data), aesKey); // ③ AES 加密请求体
+}</code></pre>
+<p>注意 <code>encrypt()</code> 是 RSA（<code>jsencrypt</code>），<code>encryptWithAes()</code> 是 AES（<code>crypto-js</code>，ECB/Pkcs7）。AES 密钥每次请求新生成，用完即弃。</p>
+
+<h2>四、后端做了什么（CryptoFilter）</h2>
+<p>关键：解密发生在 <strong>Controller 之前的 Filter 层</strong>，所以 Controller 拿到的已是明文。</p>
+<pre><code>// CryptoFilter.java:64
+String headerValue = request.getHeader(properties.getHeaderFlag()); // "encrypt-key"
+if (StringUtils.isNotBlank(headerValue)) {
+    // 有加密头 → 包一层解密 Wrapper（用 RSA 私钥解出 AES 密钥，再 AES 解请求体）
+    requestWrapper = new DecryptRequestBodyWrapper(servletRequest, privateKey, headerFlag);
+} else {
+    // 没有加密头，但接口标了 @ApiEncrypt（强制加密）→ 拒绝！
+    if (ObjectUtil.isNotNull(apiEncrypt)) {
+        handlerExceptionResolver.resolveException(..., new ServiceException("没有访问权限...", 403));
+        return;
+    }
+}</code></pre>
+
+<div class="side">
+💡 <b><code>@ApiEncrypt</code> 是「强制」加密注解</b>：标了它的接口（<code>/auth/login</code>、<code>/auth/register</code>），如果请求<strong>没带加密头就直接拒绝</strong>。防止有人绕过前端、明文打登录接口。<code>response()=true</code> 时还会把响应体也加密回去（用 <code>EncryptResponseBodyWrapper</code>）。</p>
+</div>
+
+<h3>完整往返</h3>
+<div class="flow">前端                                  后端
+────                                  ────
+明文 {username, password}
+  │ ① 生成 AES 密钥 k
+  │ ② RSA 公钥加密 k → encrypt-key 头
+  │ ③ AES(k) 加密 body
+  ▼
+密文 body + encrypt-key 头  ───────►  CryptoFilter
+                                       │ 读 encrypt-key 头
+                                       │ RSA 私钥解出 k
+                                       │ AES(k) 解 body
+                                       ▼
+                                     Controller 拿到明文 {username, password}
+                                       （继续走第 3~6 步登录）</div>
+
+<details>
+<summary>🤔 想一想：CryptoFilter 为什么必须做在 Filter 层，而不是用 Spring 的 <code>@RequestBody</code> 反序列化后再解密？</summary>
+因为请求体是<strong>一次性流</strong>，<code>@RequestBody</code> 一旦读取并反序列化，流就消费完了，后面再想解密原始密文已经来不及。Filter 在最外层用 <code>DecryptRequestBodyWrapper</code> 包装原始请求，重写 <code>getInputStream()</code> 返回解密后的内容，这样下游 Spring MVC 拿到的「就像」一开始就是明文，无感接入。这也是为什么登录 Controller 能用 <code>@RequestBody String body</code> 直接拿到明文 JSON。
+</details>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 接口加解密里，AES 密钥本身是怎么安全传到后端的？</p>
+<span class="opt">A. 明文放在请求头</span>
+<span class="opt">B. 用 RSA 公钥加密后放在 encrypt-key 头，后端用 RSA 私钥解出</span>
+<span class="opt">C. 写死在前后端代码里</span>
+<span class="opt">D. 通过 token 传递</span>
+<details><summary>看答案</summary><b>B</b>。这就是混合加密：AES 加密数据（快），RSA 加密 AES 密钥（安全传钥）。AES 密钥每次请求随机生成。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 一个标了 <code>@ApiEncrypt</code> 的接口，收到一个没有加密头的明文请求，会怎样？</p>
+<span class="opt">A. 正常处理</span>
+<span class="opt">B. 被 CryptoFilter 拒绝，返回 403「没有访问权限」</span>
+<span class="opt">C. 自动加密后处理</span>
+<span class="opt">D. 返回 401</span>
+<details><summary>看答案</summary><b>B</b>。<code>@ApiEncrypt</code> 是强制加密：无加密头则 Filter 直接用 handlerExceptionResolver 抛 403，防止绕过前端明文打接口。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 接口传输加密（AES/RSA）和密码存储加密（BCrypt）的关系是？</p>
+<span class="opt">A. 是同一回事</span>
+<span class="opt">B. 完全独立的两件事：前者保护「传输中」，后者保护「数据库里」，一次登录两者都用</span>
+<span class="opt">C. 互斥，开了一个就不用另一个</span>
+<span class="opt">D. BCrypt 可以解密 AES</span>
+<details><summary>看答案</summary><b>B</b>。正交关系。请求体 AES 加密 → 传到后端解密 → 拿到明文密码 → 用 BCrypt.checkpw 和库里的哈希比对。两层各管一段。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://plus-doc.dromara.org/#/ruoyi-vue-plus/framework/security_encrypt" target="_blank">RuoYi-Vue-Plus 官方文档 · 接口加密</a>——含 RSA 公私钥配置位置与开关说明，对照本课落地。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「响应加密 response()=true 实际开了吗？」「ECB 模式安全吗，为什么不用 CBC？」后端到此讲完。下一课转向<strong>前端 Vue 的鉴权对接</strong>——token 存哪、请求头怎么加、401 怎么处理、路由和按钮权限怎么控制。</div>
+
+<div class="nav">课程 0006 / 上一课：<a href="0005.html">五种登录+验证码</a> · 下一课：前端 Vue 鉴权对接（Pinia + axios + 路由守卫）</div>
+
+</body>
+</html>

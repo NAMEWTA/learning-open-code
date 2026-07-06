@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 | 17种脱敏策略：@Sensitive 注解与策略枚举体系</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>01 | 17种脱敏策略：@Sensitive 注解与策略枚举体系</h1>
+
+<p>ruoyi-common-sensitive 模块是整个 RuoYi-Vue-Plus 生态中体量最小、设计最精炼的模块之一——它只有 <strong>5 个 Java 文件</strong>，却支撑了整个系统的脱敏能力。本课聚焦于 <code>@Sensitive</code> 注解与 <code>SensitiveStrategy</code> 枚举，它们是脱敏体系的"心脏"。</p>
+
+<h2>1. 全景鸟瞰：5 个文件的协作关系</h2>
+
+<p>在深入细节之前，先建立整体认知。这 5 个 Java 文件各司其职：</p>
+
+<table>
+  <tr><th>文件</th><th>包路径</th><th>角色</th></tr>
+  <tr><td><code>@Sensitive</code> 注解</td><td><code>org.dromara.common.sensitive.annotation</code></td><td>标记字段需要脱敏，定义脱敏策略和权限条件</td></tr>
+  <tr><td><code>SensitiveStrategy</code> 枚举</td><td><code>org.dromara.common.sensitive.core</code></td><td>17 种脱敏策略，每个枚举值持有一个 <code>Function&lt;String,String&gt;</code> 脱敏器</td></tr>
+  <tr><td><code>SensitiveJsonFieldProcessor</code></td><td><code>org.dromara.common.sensitive.handler</code></td><td>实现 <code>JsonFieldProcessor</code>，在 JSON 序列化时检测 <code>@Sensitive</code> 并执行脱敏</td></tr>
+  <tr><td><code>SensitiveConfig</code></td><td><code>org.dromara.common.sensitive.config</code></td><td>自动装配类，将 <code>SensitiveJsonFieldProcessor</code> 注册为 Spring Bean</td></tr>
+  <tr><td><code>SensitiveService</code> 接口</td><td><code>org.dromara.common.sensitive.core</code></td><td>条件脱敏接口，根据角色/权限判断当前用户是否需要脱敏</td></tr>
+</table>
+
+<p>这 5 个文件构成了一条清晰的协作链：</p>
+
+<pre>@Sensitive 标记字段 → SensitiveJsonFieldProcessor 检测 → SensitiveService 判断是否脱敏
+    → SensitiveStrategy 选择脱敏器 → hutool DesensitizedUtil 执行脱敏</pre>
+
+<div class="insight">
+<strong>关键洞察：</strong>整个脱敏模块是一个典型的 <strong>声明式处理架构</strong>——开发者只需在实体类字段上加 <code>@Sensitive(strategy = SensitiveStrategy.PHONE)</code>，其余全部由框架自动完成。这与 Spring 的 <code>@Transactional</code> 理念一致：声明意图，框架执行。
+</div>
+
+<h2>2. @Sensitive 注解详解</h2>
+
+<p><code>@Sensitive</code> 是脱敏体系的入口注解，标注在 Java Bean 的字段上。它有三个属性：</p>
+
+<pre>@Target({ElementType.FIELD})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Sensitive {
+    SensitiveStrategy strategy();          // 必填：脱敏策略
+    String[] roleKey() default {};         // 可选：角色 key 数组
+    String[] perms() default {};           // 可选：权限标识数组
+}</pre>
+
+<h3>2.1 strategy() —— 必填属性</h3>
+
+<p><code>strategy()</code> 没有默认值，<strong>必须显式指定</strong>。这确保了开发者不会"忘记"选择脱敏方式而意外暴露敏感数据。它接收一个 <code>SensitiveStrategy</code> 枚举值，例如：</p>
+
+<pre>@Sensitive(strategy = SensitiveStrategy.PHONE)
+private String phone;         // 13812345678 → 138****5678
+
+@Sensitive(strategy = SensitiveStrategy.ID_CARD)
+private String idCard;        // 110101199001011234 → 110***********1234
+
+@Sensitive(strategy = SensitiveStrategy.BANK_CARD)
+private String bankCard;      // 6222021234567890 → 622202********7890</pre>
+
+<h3>2.2 roleKey() 与 perms() —— 条件脱敏</h3>
+
+<p>这两个属性是可选的，<strong>不填写时对所有用户生效</strong>。一旦填写，<code>SensitiveService.isSensitive(roleKey[], perms[])</code> 会被调用来判断当前用户是否需要脱敏。</p>
+
+<pre>// 场景：仅对普通角色脱敏，admin 角色看到明文
+@Sensitive(strategy = SensitiveStrategy.PHONE, roleKey = {"common"})
+private String phone;
+
+// 场景：仅对没有 "system:user:query" 权限的用户脱敏
+@Sensitive(strategy = SensitiveStrategy.ID_CARD, perms = {"system:user:query"})
+private String idCard;</pre>
+
+<blockquote>
+<strong>roleKey 和 perms 是 OR 关系</strong>：只要用户满足任一 roleKey <strong>或</strong>任一 perms，就会进行脱敏。如果两者都不配置，默认对所有用户脱敏。
+</blockquote>
+
+<div class="mission">
+<strong>实践建议：</strong>常见的权限设计是 admin 角色看到明文，普通用户看到脱敏数据。此时在 admin 角色对应的 <code>SensitiveService</code> 实现中，对 roleKey 为 admin 的情况返回 <code>false</code>（不脱敏），对 common 返回 <code>true</code>（脱敏）。
+</div>
+
+<h2>3. SensitiveStrategy 枚举详解</h2>
+
+<p><code>SensitiveStrategy</code> 是整个模块最核心的类。它是一个存储在 <code>org.dromara.common.sensitive.core</code> 包下的枚举，每个枚举值都是一个独立的脱敏策略。</p>
+
+<h3>3.1 策略模式实现</h3>
+
+<p>每个枚举值在构造时接收一个 <code>Function&lt;String, String&gt;</code> 类型的脱敏器：</p>
+
+<pre>public enum SensitiveStrategy {
+    PHONE(s -> DesensitizedUtil.mobilePhone(s)),
+    ID_CARD(s -> DesensitizedUtil.idCardNum(s, 3, 4)),
+    // ... 其他 15 个策略
+
+    private final Function&lt;String, String&gt; desensitizer;
+
+    SensitiveStrategy(Function&lt;String, String&gt; desensitizer) {
+        this.desensitizer = desensitizer;
+    }
+
+    public String desensitize(String value) {
+        return desensitizer.apply(value);
+    }
+}</pre>
+
+<p>这是一个干净的<strong>策略模式</strong>实现。每个枚举值就是一个小型策略对象。当处理器需要执行脱敏时，调用 <code>strategy.desensitize(value)</code> 即可。</p>
+
+<h3>3.2 全部 17 种策略一览</h3>
+
+<table>
+  <tr><th>枚举值</th><th>脱敏效果示例</th><th>底层实现</th></tr>
+  <tr><td><code>PHONE</code></td><td>13812345678 → 138****5678</td><td><code>DesensitizedUtil.mobilePhone()</code></td></tr>
+  <tr><td><code>ID_CARD</code></td><td>110101199001011234 → 110***********1234</td><td><code>DesensitizedUtil.idCardNum(s, 3, 4)</code></td></tr>
+  <tr><td><code>EMAIL</code></td><td>zhangsan@example.com → z****@example.com</td><td><code>DesensitizedUtil.email()</code></td></tr>
+  <tr><td><code>BANK_CARD</code></td><td>6222021234567890 → 622202********7890</td><td><code>DesensitizedUtil.bankCard()</code></td></tr>
+  <tr><td><code>CHINESE_NAME</code></td><td>张三丰 → 张**</td><td><code>DesensitizedUtil.chineseName()</code></td></tr>
+  <tr><td><code>FIXED_PHONE</code></td><td>010-12345678 → 010-****5678</td><td><code>DesensitizedUtil.fixedPhone()</code></td></tr>
+  <tr><td><code>PASSWORD</code></td><td>mypassword → **********</td><td><code>DesensitizedUtil.password()</code></td></tr>
+  <tr><td><code>ADDRESS</code></td><td>北京市朝阳区xxx路100号 → 北京市朝阳区******</td><td><code>DesensitizedUtil.address(s, 8)</code></td></tr>
+  <tr><td><code>CAR_LICENSE</code></td><td>京A12345 → 京A1***5</td><td><code>DesensitizedUtil.carLicense()</code></td></tr>
+  <tr><td><code>USER_ID</code></td><td>10001 → 1****</td><td><code>DesensitizedUtil.userId()</code></td></tr>
+  <tr><td><code>IPV4</code></td><td>192.168.1.100 → 192.*.*.*</td><td><code>DesensitizedUtil.ipv4()</code></td></tr>
+  <tr><td><code>IPV6</code></td><td>2001:db8::1 → 2001:*:*:*:*:*:*:*</td><td><code>DesensitizedUtil.ipv6()</code></td></tr>
+  <tr><td><code>FIRST_MASK</code></td><td>张三丰 → *三丰</td><td><code>DesensitizedUtils.mask(s, 0, s.length()-1)</code></td></tr>
+  <tr><td><code>STRING_MASK</code></td><td>5000元 → 5000****元</td><td><code>DesensitizedUtils.mask(s, 4, 4, 4)</code></td></tr>
+  <tr><td><code>MASK_HIGH_SECURITY</code></td><td>13812345678 → 138****</td><td><code>DesensitizedUtils.maskHighSecurity()</code></td></tr>
+  <tr><td><code>MIDDLE_MASK</code></td><td>hello world → he***ld</td><td><code>DesensitizedUtils.mask()</code> (中段掩码)</td></tr>
+  <tr><td><code>CUSTOM_MASK</code></td><td>完全自定义的脱敏规则</td><td>用户自定义 <code>Function&lt;String,String&gt;</code></td></tr>
+</table>
+
+<div class="insight">
+<strong>设计亮点：</strong>17 种策略覆盖了企业应用中最常见的敏感数据类型。前 12 种直接使用 hutool <code>DesensitizedUtil</code> 的现成方法，后 5 种使用 RuoYi 自定义的 <code>DesensitizedUtils</code> 提供更灵活的掩码控制。这种"常用优先 + 灵活兜底"的策略让开发者几乎不需要写任何脱敏代码。
+</div>
+
+<h2>4. hutool 与 RuoYi 自定义脱敏的分工</h2>
+
+<h3>4.1 DesensitizedUtil（hutool）：标准化脱敏</h3>
+
+<p>hutool 的 <code>DesensitizedUtil</code> 提供了 11 种固定格式的脱敏方法，覆盖了国内企业最常见的敏感数据类型：</p>
+
+<table>
+  <tr><th>方法</th><th>适用场景</th><th>特点</th></tr>
+  <tr><td><code>mobilePhone()</code></td><td>手机号</td><td>固定保留前 3 后 4 位</td></tr>
+  <tr><td><code>idCardNum(s, 3, 4)</code></td><td>身份证号</td><td>可配置前后保留位数</td></tr>
+  <tr><td><code>email()</code></td><td>邮箱</td><td>只保留第一个字符和域名</td></tr>
+  <tr><td><code>bankCard()</code></td><td>银行卡</td><td>保留前 6 后 4 位</td></tr>
+  <tr><td><code>chineseName()</code></td><td>中文姓名</td><td>姓保留，名用 * 替代</td></tr>
+  <tr><td><code>fixedPhone()</code></td><td>固定电话</td><td>保留区号，号码脱敏</td></tr>
+  <tr><td><code>password()</code></td><td>密码</td><td>全部替换为 *</td></tr>
+  <tr><td><code>address(s, 8)</code></td><td>地址</td><td>保留前 8 个字符</td></tr>
+  <tr><td><code>carLicense()</code></td><td>车牌号</td><td>保留省份简称和最后一位</td></tr>
+  <tr><td><code>userId()</code></td><td>用户 ID</td><td>保留前后各 1 位</td></tr>
+  <tr><td><code>ipv4() / ipv6()</code></td><td>IP 地址</td><td>保留首段，其余掩码</td></tr>
+</table>
+
+<h3>4.2 DesensitizedUtils（RuoYi 自定义）：灵活掩码</h3>
+
+<p><code>DesensitizedUtils</code> 继承自 hutool 的 <code>DesensitizedUtil</code>，扩展了两个关键方法：</p>
+
+<pre>public class DesensitizedUtils extends DesensitizedUtil {
+    /**
+     * 通用掩码脱敏
+     * @param value         原始值
+     * @param prefixVisible 开头保留字符数
+     * @param suffixVisible 结尾保留字符数
+     * @param maskLength    掩码长度（超出部分用 * 填充）
+     */
+    public static String mask(String value, int prefixVisible,
+                              int suffixVisible, int maskLength);
+
+    /**
+     * 高安全掩码脱敏：中间全部掩码，只保留头尾
+     * @param value         原始值
+     * @param prefixVisible 开头保留字符数
+     * @param suffixVisible 结尾保留字符数
+     */
+    public static String maskHighSecurity(String value,
+                                          int prefixVisible,
+                                          int suffixVisible);
+}</pre>
+
+<p>三个通用策略对 <code>mask()</code> 的使用：</p>
+<ul>
+  <li><code>STRING_MASK</code> → <code>mask(s, 4, 4, 4)</code>：保留前 4 后 4 字符，中间用 4 个 * 掩码。适合金额、数量等字符串。</li>
+  <li><code>FIRST_MASK</code> → <code>mask(s, 0, s.length()-1)</code>：只保留最后一个字符，前面全部掩码。适合只展示尾号的场景。</li>
+  <li><code>MASK_HIGH_SECURITY</code> → <code>maskHighSecurity()</code>：头尾各保留少量字符，中间完全掩码（掩码长度自动计算为中间字符数）。适合高安全场景。</li>
+</ul>
+
+<div class="insight">
+<strong>架构思考：</strong>为什么 RuoYi 不把所有策略都用 <code>DesensitizedUtils.mask()</code> 实现？因为 hutool 的内置方法经过了大量生产验证，对电话号码、身份证、银行卡等格式有专门的边界处理（比如手机号自动识别 86 前缀）。直接复用这些久经考验的实现比自己写掩码逻辑更可靠。RuoYi 自定义的 <code>DesensitizedUtils</code> 仅用于 hutool 没有覆盖的通用场景，边界清晰、职责分明。
+</div>
+
+<h2>5. 小结</h2>
+
+<p>本课覆盖了 ruoyi-common-sensitive 模块的两个核心组件：</p>
+<ul>
+  <li><strong>@Sensitive 注解</strong>：声明式标记，3 个属性支撑从简单脱敏到条件脱敏的全场景。</li>
+  <li><strong>SensitiveStrategy 枚举</strong>：17 种即开即用的脱敏策略，底层复用了 hutool 的成熟实现和 RuoYi 自研的灵活掩码工具。</li>
+</ul>
+
+<p>下一课将深入 <code>SensitiveJsonFieldProcessor</code> 和 <code>SensitiveService</code>，理解声明式注解如何被实际处理——从 JSON 字段拦截到条件判断的完整链路。</p>
+
+<div class="quiz">
+  <details>
+    <summary>📝 课后测验（点击展开）</summary>
+    <ol>
+      <li><strong>@Sensitive 注解的 strategy() 属性为什么没有默认值？</strong><br>
+      这是强制约束设计。如果提供了默认值，开发者可能忘记显式指定脱敏策略，导致字段以非预期的方式脱敏（或不脱敏）。要求必填确保开发者有意识地选择了脱敏方式，减少敏感数据泄露风险。</li>
+      <li><strong>roleKey 和 perms 同时配置时，脱敏的判断逻辑是什么？</strong><br>
+      是 <strong>OR 关系</strong>。<code>SensitiveService.isSensitive(roleKey[], perms[])</code> 的实现中，只要当前用户满足任一 roleKey 或任一 perms，返回 <code>true</code> 即执行脱敏。这意味着"任何一个条件命中就脱敏"，而不是"所有条件都满足才脱敏"。</li>
+      <li><strong>STRING_MASK 和 MASK_HIGH_SECURITY 的核心区别是什么？</strong><br>
+      <code>STRING_MASK</code> 使用固定长度的掩码（4 个 *），保留前后指定字符数，掩码部分始终是 4 个 * 无论中间多长。<br>
+      <code>MASK_HIGH_SECURITY</code> 使用动态长度掩码，中间部分完全被 * 等量替换——如果中间有 8 个字符，就生成 8 个 *。这在高安全场景下不会泄露字符串的实际长度信息。</li>
+    </ol>
+  </details>
+</div>
+
+<div class="cite">
+<strong>参考文件：</strong>
+<code>SensitiveStrategy.java</code> (org.dromara.common.sensitive.core)、
+<code>DesensitizedUtils.java</code> (org.dromara.common.sensitive.core)、
+hutool <code>DesensitizedUtil</code> (cn.hutool.core.util)
+</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav">
+  <span></span>
+  <span><a href="02-响应增强与JsonValueEnhancer集成.html">下一课：02 | 响应增强与 JsonValueEnhancer 集成 &#8594;</a></span>
+</div>
+
+</body>
+</html>

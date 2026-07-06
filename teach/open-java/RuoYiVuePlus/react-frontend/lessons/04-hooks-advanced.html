@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>04 · Hook（下）：useRef、useMemo、useCallback 与自定义 Hook</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.85rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+  .wrong { background: #ffeef0; border-left: 3px solid #d73a49; padding: 0.5rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+  .right { background: #e8f5e9; border-left: 3px solid #22863a; padding: 0.5rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./03-useState-useEffect.html">03 State与Hook上</a></div>
+
+<h1>04 · Hook（下）：useRef、useMemo、useCallback 与自定义 Hook</h1>
+
+<p><strong>胜利条件：</strong>能说出 useRef 和 useState 的本质区别（不触发重渲染）；知道什么时候用 useMemo/useCallback 避免不必要的计算；能读懂 ruoyi-react 自定义 Hook 的逻辑并为自己写一个。</p>
+
+<h2>一、useRef：一个"不触发重渲染"的容器</h2>
+
+<blockquote>
+useRef 存一个值，你改了 <strong>不会触发重渲染</strong>。最常用于：引用 DOM 元素、保存定时器 ID、记住"上一次的值"。
+</blockquote>
+
+<h3>useState vs useRef：本质区别</h3>
+
+<table>
+<tr><th></th><th>useState</th><th>useRef</th></tr>
+<tr><td>变值后</td><td><strong>触发重渲染</strong></td><td><strong>不触发重渲染</strong></td></tr>
+<tr><td>读取</td><td><code>value</code></td><td><code>ref.current</code></td></tr>
+<tr><td>更新</td><td><code>setValue(v)</code></td><td><code>ref.current = v</code></td></tr>
+<tr><td>典型场景</td><td>影响 UI 的数据</td><td>DOM 引用、定时器、缓存、标记位</td></tr>
+</table>
+
+<h3>ruoyi-react 中 useRef 的用法</h3>
+
+<p><span class="file-ref">src/api/request.ts</span> 中的防重复提交就是典型用例：</p>
+<pre><code>// 标记位：防止同一个请求重复提交
+const isRelogin = { show: false };
+
+// 缓存上一次请求的标识，用来 500ms 内去重
+const requestCache = new Map();</code></pre>
+
+<p><span class="file-ref">src/hooks/useTableSelection.ts</span> — 表格多选：</p>
+<pre><code>const useTableSelection = () => {
+  const [selectedRowKeys, setSelectedRowKeys] = useState&lt;Key[]&gt;([]);
+  const selectedRowsRef = useRef&lt;any[]&gt;([]);  // 保存完整的行数据，但不需要触发重渲染
+
+  const onSelectChange = (keys: Key[], rows: any[]) => {
+    setSelectedRowKeys(keys);     // keys 要显示 → useState
+    selectedRowsRef.current = rows; // rows 存在 ref 里，操作时用
+  };
+
+  return { selectedRowKeys, selectedRowsRef, onSelectChange };
+};</code></pre>
+
+<h2>二、useMemo：缓存计算结果</h2>
+
+<blockquote>
+useMemo 把<strong>昂贵的计算</strong>缓存起来，只有依赖变了才重新算。不是所有值都用 useMemo 包——只在计算确实耗时、或者要传给子组件作 props 时才用。
+</blockquote>
+
+<pre><code>// 语法
+const memoizedValue = useMemo(() => {
+  return 昂贵的计算(依赖1, 依赖2);
+}, [依赖1, 依赖2]);  // 只有这些变了才重新计算
+
+// ruoyi-react 真实例子：BasicLayout.tsx 中过滤菜单
+const menuData = useMemo(() => {
+  // 从后端路由树递归生成 ProLayout 需要的菜单格式
+  return generateMenuData(backendRoutes);
+}, [backendRoutes]);  // 路由不变，菜单格式不重新算</code></pre>
+
+<h3>什么时候用？一个简单的判断标准</h3>
+
+<pre><code>// ❌ 不需要 useMemo：计算很轻
+const fullName = firstName + lastName;
+
+// ✅ 需要 useMemo：复杂数组操作，且在 JSX 中直接使用
+const filteredList = useMemo(() => {
+  return bigArray.filter(...).sort(...).map(...);
+}, [bigArray, keyword]);</code></pre>
+
+<h2>三、useCallback：缓存函数引用</h2>
+
+<blockquote>
+useCallback 是 useMemo 的函数版——缓存<strong>函数本身</strong>，避免每次渲染都创建新函数。只在函数作为 props 传给用 <code>React.memo</code> 包裹的子组件时才有意义。
+</blockquote>
+
+<pre><code>// 语法：useCallback(函数, 依赖数组)
+const handleClick = useCallback(() => {
+  doSomething(count);
+}, [count]);  // count 变了才创建新函数
+
+// 等价于
+const handleClick = useMemo(() => {
+  return () => doSomething(count);
+}, [count]);</code></pre>
+
+<div class="right">
+<strong>ruoyi-react 的大多数回调函数并未使用 useCallback</strong>，因为 ProTable 等 Ant Design 组件已经内部处理了渲染优化。不要盲目包装！
+</div>
+
+<h2>四、自定义 Hook：封装可复用的逻辑</h2>
+
+<blockquote>
+自定义 Hook 就是用 <code>use</code> 开头的普通函数，内部可以调用其他 Hook。它<strong>封装逻辑</strong>，不封装 UI。
+</blockquote>
+
+<h3>解剖 ruoyi-react 的自定义 Hook</h3>
+
+<p><span class="file-ref">src/hooks/useDict.ts</span> — 最重要、最常用的自定义 Hook：</p>
+<pre><code>// 自定义 Hook = use 开头 + 调用其他 Hook + 返回数据/方法
+export const useDict = (dictType: string) => {
+  const { dictCache, setDictCache } = useDictStore();      // 用 Zustand store
+  const queryClient = useQueryClient();                     // 用 react-query
+
+  return useQuery({                                         // 用 react-query 的 Hook
+    queryKey: ['dict', dictType],
+    queryFn: async () => {
+      if (dictCache[dictType]) {
+        return dictCache[dictType];  // 缓存命中
+      }
+      const res = await getDicts(dictType);
+      setDictCache(dictType, res.data);
+      return res.data;
+    },
+    staleTime: 10 * 60 * 1000,  // 10 分钟内不重新请求
+    enabled: !!dictType,
+  });
+
+  // 调用方：
+  // const { data: statusOptions } = useDict('sys_normal_disable');
+  // 拿到 [{value: '0', label: '正常'}, {value: '1', label: '停用'}]
+};</code></pre>
+
+<p><span class="file-ref">src/hooks/useTableSelection.ts</span> — 第二种典型模式：</p>
+<pre><code>export const useTableSelection = () => {
+  const [selectedRowKeys, setSelectedRowKeys] = useState&lt;Key[]&gt;([]);
+  const selectedRowsRef = useRef&lt;any[]&gt;([]);
+
+  const onSelectChange = useCallback((keys: Key[], rows: any[]) => {
+    setSelectedRowKeys(keys);
+    selectedRowsRef.current = rows;
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedRowKeys([]);
+    selectedRowsRef.current = [];
+  }, []);
+
+  return { selectedRowKeys, selectedRowsRef, onSelectChange, clearSelection };
+};</code></pre>
+
+<h3>自定义 Hook 的模式总结</h3>
+
+<table>
+<tr><th>模式</th><th>例子</th><th>特征</th></tr>
+<tr><td><strong>数据获取型</strong></td><td>useDict</td><td>内部调用 API + 缓存，返回 { data, isLoading, error }</td></tr>
+<tr><td><strong>状态封装型</strong></td><td>useTableSelection</td><td>封装 useState + useCallback，返回 { 状态 + 操作方法 }</td></tr>
+<tr><td><strong>副作用封装型</strong></td><td>useLoading</td><td>封装 useEffect + useState，返回 { loading, execute }</td></tr>
+<tr><td><strong>工具转换型</strong></td><td>useDateRangeQuery</td><td>接收日期组件值，转成查询参数</td></tr>
+</table>
+
+<h2>五、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/hooks/useDict.ts</span>，逐行追踪：<code>useDict('sys_normal_disable')</code> 调用后每一步发生了什么</li>
+  <li>打开 <span class="file-ref">src/pages/system/user/index.tsx</span>，搜索 <code>useDict</code>，看字典数据怎么用在表格列的 render 函数中</li>
+  <li>打开 <span class="file-ref">src/hooks/useLoading.ts</span>，读懂这个只有 ~15 行的自定义 Hook</li>
+  <li>自己写一个 <code>useLocalStorage(key, initialValue)</code> Hook：封装 localStorage 读写 + useState</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://zh-hans.react.dev/learn/reusing-logic-with-custom-hooks">React 官方文档 — 使用自定义 Hook 复用逻辑</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："useRef 和 useState 到底怎么选择？为什么不用 useState 存 DOM 引用？"</div>
+
+</body>
+</html>

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · JSON 校验与实战总结：@JsonPattern、模块依赖与最佳实践</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .danger { background: #fff2f0; border-left: 3px solid #e8503a; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .danger b { color: #c0341d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · JSON 校验与实战总结 <span class="tag">validate + 收尾</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5、#6）</b>：学完你能说清 <code>@JsonPattern</code> 校验注解的完整链路、<code>JsonType</code> 枚举的三种模式如何在 <code>JsonPatternValidator</code> 中驱动不同校验策略，并能解释模块在 RuoYi 体系中的依赖位置与最佳实践。
+</div>
+
+<p>前四课覆盖了 config、handler、enhance 三大区域。最后一课看两样：validate 校验区（三个类）和全景回顾——把 13 个类串联成一个完整的故事。</p>
+
+<h2>一、@JsonPattern — 一个标准的 Bean Validation 注解</h2>
+
+<pre><code>@Documented
+@Target({ElementType.METHOD, ElementType.FIELD})
+@Retention(RetentionPolicy.RUNTIME)
+@Constraint(validatedBy = JsonPatternValidator.class)   // ← 指定校验器
+public @interface JsonPattern {
+
+    JsonType type() default JsonType.ANY;               // 期望的 JSON 类型
+
+    String message() default "不是有效的 JSON 格式";      // 校验失败消息
+
+    Class&lt;?&gt;[] groups() default {};                     // Bean Validation 分组
+
+    Class&lt;? extends Payload&gt;[] payload() default {};     // 负载信息
+}</code></pre>
+
+<p>整个注解除 <code>type()</code> 属性外，其余全是 Jakarta Bean Validation 的<strong>标准模板</strong>。任何一个 <code>@Constraint</code> 注解都有三个必选字段（message、groups、payload）——前者的值最终进入 <code>ConstraintViolation.getMessage()</code>，后者用于分组校验和携带元信息。</p>
+
+<div class="why"><b>type 的默认值为 ANY</b>：表示「只要是合法的 JSON 对象或数组就行」。如果你的字段只应存储 JSON 对象（如 <code>{"name":"张三"}</code>），就显式指定 <code>type = JsonType.OBJECT</code>；如果只应存储数组（如 <code>[1,2,3]</code>），就指定 <code>type = JsonType.ARRAY</code>。</div>
+
+<h2>二、JsonType 枚举 — 驱动校验策略的三个值</h2>
+
+<pre><code>@Getter
+@AllArgsConstructor
+public enum JsonType {
+    OBJECT,   // JSON 对象，如 {"a":1}
+    ARRAY,    // JSON 数组，如 [1,2,3]
+    ANY       // 任意 JSON 类型，对象或数组都允许
+}</code></pre>
+
+<p>枚举非常简洁，但它是校验策略的关键驱动因素——<code>JsonPatternValidator</code> 根据它的值走不同的校验分支。</p>
+
+<h2>三、JsonPatternValidator — 把注解、枚举、JsonUtils 串联起来</h2>
+
+<pre><code>public class JsonPatternValidator
+        implements ConstraintValidator&lt;JsonPattern, String&gt; {
+
+    private JsonType jsonType;
+
+    @Override
+    public void initialize(JsonPattern annotation) {
+        this.jsonType = annotation.type();     // ① 从注解读取类型约束
+    }
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        if (StringUtils.isBlank(value)) {
+            return true;                       // ② 空值放行，交给 @NotBlank 控制
+        }
+        return switch (jsonType) {             // ③ 根据枚举分支选择校验方法
+            case ANY    -&gt; JsonUtils.isJson(value);
+            case OBJECT -&gt; JsonUtils.isJsonObject(value);
+            case ARRAY  -&gt; JsonUtils.isJsonArray(value);
+        };
+    }
+}</code></pre>
+
+<p>完整链路：<strong>@JsonPattern 注解决定 jsonType → initialize() 读取 → isValid() 根据 jsonType 走不同分支 → 各分支委托给 JsonUtils 的对应校验方法</strong>。</p>
+
+<div class="side">💡 注意 <code>isValid</code> 对空值的处理：<code>StringUtils.isBlank(value)</code> 直接返回 true（校验通过）。这不是「空字符串是合法 JSON」，而是把「是否为空的判断权」交还给 <code>@NotBlank</code> / <code>@NotNull</code>。如果你需要「必填且是合法 JSON」，应该同时加 <code>@NotBlank</code> 和 <code>@JsonPattern</code>。</div>
+
+<h2>四、JsonUtils 中的 JSON 格式校验方法</h2>
+
+<p>校验器底层依赖的三个方法：</p>
+
+<pre><code>// ① 统用校验：是合法 JSON 就行（对象或数组）
+public static boolean isJson(String str) {
+    return readTreeQuietly(str) != null;
+}
+
+// ② 精确校验：必须是 JSON 对象 {}
+public static boolean isJsonObject(String str) {
+    JsonNode node = readTreeQuietly(str);
+    return node != null && node.isObject();
+}
+
+// ③ 精确校验：必须是 JSON 数组 []
+public static boolean isJsonArray(String str) {
+    if (StringUtils.isBlank(str)) return false;
+    JsonNode node = readTreeQuietly(str);
+    return node != null && node.isArray();
+}
+
+// 底层共用：安静解析，失败返回 null
+private static JsonNode readTreeQuietly(String str) {
+    if (StringUtils.isBlank(str)) return null;
+    try {
+        return JSON_MAPPER.readTree(str);
+    } catch (Exception e) {
+        return null;
+    }
+}</code></pre>
+
+<div class="why"><b>为什么 readTreeQuietly 吞掉异常？</b>因为校验方法的语义是「判断是否合法」而不是「报错」。调用方只关心 true/false。如果用 try-catch 在外面包，校验逻辑会变啰嗦。readTreeQuietly 把异常转换成 null，调用方只需判断 null。</div>
+
+<h2>五、实战：如何在业务中使用 @JsonPattern</h2>
+
+<pre><code>// 示例 1：字段要求是合法的 JSON（不限制类型）
+@JsonPattern(message = "扩展字段必须是合法的 JSON 格式")
+@NotBlank(message = "扩展字段不能为空")
+private String extraData;   // 用户可以存 {} 或 []
+
+// 示例 2：字段必须是 JSON 对象
+@JsonPattern(type = JsonType.OBJECT, message = "配置信息必须是 JSON 对象格式")
+private String configData;  // 只允许 {"key":"value"}
+
+// 示例 3：字段必须是 JSON 数组
+@JsonPattern(type = JsonType.ARRAY, message = "标签列表必须是 JSON 数组格式")
+private String tags;        // 只允许 ["tag1","tag2"]</code></pre>
+
+<div class="danger"><b>陷阱提醒</b>：<code>@JsonPattern</code> 只校验格式合法性，<strong>不校验 JSON 内容的业务语义</strong>。比如字段要求 <code>{"name":"张三","age":25}</code>，但用户传了 <code>{"foo":"bar"}</code>——这在格式上完全合法，校验会通过。如果需要对 JSON 内容做 schema 校验，需要用 JSON Schema 或自定义 Validator。</div>
+
+<h2>六、模块全景回顾：13 个类的完整故事</h2>
+
+<p>我们从 5 个区域、13 个 Java 文件中提取一个「设计故事」：</p>
+
+<div class="flow">📦 ruoyi-common-json  =  Jackson 的业务定制层
+
+【第一层 · 基础规则】 config/
+  JacksonConfig
+    ├─ 注册 SimpleModule（7 个序列化/反序列化处理器）
+    └─ 设置 JsonMapper 默认时区
+  JsonEnhancementConfig
+    └─ 装配 JsonValueEnhancer(JsonMapper, List&lt;JsonFieldProcessor&gt;)
+
+【第二层 · 数据格式】 handler/
+  BigNumberSerializer        ← 保护 Long 精度传给 JS 前端
+  CustomDateDeserializer     ← Date 多格式自动识别
+  CustomLocalDateTimeDeserializer ← LocalDateTime 多格式自动识别
+
+【第三层 · 出站加工】 enhance/
+  JsonEnhancementContext     ← 数据总线：共享属性表 + 状态标记
+  JsonFieldContext           ← 字段快照 Record：owner + name + member + value
+  JsonFieldProcessor         ← 扩展点接口：collect → prepare → process
+  JsonValueEnhancer          ← 引擎：递归扫描 + 批量预处理 + 渲染
+
+【第四层 · 入站校验】 validate/
+  @JsonPattern               ← Bean Validation 注解
+  JsonType                   ← 枚举：OBJECT / ARRAY / ANY
+  JsonPatternValidator       ← 校验实现：注解 → 枚举 → JsonUtils
+
+【第五层 · 统一门面】 utils/
+  JsonUtils                  ← 10 个公开方法：序列化/反序列化/校验</pre>
+
+<p><strong>核心设计哲学</strong>：这个模块的每一层都在做同一件事——<strong>把 Jackson 的底层能力包装成业务友好的、非侵入式的接入点</strong>。序列化端「输入宽容（多格式日期）、输出严格（固定格式 + 精度保护）」；增强端「插件式扩展（实现接口即可）、三阶段分离（消除 N+1）」；校验端「标准 Bean Validation 集成（配合 @NotBlank 使用）」；工具端「统一门面（一行代码搞定）」。</p>
+
+<h2>七、模块依赖拓扑（在 RuoYi 中的位置）</h2>
+
+<table>
+<tr><th>层级</th><th>模块</th><th>与 JSON 模块的关系</th></tr>
+<tr><td>底层</td><td><code>ruoyi-common-core</code></td><td>被 JSON 模块依赖（SpringUtils、StringUtils）</td></tr>
+<tr><td>本层</td><td><code>ruoyi-common-json</code> ⬅ </td><td>当前模块</td></tr>
+<tr><td>上层</td><td><code>ruoyi-common-redis</code></td><td>依赖 JSON 模块做序列化（Redis 里存 JSON 对象）</td></tr>
+<tr><td>上层</td><td><code>ruoyi-common-satoken</code></td><td>依赖 JSON 模块做 Token 序列化</td></tr>
+<tr><td>上层</td><td><code>ruoyi-common-sms</code></td><td>依赖 JSON 模块做短信配置序列化</td></tr>
+<tr><td>上层</td><td>各业务模块 (admin/system/...)</td><td>通过 JSON 模块做请求/响应序列化</td></tr>
+</table>
+
+<div class="why"><b>JSON 模块是「基础能力模块」</b>：它不依赖任何业务模块，只向上依赖 common-core。但它被多个上层模块依赖——Redis 需要它存 JSON、Sa-Token 需要它序列化 Token、业务模块需要它做 HTTP 消息转换。这就是为什么它属于 common 层。</div>
+
+<h2>八、JsonUtils 方法速选表</h2>
+
+<table>
+<tr><th>场景</th><th>用哪个方法</th></tr>
+<tr><td>对象转 JSON 字符串（写日志、返给前端）</td><td><code>toJsonString(obj)</code></td></tr>
+<tr><td>JSON 字符串转简单对象</td><td><code>parseObject(json, User.class)</code></td></tr>
+<tr><td>JSON 字符串转泛型对象（如 List&lt;User&gt;）</td><td><code>parseObject(json, new TypeReference&lt;List&lt;User&gt;&gt;(){})</code></td></tr>
+<tr><td>Redis 取出的 byte[] 转对象</td><td><code>parseObject(bytes, User.class)</code></td></tr>
+<tr><td>JSON 转 Dict（万能 Map）</td><td><code>parseMap(json)</code></td></tr>
+<tr><td>JSON 数组转 List&lt;Dict&gt;</td><td><code>parseArrayMap(json)</code></td></tr>
+<tr><td>JSON 数组转 List&lt;User&gt;</td><td><code>parseArray(json, User.class)</code></td></tr>
+<tr><td>序列化时去掉敏感字段</td><td><code>toJsonStringExcludeFields(obj, "password", "salt")</code></td></tr>
+<tr><td>判断字符串是不是合法 JSON</td><td><code>isJson(str)</code></td></tr>
+<tr><td>判断字符串是不是 JSON 对象 {}</td><td><code>isJsonObject(str)</code></td></tr>
+<tr><td>判断字符串是不是 JSON 数组 []</td><td><code>isJsonArray(str)</code></td></tr>
+</table>
+
+<h2>九、最佳实践清单</h2>
+
+<ol>
+<li><strong>永远用 JsonUtils 而非直接 new ObjectMapper</strong>——否则 BigNumberSerializer 等定制处理器不会生效，Long 精度丢失问题会重现。</li>
+<li><strong>@JsonPattern 要配合 @NotBlank 使用</strong>——前者对空值放行，空值校验交给后者。</li>
+<li><strong>写 JsonFieldProcessor 时用全限定类名做 attribute key 前缀</strong>——避免多个 Processor 在 context 里互相覆盖。</li>
+<li><strong>复杂泛型反序列化用 TypeReference 而非 Class</strong>——<code>parseObject(json, List.class)</code> 会丢失泛型信息，反序列化出来是 <code>List&lt;LinkedHashMap&gt;</code> 而非 <code>List&lt;User&gt;</code>。</li>
+<li><strong>toJsonStringExcludeFields 是递归删除</strong>——它不仅从顶层对象删字段，嵌套对象中的同名字段也会被删。注意这一点以避免误删。</li>
+<li><strong>增强框架的 process() 中不要做 IO</strong>——把 IO 放在 prepare() 里，process 只从 context 取缓存结果。违反这一点会导致 N+1 问题。</li>
+</ol>
+
+<h2>十、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. @JsonPattern 校验注解的完整链路是？</p>
+<span class="opt">A. @JsonPattern → JsonPatternValidator.initialize() 读 type → isValid() 根据 JsonType 枚举走不同分支 → 各分支委托 JsonUtils 的方法</span>
+<span class="opt">B. @JsonPattern → Jackson 在序列化时自动校验</span>
+<span class="opt">C. @JsonPattern → AOP 切面拦截 → JsonUtils 校验</span>
+<span class="opt">D. @JsonPattern → Spring 启动时预检查</span>
+<details><summary>看答案</summary><b>A</b>。这是标准的 Bean Validation 流程：注解上 @Constraint 指定校验器 → 初始化时读取配置 → 校验时根据枚举分支调用 JsonUtils。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 JsonPatternValidator.isValid() 对空值返回 true？</p>
+<span class="opt">A. 空字符串本身就是合法 JSON</span>
+<span class="opt">B. 把「是否为空的判断权」交给 @NotBlank/@NotNull，校验器只负责「如果非空，格式是否合法」</span>
+<span class="opt">C. Bean Validation 规范要求所有校验器都必须放行空值</span>
+<span class="opt">D. 作者疏忽，应该对空值返回 false</span>
+<details><summary>看答案</summary><b>B</b>。这是 Bean Validation 的最佳实践——每个 ConstraintValidator 只负责自己的校验维度。空值校验交给专门的 @NotBlank/@NotNull，避免职责混乱。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>toJsonStringExcludeFields(obj, "password")</code> 会删除哪些字段？</p>
+<span class="opt">A. 只删除顶层对象的 password 字段</span>
+<span class="opt">B. 递归删除整个对象树中所有名为 password 的字段（包括嵌套对象中的）</span>
+<span class="opt">C. 把 password 的值置为 null，字段名保留</span>
+<span class="opt">D. 抛出异常，因为 password 可能是必传字段</span>
+<details><summary>看答案</summary><b>B</b>。<code>removeFields</code> 是递归的——它对顶层是 ObjectNode 时删除字段，然后对每个子节点递归调用自身。嵌套对象中的同名字段也会被删除。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. ruoyi-common-json 在 RuoYi 的模块依赖中处于什么位置？</p>
+<span class="opt">A. 最顶层业务模块，被所有模块依赖</span>
+<span class="opt">B. 公共层中层：向上依赖 common-core，向下被 redis/satoken/sms 等模块依赖</span>
+<span class="opt">C. 独立模块，不依赖任何其他模块</span>
+<span class="opt">D. 直接依赖所有业务模块</span>
+<details><summary>看答案</summary><b>B</b>。它只向上依赖 common-core（基础工具），但被 redis、satoken、sms 等多个上层模块依赖——是典型的基础能力公共模块。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://jakarta.ee/specifications/bean-validation/" target="_blank">Jakarta Bean Validation Specification</a> — 理解 @Constraint 注解的标准结构。配套速查见 <code>reference/0005.html</code>，术语见 <code>GLOSSARY.md</code>。</div>
+
+<div class="reminder">💡 恭喜学完全部 5 课！你可以随时问我任何关于 JSON 模块的问题，比如「如果我要加一个自定义的 JSON 校验注解（如校验 JSON Schema），应该扩展哪里？」「增强框架和 Jackson 的 JsonSerializer 有什么区别，什么时候该用哪个？」回顾全景结构请回看 0001 课。</div>
+
+<div class="nav">课程 0005 / 使命：全面读懂 ruoyi-common-json · 全部课程完成 🎉</div>
+
+</body>
+</html>

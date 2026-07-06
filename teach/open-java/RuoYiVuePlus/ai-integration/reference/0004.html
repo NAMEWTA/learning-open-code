@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ruoyi-ai 模块速查手册</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fff; font-size: 0.9rem; }
+  h1 { font-size: 1.4rem; border-bottom: 2px solid #1d6fd6; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; color: #1d6fd6; }
+  h3 { font-size: 0.95rem; margin-top: 1.5rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.68rem; padding:0.05rem 0.4rem; border-radius:3px; vertical-align:middle; margin-left:0.3rem; }
+  .nav { margin-top: 2rem; font-size: 0.8rem; color: #aaa; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  @media print { body { font-size: 0.8rem; } pre { background: #f5f5f5; color: #1a1a1a; } }
+</style>
+</head>
+<body>
+
+<h1>ruoyi-ai 模块速查手册 <span class="tag">v1.0</span></h1>
+
+<p>涵盖 ruoyi-ai 模块全部 4 节课程核心内容。适合快速回忆和面试前温习。<br>
+→ 回课程：<a href="../lessons/0001.html">L1 全景</a> · <a href="../lessons/0002.html">L2 配置</a> · <a href="../lessons/0003.html">L3 异常/流式</a> · <a href="../lessons/0004.html">L4 前端</a></p>
+
+<h2>一、模块本质</h2>
+<p><code>ruoyi-ai</code> 是 <b>Snail AI SDK 的 Spring Boot 适配器</b>——不实现 AI 能力，通过自动配置、条件装配和双异常处理体系将外部 AI 智能体平台嵌入 RuoYi-Vue-Plus。后端仅 3 个 Java 文件（~210 行）。</p>
+
+<h2>二、三层物理架构</h2>
+<table>
+<tr><th>层</th><th>位置</th><th>文件</th><th>职责</th></tr>
+<tr><td>业务模块层</td><td><code>ruoyi-modules/ruoyi-ai</code></td><td>SnailAiController.java (73行)</td><td>REST 端点 · 用户身份桥接</td></tr>
+<tr><td>通用配置层</td><td><code>ruoyi-common/ruoyi-common-ai</code></td><td>SnailAiConfig.java (16行)<br>SnailAiChatExceptionHandler.java (125行)</td><td>Spring Boot 自动配置<br>AI Chat 专属异常处理</td></tr>
+<tr><td>SDK 层</td><td>Maven 依赖</td><td><code>com.aizuda.snail.ai.*</code></td><td>gRPC 通信 · Agent 管理 · Chat 网关</td></tr>
+<tr><td>Server 层</td><td>独立进程</td><td>Snail AI Server</td><td>AI 模型调度 · 智能体管理 · 知识库</td></tr>
+</table>
+
+<h2>三、两层条件装配</h2>
+<table>
+<tr><th>组件</th><th>条件</th><th>作用</th></tr>
+<tr><td><code>SnailAiConfig</code></td><td><code>snail-ai.enabled=true</code></td><td><b>总开关</b>——关闭后整个 SDK 不初始化，零开销</td></tr>
+<tr><td><code>SnailAiController</code></td><td><code>snail-ai.open-api.enabled=true</code></td><td><b>子开关</b>——在 AI 已激活的前提下控制用户注册端点</td></tr>
+</table>
+
+<h2>四、用户身份桥接链路</h2>
+<pre><code>LoginHelper.getUserId() / getLoginUser()
+  → OpenApiUserRegisterRequest(externalId=userId, nickname)
+    → userClient.register(request)    // gRPC → Snail AI Server
+      → 三层校验：null / status!=1 / data==null
+        → OpenApiUserVO(openId, externalId)</code></pre>
+
+<h2>五、异常处理双轨制</h2>
+<table>
+<tr><th>路径</th><th>消费者</th><th>响应格式</th><th>处理器</th></tr>
+<tr><td><code>/api/snail/chat/**</code></td><td>Snail AI 前端 SDK</td><td><code>Result{status, message, data}</code></td><td><code>SnailAiChatExceptionHandler</code></td></tr>
+<tr><td><code>/snail-ai/**</code></td><td>RuoYi 前端</td><td><code>R{code, msg, data}</code></td><td>RuoYi GlobalExceptionHandler</td></tr>
+</table>
+
+<p><b>关键设计</b>：<code>@RestControllerAdvice(assignableTypes = SnailAiChatGatewayController.class)</code> 限定范围 + <code>@Order(HIGHEST_PRECEDENCE)</code> 确保优先级。</p>
+
+<h2>六、SSE 流式数据流</h2>
+<pre><code>fetch() POST /snail-ai/agent/{id}/chat/stream
+  → response.body.getReader()              // ReadableStream
+    → TextDecoder 解码字节块
+      → buffer.split(/\r?\n\r?\n/)         // SSE 事件分割
+        → event: thinking → onThinking()
+        → event: message  → onMessage() → setMessages(追加 content)
+        → event: done     → onDone() → invalidateQueries()
+        → event: error    → onError()</code></pre>
+
+<h2>七、双前端对比</h2>
+<table>
+<tr><th>维度</th><th>React</th><th>Vue</th></tr>
+<tr><td>方式</td><td>@ant-design/x 原生组件</td><td>iframe 嵌入</td></tr>
+<tr><td>代码量</td><td>~1040 行</td><td>~100 行</td></tr>
+<tr><td>通信</td><td>SSE / HTTP</td><td>URL 参数 (openId + trustedCredential)</td></tr>
+<tr><td>认证</td><td>HTTP 请求头 (globalHeaders)</td><td>URL 参数 (trustedCredential = RuoYi token)</td></tr>
+<tr><td>UI 控制</td><td>完全自主</td><td>依赖 Snail AI 内建 UI</td></tr>
+<tr><td>维护成本</td><td>高</td><td>零</td></tr>
+</table>
+
+<h2>八、核心配置速查</h2>
+<pre><code>snail-ai:
+  enabled: false                    # 总开关（默认关闭）
+  server:
+    host: 127.0.0.1                 # gRPC Server 地址
+    port: 18888
+  app-id: 1                         # Server 端应用 ID
+  token: SAI_xxx                    # Server 端认证令牌
+  port: 18889                       # 本客户端 gRPC 端口
+  skill-temp-dir: /tmp/snail-ai-agent/skills
+  chat.ui.embed:
+    enabled: true
+    show-header: false              # 嵌入模式隐藏 Snail AI 顶部栏
+    compact-input: true
+  open-api:
+    enabled: true
+    web-port: 8900</code></pre>
+
+<h2>九、常见问题</h2>
+<p><b>Q: snail-ai.enabled=false 时是否有性能影响？</b><br>
+A: 无。<code>@ConditionalOnProperty</code> 阻止了所有 AI 相关 Bean 的加载和 gRPC 连接建立。启动时间、内存占用完全不受影响。</p>
+<p><b>Q: 为什么不统一使用 iframe 嵌入？</b><br>
+A: React 端选择原生组件是为了完全控制 UI 和交互体验（与 RuoYi 风格统一）。Vue 端选择 iframe 是为了零维护成本。两种路线各有适用场景，不是技术优劣问题。</p>
+<p><b>Q: 如何关闭用户注册端点但保留 AI 对话？</b><br>
+A: 设置 <code>snail-ai.enabled=true</code> + <code>snail-ai.open-api.enabled=false</code>。</p>
+
+<div class="nav">ruoyi-ai 模块速查手册 · 关联课程：<a href="../lessons/0001.html">L1</a> <a href="../lessons/0002.html">L2</a> <a href="../lessons/0003.html">L3</a> <a href="../lessons/0004.html">L4</a> · <a href="../GLOSSARY.md">术语表</a></div>
+
+</body>
+</html>

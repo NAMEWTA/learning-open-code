@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>08 Vue 前端 — 数据权限配置全流程</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>08 Vue 前端 — 数据权限配置全流程</h1>
+
+<blockquote><strong>本节目标：</strong>你能够从前端操作到后端接口，完整追踪数据权限配置的数据流：点"分配权限"按钮 → 选 dataScope → 勾部门树 → 提交 deptIds → PUT 接口。</blockquote>
+
+<h2>整体结构</h2>
+
+<p>Vue 版的数据权限配置<strong>没有独立弹窗</strong>，而是和菜单权限合并到同一个「分配权限」弹窗（<code>role/index.vue</code>），用 <code>el-tabs</code> 分「菜单权限」和「数据权限」两个 Tab。所有逻辑代码都在一个文件（~1040 行）。</p>
+
+<p>关键：提交接口是统一的 <code>PUT /system/role/permission</code>（<code>updateRolePermission</code>），菜单权限和数据权限<strong>一次提交</strong>。</p>
+
+<h2>六步操作流程</h2>
+
+<h3>步骤1：点击"分配权限"按钮</h3>
+
+<p>行内操作列有「分配权限」按钮（<code>index.vue:138-146</code>），点击触发 <code>handleDataScope(row)</code>：</p>
+
+<pre><code>const handleDataScope = async (row) => {
+  permissionTab.value = 'menu';              // 默认切到菜单Tab
+  const response = await getRole(row.roleId); // ① 获取角色详情(含dataScope)
+  Object.assign(form.value, response.data);
+  const menuRes = await getRoleMenuTreeselect(row.roleId); // ② 菜单树+已选
+  const res = await getRoleDeptTreeSelect(row.roleId);     // ③ 部门树+已选
+  openDataScope.value = true;
+  await nextTick(() => {
+    // ④ 菜单树回填勾选
+    initPermissionState(menuRes.checkedKeys);
+    // ⑤ 部门树回填勾选
+    deptRef.value?.setCheckedKeys(res.checkedKeys);
+  });
+};</code></pre>
+
+<p>注意 <code>③ getRoleDeptTreeSelect</code> 调的接口是 <code>GET /system/role/deptTree/{roleId}</code>（<code>deptTreeSelect</code>），<strong>不同于</strong>部门管理用的 <code>/system/dept/list</code>。这个接口一次返回 <code>{ depts: 部门树, checkedKeys: 已勾选部门ID }</code>。</p>
+
+<p><strong>为什么用 nextTick？</strong> 弹窗打开后 DOM 需要渲染，部门树 (<code>el-tree</code>) 需要在挂载后才能调用 <code>setCheckedKeys</code>。</p>
+
+<h3>步骤2：选择 dataScope</h3>
+
+<p>下拉定义（<code>index.vue:402-409</code>）：</p>
+
+<pre><code>const dataScopeOptions = ref([
+  { value: '1', label: '全部数据权限' },
+  { value: '2', label: '自定数据权限' },
+  { value: '3', label: '本部门数据权限' },
+  { value: '4', label: '本部门及以下数据权限' },
+  { value: '5', label: '仅本人数据权限' },
+  { value: '6', label: '部门及以下或本人数据权限' }   // 比经典RuoYi多了6
+]);</code></pre>
+
+<p>下拉绑定了 <code>@change="dataScopeSelectChange"</code>（<code>index.vue:994-998</code>）：</p>
+
+<pre><code>const dataScopeSelectChange = (value) => {
+  if (value !== '2') {
+    deptRef.value?.setCheckedKeys([]);  // 非"自定义"时清空已勾选的部门
+  }
+};</code></pre>
+
+<h3>步骤3：勾选部门树（仅 dataScope=2 时）</h3>
+
+<p>部门树区域由 <code>v-show="form.dataScope === '2'"</code> 控制显隐（<code>index.vue:296-317</code>）：</p>
+
+<pre><code>&lt;el-form-item v-show="form.dataScope === '2'" label="数据权限"&gt;
+  &lt;el-checkbox v-model="deptExpand"&gt;展开/折叠&lt;/el-checkbox&gt;
+  &lt;el-checkbox v-model="deptNodeAll"&gt;全选/全不选&lt;/el-checkbox&gt;
+  &lt;el-checkbox v-model="form.deptCheckStrictly"&gt;父子联动&lt;/el-checkbox&gt;
+  &lt;el-tree
+    ref="deptRef"
+    :data="deptOptions"
+    show-checkbox
+    default-expand-all
+    node-key="id"
+    :check-strictly="!form.deptCheckStrictly"   &lt;!-- 取反：联动时非严格模式 --&gt;
+    :props="{ label: 'label', children: 'children' }"
+  /&gt;
+&lt;/el-form-item&gt;</code></pre>
+
+<p><code>check-strictly</code> 的逻辑容易晕：el-tree 的 <code>check-strictly</code> 含义是「父子不联动」。而 UI 的 Checkbox 叫「父子联动」。所以绑定是 <code>:check-strictly="!form.deptCheckStrictly"</code>——联动时严格模式关，不联动时严格模式开。</p>
+
+<h3>步骤4：点击"确定"提交</h3>
+
+<p><code>index.vue:1017-1028</code>：</p>
+
+<pre><code>const submitDataScope = async () => {
+  if (form.value.roleId) {
+    syncFormMenuPermissionIds();               // ① 收菜单勾选 → form.menuIds
+    form.value.deptIds = getDeptAllCheckedKeys(); // ② 收部门勾选 → form.deptIds
+    await updateRolePermission(form.value);      // ③ 一次提交全部
+    modal.msgSuccess('修改成功');
+    openDataScope.value = false;
+    getList();                                   // ④ 刷新列表
+  }
+};</code></pre>
+
+<p><strong>getDeptAllCheckedKeys 的细节</strong>（<code>index.vue:875-884</code>）：</p>
+
+<pre><code>const getDeptAllCheckedKeys = () => {
+  const checkedKeys = deptRef.value?.getCheckedKeys();       // 全选节点
+  const halfCheckedKeys = deptRef.value?.getHalfCheckedKeys(); // 半选节点
+  if (halfCheckedKeys) {
+    checkedKeys?.unshift(...halfCheckedKeys);  // 半选节点也带上！
+  }
+  return checkedKeys;
+};</code></pre>
+
+<p><strong>为什么半选节点也要带？</strong> el-tree 父子联动时，子节点全选了父节点才显示为全选；如果只选了部分子节点，父节点是<strong>半选状态</strong>。但后端保存时需要知道「父节点被部分选中」，否则下次回显无法还原半选态。这个半选收集是 React 版需要手写 <code>collectAncestorKeys</code> 的原因（第9课对比）。</p>
+
+<h3>步骤5：后端接收并保存</h3>
+
+<p><code>PUT /system/role/permission</code> → <code>SysRoleServiceImpl.updateRolePermission()</code>：</p>
+
+<pre><code>// 保存 dataScope + deptCheckStrictly → sys_role
+// 保存 deptIds → sys_role_dept（先删后批量插）
+// 缓存清理: @CacheEvict(SYS_ROLE_CUSTOM)</code></pre>
+
+<h3>步骤6：下次登录生效</h3>
+
+<p>修改后，用户下次登录时 <code>buildLoginUser</code> 重新查 <code>sys_role</code> 的 <code>dataScope</code>，运行时 Handler 读新值。注意：已登录用户的角色<strong>不会立即刷新</strong>，需重新登录。</p>
+
+<h2>前端数据流总图</h2>
+
+<table>
+<tr><th>前端字段</th><th>来源</th><th>提交通道</th><th>落库</th></tr>
+<tr><td>dataScope</td><td>下拉选 (1-6)</td><td>PUT /system/role/permission</td><td>sys_role.data_scope</td></tr>
+<tr><td>deptIds[]</td><td>部门树勾选（仅dataScope=2时）</td><td>同上</td><td>sys_role_dept (逐条)</td></tr>
+<tr><td>deptCheckStrictly</td><td>父子联动Checkbox</td><td>同上</td><td>sys_role.dept_check_strictly</td></tr>
+</table>
+
+<div class="tip"><strong>与经典 RuoYi 的差异：</strong>本版没有独立的 <code>changeRoleDataScope</code> 接口，也没有 <code>dataScopeMenuTreeselect</code>。菜单权限和数据权限统一走 <code>PUT /system/role/permission</code>。</div>
+
+<div class="cite">📖 推荐一手资料：源码 <code>plus-ui-vue/src/views/system/role/index.vue</code> + <code>src/api/system/role/index.ts</code> — 所有前端逻辑都在一个文件里，读起来很直接。</div>
+<div class="reminder">💡 试试问"如果我在 dataScope=2 模式下勾了部门 103、104，然后又切到 dataScope=3，deptIds 字段还会提交吗？如果不提交，什么时候被清空的？"</div>
+
+</body>
+</html>

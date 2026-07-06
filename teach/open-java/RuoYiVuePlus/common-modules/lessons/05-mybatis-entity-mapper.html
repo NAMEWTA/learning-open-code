@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>05 · ruoyi-common-mybatis：实体基类与增强 Mapper</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>05 · ruoyi-common-mybatis（上）：实体基类与增强 Mapper</h1>
+
+<p><strong>核心问题：</strong>如何在每个实体中自动填充 createTime/updateTime/createBy 等审计字段，而无需在每次 INSERT/UPDATE 时手动设置？</p>
+
+<div class="info">
+<strong>模块定位：</strong>34 个 Java 文件，基于 MyBatis-Plus 深度定制。提供自动填充、增强 Mapper、数据权限、链式查询、多数据源感知、SQL 日志等企业级持久层能力。被 ruoyi-admin、ruoyi-system、ruoyi-gen、ruoyi-demo 等模块引用。
+</div>
+
+<h2>1. BaseEntity — 实体基类</h2>
+
+<pre><code>public class BaseEntity implements Serializable {
+    @TableField(fill = FieldFill.INSERT)
+    private Long createDept;       // 创建部门
+
+    @TableField(fill = FieldFill.INSERT)
+    private Long createBy;         // 创建人
+
+    @TableField(fill = FieldFill.INSERT)
+    private LocalDateTime createTime;  // 创建时间
+
+    @TableField(fill = FieldFill.INSERT_UPDATE)
+    private Long updateBy;         // 更新人
+
+    @TableField(fill = FieldFill.INSERT_UPDATE)
+    private LocalDateTime updateTime;  // 更新时间
+}</code></pre>
+
+<p>项目中有 <strong>22 个实体类</strong>继承 <code>BaseEntity</code>。</p>
+
+<h2>2. InjectionMetaObjectHandler — 自动填充处理器</h2>
+
+<pre><code>// insertFill 逻辑：
+1. 判断 metaObject.originalObject instanceof BaseEntity
+2. 若是 → 直接设置 createTime/updateTime = 当前时间
+          从 LoginHelper 获取当前用户 → 填充 createBy/updateBy/createDept
+          用户不存在时默认填充 -1
+3. 若非 → 使用 strictInsertFill 按字段名注入 createTime/updateTime
+
+// updateFill 逻辑：
+设置 updateTime = 当前时间，updateBy = 当前用户ID
+</code></pre>
+
+<p><strong>如何获取当前用户？</strong> <code>InjectionMetaObjectHandler</code> 通过 <code>LoginHelper.getUserId()</code> 获取。而 <code>LoginHelper</code> 又通过 Sa-Token 的 ThreadLocal 获得当前登录用户。这意味着即使不在 Controller 层，也能拿到用户信息。</p>
+
+<h2>3. BaseMapperPlus — 增强 Mapper 接口</h2>
+
+<pre><code>// 泛型：T=实体类型, V=VO类型
+public interface BaseMapperPlus&lt;T, V&gt; extends BaseMapper&lt;T&gt; {
+
+    // 实体到VO自动转换（使用 MapstructUtils）
+    V selectVoById(Serializable id);
+    List&lt;V&gt; selectVoList(Wrapper&lt;T&gt; wrapper);
+    List&lt;V&gt; selectVoPage(Page&lt;T&gt; page, Wrapper&lt;T&gt; wrapper);
+
+    // 批量操作封装
+    boolean insertBatch(Collection&lt;T&gt; entities);
+    boolean updateBatchById(Collection&lt;T&gt; entities);
+    boolean insertOrUpdateBatch(Collection&lt;T&gt; entities);
+
+    // 链式 CRUD 入口
+    LambdaCrudChainWrapper&lt;T, V&gt; lambda();
+
+    // 自定义转换查询
+    &lt;C&gt; List&lt;C&gt; selectObjs(Wrapper&lt;T&gt; wrapper, Function&lt;T, C&gt; mapper);
+}</code></pre>
+
+<p>项目中有 32 个 Mapper 接口继承 <code>BaseMapperPlus</code>（而非原生 BaseMapper）。</p>
+
+<h2>4. LambdaCrudChainWrapper — 链式 CRUD</h2>
+
+<pre><code>// 业务层使用示例（无需写 SQL）
+userMapper.lambda()
+    .eq(User::getStatus, UserStatus.OK)
+    .likeIfText(User::getUsername, query.getUsername())
+    .betweenIfPresent(User::getCreateTime, startTime, endTime)
+    .voPage(page);  // 自动转换实体→VO
+
+// 更新链
+userMapper.lambda()
+    .set(User::getStatus, UserStatus.DISABLE)
+    .eq(User::getId, userId)
+    .update();
+
+// 聚合函数
+userMapper.lambda()
+    .selectCount(User::getId)  // COUNT(id)
+    .eq(User::getDeptId, deptId)
+    .count();</code></pre>
+
+<h2>5. 逻辑删除配置</h2>
+
+<pre><code># common-mybatis.yml
+mybatis-plus:
+  global-config:
+    dbConfig:
+      logicDeleteValue: 1      # 已删除
+      logicNotDeleteValue: 0   # 未删除
+      insertStrategy: NOT_NULL  # 非空插入
+  enableLogicDelete: true       # 全局开关（PlusPostInitTableInfoHandler 处理）</code></pre>
+
+<p><code>PlusPostInitTableInfoHandler</code> 在表信息初始化后统一控制逻辑删除开关。当 <code>enableLogicDelete=false</code> 时，反射设置所有 <code>TableInfo.withLogicDelete=false</code>。</p>
+
+<h2>6. 雪花 ID 生成器</h2>
+<pre><code>// MybatisPlusConfig 中注册
+IdentifierGenerator idGenerator = new DefaultIdentifierGenerator(
+    NetUtil.getLocalhost(),  // 绑定网卡 MAC，防止集群重复
+    workerId, dataCenterId
+);
+// 配置全局 idType = ASSIGN_ID
+// IdGeneratorUtil 提供便捷调用: nextId(), nextLongId(), nextUUID()
+</code></pre>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>找一个继承 BaseEntity 的实体类（如 SysUser），确认 @TableField(fill=...) 注解</li>
+<li>在 SysUserServiceImpl 中打一个断点，观察 insert 时 InjectionMetaObjectHandler 的 fill 过程</li>
+<li>查看 <code>BaseMapperPlus</code> 的 <code>selectVoById</code> 内部如何调用 MapstructUtils.convert() 做实体到 VO 转换</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://baomidou.com/pages/49f6e0/">MyBatis-Plus 自动填充功能</a></div>
+<div class="reminder"> 想知道 BaseEntity 的 createBy 字段是通过什么链路从 HTTP 请求传递到底层数据库的？下一课数据权限会揭示更多细节。也可以直接问我。</div>
+
+</body>
+</html>

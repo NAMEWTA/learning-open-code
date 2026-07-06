@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 导入处理器：DefaultExcelListener、ExcelResult 完整链路</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#f4ecf9; color:#7c3aed; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 导入处理器链：从 InputStream 到 ExcelResult <span class="tag">处理器层 ①</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #6）</b>：学完你能完整追踪导入链路——<code>ExcelBuilder.read(is, clazz).doRead()</code> → <code>DefaultExcelListener</code> 逐行处理 → <code>ExcelResult.getAnalysis()</code> 返回回执。能解释 <code>failFast</code> 参数如何影响异常行为，以及两种异常类型的不同处理策略。
+</div>
+
+<p>导入链路比导出链路简单——只有 <strong>1 个接口 + 1 个默认实现 + 1 个结果接口 + 1 个默认结果</strong>，共 4 个文件。但设计很精炼，值得细读。</p>
+
+<h2>一、导入四件套：接口与实现</h2>
+
+<table>
+<tr><th>文件</th><th>角色</th><th>关键方法</th></tr>
+<tr>
+  <td><code>core/ExcelListener.java</code></td>
+  <td>监听接口</td>
+  <td><code>getExcelResult()</code> — 唯一扩展方法</td>
+</tr>
+<tr>
+  <td><code>core/DefaultExcelListener.java</code></td>
+  <td>默认监听实现（152 行）</td>
+  <td><code>invoke()</code>, <code>onException()</code>, <code>invokeHeadMap()</code></td>
+</tr>
+<tr>
+  <td><code>core/ExcelResult.java</code></td>
+  <td>结果接口</td>
+  <td><code>getList()</code>, <code>getErrorList()</code>, <code>getAnalysis()</code></td>
+</tr>
+<tr>
+  <td><code>core/DefaultExcelResult.java</code></td>
+  <td>默认结果实现</td>
+  <td><code>getAnalysis()</code> — 生成人性化回执</td>
+</tr>
+</table>
+
+<h2>二、ExcelListener —— 一个极简的接口</h2>
+
+<p>位置：<code>core/ExcelListener.java</code></p>
+
+<pre><code>public interface ExcelListener&lt;T&gt; extends ReadListener&lt;T&gt; {
+    ExcelResult&lt;T&gt; getExcelResult();
+}</code></pre>
+
+<p>它继承 Fesod Sheet 的 <code>ReadListener&lt;T&gt;</code>，只加了一个方法 <code>getExcelResult()</code>。Fesod Sheet 的 <code>ReadListener</code> 已经定义了全部分析事件回调：<code>invoke()</code>、<code>doAfterAllAnalysed()</code>、<code>onException()</code>、<code>invokeHeadMap()</code>。RuoYi 只补充了「读取完成后我需要获取结果」的契约。</p>
+
+<div class="side">
+💡 <b>设计意图</b>：如果你对默认的异常处理或校验策略不满意，可以实现 <code>ExcelListener</code> 接口（或直接继承 <code>DefaultExcelListener</code>），通过 <code>ReadBuilder.listener(customListener)</code> 注入。模块的扩展点非常干净。
+</div>
+
+<h2>三、DefaultExcelListener —— 逐行解析的核心</h2>
+
+<p>位置：<code>core/DefaultExcelListener.java</code>（152 行）</p>
+
+<h3>3.1 构造器：两个开关控制行为</h3>
+
+<pre><code>// 核心字段
+private Boolean isValidate = Boolean.TRUE;  // 是否执行JSR303校验
+private Boolean failFast = Boolean.TRUE;    // 异常时是否立即终止
+private Map&lt;Integer, String&gt; headMap;       // 表头数据（用于错误信息定位列名）
+private final ExcelResult&lt;T&gt; excelResult = new DefaultExcelResult&lt;&gt;();
+
+// 三个构造器
+public DefaultExcelListener()                          // validate=true, failFast=true
+public DefaultExcelListener(boolean isValidate)        // 自定义校验开关
+public DefaultExcelListener(boolean isValidate, boolean failFast) // 全自定义</code></pre>
+
+<div class="step"><span class="num">1</span><b><code>isValidate</code> —— 是否需要 Jakarta Validation 校验</b><br>
+默认 <code>true</code>。如果导入模板已经通过 Excel 下拉限制了输入值，可以考虑关闭校验提升性能。关闭方式：<code>ExcelBuilder.read(is, clazz).validate(false).doRead()</code>。</div>
+
+<div class="step"><span class="num">2</span><b><code>failFast</code> —— 快速失败 vs 全量收集</b><br>
+默认 <code>true</code>（快速失败）。设为 <code>false</code> 时，即使某行出错也不终止读取，而是把所有错误收集起来，最后一次性返回。适合「先导入了再说，回头人工处理错误行」的柔性场景。</div>
+
+<h3>3.2 invoke() —— 每读一行回调一次</h3>
+
+<pre><code>// core/DefaultExcelListener.java:125
+@Override
+public void invoke(T data, AnalysisContext context) {
+    if (isValidate) {
+        ValidatorUtils.validate(data);   // ① 执行 Jakarta Validation
+    }
+    excelResult.getList().add(data);     // ② 校验通过则加入成功列表
+}</code></pre>
+
+<p>逻辑非常直白：先校验，再收集。如果 <code>ValidatorUtils.validate(data)</code> 抛出 <code>ConstraintViolationException</code>，会被下面的 <code>onException()</code> 兜住。</p>
+
+<h3>3.3 onException() —— 异常分类处理（最重要的方法）</h3>
+
+<pre><code>// core/DefaultExcelListener.java:76-104
+@Override
+public void onException(Exception exception, AnalysisContext context) throws Exception {
+    String errMsg = null;
+    if (exception instanceof ExcelDataConvertException e) {
+        // 类型一：单元格转换异常 — 能定位到具体行号+列号
+        errMsg = StrUtil.format("第{}行-第{}列-表头{}: 解析异常",
+            e.getRowIndex() + 1, e.getColumnIndex() + 1,
+            headMap == null ? "" : headMap.get(e.getColumnIndex()));
+    }
+    if (exception instanceof ConstraintViolationException e) {
+        // 类型二：JSR303 校验异常 — 只能定位到行号
+        String violationsMsg = StreamUtils.join(
+            e.getConstraintViolations(), ConstraintViolation::getMessage, ", ");
+        errMsg = StrUtil.format("第{}行数据校验异常: {}",
+            context.readRowHolder().getRowIndex() + 1, violationsMsg);
+    }
+    if (errMsg == null) {
+        // 类型三：兜底 — 其他未知异常
+        errMsg = StrUtil.format("第{}行数据异常: {}",
+            context.readRowHolder().getRowIndex() + 1, exception.getMessage());
+    }
+    excelResult.getErrorList().add(errMsg);  // 收集错误信息
+    if (failFast) {
+        throw new ExcelAnalysisException(errMsg);  // 快速失败：立即终止
+    }
+}</code></pre>
+
+<div class="side">
+💡 <b>两种异常的区别</b>：<br>
+<strong>ExcelDataConvertException</strong>：Fesod Sheet 在把单元格字符串转成 Java 类型时抛出的。发生在某一行数据还没进 <code>invoke()</code> 之前。好处是能拿到精确的 <code>rowIndex</code> + <code>columnIndex</code>，错误信息里带表头名。<br>
+<strong>ConstraintViolationException</strong>：在 <code>invoke()</code> 里调 <code>ValidatorUtils.validate()</code> 抛出的。此时数据已成功转换为 Java 对象，但字段值不满足 <code>@NotNull</code> / <code>@Size</code> 等校验规则。只能拿到行号。<br>
+如果两个都不是，走兜底分支——打印完整堆栈（log.warn），收集简化的错误信息。
+</div>
+
+<h3>3.4 invokeHeadMap() —— 记录表头映射</h3>
+
+<pre><code>// core/DefaultExcelListener.java:113
+@Override
+public void invokeHeadMap(Map&lt;Integer, String&gt; headMap, AnalysisContext context) {
+    this.headMap = headMap;  // 保存列索引 → 表头名的映射
+}</code></pre>
+
+<p>这个方法在 <code>onException()</code> 中用到——当转换异常发生时，通过列索引查出「是哪个表头列出了问题」，拼进错误信息：<code>"第3行-第2列-表头性别: 解析异常"</code>。</p>
+
+<h2>四、ExcelResult / DefaultExcelResult —— 结果契约</h2>
+
+<p>位置：<code>core/ExcelResult.java</code>（27 行）+ <code>core/DefaultExcelResult.java</code>（98 行）</p>
+
+<pre><code>public interface ExcelResult&lt;T&gt; {
+    List&lt;T&gt; getList();        // 成功解析的数据
+    List&lt;String&gt; getErrorList(); // 错误信息列表
+    String getAnalysis();      // 导入回执（人性化摘要）
+}</code></pre>
+
+<p><code>DefaultExcelResult</code> 的精髓在 <code>getAnalysis()</code>：</p>
+
+<pre><code>// core/DefaultExcelResult.java:84-96
+public String getAnalysis() {
+    int successCount = list.size();
+    int errorCount = errorList.size();
+    if (successCount == 0) {
+        return "读取失败，未解析到数据";
+    } else {
+        if (errorCount == 0) {
+            return StrUtil.format("恭喜您，全部读取成功！共{}条", successCount);
+        } else {
+            return StrUtil.format("共{}条，成功导入{}条，错误{}条",
+                successCount + errorCount, successCount, errorCount);
+        }
+    }
+}</code></pre>
+
+<p>三种情况的分支逻辑：全失败、全成功、部分成功。业务方拿到 <code>ExcelResult</code> 后，可以用 <code>getAnalysis()</code> 直接丢给前端做 toast 提示，也可以用 <code>getList()</code> + <code>getErrorList()</code> 做更精细的处理。</p>
+
+<h2>五、完整导入调用链（从业务代码到底层）</h2>
+
+<div class="flow">// 业务层 Controller
+@PostMapping("/importData")
+public R&lt;Void&gt; importData(@RequestPart("file") MultipartFile file) throws Exception {
+    ExcelResult&lt;SysUser&gt; result = ExcelBuilder
+        .read(file.getInputStream(), SysUser.class)   // ① 创建 ReadBuilder
+        .sheetNo(0)                                    // ② 读取第0个Sheet
+        .failFast(false)                               // ③ 全量收集错误
+        .doRead();                                     // ④ 执行导入
+    // ...
+    return R.ok(result.getAnalysis());                 // ⑤ 返回回执
+}
+
+// ReadBuilder.doRead() 内部——ExcelBuilder.java:839
+public ExcelResult&lt;T&gt; doRead() {
+    ExcelListener&lt;T&gt; readListener = listener;
+    if (readListener == null) {
+        readListener = new DefaultExcelListener&lt;&gt;(validate, failFast);
+    }
+    createSheetBuilder(createReaderBuilder(readListener)).doRead();
+    return readListener.getExcelResult();
+}
+
+// createReaderBuilder() 内部——ExcelBuilder.java:873
+private ExcelReaderBuilder createReaderBuilder(ExcelListener&lt;T&gt; readListener) {
+    ExcelReaderBuilder builder = FesodSheet.read(inputStream)
+        .head(headType)
+        .autoCloseStream(false);
+    if (readListener != null) {
+        builder.registerReadListener(readListener);
+    }
+    // ... 应用 headRowNumber, ignoreEmptyRow, password 等配置
+    return builder;
+}</div>
+
+<h2>六、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. <code>DefaultExcelListener</code> 处理了哪两种具体的异常类型？它们在错误信息上的差异是什么？</p>
+<span class="opt">A. IOException 和 NullPointerException，前者有文件名，后者没有</span>
+<span class="opt">B. ExcelDataConvertException（能定位到行号+列号+表头名）和 ConstraintViolationException（只能定位到行号）</span>
+<span class="opt">C. SQLException 和 ValidationException</span>
+<span class="opt">D. 不区分类型，统一处理</span>
+<details><summary>看答案</summary><b>B</b>。<code>ExcelDataConvertException</code> 携带 <code>rowIndex</code> + <code>columnIndex</code>，配合 <code>headMap</code> 可以定位到具体表头列。而 <code>ConstraintViolationException</code> 发生在数据已转换完成后的校验阶段，只能通过 <code>context.readRowHolder()</code> 拿到行号。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 将 <code>failFast</code> 设为 <code>false</code> 后，<code>onException()</code> 的行为有什么变化？</p>
+<span class="opt">A. 不再收集错误信息</span>
+<span class="opt">B. 收集错误信息但不抛出 ExcelAnalysisException，继续读取后续行</span>
+<span class="opt">C. 跳过校验直接收集数据</span>
+<span class="opt">D. 行为不变</span>
+<details><summary>看答案</summary><b>B</b>。代码中只将 <code>excelResult.getErrorList().add(errMsg)</code> 放在 <code>if (failFast)</code> 之前，因此无论 failFast 是什么值都会收集错误。区别在于 <code>failFast=true</code> 时紧接着 <code>throw new ExcelAnalysisException(errMsg)</code> 终止读取。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>ExcelResult.getAnalysis()</code> 在「5 条数据全部成功导入」时会返回什么？</p>
+<span class="opt">A. "读取失败，未解析到数据"</span>
+<span class="opt">B. "恭喜您，全部读取成功！共 5 条"</span>
+<span class="opt">C. "共 5 条，成功导入 5 条，错误 0 条"</span>
+<span class="opt">D. "导入完成"</span>
+<details><summary>看答案</summary><b>B</b>。<code>getAnalysis()</code> 对 <code>errorCount == 0</code> 的情况单独写了「恭喜您，全部读取成功！」的文案。只有存在错误时才返回「共X条，成功导入Y条，错误Z条」格式。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<code>core/DefaultExcelListener.java</code>（152 行）+ <code>core/DefaultExcelResult.java</code>（98 行）——两个文件都很短，十分钟能读完，是导入链路的全部核心逻辑。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「如果我想在导入后做额外的业务校验（比如检查手机号是否已注册），应该在哪一层加？」「为什么 doReadAll() 和 doRead() 的实现方式不同？」下一课聚焦导出处理器链——ExcelDownHandler 的下拉四数据源、CellMergeHandler 的合并算法、DataWriteHandler 的表头标注。</div>
+
+<div class="nav">课程 0003 / 使命：读懂 ruoyi-common-excel 模块 · 上一课：核心注解 · 下一课预告：导出处理器链</div>
+
+</body>
+</html>

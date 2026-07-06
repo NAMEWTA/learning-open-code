@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>10 扩展与排错 — 新增规则、ignore 场景、三类故障排查</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .checklist { background: #fafafa; border: 1px solid #e0e0e0; padding: 1rem 1.2rem; border-radius: 6px; margin: 1rem 0; }
+  .checklist li { margin-bottom: 0.5rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>10 扩展与排错 — 新增规则、ignore 场景、三类故障排查</h1>
+
+<blockquote><strong>本节目标：</strong>你能新增一种自定义数据范围规则（改 3 个文件）、能在 3 种场景正确使用 ignore、能按排查清单快速定位"权限不生效/越权/SQL 报错"。</blockquote>
+
+<h2>扩展一：新增一个数据范围规则</h2>
+
+<p>假设你要新增一种"仅本部门及上级部门"（DataScopeType code=7）。需要改 3 个地方：</p>
+
+<h3>1. 加枚举值</h3>
+
+<p><code>DataScopeType.java</code>：</p>
+
+<pre><code>// 新增枚举值
+DEPT_AND_PARENT("7",
+    " #{#deptName} IN ( #{@sdss.getDeptAndParent( #user.deptId )} ) ",
+    " 1 = 0 ");</code></pre>
+
+<h3>2. 加 sdss 方法</h3>
+
+<p><code>SysDataScopeServiceImpl.java</code>（或 ISysDataScopeService）：</p>
+
+<pre><code>// 新增方法，返回当前部门及上级部门ID串
+@Cacheable(cacheNames = CacheNames.SYS_DEPT_AND_PARENT, key = "#deptId")
+public String getDeptAndParent(Long deptId) {
+    // 通过 ancestors 字段递归查找上级部门
+    // 实现类似于 getDeptAndChild，但方向相反
+}</code></pre>
+
+<h3>3. 前端加选项</h3>
+
+<p>Vue：<code>dataScopeOptions</code> 加 <code>{ value: '7', label: '本部门及上级数据权限' }</code></p>
+
+<p>React：<code>dataScopeOptions</code> 加 <code>{ value: '7', label: '本部门及上级数据权限' }</code></p>
+
+<div class="tip"><strong>不改的文件：</strong>Handler、Interceptor、AOP 切面、注解都<strong>不用改</strong>。因为 Handler 是通过循环 <code>DataScopeType.findCode(role.getDataScope())</code> 动态查找模板，新增枚举值自动生效。</div>
+
+<h2>扩展二：ignore 的三种使用场景</h2>
+
+<p><code>DataPermissionHelper.ignore()</code> 的核心作用是<strong>临时关闭数据权限</strong>。三种场景：</p>
+
+<h3>场景1：SpEL 内防止死循环（框架内置）</h3>
+
+<p><code>PlusDataPermissionHandler:162</code>：</p>
+
+<pre><code>String sql = DataPermissionHelper.ignore(() ->
+    parser.parseExpression(type.getSqlTemplate(), parserContext)
+          .getValue(context, String.class));</code></pre>
+
+<p>这是最关键的用法——渲染模板时 <code>@sdss.getRoleCustom()</code> 会查 DB，如果不 ignore，查 DB 又会触发数据权限。死循环。</p>
+
+<h3>场景2：业务代码中临时查全部数据</h3>
+
+<pre><code>// 管理员操作：查看所有用户
+DataPermissionHelper.ignore(() -> {
+    List&lt;SysUser&gt; allUsers = userMapper.selectList();
+    // 不受当前用户数据权限限制
+});</code></pre>
+
+<p>注意用 <code>DataPermissionHelper.ignore(Runnable)</code> 或 <code>DataPermissionHelper.ignore(Supplier)</code>，都有 finally 自动恢复。</p>
+
+<h3>场景3：报表/统计类查询</h3>
+
+<pre><code>// 统计报表需要全量数据
+DataPermissionHelper.ignore(() -> {
+    return reportMapper.selectMonthlyStats();
+});</code></pre>
+
+<div class="warn"><strong>ignore 的使用原则：</strong></div>
+<ol>
+  <li><strong>最小作用域</strong>：ignore 包裹的代码越少越好，只包需要跳过权限的那次查询</li>
+  <li><strong>一定要带 finally</strong>：Supplier/Runnable 版已内置，自己手写要确保恢复</li>
+  <li><strong>不要滥用</strong>：如果到处都在 ignore，说明设计有问题——可能应该用角色配置来调整</li>
+</ol>
+
+<h2>三类典型故障排查清单</h2>
+
+<h3>类型一：权限"不生效"（应该过滤但没过滤）</h3>
+
+<div class="checklist">
+<ol>
+  <li><strong>Mapper 方法没加注解？</strong> → 检查 Mapper 接口方法上有没有 <code>@DataPermission</code>。AOP 切点只匹配有注解的方法。</li>
+  <li><strong>当前用户是超级管理员？</strong> → <code>LoginHelper.isSuperAdmin()</code> 返回 true 则直接短路。检查用户 userId 是否等于 <code>SUPER_ADMIN_USER_ID</code>。</li>
+  <li><strong>角色 dataScope=1（全部数据）？</strong> → <code>buildDataFilter</code> 中遇到 ALL 直接返回空。检查 <code>sys_role.data_scope</code>。</li>
+  <li><strong>MyBatis-Plus 忽略标记？</strong> → 检查 XML Mapper namespace 或代码中是否调了 <code>InterceptorIgnoreHelper</code> 跳过数据权限。</li>
+  <li><strong>方法走了缓存？</strong> → 如果方法加了 <code>@DataPermission</code> 但实际调用走了其他缓存路径（如一级缓存、Redis 缓存），可能绕过了 MyBatis 拦截器。</li>
+</ol>
+</div>
+
+<h3>类型二：权限"越权"（能看不该看的数据）</h3>
+
+<div class="checklist">
+<ol>
+  <li><strong>dataScope 配置错误？</strong> → 检查角色 dataScope 字段。预期是本部门(3)但实际配了全部(1)。</li>
+  <li><strong>多角色权限叠加？</strong> → 用户有角色A(dataScope=1 全部)和角色B(dataScope=5 仅本人)。由于 OR 拼接，角色A 的 ALL 直接短路——用户看到全部数据。这是设计的正确行为：<strong>权限取并集</strong>。</li>
+  <li><strong>接口约束未生效？</strong> → 检查 Controller 有没有 <code>@SaCheckPermission</code>。如果没有，<code>scopeRoles</code> 会用全部角色参与计算，可能导致宽松角色越权。</li>
+  <li><strong>deptIds 未清理？</strong> → 前端改了 dataScope 从 2（自定义）到 3（本部门），但 deptIds 没清空。Vue 版依赖 <code>dataScopeSelectChange</code>，React 版在 submit 时强制 <code>dataScope !== '2' ? [] : nextDeptIds</code>。</li>
+</ol>
+</div>
+
+<h3>类型三：SQL 执行报错</h3>
+
+<div class="checklist">
+<ol>
+  <li><strong>多表 join 列名冲突？</strong> → <code>DataColumn.value</code> 没加表别名，如写成 <code>"dept_id"</code> 而非 <code>"d.dept_id"</code>。</li>
+  <li><strong>key/value 数组长度不匹配？</strong> → Handler:131 直接抛异常 <code>"key与value长度不匹配"</code>。检查注解的 key 和 value 数组。</li>
+  <li><strong>SpEL 表达式解析失败？</strong> → 模板中有语法错误或引用了不存在的 bean。检查 <code>DataScopeType.sqlTemplate</code>。</li>
+  <li><strong>sdss 方法返回 null？</strong> → 应该返回 "-1" 而非 null。NullSafe 框架会兜 default "-1"，但如果方法直接抛 NPE 就不同了。</li>
+  <li><strong>部门树为空时 generate IN() 空参数？</strong> → sdss 返回 "-1" 保证 <code>IN (-1)</code> 语法正确。如果忘了 null 检查，可能生成 <code>IN ()</code> 导致 SQL 语法错误。</li>
+</ol>
+</div>
+
+<h2>扩展清单速查</h2>
+
+<table>
+<tr><th>目标</th><th>需要改的文件</th><th>不需要改的</th></tr>
+<tr><td>新增数据范围规则（如 code=7）</td><td><code>DataScopeType</code>（加枚举 + 模板）、<code>SysDataScopeServiceImpl</code>（加方法）、前端（加下拉选项）</td><td>Handler、Interceptor、AOP、注解</td></tr>
+<tr><td>新增 SpEL 变量（如按创建时间过滤）</td><td><code>DataScopeType</code>（改模板）、<code>DataPermissionHelper.setVariable()</code> 注入变量</td><td>注解（如果复用现有 key）</td></tr>
+<tr><td>业务代码中关闭数据权限</td><td><code>DataPermissionHelper.ignore(Supplier)</code> 包裹</td><td>所有其他代码</td></tr>
+<tr><td>新增一个需要数据权限的业务表</td><td>Mapper 方法加 <code>@DataPermission</code> + <code>@DataColumn</code></td><td>框架代码</td></tr>
+</table>
+
+<div class="cite">📖 推荐一手资料：源码 <code>DataScopeType.java:26-56</code> — 六行模板就是全部规则。再读 <code>SysDataScopeServiceImpl.java:29-72</code> 里 sdss 的两个方法，理解扩展模式。</div>
+<div class="reminder">💡 这已经是最后一节课了。回顾整个系列，你应该已经掌握了从注解到 SQL、从前端配置到后端引擎的完整链路。现在试试问我任何数据权限相关的组合问题——比如"我想给订单表加数据权限，按所属门店过滤，还要支持超级管理员临时查看全部门店数据，该怎么做？"</div>
+
+</body>
+</html>

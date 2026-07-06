@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · XSS 防护体系</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · XSS 防护体系</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code></p>
+
+<h2>一句话定位</h2>
+<div class="chain"><b>XssProperties</b>(配置开关+白名单) → <b>XssFilter</b>(路由决策: 放行还是清洗) → <b>XssHttpServletRequestWrapper</b>(内容清洗: HtmlUtil.cleanHtmlTag)</div>
+
+<h2>三层防线</h2>
+<table>
+<tr><th>层</th><th>类</th><th>职责</th></tr>
+<tr><td>配置层</td><td><code>XssProperties</code></td><td>enabled 总开关 + excludeUrls 白名单</td></tr>
+<tr><td>Filter层</td><td><code>XssFilter</code></td><td>判断是否过滤: GET/DELETE 放行, 白名单放行, 其余包装</td></tr>
+<tr><td>Wrapper层</td><td><code>XssHttpServletRequestWrapper</code></td><td>重写 getParameter/getParameterMap/getInputStream, 在每个点执行 cleanHtmlTag</td></tr>
+</table>
+
+<h2>XssFilter 放行规则</h2>
+<table>
+<tr><th>条件</th><th>行为</th></tr>
+<tr><td>请求方法为 GET 或 DELETE</td><td>直接放行（无请求体，XSS 风险低）</td></tr>
+<tr><td>URL 匹配 excludeUrls 白名单</td><td>直接放行（如富文本编辑器路径）</td></tr>
+<tr><td>其他情况</td><td>创建 XssHttpServletRequestWrapper 包装后继续</td></tr>
+</table>
+
+<h2>XssHttpServletRequestWrapper 清洗点</h2>
+<table>
+<tr><th>方法</th><th>清洗方式</th></tr>
+<tr><td><code>getParameter(name)</code></td><td><code>HtmlUtil.cleanHtmlTag(value).trim()</code></td></tr>
+<tr><td><code>getParameterValues(name)</code></td><td>遍历数组，逐个 cleanHtmlTag + trim</td></tr>
+<tr><td><code>getParameterMap()</code></td><td>copy → 逐 entry 清洗（防容器不可改 Map）</td></tr>
+<tr><td><code>getInputStream()</code></td><td>JSON? → 读取 body → cleanHtmlTag → 重建 ByteArrayInputStream<br>非 JSON → 返回原始流</td></tr>
+</table>
+
+<h2>HtmlUtil.cleanHtmlTag() 效果</h2>
+<table>
+<tr><th>输入</th><th>输出</th></tr>
+<tr><td><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></td><td>空字符串</td></tr>
+<tr><td><code>&lt;div onclick="x"&gt;text&lt;/div&gt;</code></td><td><code>text</code></td></tr>
+<tr><td><code>&lt;b&gt;bold&lt;/b&gt;</code></td><td><code>bold</code></td></tr>
+<tr><td><code>正常文本</code></td><td><code>正常文本</code></td></tr>
+</table>
+
+<h2>配置示例</h2>
+<div class="chain">xss:
+  enabled: true          # @ConditionalOnProperty 控制 Bean 是否注册
+  excludeUrls:
+    - /system/notice/*   # 富文本公告保留 HTML
+    - /tool/swagger/*</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>三层防线：<b>配置(开关+白名单) → Filter(路由) → Wrapper(清洗)</b></li>
+<li><b>GET/DELETE 自动放行</b>——它们没有请求体，XSS 载荷主要在 POST/PUT body 中</li>
+<li><b>getParameterMap 先 copy 再改</b>——防止容器 UnmodifiableMap 抛异常</li>
+<li>清洗策略是<b>全量去标签</b>，不是白名单保留——富文本路径必须排白</li>
+<li><code>@ConditionalOnProperty</code> 控制的是 <b>Bean 是否存在</b>，不是 Filter 内部开关——<code>xss.enabled=false</code> 时 XssFilter 不存在于 Filter 链中</li>
+<li>XssHttpServletRequestWrapper 的 <code>isFinished()</code> 固定返回 true（body 已完整读入内存）</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：XssFilter、XssHttpServletRequestWrapper、XssProperties、@ConditionalOnProperty</p>
+</body>
+</html>

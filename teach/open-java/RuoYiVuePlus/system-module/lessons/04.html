@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第4课：数据权限（Data Scope）— 从配置到 SQL 注入</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🎯 第4课：数据权限（Data Scope）— 从配置到 SQL 注入</h1>
+
+<p><strong>胜利目标：</strong>能画出数据权限的完整链路，说出 5 种 data_scope 的含义和 SQL 注入方式。</p>
+
+<h2>1. 什么是数据权限？</h2>
+
+<p><strong>功能权限</strong>控制"能不能访问某页面/按钮"，而<strong>数据权限</strong>控制"能看到哪些数据行"。</p>
+
+<blockquote>
+  例如：两个用户都有 <code>system:user:list</code> 权限，但 A 是总部管理员（能看到所有人），B 是部门经理（只能看到自己部门的人）。这就是数据权限的体现。
+</blockquote>
+
+<h2>2. 六种数据范围</h2>
+
+<table>
+  <thead><tr><th>值</th><th>含义</th><th>SQL 注入逻辑</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>全部数据权限</td><td>不注入任何条件，能看到所有数据</td></tr>
+    <tr><td>2</td><td>自定义数据权限</td><td>注入 <code>dept_id IN (角色配置的部门列表)</code></td></tr>
+    <tr><td>3</td><td>本部门数据权限</td><td>注入 <code>dept_id = 当前用户的部门ID</code></td></tr>
+    <tr><td>4</td><td>本部门及以下数据权限</td><td>注入 <code>dept_id IN (当前部门 + 所有子部门ID)</code></td></tr>
+    <tr><td>5</td><td>仅本人数据权限</td><td>注入 <code>user_id = 当前用户ID</code></td></tr>
+    <tr><td>6</td><td>部门及以下或本人数据权限</td><td>注入 <code>dept_id IN (...) OR user_id = 当前用户ID</code></td></tr>
+  </tbody>
+</table>
+
+<h2>3. 数据权限的完整链路</h2>
+
+<pre><code>
+【请求到达】
+POST /system/user/list
+Authorization: Bearer xxx-token
+    │
+    ▼
+【Controller】SysUserController.list()
+    @SaCheckPermission("system:user:list")  ← 功能权限检查
+    │
+    ▼
+【Service】SysUserServiceImpl.selectPageUserList()
+    │
+    ▼
+【Mapper】SysUserMapper.selectPageUserList()
+    │  ← MyBatis-Plus 拦截器介入！
+    ▼
+【DataScope 插件】注入 SQL 条件
+    │
+    │  1. 从 LoginHelper 获取当前用户的所有角色
+    │  2. 遍历角色，根据每个角色的 data_scope 计算条件
+    │  3. 按 OR 拼接多个角色的条件
+    │
+    ▼
+【最终 SQL】
+SELECT * FROM sys_user
+WHERE del_flag = '0'
+  AND (
+    -- 角色1: data_scope=4（本部门及以下）
+    dept_id IN (100, 101, 102)
+    OR
+    -- 角色2: data_scope=5（仅本人）
+    user_id = 123
+  )
+</code></pre>
+
+<h2>4. 核心源码分析</h2>
+
+<h3>4.1 SysDataScopeService — 数据范围计算</h3>
+
+<pre><code>@Service("sdss")  // 注意 Bean 名称缩写
+public class SysDataScopeServiceImpl implements ISysDataScopeService {
+
+    // 获取角色自定义权限：返回角色关联的部门ID列表
+    @Cacheable(cacheNames = "sys_role_custom", key = "#roleId")
+    public String getRoleCustom(Long roleId) {
+        // 从 sys_role_dept 表查询角色关联的部门
+        List&lt;SysRoleDept&gt; list = roleDeptMapper.lambda()
+            .select(SysRoleDept::getDeptId)
+            .eq(SysRoleDept::getRoleId, roleId)
+            .list();
+        return StreamUtils.join(list, rd -> Convert.toStr(rd.getDeptId()));
+    }
+
+    // 获取部门及以下权限：返回当前部门 + 所有子部门ID
+    @Cacheable(cacheNames = "sys_dept_and_child", key = "#deptId")
+    public String getDeptAndChild(Long deptId) {
+        List&lt;Long&gt; deptIds = deptMapper.selectDeptAndChildById(deptId);
+        return StreamUtils.join(deptIds, Convert::toStr);
+    }
+}</code></pre>
+
+<h3>4.2 DataScope 拦截器（在 common-mybatis 中）</h3>
+
+<p>DataScope 插件是 MyBatis-Plus 的拦截器，拦截所有标注了 <code>@DataScope</code> 注解的查询，自动注入 WHERE 条件。它根据当前登录用户拥有的角色的 <code>data_scope</code> 值动态拼接 SQL：</p>
+
+<pre><code>// 伪代码：DataScope 拦截器的核心逻辑
+for (Role role : currentUser.getRoles()) {
+    switch (role.getDataScope()) {
+        case "1": // 全部 → 不注入条件
+            return;
+        case "2": // 自定义 → dept_id IN (...)
+            String customDeptIds = dataScopeService.getRoleCustom(role.getRoleId());
+            conditions.add("dept_id IN (" + customDeptIds + ")");
+            break;
+        case "3": // 本部门 → dept_id = currentUser.deptId
+            conditions.add("dept_id = " + currentUser.getDeptId());
+            break;
+        case "4": // 本部门及以下 → dept_id IN (deptId + 子部门)
+            String allDeptIds = dataScopeService.getDeptAndChild(currentUser.getDeptId());
+            conditions.add("dept_id IN (" + allDeptIds + ")");
+            break;
+        case "5": // 仅本人 → user_id = currentUser.userId
+            conditions.add("user_id = " + currentUser.getUserId());
+            break;
+    }
+}
+// 多个角色的条件用 OR 拼接
+sql += " AND (" + String.join(" OR ", conditions) + ")";</code></pre>
+
+<div class="highlight">
+  <strong>关键设计细节：</strong>
+  <ul>
+    <li>多个角色之间用 <strong>OR</strong> 连接——只要满足任一角色的数据范围即可</li>
+    <li><code>SysDataScopeServiceImpl</code> 标注了 <code>@Service("sdss")</code> 避免名称过长</li>
+    <li><code>@Cacheable</code> 缓存数据范围计算结果，避免每次查询都重新计算部门树</li>
+    <li>注解中包含 <code>condition = "#roleId != null"</code> 防止缓存空值</li>
+  </ul>
+</div>
+
+<h2>5. 数据权限在 Controller 层的检查</h2>
+
+<p>除了 SQL 层面的注入，Controller 层也有显式的数据权限校验：</p>
+
+<pre><code>// SysUserController.edit()
+@PutMapping
+public R&lt;Void&gt; edit(@RequestBody SysUserBo user) {
+    // 显式检查当前用户是否有权限操作目标用户的数据
+    userService.checkUserDataScope(user.getUserId());
+    // 显式检查当前用户是否有权限操作目标部门的数据
+    deptService.checkDeptDataScope(user.getDeptId());
+    // ...
+}
+
+// SysDeptServiceImpl.checkDeptDataScope()
+public void checkDeptDataScope(Long deptId) {
+    if (LoginHelper.isSuperAdmin()) return;  // 超管跳过
+    if (deptMapper.countDeptById(deptId) == 0) {
+        throw new ServiceException("没有权限访问部门数据！");
+    }
+}</code></pre>
+
+<div class="highlight">
+  <strong>两重保险：</strong>SQL 层面通过拦截器注入 WHERE 条件（读操作）+ Controller 层面通过显式校验（写操作），双重保证数据安全。
+</div>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>口述从用户请求到 SQL 注入的完整数据权限链路</li>
+  <li>说出 6 种 data_scope 值及其对应的 SQL 拼接逻辑</li>
+  <li>解释为什么多角色之间用 OR 而不是 AND 拼接</li>
+  <li>解释 SysDataScopeService 为什么使用 @Cacheable 缓存，缓存什么内容</li>
+  <li>对比"SQL 层面注入"和"Controller 层面校验"两种数据权限控制方式</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>common-mybatis</code> 模块中的 DataScope 拦截器源码 — 理解 MyBatis 插件机制</div>
+<div class="reminder">💡 有疑问？直接问我。例如："如果用户有多个角色，数据权限是如何合并的？" 或 "如何给一个新的业务表添加数据权限支持？"</div>
+
+</body>
+</html>

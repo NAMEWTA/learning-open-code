@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>06 · 路由系统与布局：ProLayout 如何撑起整个后台</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./05-umijs-skeleton.html">05 UmiJS骨架</a> · → <a href="./07-zustand-core.html">07 Zustand上</a></div>
+
+<h1>06 · 路由系统与布局：ProLayout 如何撑起整个后台</h1>
+
+<p><strong>胜利条件：</strong>能画出 ruoyi-react 的路由层级结构（静态路由→BasicLayout→子路由→DynamicPage）；理解 ProLayout 的核心 props；能解释菜单从后端路由树到左侧导航栏的完整转换过程。</p>
+
+<h2>一、两级路由：静态 vs 动态</h2>
+
+<blockquote>
+ruoyi-react 的路由分两层：<strong>静态路由</strong>写在 config.ts 里（登录、首页等固定页），<strong>动态路由</strong>从后端 API 拿到、由 DynamicPage 在运行时匹配。
+</blockquote>
+
+<div class="diagram"><code>
+config/config.ts 中的 routes
+│
+├── /login          → pages/login.tsx           (无布局，独立页)
+├── /register       → pages/register.tsx         (无布局)
+├── /social-callback → pages/socialCallback.tsx   (无布局)
+├── /401, /404      → pages/error/               (无布局)
+│
+└── /  → BasicLayout  ← 所有管理页面共用此布局
+    ├── /              → redirect → /index
+    ├── /index         → pages/index.tsx          (仪表盘)
+    ├── /user/profile  → pages/user/profile       (个人信息)
+    └── * (catch-all)  → pages/dynamicPage.tsx    (动态路由)</code></div>
+
+<h2>二、BasicLayout：整个后台的"壳"</h2>
+
+<p><span class="file-ref">src/layouts/BasicLayout.tsx</span>（500+ 行）是 ruoyi-react 的心脏。</p>
+
+<h3>核心结构（精简）</h3>
+
+<pre><code>const BasicLayout: React.FC = () => {
+  // ===== 1. 数据层：从 Store 获取状态 =====
+  const token = getToken();
+  const { userInfo } = useUserStore();
+  const { menuData, backendRoutes, reloadMenus } = usePermissionStore();
+  const { layoutSettings } = useAppStore();
+
+  // ===== 2. 副作用层：挂载时初始化 =====
+  useEffect(() => {
+    if (!getToken()) return;          // 无 token → 不加载
+    reloadMenus();                    // 调后端 API：getInfo() + getRouters()
+    initPush();                       // 初始化实时推送
+    return () => closePush();         // 卸载清理
+  }, []);
+
+  // ===== 3. 没有 token → 跳转登录 =====
+  if (!token) {
+    return &lt;Redirect to="/login" /&gt;;
+  }
+
+  // ===== 4. 渲染 ProLayout =====
+  return (
+    &lt;ProLayout
+      // --- 数据 ---
+      title="若依管理系统"
+      logo="..."
+      menu={{ defaultOpenAll: true }}
+      menuDataRender={() => menuData}       // 菜单数据
+
+      // --- 布局模式 ---
+      layout={layoutSettings.navType}       // side(侧边) / top(顶部) / mix(混合)
+      navTheme={layoutSettings.sideTheme}   // dark / light
+      fixedHeader={layoutSettings.fixedHeader}
+
+      // --- 右侧操作区 ---
+      actionsRender={() => [
+        &lt;MenuSearch /&gt;,
+        &lt;MessageBox /&gt;,
+        &lt;Screenfull /&gt;,
+        &lt;LocaleSelect /&gt;,
+        &lt;SizeSelect /&gt;,
+        &lt;LayoutSettings /&gt;,
+      ]}
+
+      // --- 用户下拉菜单 ---
+      avatarProps={{
+        src: userInfo?.avatar,
+        title: userInfo?.nickName,
+        render: (_, dom) => (
+          &lt;Dropdown menu={{ items: userMenuItems }}&gt;{dom}&lt;/Dropdown&gt;
+        ),
+      }}
+
+      // --- 标签页（多tab）---
+      {...(tagsView && {
+        tagRender: () => &lt;TagsView /&gt;,
+      })}
+    &gt;
+      // 子路由的内容渲染在这里
+      &lt;Outlet /&gt;
+    &lt;/ProLayout&gt;
+  );
+};</code></pre>
+
+<h2>三、ProLayout 的 7 个核心 Props</h2>
+
+<table>
+<tr><th>Prop</th><th>作用</th><th>ruoyi-react 传了什么</th></tr>
+<tr><td><code>menuDataRender</code></td><td>左侧菜单的数据源</td><td>从 permissionStore 的 menuData（后端路由树格式化后的数组）</td></tr>
+<tr><td><code>layout</code></td><td>布局模式</td><td>side / top / mix，用户可在设置面板切换</td></tr>
+<tr><td><code>navTheme</code></td><td>侧边栏主题</td><td>dark / light</td></tr>
+<tr><td><code>actionsRender</code></td><td>顶栏右侧操作区</td><td>搜索、消息、全屏、语言、尺寸、设置</td></tr>
+<tr><td><code>avatarProps</code></td><td>右上角头像+下拉菜单</td><td>用户头像、昵称、下拉（个人中心/退出）</td></tr>
+<tr><td><code>children</code></td><td>内容区（页面主体）</td><td><code>&lt;Outlet /&gt;</code>——子路由渲染在这里</td></tr>
+<tr><td><code>tagRender</code></td><td>标签页栏（可选）</td><td><code>&lt;TagsView /&gt;</code>——多 tab 切换</td></tr>
+</table>
+
+<h2>四、菜单数据流：后端路由 → 侧边栏</h2>
+
+<div class="diagram"><code>
+① 后端 API: GET /system/menu/getRouters?userId=1
+   返回→ BackendRoute[] （树形，含 component:'@/views/system/user/index'）
+
+② permissionStore.reloadMenus()
+   - 调 getInfo() 拿用户信息 → userStore
+   - 调 getRouters() 拿路由树 → permissionStore.backendRoutes
+
+③ 菜单格式化（menu.tsx）
+   - 遍历 backendRoutes 树
+   - 过滤隐藏菜单（meta.visible=false）
+   - 转成 ProLayout menuDataRender 需要的格式
+   - 图标处理（Ant Design Icon + Iconify 混合）
+   - 设置 key/path/name/icon/children
+
+④ ProLayout 渲染
+   - menuDataRender 返回格式化后的菜单数组
+   - ProLayout 渲染为左侧导航栏</code></div>
+
+<h2>五、布局设置持久化</h2>
+
+<p>用户调整了主题、布局模式后，这些偏好需要记住。<span class="file-ref">src/stores/appStore.ts</span> 负责：</p>
+
+<pre><code>export const useAppStore = create(
+  persist(                    // ← Zustand 的 persist 中间件！
+    (set) => ({
+      layoutSettings: {
+        navType: 'side',
+        sideTheme: 'dark',
+        fixedHeader: true,
+        showLogo: true,
+        tagsView: true,
+        // ...
+      },
+      setLayoutSettings: (settings) => set({ layoutSettings: settings }),
+    }),
+    {
+      name: 'layout-setting-react',  // localStorage 的 key
+    },
+  ),
+);</code></pre>
+
+<p>这就是"持久化"的一部分——布局设置自动同步到 localStorage，刷新后不丢失。</p>
+
+<h2>六、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/layouts/BasicLayout.tsx</span>，找到 <code>menuDataRender</code> 回调，看它返回了什么</li>
+  <li>打开 <span class="file-ref">src/stores/permissionStore.ts</span>，找到 <code>reloadMenus</code> 方法，看它如何生成 <code>menuData</code></li>
+  <li>打开浏览器开发者工具（F12），在 Application → Local Storage 中找到 <code>layout-setting-react</code>，查看存储的 JSON</li>
+  <li>修改布局设置（如切换暗黑模式），观察 localStorage 中该 key 的变化</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://procomponents.ant.design/components/layout">ProComponents 官方文档 — ProLayout</a>（重点看 API 表格中的每个 prop）</div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："ProLayout 的 side/mix/top 三种布局模式有什么区别？<code>&lt;Outlet /&gt;</code> 是什么，为什么子路由内容会渲染在那里？"</div>
+
+</body>
+</html>

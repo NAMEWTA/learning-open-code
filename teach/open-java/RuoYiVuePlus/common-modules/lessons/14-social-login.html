@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>14 · ruoyi-common-social：第三方登录 OAuth2.0 集成</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>14 · ruoyi-common-social：第三方登录 OAuth2.0 集成</h1>
+
+<p><strong>核心问题：</strong>如何在一个系统中同时支持微信、QQ、GitHub、企业微信、钉钉、支付宝等 26 种第三方登录？</p>
+
+<div class="info">
+<strong>模块定位：</strong>13 个 Java 文件。基于 <strong>JustAuth</strong>（me.zhyd.oauth）开源 SDK。支持 26 个平台，包括 3 种私有化部署的自定义扩展（Gitea/MaxKey/TopIAM）。
+</div>
+
+<h2>1. 支持的 26 个平台一览</h2>
+
+<table>
+<tr><th>类别</th><th>平台</th></tr>
+<tr><td>社交</td><td>QQ、微信开放平台、微信公众号、微博、抖音、人人</td></tr>
+<tr><td>企业协作</td><td>钉钉 V2、企业微信（扫码登录）</td></tr>
+<tr><td>代码托管</td><td>GitHub、Gitee、GitLab、Coding</td></tr>
+<tr><td>私有 Git</td><td><strong>Gitea</strong>（自定义扩展）</td></tr>
+<tr><td>开放平台</td><td>百度、淘宝、支付宝、华为 V3、阿里云</td></tr>
+<tr><td>职场</td><td>领英（LinkedIn）</td></tr>
+<tr><td>技术社区</td><td>开源中国、Stack Overflow</td></tr>
+<tr><td>企业 IDaaS</td><td>Microsoft (Entra ID)、<strong>MaxKey</strong>（开源IAM）、<strong>TopIAM</strong>（开源身份治理）</td></tr>
+</table>
+
+<h2>2. OAuth2.0 授权码模式流程</h2>
+
+<pre>
+浏览器                                        后端                          第三方平台
+  │                                            │                              │
+  │  1. GET /auth/social?source=github         │                              │
+  │──────────────────────────────────────────→│                              │
+  │                                            │  2. 生成 authorizeUrl         │
+  │  3. 302 重定向到 GitHub 授权页              │─────────────────────────────→│
+  │←──────────────────────────────────────────│                              │
+  │                                                         用户授权           │
+  │  4. 回调 redirectUri?code=xxx&state=xxx  │                              │
+  │──────────────────────────────────────────→│                              │
+  │                                            │  5. 用 code 换 access_token   │
+  │                                            │─────────────────────────────→│
+  │                                            │  6. 用 access_token 拿用户信息 │
+  │                                            │─────────────────────────────→│
+  │                                            │  7. 根据 source+uuid 查绑定     │
+  │                                            │  8. LoginHelper.login() 签发Token│
+  │  9. 返回 LoginVo (含 Admin-Token)          │                              │
+  │←──────────────────────────────────────────│                              │
+</pre>
+
+<h2>3. State 防 CSRF</h2>
+<pre><code>// AuthRedisStateCache — State 存储在 Redis
+public void cache(String key, String value) {
+    RedisUtils.setCacheObject(
+        GlobalConstants.SOCIAL_AUTH_CODE_KEY + key, value,
+        Duration.ofMinutes(3)  // 3 分钟过期
+    );
+}
+// 回调时比对 state 参数 → 一致才继续 → 防止 CSRF 攻击
+</code></pre>
+
+<h2>4. 账号绑定机制</h2>
+<pre><code>// 首次登录 → "你还没有绑定第三方账号" → 引导绑定
+// 已绑定   → authId = source + uuid (如 "GITHUB12345678")
+//          → 查 sys_social 表找到系统用户 ID
+//          → 通过 Sa-Token 签发 Token
+
+// 表结构 sys_social:
+//   id, user_id (系统用户ID), auth_id (第三方唯一标识),
+//   source (平台, 如github), access_token, expire_in, ...
+</code></pre>
+
+<h2>5. 三种私有化扩展模式</h2>
+
+<p><strong>Gitea（自建 Git）：</strong>通过 serverUrl 配置私有部署地址，实现 authorize/accessToken/userInfo 三个端点。</p>
+<pre><code># 配置示例
+justauth:
+  type:
+    gitea:
+      client-id: xxx
+      client-secret: xxx
+      redirect-uri: http://localhost:8080/auth/callback
+      server-url: https://gitea.example.com</code></pre>
+
+<p><strong>MaxKey / TopIAM（企业 IDaaS）：</strong>同理适配私有部署的身份认证平台，展示了如何处理非标准 OAuth2.0 差异（如 scope 参数的空格分隔、Basic Auth header 等）。</p>
+
+<h2>6. 前端对应</h2>
+<p>登录页 <code>plus-ui-vue/src/views/login.vue</code> 中的第三方登录图标区，通过 <code>api/login.ts</code> 中 <code>grantType: 'social'</code> 参数调用 <code>/auth/social/callback</code> 接口实现社交登录。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>在 application.yml 中配置 GitHub 的 client-id 和 client-secret</li>
+<li>访问 /auth/social?source=github，观察 OAuth2.0 完整跳转流程</li>
+<li>查看 sys_social 表结构，理解 authId = source+uuid 的绑定设计</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://justauth.wiki/">JustAuth 官方文档</a> — 集成了 30+ 第三方平台的开源授权 SDK</div>
+<div class="reminder"> 想接入一个新的第三方平台（如 Google、Twitter）？或者想了解 OAuth2.0 的 PKCE 扩展？直接问我。</div>
+
+</body>
+</html>

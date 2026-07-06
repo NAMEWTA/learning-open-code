@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 工作流事件解耦：流程内核与业务逻辑的完全分离</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.45rem 0.6rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 工作流事件解耦：流程内核与业务逻辑的完全分离 <span class="tag">事件契约</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #7）</b>：学完你能讲清 <code>ProcessEvent</code> / <code>ProcessTaskEvent</code> / <code>ProcessDeleteEvent</code> 三个事件的发布与消费全链路，理解为什么事件类要放在 api 模块以及 Spring <code>@EventListener</code> 如何实现「业务代码不引入流程引擎依赖」。
+</div>
+
+<p>前三课我们看了查询契约（Service 接口）和数据契约（DTO/模型）。这一课看 ruoyi-api 里独一档的设计——<strong>行为契约：事件对象</strong>。它是 api 模块中唯一不涉及数据库查询的部分，却可能是解耦做得最彻底的部分。</p>
+
+<h2>一、问题场景：请假审批怎么更新业务表？</h2>
+
+<p>假设你有一个请假业务（<code>TestLeaveServiceImpl</code>）：用户提交请假申请 → 领导审批通过 → 请假记录的状态要变成「已通过」。</p>
+
+<p>如果直接在流程引擎的回调里写 <code>leaveMapper.updateById()</code>，那流程引擎就必须知道请假业务的存在——这不合理，流程引擎是通用组件。反过来，如果在请假业务里轮询流程状态，那是低效的轮询模式。</p>
+
+<p><strong>解决方案：事件驱动。</strong>流程引擎只负责「发起事件 = 发生了什么」，业务模块只负责「监听事件 = 我关心什么」。中间通过 ruoyi-api 里的事件类作为数据契约。</p>
+
+<h2>二、三个事件类的设计</h2>
+
+<table>
+<tr><th>事件类</th><th>字段</th><th>触发时机</th><th>谁定义</th><th>谁发布</th><th>谁监听</th></tr>
+<tr>
+  <td><code>ProcessEvent</code><br><small>65行</small></td>
+  <td>flowCode, instanceId, businessId, nodeType, nodeCode, nodeName, status, params, submit</td>
+  <td>流程实例状态变化（提交/完成/退回/作废/终止等）</td>
+  <td>ruoyi-api</td>
+  <td>FlowProcessEventHandler</td>
+  <td>TestLeaveServiceImpl（示例）/ 任意业务模块</td>
+</tr>
+<tr>
+  <td><code>ProcessTaskEvent</code><br><small>65行</small></td>
+  <td>flowCode, nodeType, nodeCode, nodeName, taskId, instanceId, businessId, status, params</td>
+  <td>新任务创建（也代表上一任务完成）</td>
+  <td>ruoyi-api</td>
+  <td>FlowProcessEventHandler</td>
+  <td>TestLeaveServiceImpl / 任意业务模块</td>
+</tr>
+<tr>
+  <td><code>ProcessDeleteEvent</code><br><small>29行</small></td>
+  <td>flowCode, businessId</td>
+  <td>流程实例被删除</td>
+  <td>ruoyi-api</td>
+  <td>FlowProcessEventHandler</td>
+  <td>TestLeaveServiceImpl / 任意业务模块</td>
+</tr>
+</table>
+
+<p>注意 <code>ProcessEvent</code> 和 <code>ProcessTaskEvent</code> 都是 65 行，字段结构相似但有微妙区别：<code>ProcessEvent</code> 有 <code>submit</code>（是否申请人提交）、<code>ProcessTaskEvent</code> 有 <code>taskId</code>（任务 ID）。这个字段差异反映了两种事件的本质区别——流程级 vs 任务级。</p>
+
+<h2>三、完整链路：从引擎回调到业务更新</h2>
+
+<div class="diagram">事件链路全景（以「领导审批通过请假」为例）
+
+① 流程引擎回调
+   WorkflowGlobalListener（通用监听器，在 workflow 模块）
+   │  检测到流程节点变化
+   │
+   ▼
+② 事件组装与发布
+   FlowProcessEventHandler.processHandler(...)（在 workflow 模块）
+   │  ProcessEvent event = new ProcessEvent();
+   │  event.setFlowCode("leave1");
+   │  event.setBusinessId("10");        ← 请假记录 ID
+   │  event.setStatus("completed");
+   │  event.setParams(params);          ← 携带审批意见、附件等
+   │  SpringUtils.context().publishEvent(event);
+   │
+   ▼  Spring ApplicationEvent 机制
+   │
+   ▼
+③ 业务模块监听（完全解耦！）
+   TestLeaveServiceImpl.processHandler(ProcessEvent event)（在 workflow 模块示例里）
+   │  @EventListener(condition = "#processEvent.flowCode.startsWith('leave')")
+   │  public void processHandler(ProcessEvent processEvent) {
+   │      TestLeave leave = leaveMapper.selectById(processEvent.getBusinessId());
+   │      leave.setStatus(processEvent.getStatus());
+   │      // 可取出审批意见、附件等扩展数据
+   │      Map&lt;String, Object&gt; params = processEvent.getParams();
+   │      leaveMapper.updateById(leave);
+   │  }
+   │
+   ▼
+④ 业务数据更新完成
+   请假的 status 从 "waiting" → "completed"
+   流程引擎对此一无所知——它只发了事件。</div>
+
+<div class="step"><span class="num">🔑</span><b>关键设计：事件类在 api 模块的好处</b><br>
+<code>TestLeaveServiceImpl</code> 的 <code>@EventListener</code> 方法签名用的是 <code>ProcessEvent</code>（来自 ruoyi-api），不是流程引擎的任何内部类（如 WarmFlow 的 <code>Instance</code>、<code>Task</code>）。这意味着：<br><br>
+✅ 业务模块不依赖流程引擎的具体实现（WarmFlow、Flowable、Camunda...任意替换）<br>
+✅ 事件字段是业务语义的（flowCode、businessId、status），不是引擎语义的<br>
+✅ 单元测试时可以轻松 mock <code>ProcessEvent</code>，不需要启动完整流程引擎</div>
+
+<h2>四、@EventListener 的 condition：精准订阅</h2>
+
+<p>Spring 的 <code>@EventListener</code> + SpEL <code>condition</code> 让业务模块只订阅自己关心的流程：</p>
+
+<pre><code>// 只监听「以 leave 开头的流程编码」的事件
+@EventListener(condition = "#processEvent.flowCode.startsWith('leave')")
+public void processHandler(ProcessEvent processEvent) { ... }
+
+// 也可以精确到单个流程
+@EventListener(condition = "#processEvent.flowCode == 'leave1'")
+public void processHandler(ProcessEvent processEvent) { ... }
+
+// 任务事件同理
+@EventListener(condition = "#processTaskEvent.flowCode.startsWith('leave')")
+public void processTaskHandler(ProcessTaskEvent processTaskEvent) { ... }
+
+// 删除事件
+@EventListener(condition = "#processDeleteEvent.flowCode.startsWith('leave')")
+public void processDeleteHandler(ProcessDeleteEvent processDeleteEvent) { ... }</code></pre>
+
+<p>这个 <code>condition</code> 是 SpEL 表达式，Spring 在运行时会先解析条件再决定是否调用监听方法。如果整个系统有 100 个流程定义但请假业务只关心 <code>leave*</code>，那么其他 90+ 个流程的事件不会触发请假业务的监听器——性能无损。</p>
+
+<div class="side">
+💡 <b>事件 vs 接口的区别</b>：Service 接口（第 2 课）是 <b>同步请求-响应</b>——调用方主动要数据，响应必须即时返回。事件是 <b>异步通知</b>——发布方不关心「谁在听」，监听方按自己的节奏处理。两者的共性是：<b>契约都在 ruoyi-api 里，实现方和消费方互相不知道对方存在</b>。
+</div>
+
+<h2>五、WorkflowService 与事件的协作</h2>
+
+<p>除了事件，<code>workflow.api</code> 还有一个 <code>WorkflowService</code> 接口（99 行，10 个方法），这是整个 ruoyi-api 唯一的 workflow 服务契约。它提供：</p>
+
+<ul>
+<li><b>启动流程</b>：<code>startWorkFlow(StartProcessDTO) → StartProcessReturnDTO</code></li>
+<li><b>办理任务</b>：<code>completeTask(CompleteTaskDTO) → boolean</code></li>
+<li><b>查询状态</b>：<code>getBusinessStatus(businessId) → String</code></li>
+<li><b>流程变量</b>：<code>setVariable / instanceVariable / getInstanceIdByBusinessId</code></li>
+<li><b>删除实例</b>：<code>deleteInstance(businessIds) → boolean</code></li>
+</ul>
+
+<p>这个接口由 <code>WorkflowServiceImpl</code> 实现（带 <code>@ConditionalOnEnable</code> 条件装配，如果没启用工作流则整个 Bean 不加载）。它的存在补全了 workflow 域的契约：<strong>主动操作走 Service 接口，被动响应走 Event 监听</strong>。</p>
+
+<div class="step"><span class="num">🔄</span><b>双向解耦的完整图景</b><br>
+<pre>业务模块（如请假）          ruoyi-api                工作流引擎模块
+─────────────              ────────                ──────────────
+startWorkFlow(DTO) ──────► WorkflowService ◄──── implements
+                              接口定义
+
+监听 ProcessEvent ◄──────── ProcessEvent ◄────── publishEvent()
+   @EventListener           事件类定义              FlowProcessEventHandler</pre>
+业务模块依赖 api 的两个东西：<code>WorkflowService</code>（主动发起流程）和 <code>ProcessEvent</code>（被动响应流程变化）。两者都在 api 里，业务模块不需要引入工作流引擎的任何依赖。</div>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. 流程事件（ProcessEvent）为什么放在 ruoyi-api 而不是 workflow 模块里？</p>
+<span class="opt">A. api 模块编译更快</span>
+<span class="opt">B. 让业务模块（如请假）可以监听事件，而不需要依赖 workflow 引擎模块</span>
+<span class="opt">C. Event 类必须放在 api 包，这是 Java 规范</span>
+<span class="opt">D. 放在 workflow 里会导致循环依赖</span>
+<details><summary>看答案</summary><b>B</b>。如果 ProcessEvent 在 workflow 模块里，业务模块（TestLeaveServiceImpl）要监听它就必须依赖 workflow 模块——这样业务代码就耦合了流程引擎。放在 api 里，业务模块只需依赖 api 就能订阅事件。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. @EventListener 的 condition 表达式起了什么作用？</p>
+<span class="opt">A. 装饰作用，实际不过滤</span>
+<span class="opt">B. 让业务模块只处理自己关心的流程事件（如 flowCode.startsWith('leave')），避免无关事件触发业务逻辑</span>
+<span class="opt">C. 加速 Spring 启动</span>
+<span class="opt">D. 替代 if-else 判断</span>
+<details><summary>看答案</summary><b>B</b>。condition 是 SpEL 表达式，运行时 Spring 先求值再决定是否调用方法。如果系统有 100 个流程，condition 确保只有匹配的流程事件才会进入业务处理方法。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 业务模块要使用工作流，需要引入哪些依赖？</p>
+<span class="opt">A. ruoyi-workflow + WarmFlow 引擎</span>
+<span class="opt">B. 只需要 ruoyi-api（包含 WorkflowService 接口和事件类），不需要引入工作流引擎模块</span>
+<span class="opt">C. Spring Cloud Stream</span>
+<span class="opt">D. Apache Kafka</span>
+<details><summary>看答案</summary><b>B</b>。业务模块通过 <code>WorkflowService</code> 接口调 API、通过 <code>@EventListener</code> 监听事件，二者都在 ruoyi-api 中。运行时 Spring 注入真实的实现类，编译时业务模块只看到 api。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>FlowProcessEventHandler.java</code> 的三个 publish 方法（processHandler / processTaskHandler / processDeleteHandler），看事件如何从 WarmFlow 的 Instance/Task 对象转换成 ruoyi-api 里的通用事件对象。然后打开 <code>TestLeaveServiceImpl.java</code> 的三个 @EventListener 方法，看业务代码如何完全不依赖 WarmFlow 却能响应流程变化。这对文件是最佳的解耦范本。</div>
+
+<div class="reminder">💡 有疑问？直接问我——可以问：「如果事件监听器里抛异常，流程引擎会回滚吗？」「Spring 事件是同步还是异步的，能改成异步吗？」「如何保证事件不丢失？」这是 ruoyi-api 模块讲解的最后一课。你可以回顾 <a href="0001.html">第 1 课（全景）</a>、<a href="0002.html">第 2 课（Service 接口）</a>、<a href="0003.html">第 3 课（模型与 DTO）</a> 来巩固整体认知。</div>
+
+<div class="nav">课程 0004 / ruoyi-api 模块讲解 · <a href="0003.html">← 第 3 课</a> · <a href="0002.html">← 第 2 课</a> · <a href="0001.html">← 第 1 课</a></div>
+
+</body>
+</html>

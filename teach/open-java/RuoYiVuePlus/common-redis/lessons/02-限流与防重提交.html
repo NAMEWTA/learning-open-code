@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>限流与防重提交</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>02 - 限流与防重提交</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 @RateLimiter 的令牌桶原理和三种 LimitType 的差异，掌握 @RepeatSubmit 的 setIfAbsent 幂等设计，能区分限流（事前防护）和防重提交（幂等保证）的不同意图。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>限流和防重提交是 Web 系统最常见的两个防御需求。前者防 DDoS/恶意请求（频率控制），后者防用户重复提交（幂等保护）。ruoyi-common-redis 通过两个注解 + 两个切面优雅地实现了这两种能力。</p>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 @RateLimiter：令牌桶限流</h3>
+<p>底层是 Redisson 的 <code>RRateLimiter</code>——在 Redis 中用 Lua 脚本原子维护一个按速率补充令牌的桶：</p>
+<pre>
+┌──────────────────┐
+│  令牌桶 (Redis)   │  ← 每秒补充 N 个令牌
+│  capacity: 10    │  ← 最多存储 10 个令牌（防突发）
+│  rate: 5/s       │  ← 每秒生成 5 个令牌
+│  tokens: 3       │  ← 当前剩余 3 个
+└──────────────────┘
+       ↓ tryAcquire(1) → 尝试获取 1 个令牌
+  ├─ 成功（tokens ≥ 1）→ 令牌数 -1 → 执行业务
+  └─ 失败（tokens = 0）→ 抛出限流异常
+</pre>
+
+<p><strong>注解使用：</strong></p>
+<pre>
+@RateLimiter(key = "#mobile", time = 60, count = 3, limitType = LimitType.IP)
+public void sendSms(String mobile) {
+    // 同一 IP 60 秒内最多发 3 条短信
+}
+</pre>
+
+<p><strong>SpEL 动态 key：</strong><code>key = "#mobile"</code> 将方法参数动态拼入限流 key。切面用 <code>MethodBasedEvaluationContext</code> 喂参数、<code>SpelExpressionParser</code> 解析表达式。生成的 Redis key 如：<code>rateLimiter:sendSms:13800138000</code>。</p>
+
+<h3>2.2 三种 LimitType</h3>
+<table>
+  <tr><th>类型</th><th>Key 组成</th><th>RateType</th><th>限流维度</th><th>典型场景</th></tr>
+  <tr><td><code>DEFAULT</code></td><td>方法名 + 参数</td><td>OVERALL</td><td>全局限流（所有请求共享）</td><td>全站短信发送总量控制</td></tr>
+  <tr><td><code>IP</code></td><td>方法名 + 参数 + IP</td><td>OVERALL</td><td>按来源 IP 各自限流</td><td>防止单 IP 暴力破解</td></tr>
+  <tr><td><code>CLUSTER</code></td><td>方法名 + 参数</td><td>PER_CLIENT</td><td>按后端实例各自控单机</td><td>保护单节点不被冲垮</td></tr>
+</table>
+
+<blockquote><strong>DEFAULT vs CLUSTER 的区别：</strong>DEFAULT 是全局计数（Redis 集中计数，所有节点的请求共用一个桶）；CLUSTER 是单机计数（每个 JVM 各自计数，RateType=PER_CLIENT）。选择取决于你希望限流范围是全系统还是一个节点。</blockquote>
+
+<h3>2.3 RateLimiterAspect：切面处理链路</h3>
+<pre>
+@Around("@annotation(rateLimiter)")
+public Object around(ProceedingJoinPoint point, RateLimiter rateLimiter) {
+    // 1. 构建限流 key
+    String key = buildKey(point, rateLimiter); // SpEL 解析
+
+    // 2. 获取或创建令牌桶
+    RRateLimiter limiter = RedisUtils.rateLimiter(key,
+        rateLimiter.count(),      // 令牌生成速率
+        rateLimiter.time(),       // 时间窗口（秒）
+        rateLimiter.limitType()); // DEFAULT / IP / CLUSTER
+
+    // 3. 尝试获取令牌
+    if (limiter.tryAcquire()) {
+        return point.proceed();  // 获取成功 → 执行业务
+    } else {
+        throw new RateLimiterException("访问过于频繁，请稍后再试");
+    }
+}
+</pre>
+
+<h3>2.4 @RepeatSubmit：防重提交（幂等）</h3>
+<p>与限流不同，防重提交的目标是保证<strong>同一操作只生效一次</strong>——即使用户点了多次提交按钮。</p>
+
+<p><strong>核心原理：setIfAbsent（SETNX + 过期）</strong></p>
+<pre>
+@RepeatSubmit(interval = 5000, message = "请勿重复提交")
+public void createOrder(OrderDTO order) {
+    // 5 秒内同一参数不能重复提交
+}
+</pre>
+
+<p>切面逻辑：</p>
+<pre>
+RepeatSubmitAspect:
+1. 构建防重 key: "repeatSubmit:createOrder:userId:参数MD5"
+2. RedisUtils.setObjectIfAbsent(key, "1", interval, TimeUnit.MILLISECONDS)
+   ├─ 返回 true（首次请求，Key 不存在 → 写入成功）
+   │   → 执行业务方法
+   │   → Key 在 interval 后自动过期
+   └─ 返回 false（重复请求，Key 已存在 → 写入失败）
+       → 抛出 RepeatSubmitException("请勿重复提交")
+</pre>
+
+<blockquote><strong>为什么用 setIfAbsent 而不是简单的 boolean 标志？</strong>因为 Redis SETNX 是原子操作——在高并发下，两个请求同时到达时，只有一个能成功写入 key。这是分布式环境中最可靠的幂等实现方式。如果用内存标志（如 HashMap），多个节点各自维护状态，重复请求打到不同节点就无法拦截。</blockquote>
+
+<h3>2.5 @RateLimiter vs @RepeatSubmit：意图不同</h3>
+<table>
+  <tr><th>维度</th><th>@RateLimiter</th><th>@RepeatSubmit</th></tr>
+  <tr><td>目标</td><td>控制请求频率（防刷）</td><td>保证操作幂等（防重）</td></tr>
+  <tr><td>触发逻辑</td><td>单位时间内请求数超过阈值</td><td>相同参数在间隔时间内重复请求</td></tr>
+  <tr><td>底层机制</td><td>令牌桶（RRateLimiter）</td><td>SETNX 原子占位</td></tr>
+  <tr><td>key 设计</td><td>方法 + 参数 + 可能 IP</td><td>方法 + 用户 + 参数 MD5</td></tr>
+  <tr><td>成功后</td><td>令牌归还（不持久化）</td><td>Key 保留 interval 时间</td></tr>
+  <tr><td>典型场景</td><td>短信验证码限流、登录失败限流</td><td>订单提交、支付、表单保存</td></tr>
+</table>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 令牌桶和固定窗口计数器（如"60秒内最多3次"）有什么区别？</p>
+<p><strong>参考:</strong> 固定窗口的问题是边界突刺——用户在 59 秒末发 3 次、61 秒初又发 3 次，实际 2 秒内发了 6 次，但都在各自的"窗口"内不过限。令牌桶按速率持续补充——如果 60 秒 3 次（0.05 个/秒），发完 3 次后需要等 20 秒才能获得下一个令牌，天然防突刺。</p>
+<p><strong>Q2:</strong> @RepeatSubmit 的 key 为什么要在 interval 后自动过期而不是永远保留？</p>
+<p><strong>参考:</strong> 如果永远保留，Redis 中会堆积大量已失效的防重 key。比如订单创建后，key 应该在一段时间后自动清理（如 5 秒），因为过期后再提交一笔相同参数的订单是合法的（用户真的想再下一单）。interval 的长度是业务决策——太短防不住重复点击、太长影响正常使用。</p>
+<p><strong>Q3:</strong> 如果 @RateLimiter 和 @RepeatSubmit 同时标注在一个方法上，执行顺序是什么？</p>
+<p><strong>参考:</strong> 取决于切面的 @Order 优先级。默认情况下，@RateLimiter 应先执行——先判断频率是否超标（轻量检查），再判断是否重复提交（写入 Redis）。如果反过来，重复提交检查通过后卡在限流上，下一次请求又需要重新检查重复提交——浪费了一次 SETNX。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 场景：发送短信验证码
+@RateLimiter(key = "#mobile", time = 60, count = 1, limitType = LimitType.IP)
+@RepeatSubmit(interval = 60000)
+public void sendSmsCode(String mobile) {
+
+完整调用链:
+1. RateLimiterAspect.around()
+   → buildKey: "rateLimiter:sendSmsCode:13800138000:192.168.1.1"
+   → RedisUtils.rateLimiter(key, 1, 60, LimitType.IP)
+   → RRateLimiter.trySetRate(RateType.OVERALL, 1, 60s)
+   → RRateLimiter.tryAcquire()
+     ├─ 成功 → 继续
+     └─ 失败 → throw RateLimiterException
+
+2. RepeatSubmitAspect.around()
+   → buildKey: "repeatSubmit:sendSmsCode:userId:MD5(mobile)"
+   → RedisUtils.setObjectIfAbsent(key, "1", 60s)
+     ├─ true → 继续执行业务
+     └─ false → throw RepeatSubmitException
+
+3. 执行业务:
+   → 生成验证码 → 发送短信 → 保存验证码到 Redis
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>限流和防重提交虽然都用 Redis，但它们的区别反映了一种重要的安全分层思想：限流是「事前防御」（在业务逻辑之前阻止恶意流量），防重提交是「幂等保证」（保证合法操作不会因网络/用户行为而重复执行）。两者配合使用形成双保险——限流挡住恶意攻击，防重提交拦住用户误操作。切面（AOP）是这两种能力的理想载体，因为它不侵入业务代码——加一个注解就启用，去掉注解就关闭。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/6.-distributed-objects/#612-ratelimiter">Redisson RRateLimiter 文档</a> · 入口文件：<code>aspectj/RateLimiterAspect.java</code> · <code>aspectj/RepeatSubmitAspect.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解二级缓存与工具类。</div>
+<div class="nav"><a href="01-Redisson封装与序列化.html">← 上一课</a><a href="03-二级缓存与工具类.html">下一课 →</a></div>
+</body>
+</html>

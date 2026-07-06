@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 统一拦截器 + 权限加载 + 异常</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.83rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 统一拦截器 + 权限加载 + 异常 <span class="tag">鉴权关卡</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：讲清统一拦截器（<code>SecurityConfig</code>）如何做<strong>登录校验 + 客户端一致性校验 + 访问路径/IP 白名单</strong>，<code>StpInterface</code> 如何按需加载权限，以及未登录/无权限时异常如何被统一处理。前三课讲「怎么拿到 token」，这一课讲「带着 token 来了，怎么放行或拦下」。
+</div>
+
+<h2>一、所有请求的总闸：SaInterceptor</h2>
+<p>注册在 <code>SecurityConfig.addInterceptors()</code>，拦 <code>/**</code>，排除白名单：</p>
+<pre><code>// SecurityConfig.java:81
+registry.addInterceptor(new SaInterceptor(handler -> {
+    SaRouter.match(allUrlHandler.getUrls())   // 匹配所有已注册接口
+        .check(() -> {
+            StpUtil.checkLogin();              // ① 必须已登录，否则抛 NotLoginException
+            // ② 客户端一致性校验
+            String headerCid = request.getHeader(LoginHelper.CLIENT_KEY);
+            String clientId  = StpUtil.getExtra(LoginHelper.CLIENT_KEY).toString();
+            if (!StringUtils.equalsAny(clientId, headerCid, paramCid)) {
+                throw NotLoginException.newInstance(..., "-100", "客户端ID与Token不匹配", ...);
+            }
+            validateClientAccessRules(request); // ③ 访问路径 + IP 白名单
+        });
+})).addPathPatterns("/**")
+  .excludePathPatterns(securityProperties.getExcludes());  // 白名单：/auth/login 等</code></pre>
+
+<p>三道关卡，逐个拆：</p>
+
+<h3>① 登录校验 <code>StpUtil.checkLogin()</code></h3>
+<p>读 <code>Authorization: Bearer ...</code> 里的 token，验签 + 查会话。无效就抛 <code>NotLoginException</code>（交给异常处理器）。</p>
+
+<h3>② 客户端一致性校验（RuoYi 的加固）</h3>
+<p>token 里记录了签发时的 <code>clientid</code>（第 3 课的 extra）。这里要求请求头/参数里的 <code>clientid</code> 必须和 token 里的<strong>一致</strong>。</p>
+<div class="why">
+✅ <b>为什么要这道校验</b>：防止一个端签发的 token 被挪到另一个端冒用。token 和客户端绑定，「PC 后台的 token」不能拿去当「App 的 token」用。这是 RuoYi 在 Sa-Token 基础上加的安全约束。
+</div>
+
+<h3>③ 访问路径 + IP 白名单（按客户端配置）</h3>
+<pre><code>// SecurityConfig.java:147 validateClientAccessRules()
+String accessPath = getTokenExtra(CLIENT_ACCESS_PATH_KEY);   // 来自 sys_client
+if (路径不匹配 accessPath) throw new NotPermissionException("当前客户端未授权访问该接口路径");
+String ipWhitelist = getTokenExtra(CLIENT_IP_WHITELIST_KEY);
+if (clientIp 不在 ipWhitelist) throw new NotPermissionException("当前客户端IP不在白名单内");</code></pre>
+<p>这就接上了<a href="0002.html">第 2 课</a>的 <code>sys_client.accessPath / ipWhitelist</code> 字段——配置在登录时塞进 token extra，请求时在这里生效。</p>
+
+<div class="side">
+💡 <b>白名单从哪来</b>：<code>securityProperties.getExcludes()</code> 配置了不需要登录的路径（如 <code>/auth/login</code>、<code>/auth/code</code>、静态资源）。另外 Controller 上的 <code>@SaIgnore</code> 注解（如 <code>AuthController</code>）也表示「整个类放行」。
+</div>
+
+<h2>二、权限怎么来：StpInterface（按需加载）</h2>
+<p>登录校验只管「是不是登录了」。具体接口要 <code>@SaCheckPermission("system:user:list")</code> 这种<strong>权限码</strong>时，Sa-Token 回调 <code>StpInterface</code> 拿权限列表。RuoYi 的实现是 <code>SaPermissionImpl</code>：</p>
+<pre><code>// SaPermissionImpl.java:32
+public List&lt;String&gt; getPermissionList(Object loginId, String loginType) {
+    return resolvePermissionList(loginId,
+        LoginUser::getMenuPermission,              // 优先：从当前 LoginUser 直接取
+        PermissionService::getMenuPermission);     // 兜底：远程/服务查
+}</code></pre>
+<p>逻辑很聪明：<strong>如果要查的就是当前登录用户，直接从内存里的 LoginUser 取权限集合</strong>（登录时 <code>buildLoginUser</code> 已装好）；只有跨用户查询才走 PermissionService 兜底。避免每次鉴权都查库。</p>
+
+<table>
+<tr><th>注解</th><th>校验什么</th><th>数据来源</th></tr>
+<tr><td><code>@SaCheckLogin</code></td><td>是否登录</td><td>token 会话</td></tr>
+<tr><td><code>@SaCheckPermission</code></td><td>菜单权限码</td><td><code>getPermissionList</code> → menuPermission</td></tr>
+<tr><td><code>@SaCheckRole</code></td><td>角色标识</td><td><code>getRoleList</code> → rolePermission</td></tr>
+</table>
+
+<h2>三、拦下之后：统一异常处理</h2>
+<p><code>SaTokenExceptionHandler</code>（<code>@RestControllerAdvice</code>）把认证异常翻译成统一响应：</p>
+<pre><code>// 无权限/无角色 → 403
+@ExceptionHandler({NotPermissionException.class, NotRoleException.class})
+→ R.fail(403, "没有访问权限，请联系管理员授权");
+
+// 未登录 → 401，按类型给不同提示
+@ExceptionHandler(NotLoginException.class)
+switch (e.getType()) {
+    case TOKEN_TIMEOUT  -> "登录已过期，请重新登录";
+    case BE_REPLACED    -> "当前账号已在其他设备登录，您已被强制下线";
+    case KICK_OUT       -> "账号已被管理员强制下线";
+    case TOKEN_FREEZE   -> "账号已被冻结，请联系管理员处理";
+    default             -> "登录状态异常，请重新登录";
+}  → R.fail(401, msg);</code></pre>
+<div class="why">
+✅ 注意这里 <code>BE_REPLACED</code>（被顶号）、<code>KICK_OUT</code>（被踢）这些状态，正是<a href="0003.html">第 3 课</a>「JWT + Redis 会话」才能实现的主动失效——纯 JWT 给不出这些细分原因。前端拿到 <strong>401</strong> 就触发「重新登录」弹窗（第 7、8 课）。
+</div>
+
+<details>
+<summary>🤔 想一想：拦截器里「客户端一致性校验」抛的是 <code>NotLoginException</code>（401）而不是 <code>NotPermissionException</code>（403），为什么？</summary>
+因为客户端 ID 与 token 不匹配，本质上说明「这个 token 在当前上下文里不可信 / 不是合法登录态」，属于<strong>认证</strong>问题而非<strong>授权</strong>问题。返回 401 让前端走「重新登录」流程才合理；403 会被理解成「登录有效但权限不够」，语义错误。区分 401（认证失败）和 403（授权失败）是 HTTP 语义的基本功。
+</details>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 一个带合法 token 的请求，但权限码不够，会得到什么？经过哪个处理器？</p>
+<span class="opt">A. 401，SaTokenExceptionHandler 处理 NotLoginException</span>
+<span class="opt">B. 403，SaTokenExceptionHandler 处理 NotPermissionException</span>
+<span class="opt">C. 500 服务器错误</span>
+<span class="opt">D. 直接放行</span>
+<details><summary>看答案</summary><b>B</b>。登录有效但缺权限码 → <code>NotPermissionException</code> → 403「没有访问权限」。401 是「没登录/登录失效」，403 是「登录了但权限不够」。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 鉴权时拿当前用户的权限列表，正常情况下会查数据库吗？</p>
+<span class="opt">A. 每次都查库</span>
+<span class="opt">B. 通常不查——直接从内存中当前 LoginUser 的 menuPermission 取，登录时已装好</span>
+<span class="opt">C. 查 MySQL 的权限表</span>
+<span class="opt">D. 查 ES</span>
+<details><summary>看答案</summary><b>B</b>。<code>SaPermissionImpl</code> 优先从当前 LoginUser 取权限集合（登录时 buildLoginUser 已组装并随会话缓存），只有跨用户查询才走 PermissionService 兜底。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>sys_client</code> 里配的 <code>accessPath</code>、<code>ipWhitelist</code> 在哪一步真正生效？</p>
+<span class="opt">A. 登录时</span>
+<span class="opt">B. 每次受保护请求经过 SaInterceptor 的 validateClientAccessRules() 时</span>
+<span class="opt">C. 前端校验</span>
+<span class="opt">D. 数据库约束</span>
+<details><summary>看答案</summary><b>B</b>。这些配置登录时被塞进 token extra，之后每个请求在拦截器里读出来校验路径与 IP，不匹配抛 NotPermissionException。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://sa-token.cc/doc.html#/use/at-check" target="_blank">Sa-Token 官方文档 · 注解鉴权</a> 与 <a href="https://sa-token.cc/doc.html#/fun/jur-auth" target="_blank">权限认证</a>——对照本课理解 StpInterface 的回调时机。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「@SaIgnore 和 excludes 白名单优先级谁高？」「activeTimeout 续签发生在拦截器哪一步？」下一课横向铺开——<strong>五种登录方式 + 注册 + 三类验证码</strong>各自的校验差异。</div>
+
+<div class="nav">课程 0004 / 上一课：<a href="0003.html">Sa-Token 签发 token</a> · 下一课：五种登录方式 + 注册 + 三类验证码</div>
+
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>10 · ruoyi-common-excel（下）：注解驱动的列映射与下拉框</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>10 · ruoyi-common-excel（下）：注解驱动的列映射与下拉框</h1>
+
+<p><strong>核心问题：</strong>导出 Excel 时如何自动将数据库中的「0/1」翻译为「男/女」？导入时如何提供下拉选项限制用户输入？如何合并相同内容的单元格？</p>
+
+<h2>1. 六大自定义注解</h2>
+
+<table>
+<tr><th>注解</th><th>作用</th><th>示例</th></tr>
+<tr><td><code>@ExcelDictFormat</code></td><td>字典翻译</td><td>dictType="sys_user_gender" 或 readConverterExp="0=男,1=女"</td></tr>
+<tr><td><code>@ExcelEnumFormat</code></td><td>枚举翻译</td><td>enumClass=UserStatus.class</td></tr>
+<tr><td><code>@ExcelDynamicOptions</code></td><td>动态下拉选项</td><td>providerClass=XxxProvider.class（运行时查询）</td></tr>
+<tr><td><code>@CellMerge</code></td><td>单元格合并</td><td>mergeBy={"deptId"} — 同一部门数据合并</td></tr>
+<tr><td><code>@ExcelNotation</code></td><td>批注</td><td>value="请勿修改此列"</td></tr>
+<tr><td><code>@ExcelRequired</code></td><td>必填标记</td><td>表头字体变红色</td></tr>
+</table>
+
+<h2>2. @ExcelDictFormat — 字典翻译的两种模式</h2>
+
+<pre><code>// 模式A：通过字典服务查询（dictType 非空时）
+@ExcelDictFormat(dictType = "sys_user_gender")
+private String sex;
+// 导出：0 → "男"（查 DictService.getDictLabel()）
+// 导入："女" → 1（查 DictService.getDictValue()）
+
+// 模式B：内联表达式（readConverterExp 直接解析）
+@ExcelDictFormat(readConverterExp = "0=正常,1=停用,2=删除")
+private String status;
+// separator 可指定分隔符，默认 ","</code></pre>
+
+<p><strong>前端对应：</strong>plus-ui-vue 中 <code>&lt;dict-tag :options="sys_user_gender" :value="row.sex" /&gt;</code></p>
+
+<h2>3. @CellMerge — 单元格合并</h2>
+
+<pre><code>// 按部门名合并：同一部门的行共享一个部门名单元格
+@CellMerge(mergeBy = {"deptId"})
+@ExcelProperty("部门名称")
+private String deptName;
+
+// CellMergeHandler 计算合并区间：
+//   遍历数据行 → 找出相同值区间 → 生成 CellRangeAddress 列表
+//   空值自动中断合并区间
+// CellMergeStrategy 在 Sheet 创建时预写入合并区域</code></pre>
+
+<h2>4. ExcelDownHandler — 下拉框的三种策略</h2>
+
+<table>
+<tr><th>策略</th><th>触发条件</th><th>实现方式</th></tr>
+<tr><td>固定值下拉</td><td>选项数 ≤20 且总字符 ≤255</td><td>createExplicitListConstraint（Excel 原生数据验证）</td></tr>
+<tr><td>隐藏 Sheet 引用</td><td>选项数 >20 或总字符 >255</td><td>创建隐藏 options_N Sheet + 名称管理器引用</td></tr>
+<tr><td>级联下拉</td><td>一级选项数 >10</td><td>隐藏 Sheet + 名称管理器 + INDIRECT() 公式</td></tr>
+</table>
+
+<p><strong>下拉范围：</strong>仅前 1000 行（LAST_DATA_ROW_INDEX = 1000），防止大数据量导致 Excel 打开缓慢。<br>
+<strong>错误提示：</strong>设置"此值与单元格定义数据不一致"提示框 + "填写内容只能为下拉中数据"输入提示。</p>
+
+<h2>5. ExcelEnumConvert — 枚举转换器</h2>
+
+<pre><code>// 使用时指定枚举类和字段名
+@ExcelEnumFormat(enumClass = UserStatus.class, codeField = "code", textField = "text")
+
+// ConcurrentHashMap 缓存枚举 code↔text 映射
+// 导出：code → text；导入：text → code
+</code></pre>
+
+<h2>6. ExcelBigNumberConvert — 防精度丢失</h2>
+
+<pre><code>// JS Number.MAX_SAFE_INTEGER = 9007199254740991
+// Java Long 最大值 = 9223372036854775807（远超 JS 安全范围）
+// 超 15 位的 Long 自动转为字符串写入 Excel
+// 防止导入导出时精度丢失（如雪花 ID 的后几位变成 0）</code></pre>
+<p>前端同样通过 <code>BigNumberSerializer</code>（common-json）处理 JSON 序列化时的大数问题。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>在 SysUser 导出实体上找到 @ExcelDictFormat 注解，查看字典类型配置</li>
+<li>导出用户列表，观察状态列的"0/1"是否自动翻译为"正常/停用"</li>
+<li>导入一个有数据校验的 Excel，故意填写非法值，查看错误结果格式</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://github.com/apache/fesod-sheet">Apache Fesod Sheet</a> — 底层读写引擎</div>
+<div class="reminder"> 想了解如何实现省市区三级级联下拉？直接问我。</div>
+
+</body>
+</html>

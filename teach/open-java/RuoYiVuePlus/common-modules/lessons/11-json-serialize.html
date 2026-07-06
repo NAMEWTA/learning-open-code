@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>11 · ruoyi-common-json：Jackson 配置与响应增强框架</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>11 · ruoyi-common-json：Jackson 配置与响应增强框架</h1>
+
+<p><strong>核心问题：</strong>Java Long 类型在 JavaScript 中会精度丢失、日期格式不统一、JSON 序列化时需要自动翻译和脱敏——如何统一解决？</p>
+
+<div class="info">
+<strong>模块定位：</strong>13 个 Java 文件。使用 <strong>tools.jackson</strong>（Spring Boot 3.x 重命名后的 Jackson）。两大核心能力：<strong>Jackson Module 自定义</strong>和<strong>三阶段响应增强流水线</strong>。
+</div>
+
+<h2>1. JacksonConfig — 自定义序列化配置</h2>
+
+<pre><code>// 注册的自定义 SimpleModule：
+// 序列化方向（Java → JSON）
+Long / long     → BigNumberSerializer    // 超 JS 安全范围输出字符串
+BigInteger      → BigNumberSerializer    // 同上
+BigDecimal      → ToStringSerializer     // 始终输出字符串
+LocalDateTime   → LocalDateTimeSerializer // yyyy-MM-dd HH:mm:ss
+
+// 反序列化方向（JSON → Java）
+LocalDateTime   → CustomLocalDateTimeDeserializer // 多格式自动识别
+Date            → CustomDateDeserializer          // 使用 Hutool DateUtil.parse()
+</code></pre>
+
+<h3>BigNumberSerializer 核心逻辑</h3>
+<pre><code>if (value >= MIN_SAFE_INTEGER && value <= MAX_SAFE_INTEGER) {
+    gen.writeNumber(value);  // 安全范围 → 数字
+} else {
+    gen.writeString(value.toString()); // 超出 → 字符串
+}
+// JS: Number.MAX_SAFE_INTEGER = 9007199254740991</code></pre>
+
+<p><strong>前端对应：</strong>雪花 ID 在 JS 中会被截断。通过此序列化器，超长 ID 自动以字符串形式输出，前端直接使用字符串接收。</p>
+
+<h2>2. JsonUtils — JSON 工具类</h2>
+
+<pre><code>// 对象 ↔ JSON
+JsonUtils.toJsonString(obj);
+JsonUtils.parseObject(json, User.class);
+JsonUtils.parseObject(json, new TypeReference&lt;List&lt;User&gt;&gt;() {});
+
+// 快捷解析
+JsonUtils.parseMap(json);       // → Dict (Hutool)
+JsonUtils.parseArray(json, User.class);  // → List&lt;User&gt;
+JsonUtils.parseArrayMap(json);  // → List&lt;Dict&gt;
+
+// 高级功能
+JsonUtils.toJsonStringExcludeFields(obj, "password", "salt"); // 排除敏感字段
+JsonUtils.isJson(str);          // 判断是否为合法 JSON
+</code></pre>
+
+<h2>3. JsonValueEnhancer — 三阶段响应增强流水线</h2>
+
+<div class="info">
+<strong>核心接口：JsonFieldProcessor</strong>，三个生命周期方法：
+</div>
+
+<pre>
+collect (每个字段一次)  →  prepare (整个响应一次)  →  process (每个字段一次)
+</pre>
+
+<p><strong>处理流程：</strong></p>
+<ol>
+<li><strong>collect</strong> — 递归扫描响应对象树，收集需要处理的字段 key，存入 JsonEnhancementContext</li>
+<li><strong>prepare</strong> — 批量处理（如批量查询数据库），消除 N+1 问题。例如：一次查出所有 userId→userName 映射，而非每个 userId 单独查询</li>
+<li><strong>process</strong> — 返回替换后的字段值。返回 null 置空，返回原值不修改</li>
+</ol>
+
+<p><strong>内置处理器：</strong></p>
+<table>
+<tr><th>处理器</th><th>作用</th><th>来源模块</th></tr>
+<tr><td>TranslationJsonFieldProcessor</td><td>字段翻译（用户/部门/字典/OSS）</td><td>common-translation</td></tr>
+<tr><td>SensitiveJsonFieldProcessor</td><td>字段脱敏（手机/身份证/邮箱等）</td><td>common-sensitive</td></tr>
+</table>
+
+<p><strong>技术细节：</strong></p>
+<ul>
+<li>使用 <code>IdentityHashMap</code> 防循环引用</li>
+<li>使用 <code>ConcurrentHashMap</code> 缓存类型元数据（Jackson Introspector 解析的可序列化属性）</li>
+<li>处理器按 <code>@Order</code> 排序（AnnotationAwareOrderComparator）</li>
+<li>处理器返回复杂对象时，自动调用 <code>enhanceTree()</code> 二次增强</li>
+<li>排除 ByteArray/String/Resource 类型的 HttpMessageConverter</li>
+</ul>
+
+<h2>4. JSON 校验注解</h2>
+
+<pre><code>// @JsonPattern — 校验字符串是否为合法 JSON
+@JsonPattern(type = JsonType.OBJECT)  // 必须是 JSON 对象
+private String configJson;
+
+@JsonPattern(type = JsonType.ARRAY)   // 必须是 JSON 数组
+private String listJson;
+
+@JsonPattern  // 默认 ANY：对象或数组均可
+private String anyJson;
+</code></pre>
+
+<h2>5. 验证要点</h2>
+<ol>
+<li>找一个包含雪花 ID 的 API 响应，在浏览器 Console 中查看 JSON，确认 Long 类型 ID 是否为字符串格式</li>
+<li>在 JacksonConfig 中打断点，观察序列化模块的注册过程</li>
+<li>找一个有 @Translation 注解的 VO 类，追踪 JsonValueEnhancer.enhance() 的执行过程</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://github.com/FasterXML/jackson-docs">Jackson 官方文档</a></div>
+<div class="reminder"> 想了解如何添加自定义的 JsonFieldProcessor 实现一个新的响应增强？直接问我。</div>
+
+</body>
+</html>

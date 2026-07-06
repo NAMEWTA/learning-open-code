@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 9 课 · 责任链模式 — Servlet Filter + Interceptor + MyBatis Plugin 三层链</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 9 课 · 责任链模式 — Servlet Filter + Interceptor + MyBatis Plugin 三层链 <span class="tag">行为型模式</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：理解 RuoYi-Vue-Plus 中三层责任链的架构——一个 HTTP 请求从进入服务器到 SQL 执行，经过了三道独立的拦截链。掌握每层链的职责边界和执行顺序。
+</div>
+
+<p>责任链模式的核心：<b>将多个处理器串成一条链，请求沿链传递，每个处理器可以选择处理、传递或终止</b>。RuoYi-Vue-Plus 没有手动构建链表，而是利用了三个框架内置的责任链机制：Servlet Filter Chain、Spring Interceptor Chain、MyBatis Plugin Chain。</p>
+
+<div class="diagram">一个 HTTP 请求的完整旅程：
+
+  <span class="arrow">[Layer 1: Servlet Filter Chain]</span>
+  XssFilter → RepeatableFilter → CryptoFilter
+      │            │                  │
+      │            │                  └── 解密请求体 / 加密响应体
+      │            └── 包装可重复读取的 Request（JSON 场景）
+      └── 包装 XSS 清洗的 Request
+
+      ↓ DispatcherServlet 分发
+
+  <span class="arrow">[Layer 2: Spring Interceptor Chain]</span>
+  PlusWebInvokeTimeInterceptor → ...其他拦截器
+      │
+      └── preHandle 记日志+启动计时 / afterCompletion 输出耗时
+
+      ↓ Controller 执行
+
+  <span class="arrow">[Layer 3: MyBatis Plugin Chain]</span>
+  PlusDataPermissionInterceptor → SqlLogInterceptor
+      → MybatisEncryptInterceptor → MybatisDecryptInterceptor
+      │
+      └── 每个插件在 SQL 执行前后插入处理逻辑</div>
+
+<h2>一、Layer 1：Servlet Filter Chain（最外层）</h2>
+
+<p>Servlet Filter 工作在 DispatcherServlet 之前，是最早接触请求的组件。可以修改请求/响应对象，也可以直接拦截返回（终止链）。</p>
+
+<h3>1.1 XssFilter — 安全第一关</h3>
+
+<p>打开 <code>ruoyi-common/ruoyi-common-web/src/main/java/org/dromara/common/web/filter/XssFilter.java</code>：</p>
+
+<pre><code>public class XssFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response,
+                         FilterChain chain) throws IOException, ServletException {
+        HttpServletRequest req = (HttpServletRequest) request;
+
+        // 命中排除规则？直接放行
+        if (handleExcludeURL(req, resp)) {
+            chain.doFilter(request, response);  // ← 不处理，传给下一个 Filter
+            return;
+        }
+
+        // 包装请求，清洗 XSS 脚本
+        XssHttpServletRequestWrapper xssRequest =
+            new XssHttpServletRequestWrapper((HttpServletRequest) request);
+        chain.doFilter(xssRequest, response);  // ← 传递包装后的请求
+    }
+}</code></pre>
+
+<div class="step">
+<span class="num">1</span> <b>包装模式 + 责任链</b>：XssFilter 不修改原始 Request，而是创建一个 <code>XssHttpServletRequestWrapper</code> 包装它，然后把包装对象传给下一个 Filter。后续环节拿到的都是已清洗的安全请求。 <span class="where">XssFilter.java:52-62</span>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>智能跳过</b>：GET 和 DELETE 请求不经过 XSS 过滤（这些方法没有请求体），配置中的排除 URL 也直接放行。不是所有请求都需要走完整条链。 <span class="where">XssFilter.java:71-79</span>
+</div>
+
+<h3>1.2 RepeatableFilter — 让请求体可以多次读取</h3>
+
+<p>打开 <code>ruoyi-common/ruoyi-common-web/src/main/java/org/dromara/common/web/filter/RepeatableFilter.java</code>：</p>
+
+<pre><code>public class RepeatableFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response,
+                         FilterChain chain) throws IOException, ServletException {
+        ServletRequest requestWrapper = null;
+        // 仅对 JSON 请求做包装
+        if (request instanceof HttpServletRequest
+            && StringUtils.startsWithIgnoreCase(
+                request.getContentType(), MediaType.APPLICATION_JSON_VALUE)) {
+            requestWrapper = new RepeatedlyRequestWrapper(
+                (HttpServletRequest) request, response);
+        }
+        if (null == requestWrapper) {
+            chain.doFilter(request, response);   // 非 JSON → 直接放行
+        } else {
+            chain.doFilter(requestWrapper, response);  // JSON → 包装后传递
+        }
+    }
+}</code></pre>
+
+<div class="step">
+<span class="num">3</span> <b>解决核心痛点</b>：HttpServletRequest 的 InputStream 默认只能读一次。后面的日志拦截器、加解密过滤器、Controller 都要读请求体 → 必须让流可重复读取。RepeatableFilter 将请求体缓存到内存，允许后续多次读取。 <span class="where">RepeatableFilter.java:38-49</span>
+</div>
+
+<h3>1.3 CryptoFilter — 加解密关卡</h3>
+
+<p>打开 <code>ruoyi-common/ruoyi-common-encrypt/src/main/java/org/dromara/common/encrypt/filter/CryptoFilter.java</code>：</p>
+
+<pre><code>public class CryptoFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response,
+                         FilterChain chain) throws IOException, ServletException {
+        // 获取 Controller 方法上的 @ApiEncrypt 注解
+        ApiEncrypt apiEncrypt = this.getApiEncryptAnnotation(servletRequest);
+        boolean responseFlag = apiEncrypt != null && apiEncrypt.response();
+
+        // 请求解密：POST/PUT + 加密标头 → 解密请求体
+        if (isPostOrPut(servletRequest)) {
+            String headerValue = servletRequest.getHeader(properties.getHeaderFlag());
+            if (StringUtils.isNotBlank(headerValue)) {
+                requestWrapper = new DecryptRequestBodyWrapper(
+                    servletRequest, properties.getPrivateKey(), properties.getHeaderFlag());
+            } else if (apiEncrypt != null) {
+                // 有加密注解但没有加密标头 → 拒绝访问
+                handlerExceptionResolver.resolveException(..., new ServiceException("没有访问权限"));
+                return;  // ← 终止链！不再向后传递
+            }
+        }
+
+        // 响应加密：标记了 response=true → 包装响应
+        if (responseFlag) {
+            responseBodyWrapper = new EncryptResponseBodyWrapper(servletResponse);
+            responseWrapper = responseBodyWrapper;
+        }
+
+        chain.doFilter(requestWrapper, responseWrapper);
+
+        // 在响应写回前，对响应体加密
+        if (responseFlag) {
+            String encryptContent = responseBodyWrapper.getEncryptContent(...);
+            servletResponse.getWriter().write(encryptContent);
+        }
+    }
+}</code></pre>
+
+<div class="step">
+<span class="num">4</span> <b>可以终止链</b>：当方法标注了 <code>@ApiEncrypt</code> 但请求缺少加密标头时，CryptoFilter 直接返回 403，不调用 <code>chain.doFilter()</code>。这是责任链模式的关键能力——<b>任一环节可以终止请求</b>。 <span class="where">CryptoFilter.java:78-83</span>
+</div>
+
+<div class="step">
+<span class="num">5</span> <b>请求前 + 响应后双阶段处理</b>：<code>chain.doFilter()</code> 之前的代码处理请求（解密），之后的代码处理响应（加密）。这是一个围绕 <code>chain.doFilter()</code> 的 sandwich 模式。 <span class="where">CryptoFilter.java:93-103</span>
+</div>
+
+<div class="warn">
+⚠️ <b>Filter 顺序至关重要</b>：CryptoFilter 必须在 RepeatableFilter <b>之前</b>。因为 CryptoFilter 解密请求体后，RepeatableFilter 才能缓存<b>解密后</b>的请求体供后续环节读取。如果顺序反了，RepeatableFilter 缓存的是加密密文——后续拦截器和 Controller 读到的都是乱码。
+</div>
+
+<h2>二、Layer 2：Spring Interceptor Chain（中间层）</h2>
+
+<p>拦截器工作在 DispatcherServlet 之后、Controller 之前。可以拿到目标 Handler 信息，但不能修改请求/响应对象。</p>
+
+<h3>PlusWebInvokeTimeInterceptor — 耗时统计</h3>
+
+<p>打开 <code>ruoyi-common/ruoyi-common-web/src/main/java/org/dromara/common/web/interceptor/PlusWebInvokeTimeInterceptor.java</code>：</p>
+
+<pre><code>@Slf4j
+public class PlusWebInvokeTimeInterceptor implements HandlerInterceptor {
+
+    private final static ThreadLocal&lt;StopWatch&gt; KEY_CACHE = new ThreadLocal<>();
+
+    @Override
+    public boolean preHandle(HttpServletRequest request,
+                             HttpServletResponse response,
+                             Object handler) throws Exception {
+        // 打印请求 URL 和方法
+        log.info("[PLUS]开始请求 => URL[{}],参数类型[json],参数:[{}]",
+            url, limit(jsonParam));
+
+        StopWatch stopWatch = new StopWatch();
+        KEY_CACHE.set(stopWatch);  // 存入 ThreadLocal（线程隔离）
+        stopWatch.start();
+
+        return true;  // ← 返回 true 表示继续传递链
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request,
+                                HttpServletResponse response,
+                                Object handler, Exception ex) {
+        StopWatch stopWatch = KEY_CACHE.get();
+        if (stopWatch != null) {
+            stopWatch.stop();
+            log.info("[PLUS]结束请求 => URL[{}],耗时:[{}]毫秒",
+                url, stopWatch.getDuration().toMillis());
+            KEY_CACHE.remove();  // 清理 ThreadLocal，防止内存泄漏
+        }
+    }
+}</code></pre>
+
+<div class="step">
+<span class="num">6</span> <b>ThreadLocal 存状态</b>：拦截器在 preHandle 中将 StopWatch 存入 ThreadLocal，在 afterCompletion 中取出。因为同一个请求的 preHandle 和 afterCompletion 在同一个线程中执行。 <span class="where">PlusWebInvokeTimeInterceptor.java:31</span>
+</div>
+
+<div class="step">
+<span class="num">7</span> <b>preHandle 返回 true/false 决定链走向</b>：返回 true → 继续执行后续拦截器和 Controller；返回 false → 终止链，请求到此结束。本项目的时间拦截器始终返回 true（不应因日志统计阻止请求）。 <span class="where">PlusWebInvokeTimeInterceptor.java:76</span>
+</div>
+
+<h2>三、Layer 3：MyBatis Plugin Chain（最内层）</h2>
+
+<p>MyBatis Plugin 通过动态代理拦截 SQL 执行过程。项目中的执行顺序：</p>
+
+<div class="diagram">PlusDataPermissionInterceptor  →  SQL 改写（注入数据权限条件）
+    ↓
+SqlLogInterceptor              →  SQL 日志输出
+    ↓
+MybatisEncryptInterceptor      →  入参加密（写入前）
+    ↓
+MybatisDecryptInterceptor      →  出参解密（读取后）</div>
+
+<table>
+  <tr><th>拦截器</th><th>位置</th><th>拦截点</th><th>职责</th></tr>
+  <tr><td><code>PlusDataPermissionInterceptor</code></td><td>ruoyi-common-mybatis</td><td>Executor.query/update</td><td>根据用户角色动态拼接数据权限 SQL</td></tr>
+  <tr><td><code>SqlLogInterceptor</code></td><td>ruoyi-common-mybatis</td><td>StatementHandler</td><td>记录完整 SQL 和执行耗时到日志</td></tr>
+  <tr><td><code>MybatisEncryptInterceptor</code></td><td>ruoyi-common-encrypt</td><td>ParameterHandler</td><td>对加密字段的入参自动加密</td></tr>
+  <tr><td><code>MybatisDecryptInterceptor</code></td><td>ruoyi-common-encrypt</td><td>ResultSetHandler</td><td>对加密字段的出参自动解密</td></tr>
+</table>
+
+<div class="side">
+💡 <b>三层链的分工清晰</b>：Filter 管请求/响应的包装和安全（HTTP 层面）；Interceptor 管横切逻辑（日志、权限校验，Spring 层面）；MyBatis Plugin 管数据存取（持久层）。同是责任链模式，但它们工作在完全不同的抽象层级。
+</div>
+
+<h2>四、额外链：WebSocket 拦截器</h2>
+
+<p>打开 <code>ruoyi-common/ruoyi-common-push/src/main/java/org/dromara/common/push/interceptor/PlusWebSocketInterceptor.java</code>。WebSocket 握手阶段也有自己的拦截器链——在握手前校验 token 认证，决定是否允许建立 WebSocket 连接。</p>
+
+<h2>五、前端等价物：Axios 拦截器链</h2>
+
+<p>打开 <code>plus-ui-vue/src/utils/request.ts</code>，这是前端版的责任链：</p>
+
+<pre><code>// 请求拦截器：发送前处理链
+service.interceptors.request.use((config) => {
+    // ① 注入 Authorization token
+    config.headers['Authorization'] = 'Bearer ' + getToken();
+    // ② GET 请求参数拼接到 URL
+    if (config.method === 'get' && config.params) { ... }
+    // ③ 防重复提交检查
+    if (!isRepeatSubmit && (post || put)) { ... }
+    // ④ 参数加密（AES）
+    if (isEncrypt) {
+        const aesKey = generateAesKey();
+        config.headers[encryptHeader] = encrypt(encryptBase64(aesKey));
+        config.data = encryptWithAes(JSON.stringify(config.data), aesKey);
+    }
+    return config;  // ← 返回 config，继续传递
+}, error => Promise.reject(error));
+
+// 响应拦截器：接收后处理链
+service.interceptors.response.use((res) => {
+    // ① 响应解密
+    if (encryptEnabled && keyStr) { ... }
+    // ② 状态码判断：401 → 跳登录 / 500 → 提示错误
+    if (code === 401) { ... }
+    else if (code === 500) { ElMessage.error(msg); }
+    // ③ 正常数据返回
+    return Promise.resolve(res.data);
+}, async (error) => {
+    // ④ 网络异常处理
+    ElMessage({ message: await extractErrorMessage(error), type: 'error' });
+    return Promise.reject(error);
+});</code></pre>
+
+<div class="step">
+<span class="num">8</span> <b>Axios 拦截器天生就是责任链</b>：多个请求拦截器按注册顺序执行，每个可以修改 config 后传给下一个；多个响应拦截器按注册顺序的<b>逆序</b>执行。this is exactly the chain-of-responsibility pattern. <span class="where">request.ts:110-257</span>
+</div>
+
+<h2>六、自测</h2>
+
+<div class="quiz">
+<p>1. 为什么 CryptoFilter 必须在 RepeatableFilter 之前？</p>
+<label class="opt"><input type="radio" name="q1"> A. CryptoFilter 的性能开销更大，应该先执行</label>
+<label class="opt"><input type="radio" name="q1"> B. CryptoFilter 解密请求体后，RepeatableFilter 缓存的是解密后的明文，后续环节才能读到正确的数据</label>
+<label class="opt"><input type="radio" name="q1"> C. 这是 Servlet 规范要求的固定顺序</label>
+</div>
+
+<div class="quiz">
+<p>2. Filter 和 Interceptor 的核心区别是什么？</p>
+<label class="opt"><input type="radio" name="q2"> A. Filter 更快，Interceptor 更慢</label>
+<label class="opt"><input type="radio" name="q2"> B. Filter 工作在 DispatcherServlet 之前，可以修改请求/响应对象；Interceptor 工作在 DispatcherServlet 之后，可以拿到目标 Handler 但不能修改请求/响应</label>
+<label class="opt"><input type="radio" name="q2"> C. Filter 只能有一个，Interceptor 可以有多个</label>
+</div>
+
+<div class="quiz">
+<p>3. PlusWebInvokeTimeInterceptor 为什么用 ThreadLocal 存 StopWatch？</p>
+<label class="opt"><input type="radio" name="q3"> A. StopWatch 不是线程安全的，ThreadLocal 保证每个请求线程有独立的计时器</label>
+<label class="opt"><input type="radio" name="q3"> B. 为了减少对象创建开销</label>
+<label class="opt"><input type="radio" name="q3"> C. ThreadLocal 比局部变量更快</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — 顺序决定了缓存的是加密数据还是明文。CryptoFilter 先解密，RepeatableFilter 后缓存 → 后续拦截器和 Controller 读到的都是明文。如果顺序反了，RepeatableFilter 缓存密文，后续环节读到的就是乱码。<br>
+<b>2. B</b> — Filter 是 Servlet 容器层面的，可以包装/替换 Request 和 Response；Interceptor 是 Spring 层面的，通过 preHandle/postHandle/afterCompletion 三个回调介入，但不能修改请求响应对象本身。<br>
+<b>3. A</b> — 拦截器是单例的（Spring Bean 默认为 singleton），所有请求共享同一个拦截器实例。如果 StopWatch 是实例字段，多个并发请求会互相覆盖。ThreadLocal 为每个请求线程提供独立的存储空间。</p>
+</details>
+
+<div class="nav">← <a href="08.html">第 8 课 · 观察者模式</a> | 下一课：<a href="10.html">第 10 课 · 策略模式进阶 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://refactoring.guru/design-patterns/chain-of-responsibility" target="_blank">Chain of Responsibility — Refactoring.Guru</a> ·
+<a href="https://docs.oracle.com/javaee/7/api/javax/servlet/Filter.html" target="_blank">Servlet Filter — Java EE Docs</a> ·
+<a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/handlermapping-interceptor.html" target="_blank">Spring Interceptor — Spring Docs</a> ·
+<a href="https://mybatis.org/mybatis-3/configuration.html#plugins" target="_blank">MyBatis Plugin — MyBatis Docs</a>
+</div>
+<div class="reminder">💡 有疑问？直接问我。这三层责任链是 RuoYi-Vue-Plus 架构的精髓——理解了 Filter → Interceptor → Plugin 的分工，就理解了从 HTTP 到 SQL 的完整数据流。</div>
+
+</body>
+</html>

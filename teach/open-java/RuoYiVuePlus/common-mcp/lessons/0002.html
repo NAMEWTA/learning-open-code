@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · McpAutoConfiguration 与 McpClientTemplate 详解</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .info { background: #f0f7ff; border-left: 3px solid #1d6fd6; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .annotated { font-size: 0.85rem; }
+  .annotated .line { display: block; }
+  .annotated .comment { color: #6a9955; }
+  .annotated .keyword { color: #569cd6; }
+  .annotated .type { color: #4ec9b0; }
+  .annotated .string { color: #ce9178; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · McpAutoConfiguration 与 McpClientTemplate 源码拆解 <span class="tag">核心机制</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #3~#4）</b>：学完你能解释 <code>McpAutoConfiguration</code> 的条件装配逻辑，并逐一说出 <code>McpClientTemplate</code> 的 6 个核心方法各自做什么、为什么这样设计。
+</div>
+
+<h2>一、McpAutoConfiguration：什么是「条件装配」？</h2>
+
+<p>先看源码（McpAutoConfiguration.java，完整 29 行）：</p>
+
+<pre><code>@AutoConfiguration                                          // 1. 声明为自动配置类
+public class McpAutoConfiguration {
+
+    @Bean
+    @ConditionalOnBean(McpSyncClient.class)                 // 2. 前提：必须有 McpSyncClient Bean
+    @ConditionalOnMissingBean                                // 3. 如果没有用户自定义的同名 Bean
+    public McpClientTemplate mcpClientTemplate(
+                List&lt;McpSyncClient&gt; mcpSyncClients) {       // 4. 注入所有 McpSyncClient
+        return new McpClientTemplate(mcpSyncClients);
+    }
+}</code></pre>
+
+<p>这 10 行代码里藏着三个关键设计决策：</p>
+
+<h3>1.1 决策一：<code>@AutoConfiguration</code> 而非 <code>@Configuration</code></h3>
+<p>Spring Boot 3.x 建议使用 <code>@AutoConfiguration</code> 替代 <code>@Configuration</code> 用于自动配置场景。区别在于：</p>
+<ul>
+  <li><code>@AutoConfiguration</code> 的加载顺序晚于用户自定义的 <code>@Configuration</code>，避免自动配置「抢跑」。</li>
+  <li>它需要通过 <code>AutoConfiguration.imports</code> 文件显式注册（第 1 课已看到），而不是靠 <code>@ComponentScan</code> 发现。</li>
+</ul>
+
+<h3>1.2 决策二：<code>@ConditionalOnBean(McpSyncClient.class)</code> — 条件装配的核心</h3>
+<p>这是整个模块最精妙的设计。<code>McpSyncClient</code> Bean 是谁创建的？<strong>不是本模块创建的</strong>——它是 Spring AI MCP Client Starter 根据 <code>application.yml</code> 中的配置自动创建的。</p>
+
+<p>工作流程：</p>
+<ol>
+  <li>用户（或运维）在 <code>application.yml</code> 中配置了 MCP Server 连接信息 → Spring AI MCP Starter 创建对应的 <code>McpSyncClient</code> Bean。</li>
+  <li><code>@ConditionalOnBean(McpSyncClient.class)</code> 检测到 <code>McpSyncClient</code> Bean 存在 → 条件满足 → 创建 <code>McpClientTemplate</code>。</li>
+  <li>如果没有配置任何 MCP 连接 → 没有 <code>McpSyncClient</code> Bean → 条件不满足 → <code>McpClientTemplate</code> <strong>不创建</strong>。</li>
+</ol>
+
+<div class="info">
+💡 <b>设计动机</b>：<code>ruoyi-common-mcp</code> 被设计为所有 <code>ruoyi-common-*</code> 模块的兄弟，会被父 POM 全局引入。但并不是每个 RuoYi 项目都需要 MCP 能力——条件装配保证了「依赖了但不用，不报错也不浪费资源」。
+</div>
+
+<h3>1.3 决策三：<code>@ConditionalOnMissingBean</code> — 允许业务方覆盖</h3>
+<p>如果业务模块自己定义了一个 <code>McpClientTemplate</code> Bean（例如添加日志、限流、自定义扩展），这里的 <code>@ConditionalOnMissingBean</code> 会检测到已存在同名 Bean，从而<strong>跳过</strong>自动创建。这是 Spring Boot 自动配置的经典模式——「自动配置兜底，用户自定义优先」。</p>
+
+<h3>1.4 参数注入：<code>List&lt;McpSyncClient&gt;</code> — 收集所有已连接的 Client</h3>
+<p>Spring 自动将容器中<strong>所有</strong> <code>McpSyncClient</code> 类型的 Bean 收集成一个 <code>List</code> 注入。如果用户配置了 3 个 MCP Server 连接，这里就能拿到 3 个 <code>McpSyncClient</code>。这就是后面「支持多 Server」的基础。</p>
+
+<h2>二、McpClientTemplate：6 个方法的封装逻辑</h2>
+
+<p>看源码（McpClientTemplate.java）：</p>
+
+<pre><code>@RequiredArgsConstructor                                      // Lombok：生成含全部 final 字段的构造器
+public class McpClientTemplate {
+
+    private final List&lt;McpSyncClient&gt; mcpSyncClients;         // 启动时注入所有 MCP Client
+
+    // 方法 1：查询所有 Server 的工具列表       → 广播模式
+    // 方法 2：广播调用所有 Server 的同名工具    → 广播模式
+    // 方法 3：精确调用指定 Server 的工具       → 单点模式
+    // 方法 4：广播读取所有 Server 的同名资源    → 广播模式
+    // 方法 5：精确读取指定 Server 的资源       → 单点模式
+    // 方法 6：按名称查找某个 Client           → 内部辅助
+}</code></pre>
+
+<p><strong>核心设计模式：每种操作都有两个版本——广播版（所有 Server）和单点版（指定 Server）。</strong></p>
+
+<h3>2.1 方法一：listTools() — 列出所有工具</h3>
+
+<pre><code>public Map&lt;String, List&lt;String&gt;&gt; listTools() {
+    Map&lt;String, List&lt;String&gt;&gt; result = new LinkedHashMap<>();  // 保持插入顺序
+    for (McpSyncClient client : mcpSyncClients) {
+        List&lt;String&gt; tools = client.listTools()                 // ← Spring AI MCP 的方法
+            .tools()                                           // 拿到 List&lt;Tool&gt;
+            .stream()
+            .map(McpSchema.Tool::name)                         // 只取工具名
+            .toList();
+        result.put(getServerName(client), tools);              // key=Server 名称, value=工具列表
+    }
+    return result;
+}</code></pre>
+
+<p><strong>调用链</strong>：<code>McpClientTemplate.listTools()</code> → 遍历每个 <code>McpSyncClient</code> → <code>client.listTools()</code>（Spring AI MCP SDK 方法）→ 提取工具名列表 → 按 Server 名称分组返回。</p>
+
+<p><code>LinkedHashMap</code> 的选择：保证遍历顺序与 <code>mcpSyncClients</code> 列表一致，方便调试。</p>
+
+<h3>2.2 方法二（广播版）：callTool(toolName, arguments)</h3>
+
+<pre><code>public Map&lt;String, McpToolCallResult&gt; callTool(
+            String toolName, Map&lt;String, Object&gt; arguments) {
+    Map&lt;String, McpToolCallResult&gt; result = new LinkedHashMap<>();
+    for (McpSyncClient client : mcpSyncClients) {
+        McpSchema.CallToolResult callResult = client.callTool(  // ← MCP 协议的工具调用
+            new McpSchema.CallToolRequest(toolName, arguments)  // 构建请求：工具名 + 参数 Map
+        );
+        result.put(getServerName(client),                       // key=Server 名称
+            McpToolCallResult.of(getServerName(client), callResult));  // 包装成项目结果对象
+    }
+    return result;
+}</code></pre>
+
+<p><strong>为什么需要封装这一步？</strong> 如果不封装，业务代码需要：1) 手动遍历 <code>mcpSyncClients</code>；2) 手动 <code>new CallToolRequest(...)</code>；3) 手动处理返回的 <code>CallToolResult</code> 原始对象（它的 <code>content</code> 是 SDK 类型，不方便直接序列化返回前端）。封装后业务代码只需一行：<code>mcpClientTemplate.callTool("weather", Map.of("city", "北京"))</code>。</p>
+
+<h3>2.3 方法三（单点版）：callTool(serverName, toolName, arguments)</h3>
+
+<pre><code>public Optional&lt;McpToolCallResult&gt; callTool(
+            String serverName, String toolName,
+            Map&lt;String, Object&gt; arguments) {
+    return findClient(serverName)                               // 先按名称找到对应 Client
+        .map(client -> McpToolCallResult.of(serverName,
+            client.callTool(
+                new McpSchema.CallToolRequest(toolName, arguments))));
+}</code></pre>
+
+<p><strong>返回 <code>Optional</code></strong> 而非直接抛异常：如果 Server 名称写错了（找不到对应的 Client），返回 <code>Optional.empty()</code>，由调用方决定如何处理——这是 Java 函数式编程的惯用做法。</p>
+
+<h3>2.4 方法四+五：readResource — 资源读取（结构完全对称）</h3>
+
+<p>广播版：<code>readResource(String uri)</code> → 向所有 Server 请求同名资源 → 返回 <code>Map&lt;String, McpResourceReadResult&gt;</code></p>
+<p>单点版：<code>readResource(String serverName, String uri)</code> → 向指定 Server 请求资源 → 返回 <code>Optional&lt;McpResourceReadResult&gt;</code></p>
+
+<p>与 <code>callTool</code> 的设计<strong>完全对称</strong>：遍历逻辑相同、分组方式相同、Result 包装方式相同。这降低了学习成本——懂了 <code>callTool</code> 就懂了 <code>readResource</code>。</p>
+
+<h3>2.5 辅助方法：findClient 与 getServerName</h3>
+
+<pre><code>// 按名称查找 Client（供 callTool(serverName, ...) 和 readResource(serverName, ...) 使用）
+public Optional&lt;McpSyncClient&gt; findClient(String serverName) {
+    return mcpSyncClients.stream()
+        .filter(client -> serverName.equals(getServerName(client)))
+        .findFirst();
+}
+
+// 从 McpSyncClient 中解析 Server 名称
+private String getServerName(McpSyncClient client) {
+    McpSchema.Implementation serverInfo = client.getServerInfo();
+    if (serverInfo == null || serverInfo.name() == null) {
+        return "unknown";                                      // 防御性编程：拿不到名称也不崩
+    }
+    return serverInfo.name();
+}</code></pre>
+
+<p>每个 <code>McpSyncClient</code> 连接建立后，MCP 协议的 <code>initialize</code> 握手阶段会交换双方的能力信息，其中包含 <code>serverInfo</code>（Server 名称 + 版本号）。<code>getServerName</code> 把 Server 名称提取出来作为 Map 的 key。</p>
+
+<div class="side">
+💡 <b>设计亮点：为什么是 "unknown" 而非 null？</b> 防御性编程。MCP 协议的 <code>serverInfo.name</code> 是可选字段——不能假定每个 Server 都填了名称。如果为 null，直接用 "unknown" 占位，避免后续 <code>Map.put(null, ...)</code> 引发 NPE。
+</div>
+
+<h2>三、6 个方法速查表</h2>
+
+<table>
+<tr><th>方法签名</th><th>模式</th><th>返回类型</th><th>找不到 Client 时</th></tr>
+<tr><td><code>listTools()</code></td><td>广播</td><td>Map&lt;String, List&lt;String&gt;&gt;</td><td>返回空 Map</td></tr>
+<tr><td><code>callTool(toolName, args)</code></td><td>广播</td><td>Map&lt;String, McpToolCallResult&gt;</td><td>返回空 Map</td></tr>
+<tr><td><code>callTool(server, toolName, args)</code></td><td>单点</td><td>Optional&lt;McpToolCallResult&gt;</td><td>Optional.empty()</td></tr>
+<tr><td><code>readResource(uri)</code></td><td>广播</td><td>Map&lt;String, McpResourceReadResult&gt;</td><td>返回空 Map</td></tr>
+<tr><td><code>readResource(server, uri)</code></td><td>单点</td><td>Optional&lt;McpResourceReadResult&gt;</td><td>Optional.empty()</td></tr>
+<tr><td><code>findClient(serverName)</code></td><td>—</td><td>Optional&lt;McpSyncClient&gt;</td><td>Optional.empty()</td></tr>
+</table>
+
+<h2>四、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. <code>@ConditionalOnBean(McpSyncClient.class)</code> 的「条件」具体是什么？谁负责创建 <code>McpSyncClient</code>？</p>
+<span class="opt">A. 条件是有任何 Bean，由 McpAutoConfiguration 创建 McpSyncClient</span>
+<span class="opt">B. 条件是存在 McpSyncClient Bean，由 Spring AI MCP Starter 根据 yml 配置自动创建</span>
+<span class="opt">C. 条件是配置文件中有 mcp 前缀，由 application.yml 直接创建</span>
+<span class="opt">D. 条件是引入了 spring-ai-starter-mcp-client，由 pom.xml 创建</span>
+<details><summary>看答案</summary><b>B</b>。<code>McpSyncClient</code> 由 Spring AI MCP Client Starter 根据 yml 配置自动创建。当用户配置了 MCP Server 连接 → Starter 创建对应的 <code>McpSyncClient</code> Bean → 条件满足 → 本模块创建 <code>McpClientTemplate</code>。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>callTool(toolName, args)</code> （广播版）向所有 Server 发送<strong>同一个</strong>工具调用，返回的 Map 的 key 是什么？</p>
+<span class="opt">A. 工具名称（toolName）</span>
+<span class="opt">B. Server 名称（通过 client.getServerInfo().name() 获取）</span>
+<span class="opt">C. 参数 args 的 hashCode</span>
+<span class="opt">D. 固定字符串 "default"</span>
+<details><summary>看答案</summary><b>B</b>。每个 <code>McpSyncClient</code> 在连接 MCP Server 后会拿到 serverInfo，Map 的 key 就是 <code>getServerName(client)</code> 也就是 serverInfo.name()。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>findClient("database-server")</code> 找不到时返回什么？</p>
+<span class="opt">A. null</span>
+<span class="opt">B. 抛出 IllegalArgumentException</span>
+<span class="opt">C. Optional.empty()</span>
+<span class="opt">D. 返回第一个 Client 作为兜底</span>
+<details><summary>看答案</summary><b>C</b>。<code>Optional.empty()</code>。这是 Java 函数式编程的惯用做法——让调用方自己决定找不到时如何处理（抛异常 / 给默认值 / 跳过）。</details>
+</div>
+
+<div class="reminder">💡 下一课我们把 <code>McpToolCallResult</code> 和 <code>McpResourceReadResult</code> 放大来看，并通过假想的实战场景演示完整的「配置 → 连接 → 调用工具 → 读取资源」流程。</div>
+
+<div class="nav">课程 0002 / 使命：读懂 ruoyi-common-mcp MCP 模块 · 下一课预告：实战 MCP 工具调用与资源读取</div>
+
+</body>
+</html>

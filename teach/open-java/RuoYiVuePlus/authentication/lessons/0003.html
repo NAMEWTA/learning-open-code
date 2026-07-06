@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · Sa-Token 怎么签发 token</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.83rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · Sa-Token 怎么签发 token <span class="tag">认证内核</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #3）</b>：讲清 Sa-Token 如何签发 token、<code>LoginUser</code> 存在哪里、<strong>JWT 简单模式与 Redis 各自承担什么角色</strong>。这是<a href="0001.html">第 1 课</a>全景图第 6 步的放大。
+</div>
+
+<p>策略校验完身份，调用 <code>LoginHelper.login(loginUser, model)</code>。这一步看似一行，背后是整个认证内核。我们拆开看。</p>
+
+<h2>一、LoginHelper.login() 做了三件事</h2>
+<pre><code>// LoginHelper.java:54
+public static void login(LoginUser loginUser, SaLoginParameter model) {
+    model = ObjectUtil.defaultIfNull(model, new SaLoginParameter());
+    fillRequestContext(loginUser, model);          // ① 补充 IP/浏览器/OS 等终端信息
+    StpUtil.login(loginUser.getLoginId(),           // ② Sa-Token 签发 token
+        model.setExtra(USER_KEY, loginUser.getUserId())
+             .setExtra(USER_NAME_KEY, loginUser.getUsername())
+             .setExtra(DEPT_KEY, loginUser.getDeptId())
+             .setExtra(DEPT_NAME_KEY, loginUser.getDeptName())
+             .setExtra(DEPT_CATEGORY_KEY, loginUser.getDeptCategory())
+    );
+    StpUtil.getTokenSession().set(LOGIN_USER_KEY, loginUser);  // ③ 把 LoginUser 存进 Token-Session
+}</code></pre>
+
+<h3>① loginId 是什么？为什么是「userType:userId」？</h3>
+<pre><code>// LoginUser.java:141
+public String getLoginId() {
+    return userType + ":" + userId;   // 例如 "sys_user:1"
+}</code></pre>
+<p>Sa-Token 用 <code>loginId</code> 唯一标识「谁登录了」。RuoYi 把它设计成 <code>userType:userId</code>，是为了支持<strong>多用户体系</strong>：同一张表可有 pc/app 多种用户类型，甚至不同用户表共存，靠前缀区分，权限互不串。</p>
+
+<h3>② 扩展信息（extra）塞进了 token</h3>
+<p>userId、userName、deptId、clientid 等被塞进 token 的扩展字段。<strong>好处</strong>：之后想拿当前用户 id，不必反序列化整个 LoginUser，直接 <code>StpUtil.getExtra("userId")</code> 即可，轻量。</p>
+
+<h3>③ 完整的 LoginUser 存进 Token-Session</h3>
+<p>角色、岗位、权限集合这些重对象，存进 Sa-Token 的 <strong>Token-Session</strong>（最终落 Redis）。取的时候：</p>
+<pre><code>// LoginHelper.getLoginUser()
+return StpUtil.getTokenSession().get(LOGIN_USER_KEY);</code></pre>
+
+<h2>二、关键分工：JWT 简单模式 vs Redis</h2>
+<p>这是本课最容易混淆、也最值得搞清的点。看配置：</p>
+<pre><code>// SaTokenConfig.java:30
+@Bean
+public StpLogic getStpLogicJwt() {
+    return new StpLogicJwtForSimple();   // JWT「简单模式」
+}
+@Bean
+public SaTokenDao saTokenDao() {
+    return new PlusSaTokenDao();          // 自定义 Redis 持久层
+}</code></pre>
+
+<table>
+<tr><th></th><th>JWT（token 本身）</th><th>Redis（PlusSaTokenDao）</th></tr>
+<tr><td>存什么</td><td>loginId + 扩展信息，签名防篡改</td><td>Token-Session（完整 LoginUser、权限等）+ 登录态记录</td></tr>
+<tr><td>角色</td><td>「身份凭证」，无状态可自解析</td><td>「会话数据 + 可控状态」</td></tr>
+<tr><td>为何需要它</td><td>token 自带身份，减少一次查库</td><td>能主动踢人下线、改权限即时生效、查在线用户</td></tr>
+</table>
+
+<div class="why">
+✅ <b>「简单模式」的含义</b>：token 是 JWT（自带 loginId 和 extra，可离线验签），<strong>但会话数据仍走 Redis</strong>。这样既享受 JWT「身份自携带」的便利，又保留服务端「能踢人、能改权限、能查在线」的控制力——纯无状态 JWT 做不到主动失效，这是工程上的折中。
+</div>
+
+<h3>PlusSaTokenDao 的小心思：多级缓存</h3>
+<p>它不是裸调 Redis，而是 <strong>Caffeine（本地，5 秒过期）+ Redis</strong> 两级：</p>
+<pre><code>// PlusSaTokenDao.java
+private static final Cache&lt;String, Object&gt; CAFFEINE = Caffeine.newBuilder()
+    .expireAfterWrite(5, TimeUnit.SECONDS)   // 本地缓存只活 5 秒
+    .maximumSize(1000).build();
+private &lt;T&gt; T getCacheValue(String key) {
+    return (T) CAFFEINE.get(key, RedisUtils::getCacheObject); // 本地没有才查 Redis
+}</code></pre>
+<p>高并发下，每个请求都要读登录态，本地缓存挡掉绝大多数 Redis 往返；5 秒过期保证踢人/改权限的延迟可接受。写操作会 <code>invalidate(key)</code> 让本地缓存失效。</p>
+
+<h2>三、token 怎么回到前端、又怎么带回来</h2>
+<div class="flow">签发后：
+  StpUtil.getTokenValue()  →  LoginVo.accessToken  →  前端 setToken()
+
+后续请求：
+  前端 Authorization: Bearer &lt;token&gt;   (request.ts 拦截器加)
+            +  clientid: &lt;clientId&gt;     请求头
+  ↓
+  后端 SaInterceptor 读取并校验（第 4 课）</div>
+<p>配置里 <code>token-prefix: "Bearer"</code>、<code>is-read-header: true</code>、<code>is-read-cookie: false</code>（关 cookie 杜绝 CSRF）。</p>
+
+<details>
+<summary>🤔 想一想：既然 JWT 自带身份可离线验签，为什么登录还要往 Redis 写一份？纯 JWT 不香吗？</summary>
+纯 JWT 的致命短板是<strong>无法主动失效</strong>：token 签发后在过期前一直有效，管理员「踢人下线」「禁用账号即时生效」「改了角色立刻收权」都做不到，只能等过期。RuoYi 的「JWT 简单模式 + Redis 会话」就是为了拿回这份控制力——异常处理里那些 <code>BE_REPLACED</code>（被顶号）、<code>KICK_OUT</code>（被踢）状态，全靠 Redis 侧的会话记录才能实现。
+</details>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 完整的 <code>LoginUser</code>（含角色、权限集合）存在哪里？</p>
+<span class="opt">A. 全部编码进 JWT token 字符串里</span>
+<span class="opt">B. Sa-Token 的 Token-Session 中（经 PlusSaTokenDao 落 Redis）</span>
+<span class="opt">C. 前端 localStorage</span>
+<span class="opt">D. 数据库 sys_user 表</span>
+<details><summary>看答案</summary><b>B</b>。token 里只放轻量的 loginId + extra；完整 LoginUser 经 <code>StpUtil.getTokenSession().set()</code> 存入 Token-Session，由 PlusSaTokenDao 持久化到 Redis（带 Caffeine 本地缓存）。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 管理员把某用户「强制下线」能立即生效，靠的是？</p>
+<span class="opt">A. JWT 自带的过期时间</span>
+<span class="opt">B. 前端轮询</span>
+<span class="opt">C. Redis 侧的会话记录可被服务端主动清除/标记，验签时发现状态异常即拒绝</span>
+<span class="opt">D. 修改用户密码</span>
+<details><summary>看答案</summary><b>C</b>。这正是「JWT 简单模式 + Redis」组合的价值——纯无状态 JWT 在过期前无法主动失效，Redis 会话让服务端重获控制权。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>loginId</code> 设计成 <code>userType:userId</code>（如 <code>sys_user:1</code>）主要为了？</p>
+<span class="opt">A. 好看</span>
+<span class="opt">B. 支持多用户体系，不同用户类型按前缀区分、权限隔离</span>
+<span class="opt">C. 加密需要</span>
+<span class="opt">D. Redis key 长度限制</span>
+<details><summary>看答案</summary><b>B</b>。见 <code>LoginHelper</code> 类注释：user_type 可让同表多类型用户、甚至多用户表共存，组成「用户类型 × 设备类型」的灵活权限控制。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://sa-token.cc/doc.html#/up/jwt-extend" target="_blank">Sa-Token 官方文档 · 整合 JWT</a>——官方对「简单模式 / 混入模式 / 单 token 模式」的对比，正好印证本课的 JWT vs Redis 分工。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「Token-Session 和普通 Session 区别是啥？」「activeTimeout 和 timeout 怎么配合？」下一课讲 token 带回来之后——<strong>统一拦截器怎么校验，StpInterface 怎么按需加载权限</strong>。</div>
+
+<div class="nav">课程 0003 / 上一课：<a href="0002.html">客户端+策略模式</a> · 下一课：统一拦截器 + StpInterface 权限加载 + 异常处理</div>
+
+</body>
+</html>

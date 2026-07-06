@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第9课：Service 层最佳实践 — 事务、校验、远程调用与扩展点</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🔧 第9课：Service 层最佳实践</h1>
+
+<p><strong>胜利目标：</strong>理解 Service 层的通用编码模式：事务管理、关联数据维护、远程调用接口、事件发布机制。</p>
+
+<h2>1. 事务管理模式</h2>
+
+<pre><code>// 模式1：单表操作 — 不需要 @Transactional
+public int updateUserStatus(Long userId, String status) {
+    return userMapper.lambda()
+        .set(SysUser::getStatus, status)
+        .eq(SysUser::getUserId, userId)
+        .updateCount();
+}
+
+// 模式2：多表操作 — 必须 @Transactional
+@Override
+@Transactional(rollbackFor = Exception.class)  // 🔑 rollbackFor = Exception.class
+public int insertUser(SysUserBo user) {
+    SysUser sysUser = MapstructUtils.convert(user, SysUser.class);
+    int rows = userMapper.insert(sysUser);    // ① 插入用户
+    user.setUserId(sysUser.getUserId());
+    insertUserPost(user, false);              // ② 插入岗位关联
+    insertUserRole(user, false);              // ③ 插入角色关联
+    return rows;  // ①②③ 任意一步失败都回滚
+}
+
+// 模式3：删除关联 + 删除主表
+@Override
+@Transactional(rollbackFor = Exception.class)
+public int deleteUserById(Long userId) {
+    userRoleMapper.lambda().eq(SysUserRole::getUserId, userId).delete();  // ① 删角色关联
+    userPostMapper.lambda().eq(SysUserPost::getUserId, userId).delete();  // ② 删岗位关联
+    int flag = userMapper.deleteById(userId);  // ③ 删用户
+    if (flag < 1) throw new ServiceException("删除用户失败!");
+    return flag;
+}</code></pre>
+
+<div class="highlight">
+  <strong>为什么 rollbackFor = Exception.class？</strong>Spring 默认只对 RuntimeException 回滚。<code>ServiceException</code> 是 RuntimeException，但为了防御未来可能抛出的 checked exception，显式声明回滚所有异常是最佳实践。
+</div>
+
+<h2>2. 关联数据维护：先清后建模式</h2>
+
+<p>这是 ruoyi 处理 M:N 关联的标准模式：</p>
+
+<pre><code>// 用户角色关联的标准流程
+private void insertUserRole(Long userId, Long[] roleIds, boolean clear) {
+    if (ArrayUtil.isEmpty(roleIds)) return;
+
+    // ① 权限校验：非超管不能分配超管角色
+    if (!LoginHelper.isSuperAdmin(userId)) {
+        roleList.remove(SystemConstants.SUPER_ADMIN_ROLE_ID);
+    }
+
+    // ② 数据权限校验：确保有权限操作这些角色
+    if (roleMapper.selectRoleCount(roleList) != roleList.size()) {
+        throw new ServiceException("没有权限访问角色的数据");
+    }
+
+    // ③ 先清空旧关联（如果 clear=true）
+    if (clear) {
+        userRoleMapper.lambda().eq(SysUserRole::getUserId, userId).delete();
+    }
+
+    // ④ 批量插入新关联
+    List&lt;SysUserRole&gt; list = StreamUtils.toList(roleList, roleId -> {
+        SysUserRole ur = new SysUserRole();
+        ur.setUserId(userId);
+        ur.setRoleId(roleId);
+        return ur;
+    });
+    userRoleMapper.insertBatch(list);
+}</code></pre>
+
+<div class="highlight">
+  <strong>"先清后建"的优点：</strong>比"对比差异、增量更新"简单得多，避免了复杂的 diff 逻辑。在有事务保护的情况下，性能开销可接受（通常关联数据量不大）。
+</div>
+
+<h2>3. 事件驱动 — 权限变更的副作用处理</h2>
+
+<pre><code>// 当角色权限被修改时，需要踢出所有拥有该角色的在线用户
+// 实现方式：发布 Spring Event → 监听器处理
+
+// ① Controller 层发布事件
+@PutMapping("/permission")
+public R&lt;Void&gt; editPermission(@RequestBody SysRoleBo role) {
+    if (roleService.updateRolePermission(role) > 0) {
+        // 🔑 发布事件：通知清理该角色的在线用户
+        SpringUtils.context().publishEvent(
+            OnlineUserCleanEvent.byRole(role.getRoleId())
+        );
+        return R.ok();
+    }
+    return R.fail("修改失败");
+}
+
+// ② RoleService 也提供直接清理能力（被监听器调用）
+public void cleanOnlineUserByRole(Long roleId) {
+    // 遍历所有在线 Token，登出拥有该角色的用户
+    List&lt;String&gt; keys = StpUtil.searchTokenValue("", 0, -1, false);
+    keys.parallelStream().forEach(key -> {
+        LoginUser loginUser = LoginHelper.getLoginUser(token);
+        if (loginUser.getRoles().stream().anyMatch(r -> r.getRoleId().equals(roleId))) {
+            StpUtil.logoutByTokenValue(token);
+        }
+    });
+}</code></pre>
+
+<h2>4. 远程调用接口 — 跨微服务能力暴露</h2>
+
+<p>ruoyi-system 实现了 <code>ruoyi-api</code> 模块定义的接口，供其他微服务通过 Feign 调用：</p>
+
+<pre><code>// SysUserServiceImpl 同时实现了 ISysUserService 和 UserService
+@Service
+public class SysUserServiceImpl implements ISysUserService, UserService {
+
+    // ISysUserService — 本地调用的完整接口
+    //   selectPageUserList(), insertUser(), updateUser(), deleteUserById()...
+
+    // UserService（来自 ruoyi-api）— 远程调用的精简接口
+    //   selectById()       → 供其他服务查询用户基本信息
+    //   selectListByIds()  → 供其他服务批量查询用户
+    //   selectUsersByRoleIds()   → 供工作流等模块按角色查用户
+    //   selectUsersByDeptIds()   → 供其他模块按部门查用户
+    //   selectUsersByPostIds()   → 供其他模块按岗位查用户
+
+    @Override
+    public UserDTO selectById(Long userId) {
+        // 只返回用户名、昵称、部门ID等基本信息
+        // 不返回密码、手机号等敏感信息
+        SysUserVo vo = userMapper.lambda()
+            .select(SysUser::getUserId, SysUser::getDeptId, SysUser::getUserName,
+                    SysUser::getNickName, SysUser::getStatus)
+            .eq(SysUser::getStatus, SystemConstants.NORMAL)
+            .eq(SysUser::getUserId, userId)
+            .voOne();
+        return BeanUtil.copyProperties(vo, UserDTO.class);
+    }
+}</code></pre>
+
+<div class="highlight">
+  <strong>接口隔离原则的体现：</strong>本地调用的 ISysUserService 提供完整 CRUD，远程调用的 UserService 只暴露安全的读方法（脱敏后），不暴露写操作和敏感字段。
+</div>
+
+<h2>5. QueryBuilder — 流式查询条件构建</h2>
+
+<pre><code>// ruoyi 封装的 QueryBuilder，在 LambdaQueryWrapper 上增加了语义化方法
+private Wrapper&lt;SysUser&gt; buildQueryWrapper(SysUserBo user) {
+    return QueryBuilder.lambda(SysUser.class)
+        .eq(SysUser::getDelFlag, SystemConstants.NORMAL)       // 固定条件
+        .eqIfPresent(SysUser::getUserId, user.getUserId())     // 可选条件
+        .likeIfText(SysUser::getUserName, user.getUserName())  // 文本模糊匹配
+        .eqIfText(SysUser::getStatus, user.getStatus())        // 字符串精确匹配
+        .inIfNotEmpty(SysUser::getUserId, userIds)             // 集合 IN
+        .betweenParams(SysUser::getCreateTime, params,         // 时间区间
+                       "beginTime", "endTime")
+        .and(condition, w -> { ... })                          // 子条件组
+        .orderByAsc(SysUser::getUserId)                        // 排序
+        .build();
+}
+// IfPresent/IfText/IfNotEmpty 的后缀表示：参数为空时跳过该条件</code></pre>
+
+<h2>6. 其他业务子模块速览</h2>
+
+<table>
+  <thead><tr><th>模块</th><th>表</th><th>Service</th><th>功能</th></tr></thead>
+  <tbody>
+    <tr><td>岗位管理</td><td>sys_post</td><td>SysPostService</td><td>岗位 CRUD、按部门筛选</td></tr>
+    <tr><td>字典管理</td><td>sys_dict_type + sys_dict_data</td><td>SysDictTypeService + SysDictDataService</td><td>数据字典类型和数据的 CRUD、缓存</td></tr>
+    <tr><td>参数配置</td><td>sys_config</td><td>SysConfigService</td><td>系统配置键值对 CRUD、缓存</td></tr>
+    <tr><td>通知公告</td><td>sys_notice</td><td>SysNoticeService</td><td>通知公告发布和查询</td></tr>
+    <tr><td>消息管理</td><td>sys_message</td><td>SysMessageService</td><td>站内消息的收发</td></tr>
+    <tr><td>客户端管理</td><td>sys_client</td><td>SysClientService</td><td>OAuth2 客户端注册管理</td></tr>
+    <tr><td>OSS 管理</td><td>sys_oss + sys_oss_config</td><td>SysOssService + SysOssConfigService</td><td>对象存储文件和配置管理</td></tr>
+    <tr><td>社交登录</td><td>sys_social</td><td>SysSocialService</td><td>第三方登录账号绑定</td></tr>
+    <tr><td>操作日志</td><td>sys_oper_log</td><td>SysOperLogService</td><td>操作日志查询和清理</td></tr>
+    <tr><td>登录日志</td><td>sys_login_info</td><td>SysLoginInfoService</td><td>登录历史查询和清理</td></tr>
+  </tbody>
+</table>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>写一个 Service 方法：新增岗位并关联到部门，要求支持事务回滚</li>
+  <li>解释"先清后建"模式在关联表维护中的优缺点</li>
+  <li>区分 ISysUserService 和 UserService 的职责差异（接口隔离）</li>
+  <li>追踪角色修改后踢出在线用户的完整事件链路（Controller → Event → Listener → Service）</li>
+  <li>用 QueryBuilder 写一个复杂的查询条件（多字段、时间范围、子条件组）</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>SysUserServiceImpl.java:300-350</code> — 观察 insertUser/updateUser 的事务和关联处理模式</div>
+<div class="reminder">💡 有疑问？直接问我。例如："为什么批量删除用户时不用 insertBatch 而是一个个删关联？" 或 "如何给现有模块增加远程调用接口？"</div>
+
+</body>
+</html>

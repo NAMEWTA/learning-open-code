@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 版本仲裁与 flatten 插件 — ${revision} 变量与 CI Friendly 机制</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .insight { background: #ecfdf3; border-left: 3px solid #10b981; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#f3e5f5; color:#7b1fa2; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 版本仲裁与 flatten 插件 <span class="tag">CI Friendly</span></h1>
+
+<div class="mission">
+<b>本节目标</b>：学完你能够解释 <code>${revision}</code> 变量的 CI Friendly 机制、flatten-maven-plugin 的 <code>resolveCiFriendliesOnly</code> 工作模式、Maven 依赖仲裁的"胜者选择"规则，以及 BOM 如何绕过仲裁不确定性来锁定版本。
+</div>
+
+<p>上一课我们讲到 <code>ruoyi-common-bom</code> 管理 23 个模块的版本，所有版本号都写成了 <code>${revision}</code>。但这个变量最终必须变成真实的版本号（如 <code>6.0.0-BETA</code>）才能发布到 Maven 仓库。这节课就来解开这个"变脸"过程。</p>
+
+<h2>一、${revision} — Maven 3.2+ 的 CI Friendly 变量</h2>
+
+<p>传统 Maven 项目的版本号直接在 <code>&lt;version&gt;</code> 标签中硬编码：</p>
+
+<pre><code>&lt;!-- 传统方式: 版本号硬编码 -->
+&lt;version&gt;6.0.0-BETA&lt;/version&gt;
+
+&lt;!-- CI Friendly 方式: 用变量占位 -->
+&lt;version&gt;${revision}&lt;/version&gt;
+&lt;properties&gt;
+    &lt;revision&gt;6.0.0-BETA&lt;/revision&gt;
+&lt;/properties&gt;</code></pre>
+
+<p>Maven 3.2+ 引入了三个 CI Friendly 变量：</p>
+
+<table>
+<tr><th>变量</th><th>含义</th><th>典型用途</th></tr>
+<tr><td><code>${revision}</code></td><td>项目的主版本号</td><td>日常开发：6.0.0-BETA、1.0.0</td></tr>
+<tr><td><code>${sha1}</code></td><td>Git commit SHA1</td><td>快照版本：1.0.0-abc1234</td></tr>
+<tr><td><code>${changelist}</code></td><td>版本后缀标识</td><td>区分环境：-SNAPSHOT、-RC1、-M1</td></tr>
+</table>
+
+<p>使用这种机制的<strong>最大好处</strong>是可以在命令行动态修改版本，而不需要修改任何 POM 文件：</p>
+
+<pre><code># CI/CD 流水线中动态注入版本号
+mvn clean deploy -Drevision=6.0.0-RELEASE
+
+# 日常开发用快照版本
+mvn clean install -Drevision=6.0.0-SNAPSHOT
+
+# 打 tag 发布时用正式版本
+mvn clean deploy -Drevision=6.0.0</code></pre>
+
+<p>在 RuoYi-Vue-Plus 中，<code>${revision}</code> 的定义位于根 POM 的 <code>&lt;properties&gt;</code> 段：</p>
+
+<pre><code>&lt;!-- RuoYi-Vue-Plus/pom.xml -->
+&lt;properties&gt;
+    &lt;revision&gt;6.0.0-BETA&lt;/revision&gt;   &lt;!-- 全项目统一版本号 -->
+    &lt;java.version&gt;21&lt;/java.version&gt;
+    &lt;spring-boot.version&gt;4.1.0&lt;/spring-boot.version&gt;
+    &lt;!-- ... 其他属性 ... -->
+&lt;/properties&gt;
+
+&lt;groupId&gt;org.dromara&lt;/groupId&gt;
+&lt;artifactId&gt;ruoyi-vue-plus&lt;/artifactId&gt;
+&lt;version&gt;${revision}&lt;/version&gt;         &lt;!-- 这里使用变量 --></code></pre>
+
+<div class="side">
+<b>注意</b>：BOM 的 pom.xml（<code>ruoyi-common-bom/pom.xml</code>）也在自己的 <code>&lt;properties&gt;</code> 中定义了 <code>&lt;revision&gt;6.0.0-BETA&lt;/revision&gt;</code>。因为 BOM 是一个<strong>独立工件</strong>（没有 parent），不能依赖父 POM 的属性继承，必须在本地声明。
+</div>
+
+<h2>二、问题来了：变量不能直接发布</h2>
+
+<p>如果你直接执行 <code>mvn deploy</code>，发布到 Maven 仓库的 POM 文件会<strong>仍然包含 <code>${revision}</code> 变量</strong>：</p>
+
+<pre><code>&lt;!-- 发布后的 POM（有问题的版本） -->
+&lt;groupId&gt;org.dromara&lt;/groupId&gt;
+&lt;artifactId&gt;ruoyi-common-bom&lt;/artifactId&gt;
+&lt;version&gt;${revision}&lt;/version&gt;     &lt;!-- 变量未被替换！ -->
+&lt;!-- ...
+&lt;dependency&gt;
+    &lt;version&gt;${revision}&lt;/version&gt;  &lt;!-- 下游消费者无法解析这个变量 -->
+&lt;/dependency&gt;
+--&gt;</code></pre>
+
+<p>下游消费者（引入 ruoyi-common-bom 的项目）没有任何地方定义了 <code>${revision}</code>，Maven 解析时会直接<strong>报错</strong>。这就是为什么需要 <strong>flatten-maven-plugin</strong>。</p>
+
+<h2>三、flatten-maven-plugin — 变量的"替身术"</h2>
+
+<p>flatten-maven-plugin（版本 1.7.3）是 Maven 官方出品的插件，它在构建过程中生成一个"扁平化"的 POM——把 <code>${revision}</code> 等变量替换为真实值。</p>
+
+<p>RuoYi-Vue-Plus 的根 POM 中配置了该插件：</p>
+
+<pre><code>&lt;!-- RuoYi-Vue-Plus/pom.xml 的 pluginManagement 段 -->
+&lt;plugin&gt;
+    &lt;groupId&gt;org.codehaus.mojo&lt;/groupId&gt;
+    &lt;artifactId&gt;flatten-maven-plugin&lt;/artifactId&gt;
+    &lt;version&gt;${flatten-maven-plugin.version}&lt;/version&gt;  &lt;!-- 1.7.3 -->
+    &lt;configuration&gt;
+        &lt;updatePomFile&gt;true&lt;/updatePomFile&gt;            &lt;!-- 写回原 POM -->
+        &lt;flattenMode&gt;resolveCiFriendliesOnly&lt;/flattenMode&gt;
+    &lt;/configuration&gt;
+    &lt;executions&gt;
+        &lt;execution&gt;
+            &lt;id&gt;flatten&lt;/id&gt;
+            &lt;phase&gt;process-resources&lt;/phase&gt;          &lt;!-- 在 compile 之前执行 -->
+            &lt;goals&gt;
+                &lt;goal&gt;flatten&lt;/goal&gt;
+            &lt;/goals&gt;
+        &lt;/execution&gt;
+        &lt;execution&gt;
+            &lt;id&gt;flatten.clean&lt;/id&gt;
+            &lt;phase&gt;clean&lt;/phase&gt;
+            &lt;goals&gt;
+                &lt;goal&gt;clean&lt;/goal&gt;
+            &lt;/goals&gt;
+        &lt;/execution&gt;
+    &lt;/executions&gt;
+&lt;/plugin&gt;</code></pre>
+
+<p><strong>核心配置解析：</strong></p>
+
+<table>
+<tr><th>配置项</th><th>值</th><th>含义</th></tr>
+<tr><td><code>flattenMode</code></td><td><code>resolveCiFriendliesOnly</code></td><td><strong>最保守模式</strong>：只替换 ${revision}/${sha1}/${changelist}，保留其它所有内容</td></tr>
+<tr><td><code>updatePomFile</code></td><td><code>true</code></td><td>用扁平化后的 POM 覆盖原始 POM（install/deploy 时生效）</td></tr>
+<tr><td><code>phase</code></td><td><code>process-resources</code></td><td>在 <code>compile</code> 之前执行，确保编译时版本号已正确</td></tr>
+</table>
+
+<p>flatten-maven-plugin 提供四种 flattenMode：</p>
+
+<table>
+<tr><th>模式</th><th>行为</th><th>使用场景</th></tr>
+<tr><td><code>resolveCiFriendliesOnly</code></td><td>只替换 CI 变量（revision/sha1/changelist）</td><td><b>RuoYi 的选择</b>：改动最小，风险最低</td></tr>
+<tr><td><code>oss</code></td><td>简化到 Maven Central 要求的最小 POM</td><td>发布到 Maven Central</td></tr>
+<tr><td><code>ossrh</code></td><td>类似 oss，但保留更多信息</td><td>发布到 Sonatype OSSRH</td></tr>
+<tr><td><code>defaults</code></td><td>移除所有构建相关配置</td><td>消费者只需要依赖信息</td></tr>
+<tr><td><code>clean</code></td><td>最激进：只保留 GAV + dependencies</td><td>极简消费者 POM</td></tr>
+</table>
+
+<div class="insight">
+<b>设计洞察</b>：为什么 RuoYi 选择 <code>resolveCiFriendliesOnly</code> 而不是 <code>oss</code>？因为 <code>resolveCiFriendliesOnly</code> 只动变量，不动 POM 结构，对构建过程的影响最小。如果用 <code>oss</code> 模式，发布后的 POM 会丢失 parent 声明、properties、plugin 配置等信息——这对当前多模块项目的内部引用会造成破坏。选择最保守的模式，是"先保证正确，再考虑精简"的工程实践。
+</div>
+
+<h2>四、完整工作流：从变量到发布</h2>
+
+<p>下面是一次完整构建的生命周期：</p>
+
+<div class="flow">【Step 1: 声明阶段】
+pom.xml 源码中:
+  &lt;version&gt;${revision}&lt;/version&gt;
+  &lt;properties&gt;&lt;revision&gt;6.0.0-BETA&lt;/revision&gt;&lt;/properties&gt;
+
+         │ mvn clean install / deploy
+         ▼
+
+【Step 2: process-resources 阶段】
+flatten-maven-plugin 启动
+  ├── 扫描 POM 中的 ${revision}、${sha1}、${changelist}
+  ├── 从 properties 或 -D 参数中读取真实值
+  ├── 生成 .flattened-pom.xml（扁平化副本）
+  └── 内容变为:
+      &lt;version&gt;6.0.0-BETA&lt;/version&gt;
+      &lt;dependency&gt;
+        &lt;version&gt;6.0.0-BETA&lt;/version&gt;
+      &lt;/dependency&gt;
+
+         │ updatePomFile=true
+         ▼
+
+【Step 3: install/deploy 阶段】
+  ├── 原始 pom.xml 被 .flattened-pom.xml 覆盖（仅在本次构建周期）
+  ├── 扁平化后的 POM 随工件一起安装/发布到仓库
+  └── 下游消费者看到的 POM 中不再有任何 ${} 变量
+
+【Step 4: clean 阶段（可选）】
+flatten.clean 执行:
+  └── 清理 .flattened-pom.xml 临时文件</div>
+
+<p><strong>关键规则</strong>：原始 pom.xml（磁盘上的文件）不会被永久修改。扁平化后的 POM 只在<strong>本次 Maven 构建周期的内存和 install/deploy 输出</strong>中生效。</p>
+
+<h2>五、Maven 依赖仲裁（Dependency Mediation）</h2>
+
+<p>有了统一的版本管理机制，还有一个问题要解决：当同一依赖的多个版本出现在依赖树中时，Maven 如何选择？这就是<strong>依赖仲裁（Dependency Mediation）</strong>。</p>
+
+<p>Maven 的依赖仲裁遵循两条规则：</p>
+
+<blockquote>
+<strong>规则一（距离优先）</strong>：离根节点路径最短的版本胜出。<br>
+<strong>规则二（先声明优先）</strong>：当路径深度相同时，在 POM 中先声明的版本胜出。
+</blockquote>
+
+<p>用一个例子说清楚：</p>
+
+<div class="flow">【场景】项目 A 依赖 B 和 C，B 和 C 各自传递依赖了不同版本的 X。
+
+A (root)
+├── B (depth=1)
+│   └── X:1.0  (depth=2)
+└── C (depth=1)
+    └── D (depth=2)
+        └── X:2.0  (depth=3)
+
+【仲裁结果】X:1.0 胜出！
+理由: X:1.0 的深度=2, X:2.0 的深度=3, 距离优先 → 选 1.0
+
+【另一个场景】两条路径深度相同:
+A (root)
+├── B (depth=1)
+│   └── X:1.0  (depth=2)
+└── C (depth=1)
+    └── X:2.0  (depth=2)
+
+【仲裁结果】X:1.0 胜出！（假设 B 在 POM 中先于 C 声明）
+理由: 深度相同 → 先声明优先 → 谁在 &lt;dependencies&gt; 中先出现谁赢</code></pre>
+
+<div class="side">
+<b>危险提示</b>：依赖仲裁的"先声明优先"规则是不可靠的——你调整一下依赖顺序，版本选择就可能改变。这种不确定性正是需要 BOM 来消除的。
+</div>
+
+<h2>六、BOM 如何绕过仲裁的不确定性</h2>
+
+<p>依赖仲裁的不确定性来自于<strong>传递依赖的版本不可控</strong>。BOM 的解决方案是<strong>在根节点（最近祖先）就锁定版本</strong>：</p>
+
+<pre><code>&lt;!-- 根 POM 导入 BOM，在 dependencyManagement 中锁定版本 -->
+&lt;dependencyManagement&gt;
+    &lt;dependencies&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.dromara&lt;/groupId&gt;
+            &lt;artifactId&gt;ruoyi-common-bom&lt;/artifactId&gt;
+            &lt;version&gt;${revision}&lt;/version&gt;
+            &lt;type&gt;pom&lt;/type&gt;
+            &lt;scope&gt;import&lt;/scope&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;</code></pre>
+
+<p>BOM 的工作原理是<strong>抢占距离最近的"声明位"</strong>：</p>
+
+<div class="flow">【无 BOM 的情况 — 依赖仲裁发挥】
+项目 A
+├── dependencyManagement: (空)
+├── 依赖 B (传递 X:1.0, depth=2)
+└── 依赖 C (传递 X:2.0, depth=2)
+→ Maven 仲裁: 先声明者胜出 → 不确定!
+
+【有 BOM 的情况 — 版本被锁定】
+项目 A
+├── dependencyManagement: X:3.0 (depth=0)  ← BOM 锁定的版本
+├── 依赖 B (传递 X:1.0, depth=2)
+└── 依赖 C (传递 X:2.0, depth=2)
+→ Maven 仲裁: dependencyManagement 的深度=0, 最近祖先胜出 → X:3.0!</div>
+
+<p>这就是 <strong>dependencyManagement 的"override"效应</strong>——不管传递依赖带来什么版本，dependencyManagement 中声明的版本一定赢，因为它位于依赖树的最近祖先位置。</p>
+
+<h2>七、完整链路：从根 POM 到子模块的版本解析</h2>
+
+<p>把前两课的内容串成一条完整的依赖解析链路：</p>
+
+<div class="flow">【全链路版本解析】
+
+1. 根 POM (RuoYi-Vue-Plus/pom.xml)
+   └── dependencyManagement
+       └── import ruoyi-common-bom (scope=import, type=pom)
+           └── 导入 23 个 common 模块的版本声明
+
+2. BOM (ruoyi-common-bom/pom.xml)
+   └── dependencyManagement
+       ├── ruoyi-common-core:${revision}   ← 变量占位
+       ├── ruoyi-common-redis:${revision}
+       └── ... (21 more)
+
+3. flatten-maven-plugin (process-resources 阶段)
+   └── ${revision} → 6.0.0-BETA
+   └── 生成 .flattened-pom.xml
+
+4. 子模块 (ruoyi-system/pom.xml)
+   └── dependencies
+       └── ruoyi-common-core
+           └── 继承链查找: parent → root pom → BOM → 版本=6.0.0-BETA
+
+5. Maven 依赖仲裁
+   └── dependencyManagement 声明在 depth=0
+   └── 所有传递依赖无法覆盖 → 版本被锁定</div>
+
+<p>这五种机制环环相扣：<code>${revision}</code> 提供灵活性，<code>flatten</code> 保证发布正确性，<code>dependencyManagement</code> 统一版本声明，<code>scope=import</code> 实现 BOM 导入，<code>依赖仲裁规则</code> 确保锁定版本不会被覆盖。</p>
+
+<h2>八、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. flatten-maven-plugin 的 <code>resolveCiFriendliesOnly</code> 模式会替换哪些变量？</p>
+<span class="opt">A. 所有 ${} 形式的变量</span>
+<span class="opt">B. 仅 ${revision}、${sha1}、${changelist}</span>
+<span class="opt">C. 仅 ${project.version}</span>
+<span class="opt">D. ${revision} 和 ${java.version}</span>
+<details><summary>看答案</summary><b>B</b>。resolveCiFriendliesOnly 是最保守的模式，只替换 Maven 定义的三个 CI Friendly 变量：${revision}、${sha1}、${changelist}。其它属性变量（如 ${spring-boot.version}）保持不变。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 如果不用 flatten 插件，直接发布含 <code>${revision}</code> 的 POM 会怎样？</p>
+<span class="opt">A. 正常使用，Maven 会自动查找 revision 属性</span>
+<span class="opt">B. 下游消费者因找不到 ${revision} 定义而报错</span>
+<span class="opt">C. Maven 自动用 1.0.0 作为默认版本</span>
+<span class="opt">D. 只在 IDE 中有警告，不影响构建</span>
+<details><summary>看答案</summary><b>B</b>。下游消费者的 POM 中没有定义 &lt;revision&gt; 属性，Maven 解析 ${revision} 时找不到值会直接报错。这就是 flatten 插件必须存在的原因——把变量替换为真实值。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. flatten-maven-plugin 在哪个 Maven 生命周期阶段执行？</p>
+<span class="opt">A. validate</span>
+<span class="opt">B. process-resources</span>
+<span class="opt">C. compile</span>
+<span class="opt">D. package</span>
+<details><summary>看答案</summary><b>B. process-resources</b>。这个阶段在 compile 之前，确保编译时类路径中的版本号已经是真实值。clean 时有另一个 execution（flatten.clean）在 clean 阶段执行。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. Maven 依赖仲裁中，如果两条依赖路径深度相同，哪个版本胜出？</p>
+<span class="opt">A. 版本号更高的胜出</span>
+<span class="opt">B. 版本号更低的胜出</span>
+<span class="opt">C. 在 POM 中先声明的依赖所引入的版本胜出</span>
+<span class="opt">D. 随机选择</span>
+<details><summary>看答案</summary><b>C</b>。Maven 的仲裁规则是：路径深度相同时，"先声明优先"（first-declared-wins）。这也是为什么需要 BOM——因为依赖声明顺序容易被无意改动，BOM 在 depth=0 的 dependencyManagement 锁定版本可以完全绕过仲裁。</details>
+</div>
+
+<div class="quiz">
+<p>Q5. BOM 通过在什么位置锁定版本，从而绕过依赖仲裁的不确定性？</p>
+<span class="opt">A. 在每个子模块的 dependencies 中</span>
+<span class="opt">B. 在根 POM（或 parent POM）的 dependencyManagement 中（depth=0）</span>
+<span class="opt">C. 在 Maven settings.xml 中</span>
+<span class="opt">D. 通过 maven-enforcer-plugin 强制检查</span>
+<details><summary>看答案</summary><b>B</b>。dependencyManagement 中的版本声明位于依赖树的最顶层（depth=0），根据"距离优先"规则，任何传递依赖（depth >= 1）的版本都无法覆盖它。这就是 BOM 锁定版本的底层原理。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：(1) 阅读根 POM 中 flatten-maven-plugin 的完整配置——<code>RuoYi-Vue-Plus/pom.xml</code> 的 pluginManagement 段；(2) 观察 BOM 在本地仓库中的扁平化结果——执行 <code>mvn clean install</code> 后查看 <code>~/.m2/repository/org/dromara/ruoyi-common-bom/6.0.0-BETA/ruoyi-common-bom-6.0.0-BETA.pom</code>，确认所有 ${revision} 已被替换为 6.0.0-BETA。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「如果我想在 CI 中把版本号改成 6.0.1，需要改哪些文件？」「resolveCiFriendliesOnly 和 oss 模式的实际区别是什么——发布后的 POM 少了哪些内容？」「如果 flatten 插件出 bug 没替换变量，Maven 会有什么样的错误提示？」</div>
+
+<div class="nav">课程 02 / ruoyi-common-bom 模块教学 · 上一课：BOM 机制与依赖管理 · 你已经完成了 ruoyi-common-bom 模块的全部课程</div>
+
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>04 运行时入口 — 装配、切面与拦截器</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>04 运行时入口 — 装配、切面与拦截器</h1>
+
+<blockquote><strong>本节目标：</strong>你能画出"注解 → AOP → ThreadLocal → 拦截器"的数据流图，理解两个 Spring Bean 如何协作完成注解传递。</blockquote>
+
+<h2>双通道协作模型</h2>
+
+<p>数据权限在运行时靠两个独立的 Spring Bean 协作，缺一不可：</p>
+
+<pre><code>1. AOP 切面（DataPermissionPointcutAdvisor）
+   职责：在 Mapper 方法被调用前，把 @DataPermission 注解塞进 ThreadLocal
+   触发时机：Spring AOP 代理拦截到 Mapper 方法调用
+
+2. MyBatis 拦截器（PlusDataPermissionInterceptor）
+   职责：在 SQL 发给 JDBC 前，从 ThreadLocal 取注解，改写 SQL
+   触发时机：MyBatis Executor → StatementHandler → beforeQuery / beforePrepare</code></pre>
+
+<p>两者都在 <code>MybatisPlusConfig.java</code> 中装配：</p>
+
+<pre><code>// MybatisPlusConfig.java:46-55 — 拦截器链装配
+@Bean
+public MybatisPlusInterceptor mybatisPlusInterceptor() {
+    MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+    interceptor.addInnerInterceptor(dataPermissionInterceptor());  // ① 数据权限（第一个！）
+    interceptor.addInnerInterceptor(paginationInnerInterceptor()); // ② 分页
+    interceptor.addInnerInterceptor(optimisticLockerInnerInterceptor()); // ③ 乐观锁
+    return interceptor;
+}
+
+// MybatisPlusConfig.java:67-71 — AOP 切面装配
+@Bean
+@Role(BeanDefinition.ROLE_INFRASTRUCTURE)
+public DataPermissionPointcutAdvisor dataPermissionPointcutAdvisor() {
+    return new DataPermissionPointcutAdvisor();
+}</code></pre>
+
+<p><strong>数据权限必须是第一个 InnerInterceptor</strong>——如果分页插件先拦截，SQL 已经被改写成分页查询了，数据权限的 WHERE 拼装就可能拼到错误的位置。</p>
+
+<h2>通道一：AOP 切面 — 注解入 ThreadLocal</h2>
+
+<p>切面由三个类组成：Advisor 组装 Advice+Pointcut → Pointcut 匹配 → Advice 执行。</p>
+
+<h3>Pointcut：谁该被拦截？</h3>
+
+<p><code>DataPermissionPointcut.java:24-34</code> 判断逻辑：</p>
+
+<pre><code>public boolean matches(Method method, Class&lt;?&gt; targetClass) {
+    // 1. 方法上有 @DataPermission 注解 → 命中
+    if (method.isAnnotationPresent(DataPermission.class)) {
+        return true;
+    }
+    // 2. 目标类（处理 JDK 代理）→ 接口上有 @DataPermission → 命中
+    Class&lt;?&gt; targetClassRef = resolveTargetClass(targetClass);
+    return targetClassRef.isAnnotationPresent(DataPermission.class);
+}</code></pre>
+
+<p><strong>关键点：</strong>MyBatis 的 Mapper 是 JDK 动态代理对象。Spring AOP 拿到的 <code>targetClass</code> 是 <code>$ProxyXX</code>，<code>isAnnotationPresent</code> 查不到注解。所以 <code>resolveTargetClass()</code>（第 42-55 行）通过 <code>targetClass.getInterfaces()</code> 遍历代理实现的接口，在真实 Mapper 接口上找注解。</p>
+
+<h3>Advice：把注解塞进 ThreadLocal</h3>
+
+<p><code>DataPermissionAdvice.java:26-37</code>：</p>
+
+<pre><code>public Object invoke(MethodInvocation invocation) throws Throwable {
+    Object target = invocation.getThis();
+    Method method = invocation.getMethod();
+    // ① 把注解放进 ThreadLocal
+    DataPermissionHelper.setPermission(getDataPermissionAnnotation(target, method));
+    try {
+        // ② 执行真正的 Mapper 方法（这时 MyBatis 拦截器才会触发）
+        return invocation.proceed();
+    } finally {
+        // ③ 不管成功失败都清理 ThreadLocal
+        DataPermissionHelper.removePermission();
+    }
+}</code></pre>
+
+<p><code>getDataPermissionAnnotation()</code>（第 47-60 行）的查找优先级：方法注解 > 类注解。如果是 JDK 代理（<code>Proxy.isProxyClass</code>），走 <code>getProxyClassDataPermission()</code> 到代理的接口上找。</p>
+
+<h2>通道二：MyBatis 拦截器 — SQL 改写</h2>
+
+<p><code>PlusDataPermissionInterceptor.java:36-173</code> 继承 MyBatis-Plus 的 <code>BaseMultiTableInnerInterceptor</code>。</p>
+
+<h3>SELECT 拦截：beforeQuery</h3>
+
+<pre><code>// Interceptor:55-67
+public void beforeQuery(Executor executor, MappedStatement ms, ...) {
+    // ① MyBatis-Plus 的忽略标记 → 跳过
+    if (InterceptorIgnoreHelper.willIgnoreDataPermission(ms.getId())) return;
+    // ② ThreadLocal 里没注解 → 跳过
+    if (dataPermissionHandler.invalid()) return;
+    // ③ 解析 SQL，内部回调 processSelect → setWhere
+    PluginUtils.MPBoundSql mpBs = PluginUtils.mpBoundSql(boundSql);
+    mpBs.sql(parserSingle(mpBs.sql(), ms.getId()));
+}</code></pre>
+
+<h3>UPDATE/DELETE 拦截：beforePrepare</h3>
+
+<pre><code>// Interceptor:77-95
+public void beforePrepare(StatementHandler sh, ...) {
+    SqlCommandType sct = ms.getSqlCommandType();
+    if (sct == SqlCommandType.UPDATE || sct == SqlCommandType.DELETE) {
+        if (InterceptorIgnoreHelper.willIgnoreDataPermission(ms.getId())) return;
+        if (dataPermissionHandler.invalid()) return;
+        mpBs.sql(parserMulti(mpBs.sql(), ms.getId())); // 回调 processUpdate/processDelete
+    }
+}</code></pre>
+
+<h3>processSelect / processUpdate / processDelete：回调 Handler</h3>
+
+<pre><code>// Interceptor:106-113
+protected void processSelect(Select select, int index, String sql, Object obj) {
+    if (select instanceof PlainSelect) {
+        this.setWhere((PlainSelect) select, (String) obj);
+    }
+}
+
+// Interceptor:153-157
+protected void setWhere(PlainSelect plainSelect, String mappedStatementId) {
+    Expression sqlSegment = dataPermissionHandler.getSqlSegment(plainSelect.getWhere(), true); // isSelect=true
+    if (null != sqlSegment) plainSelect.setWhere(sqlSegment);
+}
+
+// Interceptor:124-128 (update)
+protected void processUpdate(Update update, int index, String sql, Object obj) {
+    Expression sqlSegment = dataPermissionHandler.getSqlSegment(update.getWhere(), false); // isSelect=false
+    if (null != sqlSegment) update.setWhere(sqlSegment);
+}</code></pre>
+
+<h2>ThreadLocal 中的数据：DataPermissionHelper</h2>
+
+<p><code>DataPermissionHelper.java</code> 有两个存储空间：</p>
+
+<table>
+<tr><th>存储</th><th>作用</th><th>生命周期</th></tr>
+<tr><td><code>PERMISSION_CACHE</code> (ThreadLocal)</td><td>当前线程正在执行的 Mapper 的 @DataPermission 注解对象</td><td>AOP Advice.setPermission → removePermission</td></tr>
+<tr><td><code>getContext()</code> (Sa-Token SaStorage)</td><td>SpEL 变量 Map，存放 user、access 等</td><td>整个 HTTP 请求生命周期</td></tr>
+</table>
+
+<p><code>invalid()</code>（Handler:328-330）就是检查 <code>PERMISSION_CACHE.get() == null</code>——没注解就跳过整个改写流程。</p>
+
+<div class="warn"><strong>关键认知：</strong>数据权限不生效的第一个排查点永远是"ThreadLocal 里有没有注解"。如果 Mapper 方法没标 <code>@DataPermission</code>，AOP 切面不会拦截，ThreadLocal 就是 null，拦截器直接跳过。这解释了为什么框架自带的通用 Mapper 方法（如 <code>selectById</code>）不自动过滤——它们没标注解。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/core/aop.html">Spring AOP 官方文档</a> — 理解 Pointcut、Advice、Advisor 三者关系，以及 JDK 动态代理与 CGLIB 的区别，这对理解 Mapper 接口的代理匹配至关重要。</div>
+<div class="reminder">💡 试试问"如果切面和拦截器都正常工作了，但权限还是没生效，可能是哪里出了问题？"</div>
+
+</body>
+</html>

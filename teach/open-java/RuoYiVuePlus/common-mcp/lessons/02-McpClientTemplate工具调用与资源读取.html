@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第2课 · McpClientTemplate工具调用与资源读取</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第2课 · McpClientTemplate 工具调用与资源读取</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>学完你能逐行读懂 <code>McpClientTemplate</code> 的 7 个方法、解释为什么业务代码不直接操作 <code>List&lt;McpSyncClient&gt;</code>、区分 <code>McpToolCallResult</code> 和 <code>McpResourceReadResult</code> 的结构差异、说出 Tool 与 Resource 两种 MCP 原语在 Java 调用层面的区别，并能在实际业务中正确调用 <code>callTool()</code> 和 <code>readResource()</code>。</div>
+
+<p>上一课我们建立了 MCP 协议的全局认知，理解了 Spring AI MCP 和自动配置的机制。这一课打开 <code>McpClientTemplate</code>——这个模块的真正「肉」——逐方法拆解它如何把底层的 <code>McpSyncClient</code> 列表转化为业务代码可以舒适使用的 API。</p>
+
+<h2>1. McpClientTemplate 概览：为什么需要它</h2>
+
+<p>回顾一下：Spring AI MCP 在 Bootstrap 阶段为每个配置的 MCP Server 连接创建一个 <code>McpSyncClient</code> Bean。如果你的项目连接了 3 个 MCP Server，Spring 容器中就有 3 个 <code>McpSyncClient</code> 类型的 Bean。</p>
+
+<p>如果业务代码<strong>直接使用这些 Bean</strong>，会出现以下痛点：</p>
+
+<ul>
+  <li><strong>遍历嘈杂</strong>：每次调用工具都要写 <code>for (McpSyncClient client : clients) { client.callTool(...); }</code>，代码冗余。</li>
+  <li><strong>路由困难</strong>：想调用"weather-server 上的 get_forecast 工具"这个特定目标时，需要手写按 serverName 筛选的逻辑。</li>
+  <li><strong>返回格式不一致</strong>：底层 <code>McpSchema.CallToolResult</code> 和 <code>McpSchema.ReadResourceResult</code> 不包含 serverName 字段——当你有多个 Server 返回结果时，无法区分哪个结果来自哪个 Server。</li>
+  <li><strong>类型转换繁琐</strong>：每次都要把 <code>McpSchema.CallToolResult</code> 的 <code>content</code> 字段、<code>structuredContent</code> 字段转成业务需要的格式。</li>
+</ul>
+
+<p><strong>McpClientTemplate 的出现就是解决这四个痛点。</strong>它用不到 132 行代码，提供了 7 个简洁方法：</p>
+
+<table>
+<tr><th>方法签名</th><th>返回类型</th><th>模式</th><th>说明</th></tr>
+<tr>
+  <td><code>listTools()</code></td>
+  <td><code>Map&lt;String, List&lt;String&gt;&gt;</code></td>
+  <td>广播</td>
+  <td>列出所有 Server 的所有工具</td>
+</tr>
+<tr>
+  <td><code>callTool(toolName, arguments)</code></td>
+  <td><code>Map&lt;String, McpToolCallResult&gt;</code></td>
+  <td>广播</td>
+  <td>在所有 Server 上调用同名工具</td>
+</tr>
+<tr>
+  <td><code>callTool(serverName, toolName, arguments)</code></td>
+  <td><code>Optional&lt;McpToolCallResult&gt;</code></td>
+  <td>指定</td>
+  <td>在指定 Server 上调用工具</td>
+</tr>
+<tr>
+  <td><code>readResource(uri)</code></td>
+  <td><code>Map&lt;String, McpResourceReadResult&gt;</code></td>
+  <td>广播</td>
+  <td>从所有 Server 读取同名资源</td>
+</tr>
+<tr>
+  <td><code>readResource(serverName, uri)</code></td>
+  <td><code>Optional&lt;McpResourceReadResult&gt;</code></td>
+  <td>指定</td>
+  <td>从指定 Server 读取资源</td>
+</tr>
+<tr>
+  <td><code>findClient(serverName)</code></td>
+  <td><code>Optional&lt;McpSyncClient&gt;</code></td>
+  <td>查找</td>
+  <td>按名称查找特定 Client</td>
+</tr>
+<tr>
+  <td><code>getClients()</code></td>
+  <td><code>List&lt;McpSyncClient&gt;</code></td>
+  <td>透传</td>
+  <td>获取全部 Client 列表（逃生舱）</td>
+</tr>
+</table>
+
+<p>你会发现一个清晰的模式：<strong>每个核心操作都有两个重载——「广播版」和「指定 Server 版」</strong>。广播版遍历所有 Client 并返回 Map，key 是 serverName；指定版通过 findClient 定位单个 Client 并返回 Optional。</p>
+
+<h2>2. listTools()：发现所有可用工具</h2>
+
+<p>方法源码：</p>
+
+<pre>public Map&lt;String, List&lt;String&gt;&gt; listTools() {
+    Map&lt;String, List&lt;String&gt;&gt; result = new LinkedHashMap&lt;&gt;();
+    for (McpSyncClient client : mcpSyncClients) {
+        List&lt;String&gt; tools = client.listTools().tools().stream()
+            .map(McpSchema.Tool::name)
+            .toList();
+        result.put(getServerName(client), tools);
+    }
+    return result;
+}</pre>
+
+<p>执行流程：</p>
+<ol>
+  <li>遍历 <code>mcpSyncClients</code>（所有已连接的 MCP Server）。</li>
+  <li>对每个 Client，调用 <code>client.listTools()</code> 获取该 Server 的全部工具列表。</li>
+  <li>从 <code>McpSchema.ListToolsResult</code> 中提取 <code>.tools()</code>，再映射为工具名称的字符串列表。</li>
+  <li>以 serverName 为 key、工具名列表为 value，存入 LinkedHashMap（保持连接顺序）。</li>
+</ol>
+
+<p>这个方法通常用于<strong>启动时或调试时</strong>查看「当前有哪些 MCP Server 可用、每个 Server 暴露了哪些工具」。实际例子：</p>
+
+<pre>// 启动时打印所有可用工具
+Map&lt;String, List&lt;String&gt;&gt; allTools = template.listTools();
+// 输出可能是：
+// {weather-server=[get_forecast, get_alerts],
+//  filesystem-server=[read_file, list_directory, search_files]}</pre>
+
+<h2>3. callTool()：两种调用模式</h2>
+
+<p>这是本模块最核心的方法——<strong>一切 MCP 工具调用都通过它</strong>。两个重载覆盖了「广播调用」和「指定 Server 调用」两种场景。</p>
+
+<h3>3.1 指定 Server 调用（精确路由）</h3>
+
+<pre>public Optional&lt;McpToolCallResult&gt; callTool(
+        String serverName, String toolName, Map&lt;String, Object&gt; arguments) {
+    return findClient(serverName)
+        .map(client -> McpToolCallResult.of(serverName,
+            client.callTool(new McpSchema.CallToolRequest(toolName, arguments))));
+}</pre>
+
+<p>执行链路：</p>
+<ol>
+  <li><code>findClient(serverName)</code> → 从 <code>mcpSyncClients</code> 列表中按 serverName 查找目标 Client，返回 <code>Optional&lt;McpSyncClient&gt;</code>。找不到则返回 <code>Optional.empty()</code>。</li>
+  <li>如果找到 Client → <code>client.callTool(new McpSchema.CallToolRequest(toolName, arguments))</code> → 调用底层 MCP Client 的工具调用方法。</li>
+  <li><code>McpToolCallResult.of(serverName, callResult)</code> → 将底层 <code>CallToolResult</code> 包装为带 serverName 标记的项目结果对象。</li>
+  <li>如果找不到 Client → 返回 <code>Optional.empty()</code>。</li>
+</ol>
+
+<p><strong>关键类：CallToolRequest</strong></p>
+<p><code>McpSchema.CallToolRequest</code> 是 Spring AI MCP 定义的工具调用请求对象，封装了两个字段：</p>
+<ul>
+  <li><code>name()</code>：工具名称（String），对应 Server 上注册的工具名。</li>
+  <li><code>arguments()</code>：工具参数（Map&lt;String, Object&gt;），以键值对形式传递。</li>
+</ul>
+
+<p>构造示例：</p>
+<pre>new McpSchema.CallToolRequest("get_forecast", Map.of("city", "Beijing", "days", 7));</pre>
+
+<h3>3.2 广播调用（所有 Server）</h3>
+
+<pre>public Map&lt;String, McpToolCallResult&gt; callTool(
+        String toolName, Map&lt;String, Object&gt; arguments) {
+    Map&lt;String, McpToolCallResult&gt; result = new LinkedHashMap&lt;&gt;();
+    for (McpSyncClient client : mcpSyncClients) {
+        McpSchema.CallToolResult callResult =
+            client.callTool(new McpSchema.CallToolRequest(toolName, arguments));
+        result.put(getServerName(client),
+            McpToolCallResult.of(getServerName(client), callResult));
+    }
+    return result;
+}</pre>
+
+<p>广播版本<strong>遍历所有 Client</strong>，在每个 Server 上调用同一个工具名称和参数，返回一个 Map，key 为 serverName。这种模式适用于：你有多台数据库 MCP Server，想同时查询所有数据库的某个表状态；或者有多个文件系统 Server，想同时搜索一个文件。</p>
+
+<p><strong>注意</strong>：广播版不处理个别 Server 调用失败的情况——某个 Server 抛异常会直接向上传播。如需容错，业务代码应在调用外层 try-catch，或自己逐个调用指定版。</p>
+
+<h3>3.3 完整调用示例</h3>
+
+<pre>// 注入模板
+@Autowired
+private McpClientTemplate mcpClientTemplate;
+
+// 场景一：调用 weather-server 的天气查询工具
+Map&lt;String, Object&gt; args = Map.of("city", "Beijing", "days", 3);
+Optional&lt;McpToolCallResult&gt; result = mcpClientTemplate.callTool(
+    "weather-server", "get_forecast", args);
+
+result.ifPresent(r -> {
+    System.out.println("来源 Server：" + r.serverName());      // "weather-server"
+    System.out.println("是否出错：" + r.error());
+    System.out.println("文本内容：" + r.content());           // List&lt;Content&gt;
+    System.out.println("结构化数据：" + r.structuredContent()); // Object
+});
+
+// 场景二：在所有 Server 上调用 search 工具
+Map&lt;String, McpToolCallResult&gt; allResults = mcpClientTemplate.callTool(
+    "search", Map.of("keyword", "MCP协议"));
+// allResults.keySet() = ["weather-server", "filesystem-server", "database-server"]</pre>
+
+<h2>4. McpToolCallResult Record：工具调用结果的标准化包装</h2>
+
+<p>完整源码（<code>core/McpToolCallResult.java</code>）：</p>
+
+<pre>public record McpToolCallResult(
+    String serverName,
+    boolean error,
+    List&lt;McpSchema.Content&gt; content,
+    Object structuredContent
+) {
+    public static McpToolCallResult of(String serverName, McpSchema.CallToolResult result) {
+        return new McpToolCallResult(
+            serverName,
+            Boolean.TRUE.equals(result.isError()),
+            result.content(),
+            result.structuredContent()
+        );
+    }
+}</pre>
+
+<p><strong>字段解析</strong>：</p>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>来源</th><th>含义</th></tr>
+<tr>
+  <td><code>serverName</code></td>
+  <td><code>String</code></td>
+  <td>由 Template 从 <code>client.getServerInfo().name()</code> 获取</td>
+  <td><strong>核心附加值</strong>：标识结果来自哪个 MCP Server。底层 <code>CallToolResult</code> 没有这个字段</td>
+</tr>
+<tr>
+  <td><code>error</code></td>
+  <td><code>boolean</code></td>
+  <td>对应 <code>CallToolResult.isError()</code></td>
+  <td>工具执行是否出错。注意 <code>Boolean.TRUE.equals()</code> 的安全判空</td>
+</tr>
+<tr>
+  <td><code>content</code></td>
+  <td><code>List&lt;McpSchema.Content&gt;</code></td>
+  <td>对应 <code>CallToolResult.content()</code></td>
+  <td>工具返回的<strong>文本内容</strong>列表。每个 Content 是一个文本片段（类似 ChatMessage）</td>
+</tr>
+<tr>
+  <td><code>structuredContent</code></td>
+  <td><code>Object</code></td>
+  <td>对应 <code>CallToolResult.structuredContent()</code></td>
+  <td>工具返回的<strong>结构化数据</strong>（JSON Object），可以为 null</td>
+</tr>
+</table>
+
+<p><strong>为什么要有 content 和 structuredContent 两个字段？</strong></p>
+<p>这是 MCP 协议的设计：Tool 的返回可以同时包含「人类可读的文本说明」(<code>content</code>) 和「程序可处理的结构化数据」(<code>structuredContent</code>)。例如天气查询工具的返回：</p>
+<ul>
+  <li><code>content</code> 可能是：<code>"北京未来三天天气：晴天，22-30°C..."</code>（给 LLM 或人看）</li>
+  <li><code>structuredContent</code> 可能是：<code>{"city":"Beijing","forecasts":[{"date":"...","temp":22},...]}</code>（给程序解析）</li>
+</ul>
+
+<p><strong>与 CallToolResult 的对应关系</strong>：</p>
+
+<pre>
+Spring AI MCP (底层)                         ruoyi-common-mcp (本模块)
+─────────────────────                        ─────────────────────────
+McpSchema.CallToolResult                     McpToolCallResult
+  ├── .isError()          ──映射──►  .error()
+  ├── .content()          ──映射──►  .content()
+  ├── .structuredContent()──映射──►  .structuredContent()
+  └── (无 serverName)      ──新增──►  .serverName()  ← 这是本模块的附加值
+</pre>
+
+<p><strong>静态工厂方法 of() 的设计</strong>：使用静态工厂而非直接调用构造函数，提供了一层<strong>转换隔离</strong>——如果将来 <code>CallToolResult</code> 的 API 变化，只需修改这个工厂方法，所有调用方不受影响。同时它负责了 <code>Boolean.TRUE.equals(result.isError())</code> 的安全判空逻辑。</p>
+
+<h2>5. readResource()：从 MCP Server 读取数据</h2>
+
+<p>与 <code>callTool</code> 对称，<code>readResource</code> 也有广播版和指定 Server 版。</p>
+
+<h3>5.1 指定 Server 读取</h3>
+
+<pre>public Optional&lt;McpResourceReadResult&gt; readResource(String serverName, String uri) {
+    return findClient(serverName)
+        .map(client -> McpResourceReadResult.of(serverName,
+            client.readResource(new McpSchema.ReadResourceRequest(uri))));
+}</pre>
+
+<p>与 callTool 的结构几乎一样——先 <code>findClient</code>，再调用底层方法，再包装结果。区别仅在于底层调的是 <code>client.readResource()</code> 而非 <code>client.callTool()</code>。</p>
+
+<p><strong>关键类：ReadResourceRequest</strong></p>
+<p><code>McpSchema.ReadResourceRequest</code> 封装了资源 URI：</p>
+<ul>
+  <li><code>uri()</code>：资源地址（String），由 MCP Server 定义。例如 <code>"weather://cities/beijing"</code>、<code>"file:///documents/report.txt"</code>。</li>
+</ul>
+
+<p>注意：这个 URI 是 MCP 协议级的标识符，<strong>不一定对应文件系统路径</strong>。它是由 MCP Server 自定义的命名空间——Server 决定 <code>"weather://cities/beijing"</code> 映射到什么数据。</p>
+
+<h3>5.2 广播读取</h3>
+
+<pre>public Map&lt;String, McpResourceReadResult&gt; readResource(String uri) {
+    Map&lt;String, McpResourceReadResult&gt; result = new LinkedHashMap&lt;&gt;();
+    for (McpSyncClient client : mcpSyncClients) {
+        McpSchema.ReadResourceResult readResult =
+            client.readResource(new McpSchema.ReadResourceRequest(uri));
+        result.put(getServerName(client),
+            McpResourceReadResult.of(getServerName(client), readResult));
+    }
+    return result;
+}</pre>
+
+<p>在所有 Server 上读取同一个 URI 的资源。</p>
+
+<h3>5.3 完整调用示例</h3>
+
+<pre>// 读取 filesystem-server 上 .gitignore 文件内容
+Optional&lt;McpResourceReadResult&gt; resourceResult = mcpClientTemplate.readResource(
+    "filesystem-server", "file:///.gitignore");
+
+resourceResult.ifPresent(r -> {
+    System.out.println("来源 Server：" + r.serverName());   // "filesystem-server"
+    for (McpSchema.ResourceContents c : r.contents()) {
+        if (c instanceof McpSchema.TextResourceContents text) {
+            System.out.println("文本内容：" + text.text());
+        }
+    }
+});</pre>
+
+<h2>6. McpResourceReadResult Record：资源读取结果的标准化包装</h2>
+
+<p>完整源码（<code>core/McpResourceReadResult.java</code>）：</p>
+
+<pre>public record McpResourceReadResult(
+    String serverName,
+    List&lt;McpSchema.ResourceContents&gt; contents
+) {
+    public static McpResourceReadResult of(
+            String serverName, McpSchema.ReadResourceResult result) {
+        return new McpResourceReadResult(serverName, result.contents());
+    }
+}</pre>
+
+<p><strong>字段解析</strong>：</p>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>来源</th><th>含义</th></tr>
+<tr>
+  <td><code>serverName</code></td>
+  <td><code>String</code></td>
+  <td>由 Template 从 <code>client.getServerInfo().name()</code> 获取</td>
+  <td>标识资源内容来自哪个 MCP Server</td>
+</tr>
+<tr>
+  <td><code>contents</code></td>
+  <td><code>List&lt;McpSchema.ResourceContents&gt;</code></td>
+  <td>对应 <code>ReadResourceResult.contents()</code></td>
+  <td>资源内容列表。每个元素是 <code>ResourceContents</code> 的子类型</td>
+</tr>
+</table>
+
+<p><strong>ResourceContents 的两种子类型</strong>：</p>
+
+<table>
+<tr><th>类型</th><th>字段</th><th>适用场景</th></tr>
+<tr>
+  <td><code>TextResourceContents</code></td>
+  <td><code>uri()</code>、<code>mimeType()</code>、<code>text()</code></td>
+  <td><strong>文本资源</strong>：文件内容、JSON 响应、配置文本</td>
+</tr>
+<tr>
+  <td><code>BlobResourceContents</code></td>
+  <td><code>uri()</code>、<code>mimeType()</code>、<code>blob()</code></td>
+  <td><strong>二进制资源</strong>：图片、音频、PDF 等</td>
+</tr>
+</table>
+
+<p>解析时需要 <code>instanceof</code> 判断：</p>
+
+<pre>for (McpSchema.ResourceContents rc : result.contents()) {
+    if (rc instanceof McpSchema.TextResourceContents text) {
+        System.out.println(text.text());       // 文本内容
+    } else if (rc instanceof McpSchema.BlobResourceContents blob) {
+        byte[] data = blob.blob();             // 二进制数据
+    }
+}</pre>
+
+<p><strong>与 ReadResourceResult 的对应关系</strong>：</p>
+
+<pre>
+Spring AI MCP (底层)                          ruoyi-common-mcp (本模块)
+─────────────────────                         ─────────────────────────
+McpSchema.ReadResourceResult                  McpResourceReadResult
+  ├── .contents()         ──映射──►  .contents()
+  └── (无 serverName)      ──新增──►  .serverName()  ← 本模块的附加值
+</pre>
+
+<h2>7. findClient()：按名称定位的底层方法</h2>
+
+<pre>public Optional&lt;McpSyncClient&gt; findClient(String serverName) {
+    return mcpSyncClients.stream()
+        .filter(client -> serverName.equals(getServerName(client)))
+        .findFirst();
+}</pre>
+
+<p>这是 <code>callTool(serverName, ...)</code> 和 <code>readResource(serverName, ...)</code> 的底层依赖。它遍历 Client 列表，通过 <code>client.getServerInfo().name()</code> 匹配 serverName，返回第一个匹配的 Client。</p>
+
+<p><strong>serverName 的来源链路</strong>：</p>
+
+<pre>
+yml 配置的 key            →  serverInfo.name()  →  findClient 匹配  →  结果 Record.serverName
+"weather-server"          →  "weather-server"   →  按此名称过滤    →  "weather-server"
+</pre>
+
+<p>注意 <code>findFirst()</code> ——如果有多个 Client 返回了相同的 serverName（理论上不应出现，但以实际为准），只取第一个。这是防御性编码。</p>
+
+<h2>8. getServerName() 私有方法：名称解析</h2>
+
+<pre>private String getServerName(McpSyncClient client) {
+    McpSchema.Implementation serverInfo = client.getServerInfo();
+    if (serverInfo == null || serverInfo.name() == null) {
+        return "unknown";
+    }
+    return serverInfo.name();
+}</pre>
+
+<p>从 Client 的 ServerInfo 中提取名称。如果信息缺失（理论上不应发生，但防御性处理），返回 "unknown"。这确保了整个模板不会因为 Server 元信息缺失而 NPE。</p>
+
+<h2>9. Tool 与 Resource 的最终辨析</h2>
+
+<p>现在我们可以从「Java 调用方式」的角度彻底区分这两种 MCP 原语：</p>
+
+<table>
+<tr><th>维度</th><th>Tool（工具）</th><th>Resource（资源）</th></tr>
+<tr>
+  <td><strong>请求对象</strong></td>
+  <td><code>CallToolRequest(name, arguments)</code></td>
+  <td><code>ReadResourceRequest(uri)</code></td>
+</tr>
+<tr>
+  <td><strong>请求参数</strong></td>
+  <td>工具名称 + 业务参数 Map</td>
+  <td>资源 URI 字符串</td>
+</tr>
+<tr>
+  <td><strong>结果对象</strong></td>
+  <td><code>CallToolResult</code> → <code>McpToolCallResult</code></td>
+  <td><code>ReadResourceResult</code> → <code>McpResourceReadResult</code></td>
+</tr>
+<tr>
+  <td><strong>结果内容</strong></td>
+  <td>文本内容 (content) + 结构化数据 (structuredContent) + 错误标记 (isError)</td>
+  <td>资源内容列表 (contents)，每个是 Text 或 Blob</td>
+</tr>
+<tr>
+  <td><strong>Java 类比</strong></td>
+  <td>调用一个方法：<code>server.getForecast("Beijing", 7)</code></td>
+  <td>读取一个文件：<code>Files.readString(Path.of(uri))</code></td>
+</tr>
+<tr>
+  <td><strong>语义</strong></td>
+  <td>「请<strong>执行</strong>这个操作」</td>
+  <td>「请<strong>提供</strong>这个数据」</td>
+</tr>
+<tr>
+  <td><strong>有副作用？</strong></td>
+  <td>可能有（发邮件、写数据库）</td>
+  <td>一般无（纯读取）</td>
+</tr>
+</table>
+
+<div class="insight"><strong>💡 设计洞察：为什么 Tool 和 Resource 是两个独立原语？</strong><br>
+MCP 协议的设计者刻意把「执行操作」（Tool）和「读取数据」（Resource）分开，而不是像 REST 那样用 HTTP method（GET/POST/PUT/DELETE）区分。原因：<strong>给 LLM Agent 更清晰的指令</strong>。对 AI 来说，「调用一个函数并传入参数」和「读取一个 URI 的内容」是两种截然不同的认知模式——Tool 需要理解参数语义、构造参数、验证返回；Resource 只需要给出一个定位符。分开定义让 Agent 更容易选择正确的交互方式。</div>
+
+<h2>10. 检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+  <p><strong>Q1.</strong> <code>McpClientTemplate</code> 提供了哪三种调用模式？（提示：广播、指定、查找）</p>
+  <details><summary>看答案</summary>
+  <p><strong>广播模式</strong>（如 <code>callTool(toolName, arguments)</code>）：遍历所有 Client，每个都调；<br>
+  <strong>指定模式</strong>（如 <code>callTool(serverName, toolName, arguments)</code>）：只调特定的一个 Client；<br>
+  <strong>查找模式</strong>（<code>findClient(serverName)</code>）：按名称找到 Client 对象本身。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>Q2.</strong> <code>McpToolCallResult</code> 比底层的 <code>CallToolResult</code> 多了什么字段？为什么要加？</p>
+  <details><summary>看答案</summary>
+  <p>多了 <code>serverName</code> 字段。底层 <code>CallToolResult</code> 不包含来源 Server 信息——当有多个 Server 返回结果时，无法区分哪个结果来自哪个 Server。<code>serverName</code> 提供了<strong>多 Server 场景下的结果溯源能力</strong>。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>Q3.</strong> 说出 <code>CallToolRequest</code> 和 <code>ReadResourceRequest</code> 在参数结构上的根本区别。</p>
+  <details><summary>看答案</summary>
+  <p><code>CallToolRequest</code> 需要：<strong>toolName</strong>（调用哪个工具）+ <strong>arguments</strong>（Map 参数）。类似调用一个有名字和参数的方法。<br>
+  <code>ReadResourceRequest</code> 只需要：<strong>uri</strong>（资源地址字符串）。类似从文件路径读取内容，不需要额外的业务参数。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>Q4.</strong> <code>McpResourceReadResult.contents()</code> 返回的是什么类型？里面的元素可能是哪两种子类型？</p>
+  <details><summary>看答案</summary>
+  <p>返回 <code>List&lt;McpSchema.ResourceContents&gt;</code>。每个元素可能是：<br>
+  <strong>TextResourceContents</strong>（文本资源，通过 <code>.text()</code> 获取内容）<br>
+  或 <strong>BlobResourceContents</strong>（二进制资源，通过 <code>.blob()</code> 获取字节数组）。<br>
+  解析时需要 <code>instanceof</code> 判断。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>Q5.</strong> 为什么业务代码应该用 <code>McpClientTemplate</code> 而不是直接注入 <code>List&lt;McpSyncClient&gt;</code>？说出至少两个理由。</p>
+  <details><summary>看答案</summary>
+  <p><strong>理由一：统一遍历</strong>——不用每次手写 for 循环；<strong>理由二：按名称路由</strong>——通过 serverName 精确定位目标 Server，无需手写 filter；<strong>理由三：结果包装</strong>——自动附加 serverName 溯源信息；<strong>理由四：类型转换</strong>——将底层的 CallToolResult/ReadResourceResult 转为项目专用的 Record，统一返回格式。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>Q6.</strong> 请写出调用 <code>weather-server</code> 的 <code>get_current_weather</code> 工具、传入城市参数 <code>{"city": "Shanghai"}</code> 的完整 Java 代码。</p>
+  <details><summary>看答案</summary>
+<pre>Map&lt;String, Object&gt; args = Map.of("city", "Shanghai");
+Optional&lt;McpToolCallResult&gt; result =
+    mcpClientTemplate.callTool("weather-server", "get_current_weather", args);
+
+result.ifPresent(r -> {
+    if (!r.error()) {
+        // 处理文本内容
+        List&lt;McpSchema.Content&gt; texts = r.content();
+        // 处理结构化数据
+        Object data = r.structuredContent();
+    }
+});</pre>
+  </details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+1. 本模块源码：<code>core/McpClientTemplate.java</code>（132 行，建议全部通读一遍）<br>
+2. 本模块源码：<code>core/McpToolCallResult.java</code>、<code>core/McpResourceReadResult.java</code><br>
+3. <a href="https://github.com/spring-projects/spring-ai" target="_blank">Spring AI MCP 源码</a> — 查看 <code>McpSchema.CallToolRequest</code>、<code>McpSchema.CallToolResult</code>、<code>McpSchema.ReadResourceRequest</code>、<code>McpSchema.ReadResourceResult</code> 的完整定义
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。</div>
+<div class="nav"><a href="01-MCP协议与Spring AI集成.html">← 上一课</a><a href="../">模块首页 →</a></div>
+</body>
+</html>

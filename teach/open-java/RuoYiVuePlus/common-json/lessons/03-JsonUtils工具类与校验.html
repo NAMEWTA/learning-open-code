@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>03 · JsonUtils 工具类与校验</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第 3 课 · JsonUtils 工具类与校验</h1>
+<div class="mission"><strong>本节目标：</strong>学完能熟练选用 JsonUtils 的 10 个公开方法处理常见业务场景（序列化、反序列化、字段移除、格式校验），理解每个方法空值处理的差异与设计理由。能讲清 <code>@JsonPattern</code> 注解 + <code>JsonPatternValidator</code> + <code>JsonType</code> 枚举的完整校验链路，以及 <code>isJson</code>/<code>isJsonObject</code>/<code>isJsonArray</code> 三者的调用关系。</div>
+
+<h2>一、JsonUtils：业务代码唯一该调用的 JSON 入口</h2>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/utils/JsonUtils.java</code></p>
+
+<p>JsonUtils 是模块中对业务代码暴露的唯一门面类。它通过 <code>@NoArgsConstructor(access = PRIVATE)</code> 禁止实例化，所有方法都是静态方法。</p>
+
+<p>全局 JsonMapper 的获取方式值得注意：</p>
+
+<pre><code>@NoArgsConstructor(access = AccessLevel.PRIVATE)
+public class JsonUtils {
+
+    private static final JsonMapper JSON_MAPPER = SpringUtils.getBean(JsonMapper.class);
+
+    public static JsonMapper getJsonMapper() {
+        return JSON_MAPPER;
+    }
+    // ...
+}</code></pre>
+
+<p><strong>为什么用 SpringUtils.getBean 而不是 @Autowired？</strong>静态字段不支持 Spring 注入。JsonUtils 是纯静态工具类，没有实例，@Autowired 和 @PostConstruct 都用不了。折中方案是在类加载时主动从 Spring 容器拉取——代价是 JsonUtils 必须在 Spring 容器初始化完成后才能使用（类加载时机 < Container 就绪时机的时序约束）。</p>
+
+<p>同时也暴露了 <code>getJsonMapper()</code> 方法——当 10 个封装方法不够用时，业务代码可以直接获取 JsonMapper 做更底层的操作。</p>
+
+<h2>二、10 个公开方法深度解析</h2>
+
+<h3>2.1 toJsonString —— 序列化</h3>
+
+<pre><code>public static String toJsonString(Object object) {
+    if (ObjectUtil.isNull(object)) {
+        return null;
+    }
+    return JSON_MAPPER.writeValueAsString(object);
+}</code></pre>
+
+<p>最简单的序列化方法：对象 → JSON 字符串。空对象返回 null 字符串。底层 <code>writeValueAsString()</code> 会触发 JacksonConfig 中注册的所有序列化器（BigNumberSerializer、LocalDateTimeSerializer 等），以及 JSON 增强框架的增强链（如果对象是响应体的话）。</p>
+
+<p><strong>注意：</strong>null 对象返回的是 Java 的 null 字符串（<code>String</code> 类型），不是 JSON 的 <code>"null"</code> 字面量，也不是 JSON 的 <code>null</code> 空值。调用方需要判断返回值是否为 null。</p>
+
+<h3>2.2 parseObject —— 三个重载</h3>
+
+<p>反序列化是 JsonUtils 中最常用的操作类型，提供了三个重载：</p>
+
+<h4>重载 1：String + Class</h4>
+
+<pre><code>public static &lt;T&gt; T parseObject(String text, Class&lt;T&gt; clazz) {
+    if (StringUtils.isEmpty(text)) {
+        return null;
+    }
+    return JSON_MAPPER.readValue(text, clazz);
+}</code></pre>
+
+<p><strong>isEmpty 判空：</strong>空字符串 <code>""</code> 返回 null。适用于简单类型反序列化——如 <code>parseObject(jsonStr, SysUser.class)</code>。</p>
+
+<h4>重载 2：byte[] + Class</h4>
+
+<pre><code>public static &lt;T&gt; T parseObject(byte[] bytes, Class&lt;T&gt; clazz) {
+    if (ArrayUtil.isEmpty(bytes)) {
+        return null;
+    }
+    return JSON_MAPPER.readValue(bytes, clazz);
+}</code></pre>
+
+<p>专为 Redis 缓存场景设计：从 Redis 取出的数据是 <code>byte[]</code> 类型，不需要先转 String 再解析，直接一步到位。</p>
+
+<h4>重载 3：String + TypeReference</h4>
+
+<pre><code>public static &lt;T&gt; T parseObject(String text, TypeReference&lt;T&gt; typeReference) {
+    if (StringUtils.isBlank(text)) {
+        return null;
+    }
+    return JSON_MAPPER.readValue(text, typeReference);
+}</code></pre>
+
+<p><strong>isBlank 判空：</strong>比 isEmpty 更严格——<code>"  "</code>（纯空格）也返回 null。这是因为 TypeReference 通常用于复杂泛型场景，对输入格式要求更高。例如：</p>
+
+<pre><code>// 反序列化成 List&lt;SysUser&gt;
+List&lt;SysUser&gt; users = JsonUtils.parseObject(jsonStr, new TypeReference&lt;List&lt;SysUser&gt;&gt;() {});</code></pre>
+
+<p>TypeReference 是 Jackson 处理泛型的标准方式。由于 Java 的泛型擦除，<code>List&lt;SysUser&gt;.class</code> 在运行时就是 <code>List.class</code>，丢失了 SysUser 这个类型信息。TypeReference 通过匿名子类保留类型信息，Jackson 读取时能正确解析内部元素类型。</p>
+
+<h3>2.3 parseMap —— 转 Dict</h3>
+
+<pre><code>public static Dict parseMap(String text) {
+    if (StringUtils.isBlank(text)) {
+        return null;
+    }
+    return JSON_MAPPER.readValue(text, JSON_MAPPER.getTypeFactory().constructType(Dict.class));
+}</code></pre>
+
+<p><strong>Dict 是 Hutool 提供的扩展 HashMap</strong>，在 RuoYi 体系中被广泛使用。它与普通 Map 的区别在于提供了类型安全的 getter：</p>
+
+<pre><code>Dict dict = JsonUtils.parseMap("{\"name\":\"张三\",\"age\":25}");
+String name = dict.getStr("name");   // 自动转型，比 (String) dict.get("name") 安全
+Integer age = dict.getInt("age");     // null 安全，返回 null 而非 NPE</code></pre>
+
+<p>在解析配置 JSON、第三方 API 响应等场景中，Dict 比 Map 更好用。</p>
+
+<h3>2.4 parseArrayMap —— 转 Dict 列表</h3>
+
+<pre><code>public static List&lt;Dict&gt; parseArrayMap(String text) {
+    if (StringUtils.isBlank(text)) {
+        return null;
+    }
+    return JSON_MAPPER.readValue(text,
+        JSON_MAPPER.getTypeFactory().constructCollectionType(List.class, Dict.class));
+}</code></pre>
+
+<p>将 JSON 数组 <code>[{"a":1}, {"b":2}]</code> 转成 <code>List&lt;Dict&gt;</code>。适用于解析配置数组。</p>
+
+<p><strong>constructCollectionType 的作用：</strong>它构建的是一个带泛型信息的 <code>JavaType</code> 对象——<code>List&lt;Dict&gt;</code> 而不仅仅是 <code>List</code>。Jackson 据此知道列表元素的类型是 Dict，从而正确反序列化。</p>
+
+<h3>2.5 parseArray —— 转指定类型列表</h3>
+
+<pre><code>public static &lt;T&gt; List&lt;T&gt; parseArray(String text, Class&lt;T&gt; clazz) {
+    if (StringUtils.isEmpty(text)) {
+        return new ArrayList&lt;&gt;();   // 注意：空字符串返回空列表，而非 null
+    }
+    return JSON_MAPPER.readValue(text,
+        JSON_MAPPER.getTypeFactory().constructCollectionType(List.class, clazz));
+}</code></pre>
+
+<p><strong>与 parseArrayMap 的一个关键区别：空输入返回空列表而非 null。</strong>这是因为业务代码通常期望「空数组输入 → 空列表输出」以简化调用方的判空逻辑：</p>
+
+<pre><code>// 不需要担心 NPE
+List&lt;SysUser&gt; users = JsonUtils.parseArray(jsonStr, SysUser.class);
+for (SysUser user : users) {  // 空字符串进来，users 是空 List，循环安全
+    // ...
+}</code></pre>
+
+<p>这个设计也适用于从 Redis 或配置中取数组的场景——配置缺失时返回空列表比返回 null 更友好。</p>
+
+<h3>2.6 toJsonStringExcludeFields —— 序列化并移除字段</h3>
+
+<pre><code>public static String toJsonStringExcludeFields(Object object, String... fieldNames) {
+    if (ObjectUtil.isNull(object)) {
+        return null;
+    }
+    JsonNode node = JSON_MAPPER.valueToTree(object);  // 先序列化成 JsonNode 树
+    removeFields(node, fieldNames);                    // 递归移除指定字段
+    return toJsonString(node);                         // 再转回 JSON 字符串
+}</code></pre>
+
+<p>这个方法的设计思路是「先序列化、再删除、再输出」——不依赖 <code>@JsonIgnore</code> 等注解来隐藏字段，而是在运行时动态决定移除哪些字段。典型场景：</p>
+
+<pre><code>// 同一个 User 对象，管理员看到全部信息，普通用户看不到 password
+String adminView = JsonUtils.toJsonString(user);
+String userView = JsonUtils.toJsonStringExcludeFields(user, "password", "salt");</code></pre>
+
+<p>工作流程：<code>valueToTree</code> 将 Java 对象转换为 Jackson 的 <code>JsonNode</code> 树结构 → <code>removeFields</code> 递归遍历树删除指定字段 → <code>toJsonString</code> 将修改后的树序列化为 JSON 字符串。</p>
+
+<h3>2.7 removeFields —— 递归字段删除</h3>
+
+<pre><code>public static JsonNode removeFields(JsonNode node, String... fieldNames) {
+    if (node == null || ArrayUtil.isEmpty(fieldNames)) {
+        return node;
+    }
+    if (node.isObject()) {
+        ObjectNode objectNode = (ObjectNode) node;
+        for (String fieldName : fieldNames) {
+            if (StringUtils.isNotBlank(fieldName)) {
+                objectNode.remove(fieldName);
+            }
+        }
+    }
+    for (JsonNode child : node) {
+        removeFields(child, fieldNames);  // 递归到子节点
+    }
+    return node;
+}</code></pre>
+
+<p>递归的关键在于：不仅删除<strong>当前层级</strong>的对象中的字段，还会递归到当前节点的<strong>所有子节点</strong>中继续删除。例如：</p>
+
+<pre><code>{
+  "user": {"name":"张三", "password":"123"},
+  "creator": {"name":"李四", "password":"456"}
+}
+→ removeFields(node, "password")
+→ { "user": {"name":"张三"}, "creator": {"name":"李四"} }</code></pre>
+
+<p>这在批量返回场景中非常实用——一次调用就能递归清除嵌套对象中的敏感字段，不需要在每个嵌套对象上都调用一次。</p>
+
+<h3>2.8 格式校验三件套：isJson / isJsonObject / isJsonArray</h3>
+
+<p>这三个方法共享同一个核心——<code>readTreeQuietly()</code> 私有方法：</p>
+
+<pre><code>private static JsonNode readTreeQuietly(String str) {
+    if (StringUtils.isBlank(str)) {
+        return null;
+    }
+    try {
+        return JSON_MAPPER.readTree(str);
+    } catch (Exception e) {
+        return null;  // 解析失败不抛异常，静默返回 null
+    }
+}</code></pre>
+
+<p><strong>readTree</strong> 是 Jackson 提供的方法，尝试将 JSON 字符串解析为 <code>JsonNode</code> 树结构。如果解析成功，说明字符串是合法的 JSON 构造；如果抛异常，说明不是 JSON。</p>
+
+<p>三个公开方法在这个基础上加了类型判断：</p>
+
+<pre><code>// 是合法的 JSON（对象或数组都可以）
+public static boolean isJson(String str) {
+    return readTreeQuietly(str) != null;
+}
+
+// 是 JSON 对象（{} 形式）
+public static boolean isJsonObject(String str) {
+    JsonNode node = readTreeQuietly(str);
+    return node != null && node.isObject();
+}
+
+// 是 JSON 数组（[] 形式）
+public static boolean isJsonArray(String str) {
+    if (StringUtils.isBlank(str)) return false;  // 注意：这里有冗余的 blank 检查
+    JsonNode node = readTreeQuietly(str);
+    return node != null && node.isArray();
+}</code></pre>
+
+<p><strong>isJsonArray 中有一个冗余的 StringUtils.isBlank 检查</strong>——因为 <code>readTreeQuietly</code> 内部已经做了同样的检查。这可能是防御性编程的痕迹。在逻辑上无害，但从代码整洁度看可以移除。</p>
+
+<h2>三、@JsonPattern 校验注解体系</h2>
+
+<p>这个体系由 3 个文件组成，形成了标准的 <strong>Jakarta Bean Validation 扩展模式</strong>：自定义注解 → 自定义校验器 → 枚举驱动策略。</p>
+
+<h3>3.1 JsonType 枚举 —— 校验策略定义</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/validate/JsonType.java</code></p>
+
+<pre><code>public enum JsonType {
+    OBJECT,  // 要求输入必须是 JSON 对象，如 {"a":1}
+    ARRAY,   // 要求输入必须是 JSON 数组，如 [1,2,3]
+    ANY      // 对象或数组都允许（默认值）
+}</code></pre>
+
+<p>三个值的语义完全对应 Jackson 的 <code>JsonNode.isObject()</code> 和 <code>JsonNode.isArray()</code> 判断。</p>
+
+<h3>3.2 @JsonPattern 注解 —— 声明式校验</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/validate/JsonPattern.java</code></p>
+
+<pre><code>@Documented
+@Target({ElementType.METHOD, ElementType.FIELD})
+@Retention(RetentionPolicy.RUNTIME)
+@Constraint(validatedBy = JsonPatternValidator.class)
+public @interface JsonPattern {
+
+    JsonType type() default JsonType.ANY;  // 期望的 JSON 类型，默认不限
+
+    String message() default "不是有效的 JSON 格式";  // 校验失败消息
+
+    Class&lt;?&gt;[] groups() default {};        // Bean Validation 分组
+
+    Class&lt;? extends Payload&gt;[] payload() default {}; // 负载信息
+}</code></pre>
+
+<p>这是一个标准的 Jakarta Bean Validation 注解定义：</p>
+<ul>
+  <li><code>@Constraint(validatedBy = ...)</code> 将校验逻辑委托给 <code>JsonPatternValidator</code></li>
+  <li><code>@Target</code> 限定在 METHOD 和 FIELD 上（不能用在类上）</li>
+  <li><code>groups()</code> 和 <code>payload()</code> 是 Bean Validation 规范要求的固定字段</li>
+</ul>
+
+<p>使用示例：</p>
+
+<pre><code>// 只允许 JSON 对象
+@JsonPattern(type = JsonType.OBJECT, message = "配置内容必须是 JSON 对象格式")
+private String configContent;
+
+// 只允许 JSON 数组
+@JsonPattern(type = JsonType.ARRAY)
+private String tagList;
+
+// 任意 JSON 格式都可以（默认值）
+@JsonPattern
+private String jsonData;</code></pre>
+
+<h3>3.3 JsonPatternValidator —— 校验逻辑实现</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/validate/JsonPatternValidator.java</code></p>
+
+<pre><code>public class JsonPatternValidator implements ConstraintValidator&lt;JsonPattern, String&gt; {
+
+    private JsonType jsonType;
+
+    @Override
+    public void initialize(JsonPattern annotation) {
+        this.jsonType = annotation.type();  // 从注解中读取期望的 JSON 类型
+    }
+
+    @Override
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        if (StringUtils.isBlank(value)) {
+            return true;  // 空值放行，交给 @NotBlank 或 @NotNull 控制
+        }
+        return switch (jsonType) {
+            case ANY    -> JsonUtils.isJson(value);
+            case OBJECT -> JsonUtils.isJsonObject(value);
+            case ARRAY  -> JsonUtils.isJsonArray(value);
+        };
+    }
+}</code></pre>
+
+<p>设计要点：</p>
+
+<ol>
+  <li><strong>空值放行策略：</strong><code>isValid()</code> 中先用 <code>StringUtils.isBlank(value)</code> 判断空值，空值直接返回 true。这是 Bean Validation 校验器的常见模式——校验器只关心「有值时的格式是否正确」，而「是否允许为空」交给 <code>@NotBlank</code>、<code>@NotNull</code>、<code>@NotEmpty</code> 这些专职注解控制。两者结合使用，职责清晰：</li>
+</ol>
+
+<pre><code>// 字段必填且必须是 JSON 对象
+@NotBlank(message = "配置不能为空")
+@JsonPattern(type = JsonType.OBJECT, message = "配置必须是 JSON 对象格式")
+private String configContent;</code></pre>
+
+<ol start="2">
+  <li><strong>switch 分支策略：</strong>根据 <code>jsonType</code> 枚举值分发到三个不同的校验方法。注意 <code>ANY</code> 用的是 <code>isJson()</code>（不限制类型），而 <code>OBJECT</code> 和 <code>ARRAY</code> 用了更精确的判断。三者可以做到精准校验。</li>
+</ol>
+
+<h2>四、校验链路完整数据流</h2>
+
+<p>以「用户提交了一个 JSON 配置字段」为例：</p>
+
+<pre><code>@JsonPattern(type = JsonType.OBJECT, message = "配置必须是 JSON 对象格式")
+private String config;  // 用户输入: {"timeout":30}</code></pre>
+
+<div class="flow">1. Bean Validation 框架检测到 @JsonPattern 注解
+   ↓
+2. 查找 validatedBy = JsonPatternValidator.class
+   ↓
+3. 调用 JsonPatternValidator.initialize(annotation)
+   → jsonType = JsonType.OBJECT
+   ↓
+4. 调用 JsonPatternValidator.isValid(value, context)
+   → value = "{"timeout":30}"
+   → StringUtils.isBlank(value) = false（继续）
+   → switch(OBJECT) → JsonUtils.isJsonObject(value)
+   ↓
+5. JsonUtils.isJsonObject("{"timeout":30}")
+   → readTreeQuietly("{"timeout":30}")
+   → JSON_MAPPER.readTree("{"timeout":30}") → ObjectNode（解析成功）
+   → node.isObject() = true
+   → 返回 true ✓</code></pre>
+
+<p>如果用户输入了不合法的 JSON：</p>
+
+<pre><code>config = "not json"
+→ readTreeQuietly("not json")
+→ JSON_MAPPER.readTree("not json") → 抛 JsonParseException
+→ catch → return null
+→ isJsonObject = false → 校验失败 ✗
+→ 返回 "配置必须是 JSON 对象格式" 错误消息</code></pre>
+
+<h2>五、10 个方法对比速查表</h2>
+
+<table>
+<tr><th>方法</th><th>输入</th><th>输出</th><th>空值行为</th><th>判空方式</th></tr>
+<tr><td><code>toJsonString</code></td><td>Object</td><td>String</td><td>返回 null</td><td>ObjectUtil.isNull</td></tr>
+<tr><td><code>parseObject</code></td><td>String + Class</td><td>T</td><td>返回 null</td><td>StringUtils.isEmpty</td></tr>
+<tr><td><code>parseObject</code></td><td>byte[] + Class</td><td>T</td><td>返回 null</td><td>ArrayUtil.isEmpty</td></tr>
+<tr><td><code>parseObject</code></td><td>String + TypeReference</td><td>T</td><td>返回 null</td><td>StringUtils.isBlank</td></tr>
+<tr><td><code>parseMap</code></td><td>String</td><td>Dict</td><td>返回 null</td><td>StringUtils.isBlank</td></tr>
+<tr><td><code>parseArrayMap</code></td><td>String</td><td>List&lt;Dict&gt;</td><td>返回 null</td><td>StringUtils.isBlank</td></tr>
+<tr><td><code>parseArray</code></td><td>String + Class</td><td>List&lt;T&gt;</td><td><strong>返回空 List</strong></td><td>StringUtils.isEmpty</td></tr>
+<tr><td><code>toJsonStringExcludeFields</code></td><td>Object + String...</td><td>String</td><td>返回 null</td><td>ObjectUtil.isNull</td></tr>
+<tr><td><code>isJson</code></td><td>String</td><td>boolean</td><td>返回 false</td><td>readTreeQuietly null 返回</td></tr>
+<tr><td><code>isJsonObject</code></td><td>String</td><td>boolean</td><td>返回 false</td><td>readTreeQuietly null 返回</td></tr>
+<tr><td><code>isJsonArray</code></td><td>String</td><td>boolean</td><td>返回 false</td><td>冗余 blank + readTreeQuietly</td></tr>
+</table>
+
+<p>注意空值行为的不一致性：parseArray 返回空列表是一条独立的决策线，其他方法返回 null。这个差异值得在日常编码中记住。</p>
+
+<div class="insight"><strong>设计洞察：判空标准不一致的深层原因。</strong><code>isEmpty</code>（StringUtils）和 <code>isBlank</code> 的区别在于：isEmpty 认为 <code>"  "</code>（纯空格）非空，isBlank 认为它为空。为什么 parseObject(String, Class) 用 isEmpty 而 parseObject(String, TypeReference) 用 isBlank？因为前者处理的通常是简单对象（如 SysUser），纯空格输入解析失败后 Jackson 自己会报错；后者处理复杂泛型，纯空格输入可能导致诡异的类型推断错误，提前拦截更安全。但说到底，这是历史和习惯的结果，并非有意的精密设计。</div>
+
+<h2>检验环节</h2>
+
+<div class="quiz">
+<p><strong>Q1. JsonUtils.parseArray("[]" , SysUser.class) 返回什么？parseArray("" , SysUser.class) 又返回什么？</strong></p>
+<details><summary>看答案</summary>
+<p><code>parseArray("[]", SysUser.class)</code> 返回一个空的 <code>ArrayList&lt;SysUser&gt;</code>（size=0）。<code>parseArray("", SysUser.class)</code> 同样返回空的 ArrayList——因为空字符串触发了 isEmpty 检查，返回 <code>new ArrayList&lt;&gt;()</code> 而非 null。这是 parseArray 独有的行为。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q2. @JsonPattern 注解的 type 属性默认值是什么？如果不设置 type，用户可以传 JSON 数组吗？</strong></p>
+<details><summary>看答案</summary>
+<p>默认值是 <code>JsonType.ANY</code>。不设置 type 时，对象和数组都允许——因为校验器会调用 <code>JsonUtils.isJson(value)</code> 而非 <code>isJsonObject</code> 或 <code>isJsonArray</code>。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q3. 为什么 JsonPatternValidator 中空值直接返回 true？</strong></p>
+<details><summary>看答案</summary>
+<p>这是 Bean Validation 的职责分离原则：<code>@JsonPattern</code> 只负责「有值时的格式校验」，而「是否允许为空」由 <code>@NotBlank</code>、<code>@NotNull</code> 等专职注解控制。如果 <code>@JsonPattern</code> 把空值也拦截了，就必须同时设置 <code>message</code> 来区分「值为空」和「格式错误」两种失败情况，增加了复杂度。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q4. toJsonStringExcludeFields(user, "password") 能删除嵌套在 user.children 中的 password 字段吗？</strong></p>
+<details><summary>看答案</summary>
+<p>能。<code>removeFields</code> 方法会递归遍历 JsonNode 树的所有子节点，不仅是当前层级。所以如果 user 对象里嵌套了 child 对象，child 的 password 也会被删除。</p>
+</details>
+</div>
+
+<div class="cite">推荐一手资料：源码 <code>org/dromara/common/json/utils/JsonUtils.java</code>（约 240 行，10 个公开方法建议逐一读）；<code>validate/JsonPattern.java</code> 注解定义；<code>validate/JsonPatternValidator.java</code> 校验器实现；<code>validate/JsonType.java</code> 枚举定义。Bean Validation 规范的 <code>@Constraint</code> 和 <code>ConstraintValidator</code> 接口文档。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。例如：「如果我想让 JsonUtils 支持 YAML 格式的解析，应该怎么扩展？」「TypeReference 的匿名子类写法为什么不会在反序列化时丢失类型信息？」「parseMap 和 parseObject(text, Dict.class) 有什么区别？」</div>
+
+<div class="nav"><a href="02-JSON增强框架三阶段.html">上一课：JSON 增强框架三阶段</a><a href="../">模块首页</a></div>
+</body>
+</html>

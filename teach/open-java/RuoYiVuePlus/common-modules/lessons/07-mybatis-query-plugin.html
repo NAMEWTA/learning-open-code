@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>07 · ruoyi-common-mybatis（下）：查询构造器与插件链</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>07 · ruoyi-common-mybatis（下）：查询构造器、插件链与多数据源</h1>
+
+<p><strong>核心问题：</strong>复杂的联表查询、子查询、聚合统计如何用 Lambda 表达式写，而不是手写 SQL？分页、乐观锁、SQL 日志这些横切关注点如何组织？</p>
+
+<h2>1. QueryBuilder — 查询构造器入口</h2>
+
+<pre><code>// 单表查询
+LambdaQueryBuilder&lt;SysUser&gt; qb = QueryBuilder.lambda(SysUser.class);
+qb.eq(SysUser::getStatus, "0")
+  .likeIfText(SysUser::getUsername, keyword)
+  .betweenIfPresent(SysUser::getCreateTime, start, end)
+  .orderByAsc(SysUser::getId);
+
+// 联表查询（基于 MyBatis-Plus-Join）
+LambdaJoinQueryBuilder&lt;SysUser&gt; jqb = QueryBuilder.lambdaJoin(SysUser.class);
+jqb.leftJoin(SysDept.class).on(SysUser::getDeptId, SysDept::getId)
+   .selectAll(SysUser.class)
+   .selectAs(SysDept::getDeptName, SysUserVo::getDeptName)
+   .eq(SysUser::getStatus, "0");</code></pre>
+
+<h2>2. 子查询支持</h2>
+
+<pre><code>// 子查询构造
+SubQuery&lt;SysUserRole&gt; subQuery = SubQuery.of(SysUserRole.class, paramFormatter);
+subQuery.select(SysUserRole::getUserId)
+       .eq(SysUserRole::getRoleId, roleId);
+
+// 在主子查询中使用
+LambdaCrudChainWrapper&lt;SysUser, SysUserVo&gt; wrapper = userMapper.lambda();
+wrapper.inSub(SysUser::getId, subQuery);  // 用户ID IN (子查询)
+</code></pre>
+
+<h2>3. PageQuery — 分页实体</h2>
+
+<pre><code>public class PageQuery {
+    private Integer pageSize;      // 默认 Integer.MAX_VALUE（查全部，前端分页组件通常传具体值）
+    private Integer pageNum;       // 默认 1
+    private String orderByColumn;  // 排序字段
+    private String isAsc;          // asc/desc
+
+    // 支持多字段各自排序
+    // isAsc: "asc,desc"
+    // orderByColumn: "id,createTime"
+    // → ORDER BY id ASC, createTime DESC
+    public Page&lt;T&gt; build() { ... }
+}</code></pre>
+<p>项目中有 60 个文件使用 PageQuery 作为分页查询入参。前端分页组件（Element Plus Pagination）提交的参数直接映射到此对象。</p>
+
+<h2>4. MyBatis 插件链顺序</h2>
+
+<pre>
+MybatisPlusInterceptor 链:
+  [1] PlusDataPermissionInterceptor     → 数据权限 WHERE 注入
+  [2] PaginationInnerInterceptor        → 物理分页改写（自动识别数据库类型）
+  [3] OptimisticLockerInnerInterceptor  → 乐观锁版本号处理（@Version）
+
+独立拦截器:
+  SqlLogInterceptor                     → 条件启用，输出完整 SQL+参数+耗时
+  InjectionMetaObjectHandler            → insertFill/updateFill 自动填充
+  PlusPostInitTableInfoHandler          → 逻辑删除全局开关管理
+  MPJSqlInjector                        → MyBatis-Plus-Join 联表方法注入
+</pre>
+
+<p><strong>SQL 日志拦截器</strong>：启用 <code>mybatis-plus.sql-log.enabled=true</code> 后，自动将 <code>?</code> 占位符替换为实际参数值，输出完整 SQL。超长 SQL（>8000字符）按 <code>sqlLogId</code> 分片输出。</p>
+
+<h2>5. 多数据源切换</h2>
+
+<div class="info">
+<strong>底层依赖：</strong>baomidou <code>dynamic-datasource-spring-boot4-starter</code>。通过 <code>@DS</code> 注解声明数据源，<code>DynamicRoutingDataSource</code> 在运行时路由。
+</div>
+
+<pre><code>// 声明式切换
+@DS("slave")
+public interface SlaveUserMapper extends BaseMapperPlus&lt;SysUser, SysUserVo&gt; { }
+
+// 程序式切换
+DynamicDataSourceContextHolder.push("slave");
+try { ... } finally { DynamicDataSourceContextHolder.poll(); }
+</code></pre>
+
+<p><code>DataBaseHelper</code> 通过实际连接获取 <code>DatabaseMetaData</code>，按数据源名称缓存数据库类型（MySQL/Oracle/PG/SQLServer），实现跨数据库方言适配。</p>
+
+<h2>6. LambdaQueryCondition — 便捷条件封装</h2>
+
+<pre><code>// 自动处理 null/空值判断
+wrapper.eqIfPresent(User::getStatus, status);      // status 非空才添加
+wrapper.likeIfText(User::getUsername, username);    // username 有文本才添加
+wrapper.betweenIfPresent(User::getAge, min, max);  // min/max 均非空才添加
+wrapper.inIfNotEmpty(User::getDeptId, deptIds);    // 集合非空才添加
+</code></pre>
+
+<p>这些便捷方法消除了业务代码中大量的 <code>if (xxx != null) { wrapper.eq(...) }</code> 样板代码。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>找到 SysDeptMapper 中使用 QueryBuilder.lambda() 的代码，观察链式条件构建</li>
+<li>开启 SQL 日志：设置 <code>mybatis-plus.sql-log.enabled=true</code>，控制台将输出完整 SQL</li>
+<li>如果有多数据源，在 Slave 数据库的 Mapper 上添加 @DS("slave")，确认读写分离生效</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://baomidou.com/pages/2976a3/">MyBatis-Plus 插件扩展</a> 和 <a href="https://github.com/yulichang/mybatis-plus-join">MyBatis-Plus-Join</a></div>
+<div class="reminder"> 想了解如何在不改动代码的情况下切换数据源？或者如何添加自定义拦截器？直接问我。</div>
+
+</body>
+</html>

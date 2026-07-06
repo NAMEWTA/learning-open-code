@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · SaToken 模块全景 — 认证架构与五个类的分工</title>
+<style>
+  body { max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.75; color: #2c2c2c; background: #fcfcfc; }
+  h1 { border-bottom: 3px solid #1a56db; padding-bottom: .5rem; margin-top: 0; font-size: 1.75rem; }
+  h2 { margin-top: 2.5rem; color: #1e3a5f; font-size: 1.3rem; }
+  h3 { margin-top: 1.8rem; font-size: 1.05rem; color: #333; }
+  code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+  pre code { display: block; background: #1e2127; color: #abb2bf; padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; line-height: 1.6; font-size: .88em; }
+  .mission { background: linear-gradient(135deg, #e8f0fe 0%, #d4e4fc 100%); border-left: 5px solid #1a56db; padding: 1rem 1.3rem; border-radius: 6px; margin: 1.2rem 0; }
+  .flow { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px dashed #94a3b8; padding: 1rem 1.3rem; border-radius: 5px; white-space: pre; line-height: 1.8; font-size: .88em; overflow-x: auto; }
+  .side { background: #fff9e6; border-left: 4px solid #f0b400; padding: .8rem 1.2rem; border-radius: 4px; margin: 1rem 0; font-size: .95em; }
+  .step { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.3rem; margin: .8rem 0; display: flex; gap: 1rem; align-items: flex-start; }
+  .step .num { background: #1a56db; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85em; flex-shrink: 0; }
+  .step .where { color: #64748b; font-size: .8em; margin-top: .2rem; }
+  .quiz { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.2rem; margin: .8rem 0; }
+  .quiz .opt { display: block; margin: .3rem 0; padding: .3rem .6rem; border-radius: 4px; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: #1a56db; font-weight: 600; }
+  .cite { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: .8rem 1.1rem; margin: 1.5rem 0; font-size: .9em; }
+  .reminder { background: #f1f5f9; border-radius: 6px; padding: .8rem 1.2rem; margin: 1rem 0; font-size: .95em; color: #475569; }
+  .nav { color: #94a3b8; font-size: .85em; margin-top: 2rem; text-align: center; }
+  .tag { display: inline-block; background: #1a56db; color: #fff; padding: .15em .7em; border-radius: 12px; font-size: .8em; margin-left: .5rem; vertical-align: middle; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+  th, td { border: 1px solid #e2e8f0; padding: .5rem .7rem; text-align: left; font-size: .93em; }
+  th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · SaToken 模块全景 <span class="tag">认证架构</span></h1>
+
+<div class="mission">
+<strong>本节目标</strong>：理解 ruoyi-common-satoken 在平台中的定位、五个 Java 类的职责分工，以及一次登录请求的宏观流程。
+</div>
+
+<p>在 RuoYi-Vue-Plus 中，用户从输入密码到访问受保护接口，中间经过一套完整的认证鉴权管线。这套管线的骨干就是 <code>ruoyi-common-satoken</code> 模块 — 它不是从零手写的认证框架，而是在 Sa-Token 的基础上做了 JWT 化、Redis 持久化、Caffeine 加速等工程化加固。</p>
+
+<h2>一、为什么选 Sa-Token + JWT？</h2>
+
+<p>Java 生态里做认证，Spring Security 是事实标准，但它有两个问题：<strong>配置繁琐</strong>（需要写 Filter Chain、Provider、UserDetailsService 等一整套）和 <strong>Session 依赖</strong>（默认基于 Tomcat Session，分布式需要额外改造）。</p>
+
+<p>Sa-Token 的设计哲学不同：</p>
+
+<table>
+<tr><th>对比维度</th><th>Spring Security</th><th>Sa-Token</th></tr>
+<tr><td>上手成本</td><td>高，需理解 Filter Chain 模型</td><td>低，一行 StpUtil.login() 即可</td></tr>
+<tr><td>分布式支持</td><td>需额外集成 Spring Session</td><td>内置 Dao 层抽象，换存储即可</td></tr>
+<tr><td>权限模型</td><td>Role-based，扩展需自定义</td><td>权限码 + 角色 双模型，开箱即用</td></tr>
+<tr><td>踢人下线</td><td>需手写逻辑</td><td>StpUtil.kickout() 一行代码</td></tr>
+<tr><td>JWT 集成</td><td>需引入 jose4j/nimbus 等三方库</td><td>官方插件 sa-token-jwt，无缝切换</td></tr>
+</table>
+
+<p>RuoYi-Vue-Plus 选择 Sa-Token + JWT 的组合，本质是<strong>用轻量框架替代重型方案，同时通过 JWT 获得无状态 Token 的自解释能力</strong>——Token 本身携带 userId 等信息，不依赖集中式 Session，但又通过 Redis 保留了服务端可控性（可随时踢人、冻结）。</p>
+
+<h2>二、模块目录与五个类的分工</h2>
+
+<p>打开模块目录，结构极其精简 — 5 个 Java 文件，各司其职：</p>
+
+<pre><code>ruoyi-common-satoken/
+├── pom.xml                          # 依赖：sa-token-core + jwt + caffeine
+└── src/main/
+    ├── java/org/dromara/common/satoken/
+    │   ├── config/
+    │   │   └── SaTokenConfig.java           # [装配] 注册 4 个 Bean，模块入口
+    │   ├── core/
+    │   │   ├── dao/
+    │   │   │   └── PlusSaTokenDao.java      # [存储] Redis + Caffeine 双层缓存
+    │   │   └── service/
+    │   │       └── SaPermissionImpl.java    # [权限] 提供用户权限码和角色列表
+    │   ├── handler/
+    │   │   └── SaTokenExceptionHandler.java # [异常] 全局翻译认证异常为中文提示
+    │   └── utils/
+    │       └── LoginHelper.java             # [工具] 登录/退出/用户信息获取
+    └── resources/
+        └── common-satoken.yml               # [配置] Token 前缀、读取方式等
+</code></pre>
+
+<table>
+<tr><th>类/文件</th><th>角色</th><th>一句话职责</th></tr>
+<tr><td><code>SaTokenConfig</code></td><td>装配者</td><td>注册 StpLogic(JWT)、StpInterface(权限)、SaTokenDao(存储)、异常处理器</td></tr>
+<tr><td><code>PlusSaTokenDao</code></td><td>存储层</td><td>替代默认内存存储，用 Caffeine + Redis 实现分布式 Token 持久化</td></tr>
+<tr><td><code>SaPermissionImpl</code></td><td>权限源</td><td>每次鉴权时被 Sa-Token 回调，返回当前用户的权限码和角色列表</td></tr>
+<tr><td><code>SaTokenExceptionHandler</code></td><td>翻译官</td><td>捕获 NotLoginException 等异常，转为前端可读的中文错误信息</td></tr>
+<tr><td><code>LoginHelper</code></td><td>门面工具</td><td>封装登录流程（写入用户信息到 TokenSession），提供 getLoginUser() 等便捷方法</td></tr>
+<tr><td><code>common-satoken.yml</code></td><td>默认配置</td><td>Bearer 前缀、允许从 Header/参数读取 Token、关闭 Cookie 鉴权</td></tr>
+</table>
+
+<h2>三、认证流程鸟瞰</h2>
+
+<p>一次完整的登录到鉴权链路如下：</p>
+
+<div class="flow">┌──────────┐   登录请求    ┌──────────────┐   写入TokenSession   ┌──────────────┐
+│ 前端     │ ────────────&gt; │ LoginHelper   │ ──────────────────&gt; │ PlusSaTokenDao│
+│ POST /login│   loginUser  │ .login(user)  │   setObject(...)    │ Caffeine+Redis│
+└──────────┘               └──────────────┘                     └──────────────┘
+                                  │
+                                  │ StpLogicJwtForSimple
+                                  │ 生成 JWT Token
+                                  ▼
+                           ┌──────────────┐
+                           │ 返回 Token   │  "Bearer eyJhbG..."
+                           └──────────────┘
+                                  │
+        ┌─────────────────────────┘
+        ▼
+┌──────────────┐   携带Token    ┌──────────────────┐   回调权限列表   ┌──────────────────┐
+│ 前端         │ ────────────&gt; │ Sa-Token 拦截器   │ ────────────&gt; │ SaPermissionImpl  │
+│ Authorization│  请求接口      │ checkPermission() │                │ getPermissionList│
+└──────────────┘               └──────────────────┘                └──────────────────┘
+        │                              │
+        │ 403/401                      │ 通过则放行
+        ▼                              ▼
+┌──────────────┐               ┌──────────────┐
+│ ExceptionHandler│            │ Controller   │
+│ 中文错误提示    │            │ 业务逻辑      │
+└──────────────┘               └──────────────┘</div>
+
+<p class="side"><strong>关键设计</strong>：Token 本身是 JWT，包含基础用户信息（可自解释），但完整的 LoginUser 对象（含部门、权限列表）存储在 Redis 的 TokenSession 中。这兼顾了 JWT 的无状态优势和 Redis 的服务端可控性。</p>
+
+<h2>四、与 ruoyi-common-sms 的架构对比</h2>
+
+<p>你之前学过的 sms 模块与本模块有相似的"装配 + DAO + 异常处理"结构，但定位不同：</p>
+
+<table>
+<tr><th>对比维度</th><th>ruoyi-common-sms</th><th>ruoyi-common-satoken</th></tr>
+<tr><td>领域</td><td>短信发送</td><td>认证鉴权</td></tr>
+<tr><td>核心框架</td><td>阿里云/腾讯云/云片 SDK</td><td>Sa-Token</td></tr>
+<tr><td>DAO 缓存</td><td>内存 Map 缓存（短信重试间隔）</td><td>Caffeine + Redis 双层缓存</td></tr>
+<tr><td>配置入口</td><td>SmsAutoConfiguration</td><td>SaTokenConfig</td></tr>
+<tr><td>异常处理</td><td>SmsExceptionHandler（业务异常）</td><td>SaTokenExceptionHandler（认证异常 + 业务异常）</td></tr>
+<tr><td>工具类</td><td>SmsUtils（发送/校验）</td><td>LoginHelper（登录/用户信息）</td></tr>
+</table>
+
+<div class="side">
+<strong>注意</strong>：sms 的 PlusSmsDao 只用内存 Map 做限流缓存（数据非关键、丢了也无妨），而 satoken 的 PlusSaTokenDao 用 Redis 做持久化 + Caffeine 做读加速（数据关键、必须可靠）。两种 DAO 设计体现了不同业务诉求下的存储策略差异。
+</div>
+
+<h2>🤔 想一想</h2>
+
+<details>
+<summary>为什么 Sa-Token 需要一个 SaTokenDao 接口来抽象存储？直接用 RedisTemplate 不行吗？</summary>
+<p><strong>框架解耦</strong>：Sa-Token 框架本身不知道你的项目用的是 Redis、MongoDB 还是内存。通过 SaTokenDao 接口，框架核心逻辑与存储实现解耦。RuoYi 只需实现这个接口（PlusSaTokenDao），框架就用 Redis；换成别的项目可能实现一套基于数据库的 Dao。<br>
+<strong>测试友好</strong>：单元测试时可以注入一个基于 Map 的 Dao 实现，不需要启动 Redis。<br>
+<strong>多存储策略</strong>：你可以写一个「Redis 主存储 + Caffeine 读缓存」的 Dao（这正是 PlusSaTokenDao 的做法），框架完全不感知这些优化。</p>
+</details>
+
+<details>
+<summary>JWT Token 自带了 userId，为什么还要从 Redis 的 TokenSession 里读 LoginUser？</summary>
+<p><strong>JWT 不可撤销</strong>：JWT 一旦签发，在过期前无法主动使其失效。如果管理员踢人，Token 本身不会变，只有 Redis 里的 TokenSession 被清除了。<br>
+<strong>数据量限制</strong>：把所有权限码、部门信息、角色列表都塞进 JWT，Token 会变得非常臃肿（HTTP Header 有大小限制）。Redis 存全量数据，JWT 只存关键标识，是最佳平衡。</p>
+</details>
+
+<h2>提取练习</h2>
+
+<div class="quiz">
+<strong>Q1. 以下哪个类负责将 Sa-Token 的 NotLoginException 翻译为中文提示？</strong>
+<div class="opt">A. SaTokenConfig</div>
+<div class="opt">B. SaPermissionImpl</div>
+<div class="opt">C. SaTokenExceptionHandler</div>
+<div class="opt">D. LoginHelper</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。SaTokenExceptionHandler 是 @RestControllerAdvice，专门捕获 Sa-Token 异常并返回中文消息。A 是配置类，B 是权限实现，D 是登录工具类。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q2. RuoYi-Vue-Plus 使用的 JWT 模式对应的 StpLogic 实现类是？</strong>
+<div class="opt">A. StpLogicForDefault</div>
+<div class="opt">B. StpLogicJwtForMixin</div>
+<div class="opt">C. StpLogicJwtForSimple</div>
+<div class="opt">D. StpLogicJwtForStyle</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。SaTokenConfig 中注入的正是 StpLogicJwtForSimple。Simple 模式由 Sa-Token 完全接管 JWT 生成，Mixin 模式需要用户自己实现部分 JWT 逻辑。A 是默认模式（随机字符串 Token），D 是虚构的选项。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q3. 以下哪个文件声明了"关闭 Cookie 鉴权，杜绝 CSRF 风险"的配置？</strong>
+<div class="opt">A. SaTokenConfig.java</div>
+<div class="opt">B. application.yml</div>
+<div class="opt">C. common-satoken.yml</div>
+<div class="opt">D. PlusSaTokenDao.java</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。common-satoken.yml 中配置了 is-read-cookie: false，关闭 Cookie 读取 Token。A 是 Java 配置类（注册 Bean），B 是主配置文件，D 是 DAO 实现。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q4. PlusSaTokenDao 使用 Caffeine 的主要目的是什么？</strong>
+<div class="opt">A. 替代 Redis，降低运维成本</div>
+<div class="opt">B. 减少对 Redis 的读取次数，降低 QPS 压力</div>
+<div class="opt">C. 提供更强的数据一致性保证</div>
+<div class="opt">D. 存储 Token 的完整生命周期数据</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。Caffeine 是读缓存加速层，Redis 是主存储。每次鉴权都查 Redis 会带来巨大 QPS 压力，Caffeine 挡在前面吸收热数据读。A 错误（Redis 仍是主存储），C 错误（多级缓存会降低一致性），D 错误（完整数据仍在 Redis）。
+</details>
+</div>
+
+<div class="cite">
+<strong>推荐读物</strong><br>
+· <a href="https://sa-token.cc/doc.html#/">Sa-Token 官方文档</a> — 了解框架的设计哲学<br>
+· 模块源码入口：<code>SaTokenConfig.java</code> — 从装配入口开始阅读<br>
+· 上一课程：ruoyi-common-sms 的 <code>PlusSmsDao</code> — 对比两种 DAO 的缓存策略
+</div>
+
+<div class="reminder">
+📌 本节建立了模块的全局视图。下一节我们将深入 <code>SaTokenConfig</code> 的配置细节和 <code>PlusSaTokenDao</code> 的双层缓存实现 — 这是理解"为什么这么设计"的关键。
+</div>
+
+<div class="nav">第 1 课 / 共 5 课 · 下一课：配置与 DAO — SaTokenConfig 与 PlusSaTokenDao</div>
+
+</body>
+</html>

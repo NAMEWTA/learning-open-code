@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · JSON 增强框架（下）：JsonValueEnhancer 引擎实现与增强链处理流程</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .danger { background: #fff2f0; border-left: 3px solid #e8503a; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .danger b { color: #c0341d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · JSON 增强框架（下）<span class="tag">引擎实现</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：学完你能讲清 <code>JsonValueEnhancer</code> 的完整处理链路——对象树递归遍历、属性元数据缓存 (<code>ConcurrentHashMap</code>)、循环引用保护 (<code>IdentityHashMap</code>)、简单值短路、处理后二次增强，以及消息转换器排除逻辑。
+</div>
+
+<p>第 3 课我们讲了「接口」——三阶段的设计模式。这节课讲「引擎」——<code>JsonValueEnhancer</code> 怎么把这些接口驱动起来。它是 enhance 包里最长的一个类（约 370 行），但结构极其规整。</p>
+
+<h2>一、先看入口：enhance() 方法的主流程</h2>
+
+<pre><code>public Object enhance(Object body) {
+    // ① 快速短路：null、已处理过的 JsonNode、没有处理器
+    if (body == null || body instanceof JsonNode || processors.isEmpty()) {
+        return body;
+    }
+    // ② 创建上下文 + collect 扫描
+    JsonEnhancementContext context = new JsonEnhancementContext(jsonMapper);
+    collectValue(body, context, new IdentityHashMap&lt;&gt;());
+
+    // ③ 短路：没有任何字段需要处理
+    if (!context.isProcessingRequired()) {
+        return body;
+    }
+    // ④ prepare 批量预处理
+    processors.forEach(processor -&gt; processor.prepare(context));
+
+    // ⑤ render 渲染
+    return renderValue(body, context, new IdentityHashMap&lt;&gt;());
+}</code></pre>
+
+<div class="flow">请求响应对象 body
+  │
+  ├─ null / JsonNode / 无处理器？ → 原样返回（零开销）
+  │
+  ├─ [collectValue] 递归扫描对象树
+  │   └─ 每个字段调 collectField → processor.supports() & collect()
+  │   └─ supports() 返回 true → markProcessingRequired()
+  │
+  ├─ processingRequired == false？ → 原样返回（零开销）
+  │
+  ├─ [prepare] 一次调用所有 processor.prepare()
+  │
+  └─ [renderValue] 递归渲染增强后的 JSON 树
+      └─ 每个字段调 processor.process() 获取替换值</div>
+
+<h2>二、递归遍历：collectValue() 的类型分发</h2>
+
+<p><code>collectValue()</code> 是整个引擎最核心的递归方法。它使用 Java 17 的 <code>switch</code> 模式匹配做类型分发：</p>
+
+<pre><code>private void collectValue(Object value, JsonEnhancementContext context,
+                          IdentityHashMap&lt;Object, Boolean&gt; visited) {
+    switch (value) {
+        case null -&gt; { return; }                              // null 直接跳过
+        case Map&lt;?, ?&gt; map -&gt; {                              // Map → 遍历 values
+            map.values().forEach(child -&gt; collectValue(child, context, visited));
+            return;
+        }
+        case Iterable&lt;?&gt; iterable -&gt; {                       // 集合 → 遍历元素
+            iterable.forEach(child -&gt; collectValue(child, context, visited));
+            return;
+        }
+        default -&gt; {}                                         // 继续向下
+    }
+    if (value.getClass().isArray()) {                         // 数组 → 遍历元素
+        int length = Array.getLength(value);
+        for (int i = 0; i &lt; length; i++)
+            collectValue(Array.get(value, i), context, visited);
+        return;
+    }
+    if (isSimpleValue(value.getClass())                       // 简单值 → 跳过
+        || visited.put(value, Boolean.TRUE) != null) {        // 已访问 → 跳过（循环引用保护）
+        return;
+    }
+    try {
+        for (PropertyMetadata metadata : getProperties(value.getClass())) {
+            Object propertyValue = metadata.getValue(value);
+            JsonFieldContext fieldContext = new JsonFieldContext(
+                value, metadata.propertyName(), metadata.member(), propertyValue);
+            collectField(fieldContext, context);               // ← 核心：通知所有 Processor
+            collectValue(propertyValue, context, visited);     // ← 递归深入
+        }
+    } finally {
+        visited.remove(value);                                 // 退栈时清理，允许不同路径重新访问
+    }
+}</code></pre>
+
+<div class="why"><b>为什么用 IdentityHashMap 而不是 HashSet？</b><br>
+<code>IdentityHashMap</code> 使用引用相等 (<code>==</code>) 而非 <code>equals()</code> 来判断 key 是否重复。如果两个不同的对象恰好 <code>equals()</code> 返回 true（如两个内容相同的 Map），用 HashSet 会误判为已访问而跳过。而循环引用保护真正关心的是「同一个内存对象是否已被处理」，所以必须用引用相等。另外，<code>IdentityHashMap.put()</code> 返回的是旧值——如果返回非 null 说明之前已 put 过，即循环引用。</div>
+
+<h3>visited.remove(value) 在 finally 中的微妙之处</h3>
+<p>注意 visited 的 remove 放在 finally 块里——<strong>保证递归返回后一定清理</strong>。而且用的是「入栈 put / 出栈 remove」模式（而非「全局记录所有访问过的对象」），这意味着同一个对象可以在树的不同分支路径中分别被访问——只要不是在同一条路径上自我引用（真正的循环引用），就不会被阻止。</p>
+
+<h2>三、属性元数据缓存：getProperties() + ConcurrentHashMap</h2>
+
+<p>每个类型的属性元数据只解析一次，之后从缓存取：</p>
+
+<pre><code>private final Map&lt;Class&lt;?&gt;, List&lt;PropertyMetadata&gt;&gt; propertyCache
+    = new ConcurrentHashMap&lt;&gt;();
+
+private List&lt;PropertyMetadata&gt; getProperties(Class&lt;?&gt; type) {
+    return propertyCache.computeIfAbsent(type, this::resolveProperties);
+}</code></pre>
+
+<p><code>resolveProperties()</code> 使用 Jackson 的 <strong>ClassIntrospector</strong> 内省类型，找出所有可序列化属性（getter + field，优先 getter）。这个操作涉及反射和注解解析，比较昂贵——但每个 Class 只在第一次遇到时解析一次，之后直接从 <code>ConcurrentHashMap</code> 取。</p>
+
+<div class="side">💡 为什么用 ConcurrentHashMap 而不是普通的 HashMap？虽然 <code>enhance()</code> 整体在单次请求中是单线程执行的，但 <code>propertyCache</code> 是所有请求<strong>共享</strong>的。多个请求并发首次遇到同一个 Class 时可能同时触发 <code>computeIfAbsent</code>——ConcurrentHashMap 保证线程安全。</div>
+
+<h3>resolveProperties 的细节</h3>
+<pre><code>private List&lt;PropertyMetadata&gt; resolveProperties(Class&lt;?&gt; type) {
+    if (isSimpleValue(type) || type.isArray() ||
+        Map.class.isAssignableFrom(type) ||
+        Iterable.class.isAssignableFrom(type)) {
+        return Collections.emptyList();  // 简单类型和容器类型跳过
+    }
+    JavaType javaType = jsonMapper.constructType(type);
+    SerializationConfig config = jsonMapper.serializationConfig();
+    ClassIntrospector classIntrospector =
+        config.classIntrospectorInstance().forOperation(config);
+    AnnotatedClass annotatedClass =
+        classIntrospector.introspectClassAnnotations(javaType);
+    List&lt;BeanPropertyDefinition&gt; definitions =
+        classIntrospector.introspectForSerialization(javaType, annotatedClass)
+                       .findProperties();
+    // 收集 getter 和 field，优先 getter
+    List&lt;PropertyMetadata&gt; properties = new ArrayList&lt;&gt;();
+    for (BeanPropertyDefinition definition : definitions) {
+        AnnotatedMember member = definition.getAccessor();   // getter
+        if (member == null) member = definition.getField();  // 回退 field
+        if (member == null) continue;
+        member.fixAccess(true);                              // 强制可访问（包括 private）
+        properties.add(new PropertyMetadata(definition.getName(), member));
+    }
+    return Collections.unmodifiableList(properties);
+}</code></pre>
+
+<p>使用 Jackson 的 <code>ClassIntrospector</code> 而非纯 Java 反射的原因：<strong>它尊重 Jackson 的所有注解规则</strong>（<code>@JsonProperty</code>、<code>@JsonIgnore</code>、<code>@JsonUnwrapped</code> 等）——保证增强框架扫描到的属性列表和最终序列化输出的属性列表完全一致。</p>
+
+<h2>四、渲染阶段：renderValue() 的类型分发 + process 处理链</h2>
+
+<p><code>renderValue()</code> 的结构与 <code>collectValue()</code> 几乎镜像：同样的类型分发（null/Map/Iterable/Array/简单值/POJO），但这次是「构建 JSON 节点」而非「收集信息」。关键看 <code>renderPojo()</code>：</p>
+
+<pre><code>private ObjectNode renderPojo(Object value, JsonEnhancementContext context,
+                               IdentityHashMap&lt;Object, Boolean&gt; visited) {
+    ObjectNode objectNode = jsonMapper.createObjectNode();
+    for (PropertyMetadata metadata : getProperties(value.getClass())) {
+        Object originalValue = metadata.getValue(value);
+        JsonFieldContext fieldContext = new JsonFieldContext(
+            value, metadata.propertyName(), metadata.member(), originalValue);
+        Object processedValue = originalValue;
+        boolean changed = false;
+
+        // ★ 处理链：依次调用每个 Processor 的 process()
+        for (JsonFieldProcessor processor : processors) {
+            if (!processor.supports(fieldContext)) continue;
+            Object nextValue = processor.process(fieldContext, processedValue, context);
+            changed = changed || !Objects.equals(processedValue, nextValue);
+            processedValue = nextValue;
+        }
+
+        JsonNode childNode = changed
+            ? enhanceTranslatedValue(processedValue, context, visited)  // 有变化→二次增强
+            : renderValue(processedValue, context, visited);            // 无变化→常规渲染
+        objectNode.set(metadata.propertyName(), childNode);
+    }
+    return objectNode;
+}</code></pre>
+
+<div class="danger"><b>注意：processingRequired 标记和 supports() 返回值的不同作用。</b><br>
+• <code>processingRequired</code> 是<strong>请求级别</strong>标记：整个响应只要有一个字段被至少一个 Processor 关注，就要走完整流程。<br>
+• <code>supports()</code> 是<strong>字段-Processor 级别</strong>过滤：每个字段、每个 Processor 单独判断。即使 processingRequired 是 true，一个 Processor 也只为它 supports 的字段执行 process()。</div>
+
+<h2>五、二次增强：enhanceTranslatedValue() 的递归处理</h2>
+
+<p>这是增强框架里最微妙的一步。当 Processor.process() 返回了一个<strong>非简单值的全新对象</strong>（比如翻译后返回了一个包含嵌套字段的 VO），这个新对象也可能需要增强：</p>
+
+<pre><code>private JsonNode enhanceTranslatedValue(Object value,
+        JsonEnhancementContext context,
+        IdentityHashMap&lt;Object, Boolean&gt; visited) {
+    if (value == null || value instanceof JsonNode || isSimpleValue(value.getClass())) {
+        return renderValue(value, context, visited);   // 简单值：直接渲染
+    }
+    return enhanceTree(value);                          // 复杂对象：递归增强
+}
+
+private JsonNode enhanceTree(Object value) {
+    JsonEnhancementContext context = new JsonEnhancementContext(jsonMapper);
+    collectValue(value, context, new IdentityHashMap&lt;&gt;());
+    if (!context.isProcessingRequired()) {
+        return jsonMapper.valueToTree(value);
+    }
+    processors.forEach(processor -&gt; processor.prepare(context));
+    return renderValue(value, context, new IdentityHashMap&lt;&gt;());
+}</code></pre>
+
+<div class="why"><b>为什么需要二次增强？</b>假设 Processor A 把 <code>deptId=3</code> 替换成了 <code>DeptVO{name="研发部", leaderId=5}</code>。这个 <code>leaderId=5</code> 可能也需要被另一个 Processor B 处理（如翻译成 leader 姓名）。二次增强让「替换后的对象」重新走一遍 collect-prepare-process 流程——递归确保嵌套替换也不会遗漏。</div>
+
+<h2>六、消息转换器排除：supports() 方法</h2>
+
+<p><code>JsonValueEnhancer</code> 还有一个 <code>supports(Class&lt;?&gt; converterType)</code> 方法，被外部的 <code>ResponseBodyAdvice</code> 调用：</p>
+
+<pre><code>public boolean supports(Class&lt;?&gt; converterType) {
+    return !processors.isEmpty()
+        && !ByteArrayHttpMessageConverter.class.isAssignableFrom(converterType)
+        && !StringHttpMessageConverter.class.isAssignableFrom(converterType)
+        && !ResourceHttpMessageConverter.class.isAssignableFrom(converterType);
+}</code></pre>
+
+<p>三种被排除的转换器：<strong>ByteArray</strong>（文件下载，二进制数据不是 JSON 对象树）、<strong>String</strong>（已经是字符串了，二次序列化会加引号）、<strong>Resource</strong>（静态资源，不是业务数据）。这个排除是<strong>正确性保障</strong>而非性能优化——如果不排除，增强框架试图遍历 byte[] 或 String 会出错。</p>
+
+<h2>七、完整链路图：从 Controller 返回到 JSON 输出</h2>
+
+<div class="flow">Controller.某个方法 return R.ok(users)
+  │
+  ├─ Spring MVC ResponseBodyAdvice.beforeBodyWrite()
+  │     └─ 调用 jsonValueEnhancer.supports(converterType)  → 判断是否介入
+  │
+  ├─ jsonValueEnhancer.enhance(body)
+  │     │
+  │     ├─ [1] new JsonEnhancementContext(jsonMapper)
+  │     │
+  │     ├─ [2] collectValue(body, context, visited=new IdentityHashMap)
+  │     │     └─ 遍历对象树每个字段
+  │     │       ├─ type dispatch: null/Map/Iterable/Array/简单值/POJO
+  │     │       ├─ getProperties(type) → 从 ConcurrentHashMap 缓存取
+  │     │       └─ collectField(fieldContext, context)
+  │     │             └─ for each processor:
+  │     │                   if processor.supports(fieldContext):
+  │     │                       context.markProcessingRequired()
+  │     │                       processor.collect(fieldContext, context)
+  │     │
+  │     ├─ [3] if !processingRequired → return body (短路)
+  │     │
+  │     ├─ [4] for each processor: processor.prepare(context)
+  │     │     └─ 批量查询数据库、Redis 等，结果写入 context.attributes
+  │     │
+  │     └─ [5] renderValue(body, context, visited=new IdentityHashMap)
+  │           └─ 遍历对象树每个字段 → 构建 JsonNode 树
+  │             ├─ type dispatch: null/Map/Iterable/Array/简单值/POJO
+  │             └─ renderPojo(value):
+  │                   for each property:
+  │                     for each processor:
+  │                       if processor.supports:
+  │                         nextValue = processor.process(fc, value, context)
+  │                         如果 value 变了 → enhanceTranslatedValue (二次增强)
+  │                         如果 value 没变 → renderValue (常规渲染)
+  │
+  └─ Spring MVC 用 Jackson 把增强后的 JsonNode 树写出到 HTTP Response</div>
+
+<h2>八、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. collectValue() 中为什么用 IdentityHashMap 而非 HashSet 来记录已访问对象？</p>
+<span class="opt">A. IdentityHashMap 性能更好，遍历速度是 HashSet 的两倍</span>
+<span class="opt">B. 循环引用保护关心的是「同一个内存对象」，需要用引用相等（==）而非 equals()</span>
+<span class="opt">C. HashSet 不支持 null key，而域对象可能为 null</span>
+<span class="opt">D. 个人偏好，用 HashSet 也一样</span>
+<details><summary>看答案</summary><b>B</b>。循环引用保护需要判断「同一个对象是否在访问链上」，只能用引用相等（==）。如果用 equals()，两个内容相同的不同对象（如两个相等的 Map）会被误判为已访问。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. propertyCache 为什么用 ConcurrentHashMap 而非 HashMap？</p>
+<span class="opt">A. 增强框架对性能要求极高，ConcurrentHashMap 更快</span>
+<span class="opt">B. propertyCache 是所有请求共享的，多线程并发可能同时 computeIfAbsent 同一个 Class</span>
+<span class="opt">C. JSON 序列化本身就是多线程的</span>
+<span class="opt">D. 可以为性能优化用，其实 HashMap 也行</span>
+<details><summary>看答案</summary><b>B</b>。虽然单次请求内是单线程，但多个请求并发时可能同时首次遇到同一个 Class，触发 computeIfAbsent 的并发执行。ConcurrentHashMap 保证这个操作线程安全。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. enhanceTranslatedValue 的作用是什么？</p>
+<span class="opt">A. 为翻译后的文本添加引号</span>
+<span class="opt">B. 对 Processor.process() 返回的复杂新对象重走一遍 collect-prepare-process 流程</span>
+<span class="opt">C. 校验翻译结果是否合法</span>
+<span class="opt">D. 将翻译结果缓存到 Redis</span>
+<details><summary>看答案</summary><b>B</b>。Processor 替换后返回的可能是一个包含嵌套字段的新 VO，这个新对象的字段也可能需要增强——二次增强递归确保嵌套替换不遗漏。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. supports() 方法为什么排除 ByteArrayHttpMessageConverter？</p>
+<span class="opt">A. 性能考虑，文件下载不需要增强</span>
+<span class="opt">B. 文件下载返回的是 byte[] 而非对象树，增强框架无法遍历——排除它是正确性保障</span>
+<span class="opt">C. ByteArray 类型的序列化比 String 慢</span>
+<span class="opt">D. 作者偏好，其实不排除也不会出错</span>
+<details><summary>看答案</summary><b>B</b>。ByteArray 是二进制数据而非对象树，增强框架试图遍历 byte[] 会出错。排除它是正确性保障，而非性能优化。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/FasterXML/jackson-docs/wiki/JacksonPolymorphicDeserialization" target="_blank">Jackson Wiki · ClassIntrospector</a> — 理解 Jackson 的内省机制。配套速查见 <code>reference/0004.html</code>，术语见 <code>GLOSSARY.md</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「如果 enhance 过程中抛异常，JsonNode 树会被部分渲染吗？」「collectValue 和 renderValue 为什么要遍历两次对象树，不能一次搞定？」下一课进入 validate 区 + 实战总结，讲透 <strong>@JsonPattern 校验、模块依赖关系与最佳实践</strong>。</div>
+
+<div class="nav">课程 0004 / 使命：全面读懂 ruoyi-common-json · 上一课：增强框架设计模式 · 下一课：JSON 校验与实战</div>
+
+</body>
+</html>

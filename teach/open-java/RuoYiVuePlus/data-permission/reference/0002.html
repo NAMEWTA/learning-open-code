@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查：DataScopeType 六种范围 + SpEL 变量</title>
+<style>
+  body { max-width: 800px; margin: 1.5rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; font-size: 0.92rem; line-height: 1.65; color: #1a1a1a; }
+  h1 { font-size: 1.35rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.1rem; margin-top: 1.8rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 0.8rem; border-radius: 4px; font-size: 0.82rem; line-height: 1.5; overflow-x: auto; }
+  code { font-size: 0.88em; background: #f0f0f0; padding: 0.05em 0.3em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 0.8rem 0; font-size: 0.84rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.55rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .back { font-size: 0.85rem; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+</style>
+</head>
+<body>
+
+<h1>📋 速查 02：DataScopeType 六种范围 + SpEL 变量 + Handler 调用链</h1>
+
+<p><a href="../lessons/0003.html">← 课程 03</a> | <a href="../lessons/0005.html">← 课程 05</a> | <a href="../lessons/0006.html">← 课程 06</a> | <a href="../GLOSSARY.md">术语表</a></p>
+
+<h2>六种数据范围速查</h2>
+<table>
+<tr><th>code</th><th>枚举</th><th>SpEL 模板</th><th>渲染示例（假设参数）</th></tr>
+<tr><td>1</td><td>ALL</td><td><code>""</code></td><td>无条件，全局不过滤</td></tr>
+<tr><td>2</td><td>CUSTOM</td><td><code>#{#deptName} IN ( #{@sdss.getRoleCustom(#roleId)} )</code></td><td><code>dept_id IN (101,102)</code></td></tr>
+<tr><td>3</td><td>DEPT</td><td><code>#{#deptName} = #{#user.deptId}</code></td><td><code>dept_id = 103</code></td></tr>
+<tr><td>4</td><td>DEPT_AND_CHILD</td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild(#user.deptId)} )</code></td><td><code>dept_id IN (103,104,105)</code></td></tr>
+<tr><td>5</td><td>SELF</td><td><code>#{#userName} = #{#user.userId}</code></td><td><code>create_by = 1</code></td></tr>
+<tr><td>6</td><td>DEPT_AND_CHILD_OR_SELF</td><td><code>#{#deptName} IN ( ... ) OR #{#userName} = #{#user.userId}</code></td><td><code>dept_id IN (...) OR create_by = 1</code></td></tr>
+</table>
+
+<h2>SpEL 变量来源速查</h2>
+<table>
+<tr><th>变量</th><th>来源</th><th>类型</th></tr>
+<tr><td><code>#deptName</code></td><td>注解 key→value 映射（如 "dept_id"）</td><td>String（列名）</td></tr>
+<tr><td><code>#userName</code></td><td>同上（如 "create_by"）</td><td>String（列名）</td></tr>
+<tr><td><code>#user.deptId</code></td><td>LoginUser.deptId</td><td>Long</td></tr>
+<tr><td><code>#user.userId</code></td><td>LoginUser.userId</td><td>Long</td></tr>
+<tr><td><code>#roleId</code></td><td>Handler 循环注入</td><td>Long</td></tr>
+<tr><td><code>@sdss.getRoleCustom(#roleId)</code></td><td>Spring Bean "sdss" 方法</td><td>String（逗号分隔 id）</td></tr>
+<tr><td><code>@sdss.getDeptAndChild(#user.deptId)</code></td><td>同上</td><td>String（逗号分隔 id）</td></tr>
+</table>
+
+<p><strong>NullSafe 兜底：</strong>变量/属性为 null 时统一返回 <code>"-1"</code>，防止 <code>IN ()</code> 或 <code>= null</code> 破坏 SQL。</p>
+
+<h2>getSqlSegment 决策树</h2>
+<pre><code>getSqlSegment(where, isSelect)
+ ├─ isSuperAdmin?  → 原样返回 ← 短路！
+ ├─ buildDataFilter 返回空? → 原样返回
+ ├─ 原 where 非空? → where AND ( dataFilter )
+ └─ 原 where 为空? → ( dataFilter )
+ finally → DataPermissionHelper.removePermission()</code></pre>
+
+<h2>buildDataFilter 六阶段</h2>
+<pre><code>1. joinStr = isSelect ? "OR" : "AND"
+2. 构建 NullSafe SpEL 上下文
+3. scopeRoles(user, access) — 接口约束筛选角色
+4. 注册 key→value 列名变量
+5. 逐角色遍历渲染模板 → conditions 收集
+   └─ ALL? → 直接返回空 ← 短路！
+   └─ ignore 包裹渲染 ← 防递归
+   └─ 模板不匹配? → elseSql 兜底
+6. conditions.join → 去开头 joinStr</code></pre>
+
+<h2>关键文件索引</h2>
+<table>
+<tr><th>文件</th><th>作用</th></tr>
+<tr><td><code>DataScopeType.java:26-56</code></td><td>六种范围的枚举 + SpEL 模板</td></tr>
+<tr><td><code>PlusDataPermissionHandler.java:72-97</code></td><td>getSqlSegment 入口</td></tr>
+<tr><td><code>PlusDataPermissionHandler.java:107-179</code></td><td>buildDataFilter 核心</td></tr>
+<tr><td><code>PlusDataPermissionHandler.java:219-250</code></td><td>scopeRoles 接口约束筛选</td></tr>
+<tr><td><code>PlusDataPermissionHandler.java:257-281</code></td><td>resolveAccess 读 @SaCheckPermission</td></tr>
+<tr><td><code>SysDataScopeServiceImpl.java:42-54</code></td><td>sdss.getRoleCustom</td></tr>
+<tr><td><code>SysDataScopeServiceImpl.java:64-69</code></td><td>sdss.getDeptAndChild</td></tr>
+</table>
+
+<div class="back">📖 相关课程：<a href="../lessons/0003.html">03 DataScopeType</a> · <a href="../lessons/0005.html">05 getSqlSegment</a> · <a href="../lessons/0006.html">06 buildDataFilter</a> · <a href="../lessons/0004.html">04 切面拦截器</a> | 返回 <a href="../mission.md">使命</a></div>
+</body>
+</html>

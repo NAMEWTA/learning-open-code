@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 第 3 课：SecurityConfig 安全过滤链</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; padding-bottom: 0.2rem; border-bottom: 2px solid #e3e8ef; }
+  h3 { font-size: 1.02rem; margin-top: 1.3rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.08rem 0.35rem; border-radius: 3px; font-size: 0.84em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.78rem; line-height: 1.5; margin: 0.5rem 0; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.35rem 0.55rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; font-weight: 600; }
+  .badge { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.1rem 0.4rem; border-radius:3px; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; border-radius: 0 4px 4px 0; margin: 0.6rem 0; font-size: 0.85rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.5rem 0.8rem; border-radius: 0 4px 4px 0; margin: 0.6rem 0; font-size: 0.85rem; }
+  .nav { margin-top: 2rem; font-size: 0.82rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 · 第 3 课：SecurityConfig 过滤链逐项解析 <span class="badge">速查</span></h1>
+
+<h2>一句话核心</h2>
+<p>用 6 项安全策略保护 SBA 管理后台：依赖 <code>AdminServerProperties</code> 动态获取 context-path，实现路径无关的安全过滤链。</p>
+
+<h2>完整源码速览</h2>
+<pre><code>@EnableWebSecurity
+@Configuration
+public class SecurityConfig {
+
+    private final String adminContextPath;  // 从 AdminServerProperties 获取
+
+    public SecurityConfig(AdminServerProperties adminServerProperties) {
+        this.adminContextPath = adminServerProperties.getContextPath();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        SavedRequestAwareAuthenticationSuccessHandler successHandler =
+            new SavedRequestAwareAuthenticationSuccessHandler();
+        successHandler.setTargetUrlParameter("redirectTo");
+        successHandler.setDefaultTargetUrl(adminContextPath + "/");
+
+        PathPatternRequestMatcher.Builder mvc =
+            PathPatternRequestMatcher.withDefaults();
+
+        return http
+            <span style="color:#f0c000;">// ①</span> .headers(h -> h.frameOptions(disable))
+            <span style="color:#f0c000;">// ②</span> .authorizeHttpRequests(auth -> auth
+            <span style="color:#f0c000;">//        </span> .requestMatchers(mvc.matcher(ctx+"/assets/**"),
+            <span style="color:#f0c000;">//                         </span> mvc.matcher(ctx+"/login")).permitAll()
+            <span style="color:#f0c000;">//        </span> .anyRequest().authenticated())
+            <span style="color:#f0c000;">// ③</span> .formLogin(f -> f.loginPage(ctx+"/login")
+            <span style="color:#f0c000;">//                     </span> .successHandler(successHandler))
+            <span style="color:#f0c000;">// ④</span> .logout(l -> l.logoutUrl(ctx+"/logout"))
+            <span style="color:#f0c000;">// ⑤</span> .httpBasic(Customizer.withDefaults())
+            <span style="color:#f0c000;">// ⑥</span> .csrf(AbstractHttpConfigurer::disable)
+            .build();
+    }
+}</code></pre>
+
+<h2>6 项安全策略逐项速查</h2>
+
+<table>
+<tr><th>#</th><th>策略</th><th>配置方式</th><th>原因</th><th>风险 / 注意</th></tr>
+<tr>
+  <td>①</td>
+  <td>禁用 frameOptions</td>
+  <td><code>header.frameOptions(disable)</code></td>
+  <td>SBA 日志查看器等面板在 iframe 中渲染，<code>X-Frame-Options: DENY</code> 会导致白屏</td>
+  <td>clickjacking 风险。SBA 通常内网部署，风险可控。公网部署建议用 CSP <code>frame-ancestors</code></td>
+</tr>
+<tr>
+  <td>②</td>
+  <td>放行静态资源 + 登录页</td>
+  <td><code>.requestMatchers("/assets/**","/login").permitAll()</code></td>
+  <td>/assets/** 不放行则登录页无样式；/login 不放行则死循环（需登录才能看登录页）</td>
+  <td>其余所有请求均需认证</td>
+</tr>
+<tr>
+  <td>③</td>
+  <td>表单登录</td>
+  <td><code>.formLogin().loginPage().successHandler()</code></td>
+  <td>人（运维人员）通过浏览器登录。SavedRequest 登录后回到拦截前的页面</td>
+  <td>使用 SBA 自带登录页，非自定义</td>
+</tr>
+<tr>
+  <td>④</td>
+  <td>注销</td>
+  <td><code>.logout().logoutUrl()</code></td>
+  <td>POST /admin/logout 清除 SecurityContext 和 Session</td>
+  <td>依赖 CSRF 已禁用</td>
+</tr>
+<tr>
+  <td>⑤</td>
+  <td>HTTP Basic 认证</td>
+  <td><code>.httpBasic(withDefaults())</code></td>
+  <td>程序（SBA Client）通过 HTTP 头传递凭证注册 + Server 回调 actuator</td>
+  <td>与表单登录并存，服务不同类型的"用户"</td>
+</tr>
+<tr>
+  <td>⑥</td>
+  <td>禁用 CSRF</td>
+  <td><code>.csrf(disable)</code></td>
+  <td>SBA Vue.js UI 的 AJAX 请求不带 CSRF token；Client HTTP Basic 也不支持 CSRF</td>
+  <td>SBA 官方推荐配置，非偷懒</td>
+</tr>
+</table>
+
+<h2>两种认证方式的使用方</h2>
+<table>
+<tr><th>认证方式</th><th>使用者</th><th>场景</th></tr>
+<tr><td>表单登录（formLogin）</td><td>人（运维人员）</td><td>浏览器打开 SBA 管理后台，输入账号密码</td></tr>
+<tr><td>HTTP Basic（httpBasic）</td><td>程序（SBA Client）</td><td>Client 向 Server 注册；Server 回调 Client 的 actuator 端点</td></tr>
+</table>
+
+<h2>安全链路全景</h2>
+<pre><code>┌──────────────────────────────────────────────┐
+│  浏览器访问 http://localhost:9090/admin       │
+│  ├─ 未登录 → 拦截到 /admin/login              │
+│  ├─ 登录成功 → SavedRequest → 回原页面         │
+│  ├─ /assets/** → permitAll（样式/JS 加载）     │
+│  └─ 其他 API → 必须认证                       │
+├──────────────────────────────────────────────┤
+│  SBA Client 注册                              │
+│  ├─ POST /admin/instances                     │
+│  ├─ Authorization: Basic &lt;base64(user:pass)&gt; │
+│  └─ httpBasic() 认证通过 → 写入仓库            │
+├──────────────────────────────────────────────┤
+│  frameOptions: disable（iframe 正常加载）       │
+│  CSRF: disable（AJAX 不报 403）                │
+└──────────────────────────────────────────────┘</code></pre>
+
+<h2>Spring Security 版本差异速查</h2>
+<table>
+<tr><th>Spring Security 5.x（已废弃）</th><th>Spring Security 6.x（当前 RuoYi-Vue-Plus）</th></tr>
+<tr><td><code>http.authorizeRequests()</code></td><td><code>http.authorizeHttpRequests()</code></td></tr>
+<tr><td><code>.antMatchers("/path/**")</code></td><td><code>mvc.matcher("/path/**")</code>（PathPattern）</td></tr>
+<tr><td><code>.and()</code> 串联</td><td>Lambda DSL 嵌套，不需要 <code>.and()</code></td></tr>
+</table>
+
+<h2>关键设计决策</h2>
+<div class="why"><strong>为什么注入 AdminServerProperties 而不是硬编码 /admin？</strong>——无论你把 SBA 挂载到 /admin、/monitor 还是 /，所有安全规则自动适配。改一处 YML，安全规则自动跟随。</div>
+<div class="why"><strong>为什么用 PathPatternRequestMatcher？</strong>——Spring Security 6.x 新默认匹配器，性能优于 Ant 风格，天然支持 {variable} 路径变量。RuoYi-Vue-Plus 全系统统一使用。</div>
+<div class="warn"><strong>禁用 frameOptions 的安全影响</strong>——页面可被其他网站用 iframe 嵌入（clickjacking 风险）。SBA 是内部运维工具，通常在内网，攻击面有限。公网部署建议用 CSP 替代。</div>
+
+<div class="nav">速查 03 / 04 · 对应课程：<a href="../lessons/03.html">第 3 课 · 安全守护</a></div>
+
+</body>
+</html>

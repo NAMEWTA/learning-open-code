@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 实战链路与多厂商切换</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 实战链路与多厂商切换</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code> · 使命：读懂 ruoyi-common-oss 对象存储模块</p>
+
+<h2>一句话定位</h2>
+<div class="chain">从 <code>OssFactory.instance().upload(file)</code> 一行代码追踪到 S3TransferManager.upload() 的完整 12 步调用链，理解 BucketUrlUtil 两种 URL 风格、S3StorageException 异常体系、以及切换阿里云 OSS / 腾讯云 COS / MinIO 只需改数据库配置。</div>
+
+<h2>上传完整链路（12 步）</h2>
+<table>
+<tr><th>步</th><th>位置</th><th>操作</th><th>关键代码</th></tr>
+<tr><td>1</td><td><code>OssFactory.java</code></td><td>从 Redis 取默认配置 key</td><td><code>RedisUtils.getCacheObject(OssConstant.DEFAULT_CONFIG_KEY)</code></td></tr>
+<tr><td>2</td><td><code>OssFactory.java</code></td><td>从缓存取配置 JSON</td><td><code>CacheUtils.get(CacheNames.SYS_OSS_CONFIG, configKey)</code></td></tr>
+<tr><td>3</td><td><code>OssFactory.java</code></td><td>JSON → OssProperties</td><td><code>JsonUtils.parseObject(json, OssProperties.class)</code></td></tr>
+<tr><td>4</td><td><code>OssFactory.java</code></td><td>OssProperties → OssClientConfig</td><td><code>OssClientConfig.formProperties(properties)</code></td></tr>
+<tr><td>5</td><td><code>OssFactory.java</code></td><td>DCL 缓存检查/创建客户端</td><td><code>getClientLock(configKey).lock()</code> + <code>verifyConfig()</code></td></tr>
+<tr><td>6</td><td><code>DefaultOssClientImpl.java</code></td><td>初始化 S3 三剑客 + Executor</td><td><code>doInitialize()</code>：S3AsyncClient + S3TransferManager + S3Presigner</td></tr>
+<tr><td>7</td><td><code>AbstractOssClientImpl.java</code></td><td>无参 upload → 有参 bucketUpload</td><td><code>upload(key, file) → bucketUpload(defaultBucket(), key, file)</code></td></tr>
+<tr><td>8</td><td><code>AbstractOssClientImpl.java</code></td><td>构建对象 key 路径</td><td><code>buildPathKey(fileName)</code> → <code>prefix/yyyy/MM/dd/uuid.ext</code></td></tr>
+<tr><td>9</td><td><code>AbstractOssClientImpl.java</code></td><td>File → AsyncRequestBody</td><td><code>File → RandomAccessFile → ReadableByteChannel → AsyncRequestBody</code></td></tr>
+<tr><td>10</td><td><code>AbstractOssClientImpl.java</code></td><td>私有方法汇聚 + 调 doCustomUpload</td><td><code>bucketUpload(bucket, key, AsyncRequestBody, Options)</code></td></tr>
+<tr><td>11</td><td><code>AbstractOssClientImpl.java</code></td><td>S3 异步上传</td><td><code>s3TransferManager.upload(...).completionFuture().handleAsync(handler).join()</code></td></tr>
+<tr><td>12</td><td><code>AbstractOssClientImpl.java</code></td><td>构建返回结果</td><td><code>PutObjectResult.form(bucketUrl + "/" + key, key, eTag, size)</code></td></tr>
+</table>
+
+<h2>下载链路</h2>
+<div class="chain">
+download(key)
+  → bucketDownload(defaultBucket(), key, Path)
+    → OutputStreamDownloadSubscriber.create(path)
+      → doCustomDownload(builder, toPublisher(), null)
+        → S3TransferManager.download(DownloadRequest)
+          → Publisher&lt;ByteBuffer&gt; → .subscribe(subscriber)
+            → accept(ByteBuffer) → while (hasRemaining) channel.write(byteBuffer)
+              → .join() → buildGetObjectResult(key, response)
+                → GetObjectResult(key, eTag, lastModified, size, contentType, ...)</div>
+
+<h2>BucketUrlUtil：两种 URL 风格</h2>
+<table>
+<tr><th>方法</th><th>格式</th><th>示例</th></tr>
+<tr><td><code>rebuildUrlHeader(isHttps, base)</code></td><td>剥离旧协议头 + 重新拼接</td><td><code>rebuildUrlHeader(true, "s3.com")</code> → <code>"https://s3.com"</code></td></tr>
+<tr><td><code>removeHttpProtocolHeader(url)</code></td><td>去掉 http:// 或 https://</td><td><code>removeHttpProtocolHeader("https://s3.com")</code> → <code>"s3.com"</code></td></tr>
+<tr><td><code>getPathStyleBucketUrl(h, base, bucket)</code></td><td><code>{proto}://{base}/{bucket}</code></td><td><code>"https://s3.com/my-bucket"</code></td></tr>
+<tr><td><code>getSiteStyleBucketUrl(h, base, bucket)</code></td><td><code>{proto}://{bucket}.{base}</code></td><td><code>"https://my-bucket.s3.com"</code></td></tr>
+</table>
+
+<h2>URL 风格判断</h2>
+<table>
+<tr><th>endpoint 包含</th><th>风格</th><th>final URL 形态</th><th>厂商</th></tr>
+<tr><td><code>"aliyun"</code></td><td>site-style</td><td><code>bucket.endpoint</code></td><td>阿里云 OSS</td></tr>
+<tr><td><code>"qcloud"</code></td><td>site-style</td><td><code>bucket.endpoint</code></td><td>腾讯云 COS</td></tr>
+<tr><td><code>"qiniu"</code></td><td>site-style</td><td><code>bucket.endpoint</code></td><td>七牛云 Kodo</td></tr>
+<tr><td><code>"obs"</code></td><td>site-style</td><td><code>bucket.endpoint</code></td><td>华为云 OBS</td></tr>
+<tr><td>不含以上</td><td>path-style</td><td><code>endpoint/bucket</code></td><td>MinIO / 自建 S3</td></tr>
+</table>
+
+<h2>多厂商切换：只需改 4 个配置字段</h2>
+<table>
+<tr><th>字段</th><th>阿里云 OSS</th><th>→ 腾讯云 COS</th><th>→ MinIO</th></tr>
+<tr><td><code>endpoint</code></td><td><code>oss-cn-beijing.aliyuncs.com</code></td><td><code>cos.ap-beijing.myqcloud.com</code></td><td><code>192.168.1.100:9000</code></td></tr>
+<tr><td><code>accessKey</code></td><td>LTAI5t...</td><td>AKID...</td><td>minioadmin</td></tr>
+<tr><td><code>secretKey</code></td><td>(阿里云密钥)</td><td>(腾讯云密钥)</td><td>minioadmin</td></tr>
+<tr><td><code>bucketName</code></td><td>my-bucket</td><td>my-bucket-appid</td><td>my-bucket</td></tr>
+</table>
+<p style="font-size:0.85rem;">代码一行不变——SDK 对话的是 S3 协议，不是厂商 API。</p>
+
+<h2>S3StorageException 异常体系</h2>
+<table>
+<tr><th>构造器/工厂</th><th>参数</th><th>使用场景</th></tr>
+<tr><td><code>form(String message)</code></td><td>错误消息</td><td>业务校验失败："bucket is not configured"</td></tr>
+<tr><td><code>form(String msg, Throwable cause)</code></td><td>消息 + 原因</td><td>包装已知异常时补充上下文</td></tr>
+<tr><td><code>form(Throwable cause)</code></td><td>原始异常</td><td>直接包装底层异常</td></tr>
+<tr><td><code>form(String, Throwable, boolean, boolean)</code></td><td>完整参数</td><td>需要控制异常抑制和堆栈时</td></tr>
+</table>
+
+<h2>异常抛出点速查</h2>
+<table>
+<tr><th>位置</th><th>条件</th><th>消息</th></tr>
+<tr><td><code>OssFactory.instance()</code></td><td>Redis 读不到默认配置 key</td><td>"文件存储服务类型无法找到!"</td></tr>
+<tr><td><code>OssFactory.instance(configKey)</code></td><td>缓存中无对应配置 JSON</td><td>"系统异常, 'xxx'配置信息不存在!"</td></tr>
+<tr><td><code>DefaultOssClientImpl.doInitialize()</code></td><td>accessKey 为空</td><td>"accessKey is not configured."</td></tr>
+<tr><td><code>DefaultOssClientImpl.doInitialize()</code></td><td>secretKey 为空</td><td>"secretKey is not configured."</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>bucket 未配置</td><td>"bucket is not configured."</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>endpoint 未配置</td><td>"endpoint is not configured."</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>上传返回 null</td><td>"response is empty."</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>S3 SDK 异步异常</td><td>经 <code>toStorageException()</code> 转换</td></tr>
+<tr><td><code>AccessPolicy.formType()</code></td><td>策略类型不匹配</td><td>"'type' not found By xxx"</td></tr>
+</table>
+
+<h2>toStorageException 解包流程</h2>
+<div class="chain">
+原始异常 (CompletionException / ExecutionException / ...)
+  → unwrapAsyncException(e)
+    → while (cause instanceof CompletionException || ExecutionException)
+        → cause = cause.getCause()  ← 逐层剥开
+  → 剥开后检查：
+    ├─ 已是 S3StorageException → 直接返回
+    └─ 其他异常 → new S3StorageException(cause)</div>
+
+<h2>预签名 URL</h2>
+<table>
+<tr><th>方法</th><th>SDK API</th><th>用途</th></tr>
+<tr><td><code>presignGetUrl(key, duration)</code></td><td><code>s3Presigner.presignGetObject(...).url()</code></td><td>限时下载链接，浏览器直接下载</td></tr>
+<tr><td><code>presignPutUrl(key, duration, metadata)</code></td><td><code>s3Presigner.presignPutObject(...).url()</code></td><td>限时上传链接，前端直传 OSS</td></tr>
+</table>
+<p style="font-size:0.85rem;">关键：S3Presigner 用 <code>domainUrl</code>（非 endpointUrl）作为端点，保证生成的预签名 URL 对外可访问。</p>
+
+<h2>结果模型速查</h2>
+<table>
+<tr><th>Record</th><th>字段</th></tr>
+<tr><td><code>PutObjectResult</code></td><td><code>url:String</code>, <code>key:String</code>, <code>eTag:String</code>, <code>size:long</code></td></tr>
+<tr><td><code>GetObjectResult</code></td><td><code>key</code>, <code>eTag</code>, <code>lastModified:LocalDateTime</code>, <code>size:long</code>, <code>contentType</code>, <code>contentDisposition</code>, <code>contentRange</code>, <code>contentEncoding</code>, <code>contentLanguage</code>, <code>metadata:Map&lt;String,String&gt;</code></td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>上传 12 步</b>：Redis → JSON → OssProperties → OssClientConfig → DCL → doInitialize → buildPathKey → 类型转换 → 私有汇聚 → doCustomUpload → S3TransferManager → PutObjectResult。</li>
+<li><b>两种 URL 风格</b>：path-style = <code>host/bucket</code>（MinIO），site-style = <code>bucket.host</code>（阿里云/腾讯/七牛/华为）。</li>
+<li><b>切换厂商 = 改 4 个字段</b>：endpoint、accessKey、secretKey、bucketName。Java 代码不变，因为 S3 协议是通用标准。</li>
+<li><b>toStorageException 解包</b>：while 循环剥 CompletionException/ExecutionException，取根因，再包装为 S3StorageException。</li>
+<li><b>预签名 URL 用 domainUrl</b>：S3Presigner 用 domainUrl 作为端点，保证生成的 URL 对用户可访问（endpointUrl 可能是内网地址）。</li>
+<li><b>异常统一</b>：所有 OSS 操作异常最终都是 S3StorageException（RuntimeException），业务层只需 catch 这一个类型。</li>
+<li><b>双厂商并存</b>：在 sys_oss_config 表建两条记录，configKey 分别为 "oss_aliyun" 和 "oss_minio"，OssFactory.instance(configKey) 按需获取。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：S3StorageException、BucketUrlUtil、Path-Style、Site-Style、预签名 URL、PutObjectResult、GetObjectResult、toStorageException、解包异常</p>
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Redisson 封装与序列化</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>01 - Redisson 封装与序列化</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解为什么选 Redisson 而不是 RedisTemplate，掌握 CompositeCodec（key String + value JSON）和 KeyPrefixHandler 的 key 前缀处理，能讲清 RedisConfig 中单机/集群双模式的配置差异。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p><code>ruoyi-common-redis</code> 是整个项目使用 Redis 的唯一入口。它不直接依赖 Spring 的 <code>RedisTemplate</code>，而是基于 <strong>Redisson</strong>——一个将 Redis 能力包装成 Java 分布式对象（Map、Set、Queue、AtomicLong、限流器、发号器）的框架。</p>
+
+<p>模块五大区域：</p>
+<pre>
+common-redis/
+├── config/      → RedisConfig、CacheConfig、RateLimiterConfig、IdempotentConfig
+├── handler/     → KeyPrefixHandler、RedisExceptionHandler
+├── aspectj/     → RateLimiterAspect、RepeatSubmitAspect
+├── cache/       → PlusSpringCacheManager、CaffeineCacheDecorator
+└── utils/       → RedisUtils、CacheUtils、QueueUtils、SequenceUtils
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 为什么选 Redisson 而不是 RedisTemplate？</h3>
+<table>
+  <tr><th>维度</th><th>RedisTemplate (Spring Data Redis)</th><th>Redisson</th></tr>
+  <tr><td>编程模型</td><td>opsForValue / opsForHash / opsForList... 操作命令</td><td>RBucket / RMap / RQueue... Java 分布式对象</td></tr>
+  <tr><td>序列化</td><td>需手动配置 Serializer（默认 JdkSerializer）</td><td>Codec 体系，开箱即用 JSON</td></tr>
+  <tr><td>高级功能</td><td>需额外实现或集成</td><td>内置限流器、锁、发号器、Pub/Sub</td></tr>
+  <tr><td>分布式锁</td><td>需用 Lock4j 或其他框架</td><td>RLock（看门狗自动续期）</td></tr>
+  <tr><td>连接管理</td><td>Lettuce/Jedis 连接池</td><td>Netty 异步连接，单连接多路复用</td></tr>
+</table>
+
+<blockquote><strong>一句话总结：</strong>RedisTemplate 是「操作 Redis 命令的模板」，Redisson 是「把 Redis 包装成 Java 对象」。选择 Redisson 的原因是它内置了丰富的分布式对象，省去了大量底层实现。</blockquote>
+
+<h3>2.2 CompositeCodec：Key 和 Value 分开编码</h3>
+<p>RedisConfig 的核心配置：</p>
+<pre>
+@Bean
+public RedissonClient redissonClient(Config config) {
+    config.setCodec(new CompositeCodec(
+        StringCodec.INSTANCE,   // ← Key 用 String（redis-cli 中可读）
+        JsonJacksonCodec.INSTANCE // ← Value 用 JSON（支持复杂对象）
+    ));
+    return Redisson.create(config);
+}
+</pre>
+
+<p><strong>为什么要分开？</strong>如果 Key 也用 JSON 序列化，<code>redis-cli KEYS *</code> 会看到乱码——无法排查问题。StringCodec 让 Key 保持可读，JSON 让 Value 能存储复杂对象并自动还原类型。</p>
+
+<h3>2.3 KeyPrefixHandler：防止 Key 冲突</h3>
+<p>实现 Redisson 的 <code>NameMapper</code> 接口，对 Key 名做自动转换：</p>
+<pre>
+public class KeyPrefixHandler implements NameMapper {
+    private final String prefix;  // 来自配置: redis.keyPrefix
+
+    public String map(String name) {
+        if (prefix == null || prefix.isEmpty()) return name;
+        if (name.startsWith(prefix)) return name;  // 防重复添加
+        return prefix + ":" + name;                 // 如 "ruoyi:cache:user:1"
+    }
+
+    public String unmap(String name) {
+        if (prefix == null || prefix.isEmpty()) return name;
+        if (name.startsWith(prefix)) return name.substring(prefix.length() + 1);
+        return name;
+    }
+}
+</pre>
+
+<p><strong>配置：</strong><code>redis.keyPrefix = "ruoyi"</code> → 所有 Key 自动变成 <code>ruoyi:xxx</code>。业务代码仍写 <code>redisUtils.get("user:1")</code> 即可，前缀自动添加，对代码完全透明。</p>
+
+<p><strong>实际价值：</strong>如果多项目/多环境共用 Redis（开发环境/测试环境共用同一 Redis 实例），不同环境的 Key 会冲突。通过配置不同前缀（<code>dev:</code> / <code>test:</code>），即使 Key 名相同也不会互相覆盖。</p>
+
+<h3>2.4 RedisConfig：单机 vs 集群双模式</h3>
+<pre>
+redis:
+  mode: standalone            # standalone / cluster / sentinel
+  host: 127.0.0.1
+  port: 6379
+  password: 123456
+  database: 0
+  keyPrefix: ruoyi            # Key 前缀（防冲突）
+  timeout: 3000               # 连接超时（毫秒）
+</pre>
+
+<p>两种模式的配置差异：</p>
+<table>
+  <tr><th>模式</th><th>配置对象</th><th>连接方式</th><th>适用场景</th></tr>
+  <tr><td>standalone</td><td>SingleServerConfig</td><td>单一 Redis 地址</td><td>开发环境、小规模部署</td></tr>
+  <tr><td>cluster</td><td>ClusterServersConfig</td><td>多个节点地址（自动发现）</td><td>生产环境、高可用要求</td></tr>
+  <tr><td>sentinel</td><td>SentinelServersConfig</td><td>哨兵节点列表</td><td>传统主从 + 哨兵架构</td></tr>
+</table>
+
+<h3>2.5 RedisUtils：通用操作工具类</h3>
+<p>模块的核心工具类，封装了所有 Redis 基础操作：</p>
+<table>
+  <tr><th>分类</th><th>方法</th><th>底层 Redisson 对象</th></tr>
+  <tr><td>通用读写</td><td>setObject / getObject / deleteObject</td><td>RBucket</td></tr>
+  <tr><td>过期控制</td><td>setObjectIfAbsent / expire / getExpire</td><td>RBucket + SETNX</td></tr>
+  <tr><td>Map 操作</td><td>setCacheMapValue / getCacheMapValue</td><td>RMap / RMapCache</td></tr>
+  <tr><td>原子值</td><td>setAtomicValue / incrAtomicValue</td><td>RAtomicLong</td></tr>
+  <tr><td>发布订阅</td><td>publish / subscribe / unsubscribe</td><td>RTopic</td></tr>
+  <tr><td>限流器</td><td>rateLimiter</td><td>RRateLimiter</td></tr>
+  <tr><td>批处理</td><td>deleteObject(Collection) / delMultiCacheMapValue</td><td>RBatch</td></tr>
+</table>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> KeyPrefixHandler.map() 中 startsWith 防重复添加的判断为什么重要？</p>
+<p><strong>参考:</strong> 如果前缀是 "ruoyi"，原始 key 是 "ruoyi:user:1"，不判断 startsWith 会变成 "ruoyi:ruoyi:user:1"。这种 bug 通常在多级调用中出现——方法 A 传了完整 key 进来、方法 B 又 mapper 一次。startsWith 保证无论调用多少次 map()，前缀只加一次。</p>
+<p><strong>Q2:</strong> 为什么 CompositeCodec 对 Key 和 Value 分别用 StringCodec 和 JsonJacksonCodec？</p>
+<p><strong>参考:</strong> 两个实际需求：① 运维排查——redis-cli KEYS * 能看到 "ruoyi:user:1" 这样的可读 key，方便定位问题；② 类型还原——从 Redis 读取一个 User 对象时，JSON 保留类型信息（@class），反序列化时能准确还原为 User 对象而不是 LinkedHashMap。如果 Key 也用 JSON，KEYS 命令看到的是 Base64 编码，对排查毫无帮助。</p>
+<p><strong>Q3:</strong> 单机模式改集群模式需要改代码吗？</p>
+<p><strong>参考:</strong> 不需要。Redisson 的 RedissonClient 接口完全屏蔽了底层连接方式差异。只需要把 redis.mode 从 standalone 改成 cluster、并配置 nodeAddresses，代码中通过 RedisUtils 操作 Redis 的逻辑零修改。这就是面向接口编程 + 配置驱动的优势。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 一行 setObject
+RedisUtils.setObject("user:1", user, Duration.ofMinutes(30));
+
+内部路径:
+1. RedisUtils.setObject(key, value, timeout)
+2. RedissonClient.getBucket(KEY_PREFIX + key)
+   → 触发 KeyPrefixHandler.map("user:1") → "ruoyi:user:1"
+3. RBucket.set(value, timeout, TimeUnit)
+   → 触发 CompositeCodec 编码:
+     Key: "ruoyi:user:1" → StringCodec → Redis String
+     Value: User{id=1, name="张三"} → JsonJacksonCodec → {"@class":"...User","id":1,"name":"张三"}
+4. Redisson 异步执行 Redis SET ruoyi:user:1 '{"@class":...}' EX 1800
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>RedisConfig 的三处关键定制（CompositeCodec / KeyPrefixHandler / 单机集群双模式）各自解决了一个生产级问题：Codec 解决「key 可读 + value 能还原类型」、KeyPrefixHandler 解决「多环境 key 隔离」、双模式解决「开发期跑单机、上线切集群」的平滑过渡。三者结合使模块在一个 RedisConfig 类中完成全部基础设施建设——引入依赖即可用、改配置即可换环境。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/4.-data-serialization">Redisson 数据序列化文档</a> · 入口文件：<code>config/RedisConfig.java</code> · <code>handler/KeyPrefixHandler.java</code> · <code>utils/RedisUtils.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解 @RateLimiter 限流与 @RepeatSubmit 防重提交。</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-限流与防重提交.html">下一课 →</a></div>
+</body>
+</html>

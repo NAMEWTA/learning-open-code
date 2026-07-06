@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第3课：安全防护与日志体系</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .nav .prev, .nav .next { font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1.2rem; margin: 1rem 0; font-family: monospace; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; color: #333; }
+  .flow-chart { background: #f0f7ff; border: 1px solid #cce5ff; border-radius: 8px; padding: 1rem; margin: 1rem 0; font-size: 0.9rem; }
+  .flow-chart .step { margin: 0.3rem 0; padding-left: 1.5rem; position: relative; }
+  .flow-chart .step::before { content: attr(data-num); position: absolute; left: 0; top: 0; width: 1.2rem; height: 1.2rem; background: #409EFF; color: #fff; border-radius: 50%; text-align: center; font-size: 0.7rem; line-height: 1.2rem; }
+</style>
+</head>
+<body>
+
+<h1>第3课：安全防护与日志体系</h1>
+
+<blockquote>
+<strong>本课目标：</strong>理解服务端如何保护 Actuator 敏感端点，以及日志系统的三层架构（控制台/文件/异步）和"客户端发送 → 服务端接收"的远程日志通道。学完本课，你能说清服务端的安全边界和日志流转全链路。
+</blockquote>
+
+<h2>1. 安全防护：Actuator Basic Auth 机制</h2>
+
+<h3>1.1 为什么需要保护 Actuator？</h3>
+
+<p>在 <code>application.yml</code> 中，Actuator 被配置为<strong>暴露全部端点</strong>：</p>
+
+<pre>management:
+  endpoints:
+    web:
+      exposure:
+        include: <span style="color:#98c379;">'*'</span>
+  endpoint:
+    health:
+      show-details: <span style="color:#98c379;">ALWAYS</span></pre>
+
+<p>这意味着任何人都可以通过 <code>/snail-job/actuator/*</code> 访问健康检查、环境变量、线程堆栈等<strong>敏感信息</strong>。必须有防护机制。</p>
+
+<h3>1.2 两层防护架构</h3>
+
+<p><code>SecurityConfig</code> + <code>ActuatorAuthFilter</code> 构成了经典的过滤器级 Basic Auth 校验：</p>
+
+<div class="arch-diagram">SecurityConfig (@Configuration)
+   │
+   │ 读取配置:
+   │   @Value("${spring.boot.admin.client.username}")
+   │   @Value("${spring.boot.admin.client.password}")
+   │
+   ▼
+   FilterRegistrationBean
+   │   filter: ActuatorAuthFilter(username, password)
+   │   urlPatterns: /actuator, /actuator/*
+   │
+   ▼
+   ActuatorAuthFilter.doFilter()
+   │
+   ├─ 1. 获取 Authorization 请求头
+   ├─ 2. 验证 "Basic " 前缀
+   ├─ 3. Base64 解码用户名:密码
+   ├─ 4. 比对 username 和 password
+   ├─ 匹配 → filterChain.doFilter()  放行
+   └─ 不匹配 → 401 Unauthorized + WWW-Authenticate 头</div>
+
+<h3>1.3 源码精读：ActuatorAuthFilter</h3>
+
+<pre><span style="color:#5c6370;">// ActuatorAuthFilter.java 核心逻辑</span>
+<span style="color:#c678dd;">@Override</span>
+<span style="color:#c678dd;">public void</span> <span style="color:#61afef;">doFilter</span>(ServletRequest req, ServletResponse res,
+                     FilterChain chain) <span style="color:#c678dd;">throws</span> IOException {
+    HttpServletRequest request = (HttpServletRequest) req;
+    String authHeader = request.getHeader(<span style="color:#98c379;">"Authorization"</span>);
+
+    <span style="color:#5c6370;">// 校验 1: 请求头必须存在且以 "Basic " 开头</span>
+    <span style="color:#c678dd;">if</span> (authHeader == <span style="color:#c678dd;">null</span> || !authHeader.startsWith(<span style="color:#98c379;">"Basic "</span>)) {
+        response.setHeader(<span style="color:#98c379;">"WWW-Authenticate"</span>, <span style="color:#98c379;">"Basic realm=\"realm\""</span>);
+        response.sendError(<span style="color:#d19a66;">401</span>, <span style="color:#98c379;">"Unauthorized"</span>);
+        <span style="color:#c678dd;">return</span>;
+    }
+
+    <span style="color:#5c6370;">// 校验 2: Base64 解码并提取 username:password</span>
+    String base64 = authHeader.substring(<span style="color:#98c379;">"Basic "</span>.length());
+    <span style="color:#e5c07b;">byte</span>[] decoded = Base64.getDecoder().decode(base64);
+    String credentials = <span style="color:#c678dd;">new</span> String(decoded, StandardCharsets.UTF_8);
+    String[] parts = credentials.split(<span style="color:#98c379;">":"</span>);
+
+    <span style="color:#5c6370;">// 校验 3: 格式必须为 "user:pass"</span>
+    <span style="color:#c678dd;">if</span> (parts.length != <span style="color:#d19a66;">2</span>) { ... <span style="color:#c678dd;">return</span> <span style="color:#d19a66;">401</span>; }
+
+    <span style="color:#5c6370;">// 校验 4: 用户名密码精确匹配</span>
+    <span style="color:#c678dd;">if</span> (!username.equals(parts[<span style="color:#d19a66;">0</span>]) || !password.equals(parts[<span style="color:#d19a66;">1</span>])) {
+        ... <span style="color:#c678dd;">return</span> <span style="color:#d19a66;">401</span>;
+    }
+
+    <span style="color:#5c6370;">// 认证通过，放行</span>
+    chain.doFilter(request, response);
+}</pre>
+
+<div class="tip">
+<strong>认证凭据的来源：</strong>用户名和密码来自 <code>@monitor.username@</code> / <code>@monitor.password@</code> Maven 属性（在父 pom 中定义）。Spring Boot Admin Server 回调 Actuator 端点时，会携带 <code>metadata.username</code> 和 <code>metadata.userpassword</code> 构造 Basic Auth 头，所以 Admin Server 可以无缝通过校验。
+</div>
+
+<div class="warn">
+<strong>安全提示：</strong>这是一个<strong>轻量级</strong>的防护方案。Basic Auth 在非 HTTPS 环境下用户名密码是 Base64 编码（非加密）传输，生产环境建议配合 Nginx 反向代理启用 HTTPS，或替换为更安全的认证方案。
+</div>
+
+<h2>2. 日志体系：三层架构 + 远程日志</h2>
+
+<h3>2.1 logback-plus.xml 全貌</h3>
+
+<p>服务端的日志配置定义了 6 个 Appender，形成 <strong>控制台 | 文件 | 异步 | 远程</strong> 四管齐下的日志输出体系：</p>
+
+<table>
+  <tr><th>Appender 名称</th><th>类型</th><th>作用</th></tr>
+  <tr>
+    <td><code>console</code></td>
+    <td>ConsoleAppender</td>
+    <td>控制台彩色输出（带时间、线程、级别、类名着色）</td>
+  </tr>
+  <tr>
+    <td><code>file_console</code></td>
+    <td>RollingFileAppender</td>
+    <td>控制台日志写入文件 <code>console.log</code>，按天滚动，保留 1 天，INFO 级别以上</td>
+  </tr>
+  <tr>
+    <td><code>file_info</code></td>
+    <td>RollingFileAppender</td>
+    <td>INFO 级别精确文件，保留 60 天</td>
+  </tr>
+  <tr>
+    <td><code>file_error</code></td>
+    <td>RollingFileAppender</td>
+    <td>ERROR 级别单独文件，保留 60 天（排查线上故障核心入口）</td>
+  </tr>
+  <tr>
+    <td><code>async_info</code></td>
+    <td>AsyncAppender</td>
+    <td>异步包装 <code>file_info</code>，队列 1024，丢弃阈值 100</td>
+  </tr>
+  <tr>
+    <td><code>async_error</code></td>
+    <td>AsyncAppender</td>
+    <td>异步包装 <code>file_error</code>，队列 1024，丢弃阈值 100</td>
+  </tr>
+  <tr>
+    <td><code>snail_log_server_appender</code></td>
+    <td><span class="keyword">SnailJobServerLogbackAppender</span></td>
+    <td>接收客户端远程日志，持久化到数据库</td>
+  </tr>
+</table>
+
+<h3>2.2 日志文件目录结构</h3>
+
+<div class="arch-diagram">./logs/ruoyi-snailjob-server/
+├── console.log          ← 控制台输出（保留 1 天）
+├── console.2026-07-04.log
+├── info.log             ← INFO 日志（保留 60 天）
+├── info.2026-07-04.log
+├── error.log            ← ERROR 日志（保留 60 天，线上排障第一入口）
+└── error.2026-07-04.log</div>
+
+<h3>2.3 远程日志：客户端 → 服务端的日志通道</h3>
+
+<p>这是 SnailJob 日志体系中最有特色的设计——<strong>客户端任务执行日志实时上报到服务端</strong>：</p>
+
+<div class="flow-chart">
+<div style="font-weight:600; margin-bottom:0.5rem;">日志流转链路</div>
+<div class="step" data-num="1">客户端启动时，<code>SnailJobConfig.onStarting()</code> 监听 <code>SnailClientStartingEvent</code> 事件</div>
+<div class="step" data-num="2">动态挂载 <code>SnailLogbackAppender</code> 到 Logback 根 Logger</div>
+<div class="step" data-num="3">任务执行过程中产生的 INFO/WARN/ERROR 日志被 <code>SnailLogbackAppender</code> 拦截</div>
+<div class="step" data-num="4">日志通过 Netty（17888 端口）实时发送到服务端</div>
+<div class="step" data-num="5">服务端 <code>SnailJobServerLogbackAppender</code> 接收并持久化到 MySQL</div>
+<div class="step" data-num="6">Dashboard 管理界面从数据库查询展示任务执行日志</div>
+</div>
+
+<h4>客户端侧 (ruoyi-common-job)</h4>
+
+<pre><span style="color:#5c6370;">// SnailJobConfig.java - 客户端启动时挂载远程日志 appender</span>
+<span style="color:#c678dd;">@EventListener</span>(SnailClientStartingEvent.<span style="color:#c678dd;">class</span>)
+<span style="color:#c678dd;">public void</span> <span style="color:#61afef;">onStarting</span>(SnailClientStartingEvent event) {
+    LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
+    <span style="color:#5c6370;">// 创建 SnailLogbackAppender 实例</span>
+    SnailLogbackAppender&lt;ILoggingEvent&gt; ca = <span style="color:#c678dd;">new</span> SnailLogbackAppender&lt;&gt;();
+    ca.setName(<span style="color:#98c379;">"snail_log_appender"</span>);
+    ca.start();
+    <span style="color:#5c6370;">// 挂载到根 Logger</span>
+    Logger rootLogger = lc.getLogger(Logger.ROOT_LOGGER_NAME);
+    rootLogger.addAppender(ca);
+}</pre>
+
+<h4>服务端侧 (logback-plus.xml)</h4>
+
+<pre><span style="color:#5c6370;">&lt;!-- 接收客户端远程日志的 appender --&gt;</span>
+&lt;appender name=<span style="color:#98c379;">"snail_log_server_appender"</span>
+          <span style="color:#c678dd;">class</span>=<span style="color:#98c379;">"com.aizuda.snailjob.server.common.appender
+                            .SnailJobServerLogbackAppender"</span>&gt;
+&lt;/appender&gt;
+
+&lt;root level=<span style="color:#98c379;">"info"</span>&gt;
+    &lt;appender-ref ref=<span style="color:#98c379;">"snail_log_server_appender"</span> /&gt;
+&lt;/root&gt;</pre>
+
+<div class="tip">
+<strong>设计巧思：</strong>远程日志通道使得运维人员无需 SSH 到每台客户端机器查看日志。所有任务执行日志集中存储在服务端数据库中，通过 Dashboard 即可统一检索。在微服务/分布式任务场景下，这极大地降低了排障成本。
+</div>
+
+<h2>3. 课程总结：三课全景图</h2>
+
+<p>到此，你已经学完了 SnailJob 服务端的完整知识体系：</p>
+
+<table>
+  <tr><th>课程</th><th>核心知识</th><th>关键文件</th></tr>
+  <tr>
+    <td><strong>第1课</strong></td>
+    <td>模块定位、依赖结构、跨包启动原理</td>
+    <td>pom.xml, SnailJobServerApplication.java</td>
+  </tr>
+  <tr>
+    <td><strong>第2课</strong></td>
+    <td>配置体系（端口/持久化/调度参数）、双端口通信模型</td>
+    <td>application.yml, application-dev.yml, Dockerfile</td>
+  </tr>
+  <tr>
+    <td><strong>第3课</strong></td>
+    <td>Actuator Basic Auth 安全防护、三层日志架构、远程日志通道</td>
+    <td>SecurityConfig.java, ActuatorAuthFilter.java, logback-plus.xml, SnailJobConfig.java</td>
+  </tr>
+</table>
+
+<h3>相关课程模块</h3>
+
+<ul>
+  <li><strong>SnailJob 客户端（ruoyi-job 模块）</strong> — 学习 <code>@JobExecutor</code> 注解、6 种任务模式、客户端配置</li>
+  <li><strong>Spring Boot Admin 监控中心</strong> — 学习如何搭建 Admin Server、与 SnailJob 服务端的健康监控联动</li>
+  <li><strong>Docker 容器化部署</strong> — 学习如何用 Docker Compose 编排 SnailJob 服务端 + MySQL + Admin Server</li>
+</ul>
+
+<h2>4. 自我检测</h2>
+
+<ol>
+  <li>ActuatorAuthFilter 做了哪四层校验？如果攻击者直接访问 <code>/actuator/env</code> 会发生什么？</li>
+  <li>AsyncAppender 的 <code>discardingThreshold=100</code> 和 <code>queueSize=1024</code> 是什么意思？</li>
+  <li>描述一条客户端任务日志从产生到展示在 Dashboard 的完整链路。</li>
+  <li>为什么 ERROR 日志要单独存文件？线上故障排查时你看哪个文件？</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：
+  <a href="https://github.com/aizuda/snail-job/tree/main/snail-job-server/snail-job-server-common" target="_blank">SnailJob Server Common (LogbackAppender 源码)</a> ·
+  <a href="https://docs.spring-boot-admin.com/current/" target="_blank">Spring Boot Admin 安全文档</a> ·
+  <a href="https://logback.qos.ch/manual/" target="_blank">Logback 官方手册</a>
+</div>
+
+<div class="nav">
+  <a class="prev" href="02-config-and-communication.html">← 上一课：配置体系与通信模型</a>
+  <span></span>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师，可以深入讲解 SnailJob 的安全架构、日志性能优化或分布式日志收集方案。</div>
+</body>
+</html>

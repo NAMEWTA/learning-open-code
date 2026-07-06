@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · SSE 通道速查</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · SSE 通道速查</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code></p>
+
+<h2>关键文件</h2>
+<table>
+<tr><th>文件</th><th>作用</th></tr>
+<tr><td><code>controller/SseController.java</code></td><td>SSE HTTP 端点：connect()、close()</td></tr>
+<tr><td><code>core/SseEmitterSessionManager.java</code></td><td>会话管理、心跳、消息发送、Redis 发布</td></tr>
+</table>
+
+<h2>SseController 端点</h2>
+<table>
+<tr><th>方法</th><th>路径</th><th>作用</th></tr>
+<tr><td><code>connect()</code></td><td><code>GET /resource/message</code>（produces=text/event-stream）</td><td>建立 SSE 长连接</td></tr>
+<tr><td><code>close()</code></td><td><code>GET /resource/message/close</code>（@SaIgnore）</td><td>手动关闭连接</td></tr>
+</table>
+
+<h2>connect() 核心流程</h2>
+<div class="chain">① prepareSseResponse() 设 4 个响应头（Content-Type=text/event-stream, UTF-8, Cache-Control=no-cache, X-Accel-Buffering=no）
+② StpUtil.getTokenValue() + LoginHelper.getUserId() 取用户信息
+③ sessionManager.connect(userId, token)
+   ├─ computeIfAbsent(userId) → ConcurrentHashMap
+   ├─ remove(token) 顶替旧连接 → sendKickedMessage
+   ├─ new SseEmitter(sseTimeout=24h)
+   ├─ 注册 onCompletion/onTimeout/onError → 清理
+   └─ emitter.send(comment("connected"))</div>
+
+<h2>心跳：sseMonitor()</h2>
+<ul>
+  <li>每 60s（heartbeatInterval）执行一次</li>
+  <li>向每个 emitter 发送 <code>comment("heartbeat")</code></li>
+  <li>发送失败 → complete() + remove</li>
+  <li>用 comment 而非 data → 前端不触发 onmessage</li>
+</ul>
+
+<h2>消息发送</h2>
+<table>
+<tr><th>方法</th><th>范围</th><th>实现</th></tr>
+<tr><td><code>sendMessage(userId, message)</code></td><td>指定用户</td><td>遍历 userId 的 map，逐一 emitter.send(event.name("message").data(...))</td></tr>
+<tr><td><code>sendMessage(message)</code></td><td>所有本地</td><td>收集所有 userId，ThreadUtils.virtualInvokeAll 并发发送</td></tr>
+<tr><td><code>publishMessage(dto)</code></td><td>集群</td><td>RedisUtils.publish("global:message", dto)</td></tr>
+</table>
+
+<h2>存储结构</h2>
+<div class="chain">Map&lt;Long, Map&lt;String, SseEmitter&gt;&gt; USER_TOKEN_EMITTERS
+  userId → {token → emitter}
+
+空 emitterMap → 移除 userId（防止内存泄漏）</div>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SSE、SseEmitter、SseEmitterSessionManager</p>
+</body>
+</html>

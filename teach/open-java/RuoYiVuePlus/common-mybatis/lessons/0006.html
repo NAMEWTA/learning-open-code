@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · 分页与聚合查询</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 6 课 · 分页与聚合查询 <span class="tag">数据统计</span></h1>
+
+<div class="mission">
+<b>本节目标</b>：学完你能说出 PageQuery.build() 的完整处理流程（含多字段排序和 camelCase 转换），理解 AggregateLambdaQueryWrapper 如何在不修改 MyBatis-Plus 源码的前提下支持聚合查询，掌握 SubQuery 的两种参数模式（MyBatis 占位符 vs {0} 占位符），以及 SqlAggregateFunction 和 AggregateSelectUtils 在整个聚合查询体系中的角色。
+</div>
+
+<h2>一、PageQuery：统一分页模型</h2>
+
+<h3>1.1 字段设计</h3>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>pageSize</code></td><td>Integer</td><td>Integer.MAX_VALUE</td><td>分页大小，默认查全部（与常规 10/20 的默认值不同）</td></tr>
+<tr><td><code>pageNum</code></td><td>Integer</td><td>1</td><td>当前页码，从 1 开始</td></tr>
+<tr><td><code>orderByColumn</code></td><td>String</td><td>null</td><td>排序列名，支持逗号分隔多字段</td></tr>
+<tr><td><code>isAsc</code></td><td>String</td><td>null</td><td>排序方向，"asc"/"desc"，支持逗号分隔对应多字段</td></tr>
+</table>
+
+<div class="side">
+<b>注意</b>：<code>pageSize</code> 的默认值是 <code>Integer.MAX_VALUE</code> 而非 10。这意味着如果前端不传分页参数，后端默认查询全部数据。这与其他框架（如 MyBatis-Plus 默认的 10）不同，是一个"防御性"设计——宁可查出全部也不要因为默认分页丢掉数据。
+</div>
+
+<h3>1.2 build() 流程</h3>
+
+<p><code>PageQuery.build()</code> 将自身的分页参数转换为 MyBatis-Plus 的 <code>Page&lt;T&gt;</code> 对象：</p>
+
+<div class="flow">public &lt;T&gt; Page&lt;T&gt; build() {
+    ① 获取 pageNum，null→默认1；pageNum ≤ 0 → 修正为1
+    ② 获取 pageSize，null→默认 Integer.MAX_VALUE
+    ③ new Page&lt;T&gt;(pageNum, pageSize)
+    ④ 调用 buildOrderItem() 构建排序列表
+    ⑤ 如果排序列表非空，page.addOrder(orderItems)
+    ⑥ 返回 page
+}</div>
+
+<h3>1.3 多字段排序机制</h3>
+
+<p><code>buildOrderItem()</code> 的设计是 PageQuery 中最巧妙的部分，它支持三种排序模式：</p>
+
+<div class="flow">// 模式 1：单字段排序
+{isAsc: "asc", orderByColumn: "createTime"}
+→ ORDER BY create_time ASC
+
+// 模式 2：多字段同方向排序
+{isAsc: "asc", orderByColumn: "createTime,userName"}
+→ ORDER BY create_time ASC, user_name ASC
+
+// 模式 3：多字段独立方向排序
+{isAsc: "desc,asc", orderByColumn: "createTime,userName"}
+→ ORDER BY create_time DESC, user_name ASC</div>
+
+<p>核心处理逻辑：</p>
+
+<pre><code>// 1. camelCase → snake_case 转换（通过 StringUtils.toUnderScoreCase）
+String orderBy = "createTime" → "create_time"
+
+// 2. 兼容前端框架的排序值（ascending/descending → asc/desc）
+String orderDirection = StringUtils.replaceEach(isAsc,
+    new String[]{"ascending", "descending"},
+    new String[]{"asc", "desc"});
+
+// 3. 逐字段匹配：isAscArr.length==1 时所有字段共用同方向
+//    isAscArr.length==orderByArr.length 时各字段独立方向
+//    其他情况 → 抛 ServiceException("排序参数有误")</code></pre>
+
+<div class="why">
+<b>兼容性设计</b>：不同的前端表格组件（Element Plus、Ant Design、VxeTable 等）传递的排序方向值不同（"ascending"/"asc"）。<code>StringUtils.replaceEach</code> 统一兼容这两种写法，避免了需要在前后端都做转换的麻烦。
+</div>
+
+<h3>1.4 额外的 getFirstNum() 方法</h3>
+
+<p>PageQuery 还提供了一个辅助方法 <code>getFirstNum()</code>（标记 <code>@JsonIgnore</code> 不序列化），用于计算 LIMIT 的 offset：</p>
+
+<div class="flow">getFirstNum() = (pageNum - 1) * pageSize
+
+// 例如 pageNum=3, pageSize=20 → firstNum=40
+// 对应 SQL: LIMIT 40, 20</div>
+
+<p>这在需要手动拼接分页 SQL 的场景中非常有用（虽然大多数情况下直接用 <code>build()</code> 返回的 Page 对象就够了）。</p>
+
+<h2>二、AggregateLambdaQueryWrapper：聚合查询的桥梁</h2>
+
+<h3>2.1 为什么需要它</h3>
+
+<p>MyBatis-Plus 原生的 <code>LambdaQueryWrapper</code> 只能做简单的列选择（<code>select(col1, col2)</code>），当需要 <code>SELECT SUM(age) AS totalAge, COUNT(*) AS userCount FROM ...</code> 这种聚合查询时，原生的 <code>getSqlSelect()</code> 无法追加聚合函数表达式。RuoYi-Vue-Plus 通过<strong>子类重写</strong> <code>getSqlSelect()</code> 解决了这个问题：</p>
+
+<div class="flow">LambdaQueryWrapper&lt;T&gt;
+  └── AggregateLambdaQueryWrapper&lt;T&gt;  (package-private)
+        ├── aggregateSqlSelect: String          ← 追加的聚合字段 SQL
+        ├── appendSelectSql(columnSql)          ← 追加到 aggregateSqlSelect
+        ├── getSqlSelect() [@Override]          ← 优先返回 aggregateSqlSelect
+        ├── resetAggregateSelect()              ← 清空 aggregateSqlSelect（切换回普通模式）
+        ├── columnName(SFunction)               ← Lambda → 数据库列名
+        └── formatSubqueryParam(value)          ← 子查询参数格式化</div>
+
+<h3>2.2 getSqlSelect() 的重写逻辑</h3>
+
+<pre><code>@Override
+public String getSqlSelect() {
+    if (aggregateSqlSelect != null) {
+        return aggregateSqlSelect;      // 聚合模式：返回自定义 SQL
+    }
+    return super.getSqlSelect();         // 普通模式：走父类默认逻辑
+}</code></pre>
+
+<p>关键点：<code>aggregateSqlSelect</code> 不为 null 时直接返回它，完全绕过父类的列拼接逻辑。这意味着调用方可以构造任意复杂的 SELECT 子句——包括聚合函数、子查询、CASE WHEN 等。</p>
+
+<h3>2.3 select() 调用时的自动重置</h3>
+
+<p>当用户调用 <code>LambdaQueryBuilder.select(columns)</code> 时，内部先执行 <code>aggregateWrapper().resetAggregateSelect()</code>，将 <code>aggregateSqlSelect</code> 置为 null。这样从"聚合查询模式"切换回"普通查询模式"，不会出现聚合 SQL 残留的 bug。</p>
+
+<div class="why">
+<b>设计智慧</b>：<code>AggregateLambdaQueryWrapper</code> 是 <code>package-private</code>（class 前没有 public），外部代码无法直接实例化。它只通过 <code>QueryBuilder.lambda()</code> 内部创建并包装在 <code>LambdaQueryBuilder</code> 中。这种"对外隐藏、对内扩展"的模式既增强了功能，又没有暴露内部实现细节。
+</div>
+
+<h2>三、SqlAggregateFunction：5 个函数的优雅表达</h2>
+
+<h3>3.1 枚举设计</h3>
+
+<table>
+<tr><th>枚举值</th><th>SQL 名称</th><th><code>format("col")</code> 输出</th><th>典型用途</th></tr>
+<tr><td><code>SUM</code></td><td>SUM</td><td><code>SUM(col)</code></td><td>求和：订单总额、用户积分</td></tr>
+<tr><td><code>MAX</code></td><td>MAX</td><td><code>MAX(col)</code></td><td>最大值：最新时间、最高分</td></tr>
+<tr><td><code>MIN</code></td><td>MIN</td><td><code>MIN(col)</code></td><td>最小值：最早时间、最低价</td></tr>
+<tr><td><code>AVG</code></td><td>AVG</td><td><code>AVG(col)</code></td><td>平均值：平均分、平均时长</td></tr>
+<tr><td><code>COUNT</code></td><td>COUNT</td><td><code>COUNT(col)</code></td><td>计数：数量统计、COUNT(*)</td></tr>
+</table>
+
+<h3>3.2 在整个体系中的角色</h3>
+
+<p>SqlAggregateFunction 是被使用最广泛的枚举——它同时被以下组件引用：</p>
+
+<div class="flow">SqlAggregateFunction（枚举定义 5 个聚合函数）
+  │
+  ├── LambdaQueryBuilder 的 selectSum/Max/Min/Avg/Count/CountAll/CountDistinct
+  │     └── 内部调用 selectAggregate(function, column, alias)
+  │           └── → AggregateSelectUtils.aggregateSelect(function, column, alias)
+  │                 └── → function.format(column) + " AS " + checkAlias(alias)
+  │
+  ├── LambdaJoinQueryBuilder 的 selectSum/Max/Min/Avg/Count/CountAll
+  │     └── 内部调用 wrapper.selectFunc(DefaultFuncEnum.SUM, ...)
+  │           或 AggregateSelectUtils.aggregateSelect()
+  │
+  ├── LambdaCrudChainWrapper 的 selectSum/Max/Min/Avg/Count/CountAll/CountDistinct
+  │     └── 内部调用 selectAggregate(function, column, alias)
+  │
+  └── SubQuery 的 selectSum/Max/Min/Avg/Count/selectCountAll
+        └── 内部调用 function.format(columnName(column))</div>
+
+<p>一个简单的 <code>format(String expression)</code> 方法（返回 <code>name + "(" + expression + ")"</code>）统一了全模块的聚合函数 SQL 生成逻辑，避免了各处硬编码 <code>"SUM(" + col + ")"</code> 的分散写法。</p>
+
+<h2>四、SubQuery：独立子查询构造器</h2>
+
+<h3>4.1 两种参数模式</h3>
+
+<p>SubQuery 作为独立构造器，生成的 SQL 需要嵌入到外层查询中。根据嵌入的场景不同，它支持两种参数格式化模式：</p>
+
+<table>
+<tr><th>模式</th><th>创建方式</th><th>参数占位符</th><th>使用场景</th></tr>
+<tr>
+  <td><b>MyBatis 占位符模式</b></td>
+  <td><code>SubQuery.of(entityClass, formatter)</code></td>
+  <td><code>#{ew.paramNameValuePairs.MPJvaGEN1}</code></td>
+  <td>LambdaQueryBuilder 的子查询：通过 <code>aggregateWrapper()::formatSubqueryParam</code> 作为 formatter</td>
+</tr>
+<tr>
+  <td><b>占位参数模式</b></td>
+  <td><code>SubQuery.ofPlaceholders(entityClass)</code></td>
+  <td><code>{0}, {1}, {2}...</code></td>
+  <td>LambdaJoinQueryBuilder 的子查询：通过 <code>apply(sql, params)</code> 传参</td>
+</tr>
+</table>
+
+<div class="flow">// MyBatis 占位符模式（LambdaQueryBuilder 内部）
+private &lt;S&gt; String buildSubQuery(Class&lt;S&gt; entityClass, Consumer&lt;SubQuery&lt;S&gt;&gt; consumer) {
+    SubQuery&lt;S&gt; subQuery = SubQuery.of(entityClass, aggregateWrapper()::formatSubqueryParam);
+    consumer.accept(subQuery);
+    return subQuery.build();
+}
+// → 生成: SELECT user_id FROM sys_user_role WHERE role_id = #{ew.paramNameValuePairs.MPGENVAL1}
+
+// 占位参数模式（LambdaJoinQueryBuilder 内部）
+private &lt;Q&gt; SubQuery&lt;Q&gt; buildPlaceholderSubQuery(Class&lt;Q&gt; entityClass, Consumer&lt;SubQuery&lt;Q&gt;&gt; consumer) {
+    SubQuery&lt;Q&gt; subQuery = SubQuery.ofPlaceholders(entityClass); // ← placeholderParamMode=true
+    consumer.accept(subQuery);
+    return subQuery;
+}
+// 后续通过 wrapper.apply(sql, subQuery.params()) 传入参数
+// → 生成: SELECT user_id FROM sys_user_role WHERE role_id = {0}</div>
+
+<div class="side">
+<b>为什么有两种模式？</b> LambdaQueryBuilder 的子查询通过 <code>wrapper.eqSql(column, subquerySql)</code> 嵌入，MyBatis 会自动处理 <code>#{...}</code> 占位符。但 LambdaJoinQueryBuilder（MPJ）的子查询是通过 <code>wrapper.apply(sql, params)</code> 嵌入的，需要使用 <code>{0}</code> 占位符并由 <code>apply</code> 方法传入参数数组。
+</div>
+
+<h3>4.2 eqColumn：跨表关联</h3>
+
+<p>子查询最强大的功能是 <code>eqColumn</code>，它实现了<strong>关联子查询</strong>——在子查询中引用外层查询的字段：</p>
+
+<pre><code>// 场景：查询每个用户拥有的角色数量（作为 select 字段）
+QueryBuilder.lambda(SysUser.class)
+    .select(SysUser::getUserId, SysUser::getUserName)
+    .selectSub(SysUserRole.class, sub -> sub
+        .selectCountAll()
+        .eqColumn(SysUserRole::getUserId, SysUser::getUserId),  // ← 跨表关联
+        UserStatVo::getRoleCount)
+    .build();
+
+// eqColumn 的两种重载：
+// 1. 单表场景（子查询引用外层主表的字段）
+eqColumn(SFunction column, SFunction otherColumn)
+  → 生成: ur.user_id = sys_user.user_id   （自动加表名前缀）
+
+// 2. 联表场景（子查询引用指定别名的表）
+eqColumn(SFunction column, String tableAlias, SFunction otherColumn)
+  → 生成: ur.user_id = u.user_id          （使用指定别名）</pre>
+
+<h3>4.3 disableLogicDelete</h3>
+
+<p>SubQuery 默认会追加逻辑删除条件（如 <code>del_flag = 0</code>）。调用 <code>disableLogicDelete()</code> 可以关闭：</p>
+
+<pre><code>// 默认行为：append逻辑删除条件
+sub.eq(SysUserRole::getUserId, userId)
+  → WHERE (del_flag = '0' AND user_id = ?)
+
+// 禁用后：
+sub.disableLogicDelete()
+   .eq(SysUserRole::getUserId, userId)
+  → WHERE user_id = ?</pre>
+
+<div class="why">
+<b>设计考量</b>：自动追加逻辑删除是安全的默认行为，避免子查询查出已删除的数据。但在某些场景下（如统计历史数据）需要禁用它。这是"默认安全 + 可选择性关闭"的经典设计。
+</div>
+
+<h3>4.4 SubQuery 方法总览</h3>
+
+<table>
+<tr><th>分类</th><th>方法</th><th>说明</th></tr>
+<tr><td>选择字段</td><td><code>select(column)</code></td><td>指定查询列</td></tr>
+<tr><td>聚合选择</td><td><code>selectCountAll/selectSum/selectMax/selectMin/selectAvg/selectCount</code></td><td>聚合函数选择</td></tr>
+<tr><td>比较条件</td><td><code>eq/gt/ge/lt/le</code></td><td>比较运算</td></tr>
+<tr><td>模糊条件</td><td><code>like</code></td><td>LIKE 模糊匹配</td></tr>
+<tr><td>集合条件</td><td><code>in(column, Collection) / in(column, Object...)</code></td><td>IN 查询，空集合跳过</td></tr>
+<tr><td>区间条件</td><td><code>between(column, begin, end)</code></td><td>BETWEEN 查询</td></tr>
+<tr><td>跨表关联</td><td><code>eqColumn(col, otherCol) / eqColumn(col, alias, otherCol)</code></td><td>关联子查询</td></tr>
+<tr><td>条件控制</td><td><code>when(condition, consumer)</code></td><td>按条件添加子句</td></tr>
+<tr><td>特殊设置</td><td><code>disableLogicDelete()</code></td><td>禁用逻辑删除条件</td></tr>
+<tr><td>构建</td><td><code>build()</code> / <code>params()</code></td><td>生成 SQL / 获取参数</td></tr>
+</table>
+
+<h2>五、AggregateSelectUtils：聚合 SQL 工具集</h2>
+
+<h3>5.1 四个核心方法</h3>
+
+<table>
+<tr><th>方法</th><th>签名</th><th>输出示例</th></tr>
+<tr><td><code>appendSelect</code></td><td><code>appendSelect(current, fragment)</code></td><td><code>"col1" + ", SUM(col2) AS total"</code>（逗号拼接）</td></tr>
+<tr><td><code>aggregateSelect</code></td><td><code>aggregateSelect(function, column, alias)</code></td><td><code>"SUM(age) AS totalAge"</code></td></tr>
+<tr><td><code>subquerySelect</code></td><td><code>subquerySelect(sql, alias)</code></td><td><code>"(SELECT COUNT(*) FROM ...) AS roleCount"</code></td></tr>
+<tr><td><code>aliasName</code></td><td><code>aliasName(SFunction)</code></td><td>从 Lambda Getter 解析属性名（如 <code>"totalAge"</code>）</td></tr>
+</table>
+
+<h3>5.2 checkAlias：SQL 注入防护</h3>
+
+<p><code>checkAlias(String alias)</code> 通过正则表达式验证别名是否为合法 SQL 标识符：</p>
+
+<div class="flow">private static final Pattern ALIAS_PATTERN = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
+public static String checkAlias(String alias) {
+    Assert.isTrue(StringUtils.isNotBlank(alias) && ALIAS_PATTERN.matcher(alias).matches(),
+        "查询别名只能包含字母、数字、下划线且不能以数字开头: %s", alias);
+    return alias;
+}</div>
+
+<p>使用场景：所有聚合方法的 alias 参数、联表查询的 tableAlias 参数，在拼入 SQL 前都会经过 <code>checkAlias</code> 校验。如果别名包含特殊字符（如 <code>"; DROP TABLE"</code>），会直接抛异常。</p>
+
+<div class="why">
+<b>防御深度</b>：虽然别名通常来自代码中的 Lambda 引用（<code>SFunction</code>）而非用户输入，但 <code>selectAs(String tableAlias, ...)</code> 和 <code>selectSum(tableAlias, ...)</code> 等方法的 alias 参数是 String 类型，可能来自前端入参。checkAlias 提供了额外一层安全保障。
+</div>
+
+<h3>5.3 在 LambdaQueryBuilder 中的调用链</h3>
+
+<div class="flow">用户调用: builder.selectSum(SysUser::getAge, "totalAge")
+  → LambdaQueryBuilder.selectSum(column, alias)
+    → selectAggregate(function, aggregateWrapper().columnName(column), alias)
+      → aggregateWrapper().appendSelectSql(
+            AggregateSelectUtils.aggregateSelect(function, "age", "totalAge")
+              → SqlAggregateFunction.SUM.format("age") + " AS " + checkAlias("totalAge")
+              → "SUM(age) AS totalAge"
+          )
+        → aggregateSqlSelect = "SUM(age) AS totalAge"
+
+最终 MyBatis 生成: SELECT SUM(age) AS totalAge FROM sys_user WHERE ...</div>
+
+<h2>六、知识点检查</h2>
+
+<div class="quiz">
+<p>Q1: PageQuery 的 pageSize 默认值是 Integer.MAX_VALUE 而非 10，这样设计的主要原因是什么？</p>
+<label class="opt"><input type="radio" name="q1"> A. 性能优化，MAX_VALUE 时 MyBatis-Plus 不会生成 LIMIT 子句</label>
+<label class="opt"><input type="radio" name="q1"> B. 防御性设计——前端不传分页参数时默认查出全部，避免因默认分页导致数据遗漏</label>
+<label class="opt"><input type="radio" name="q1"> C. 这是一个 bug，实际上应该用 10</label>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p><b>A 和 B 都对。</b>主要设计意图是 B——防御性地查出全部数据。同时，当 pageSize = MAX_VALUE 时，MyBatis-Plus 的 PaginationInterceptor 会识别为"不需要分页"，不生成 LIMIT 子句，从而避免了不必要的 SQL 开销。</p>
+</details>
+
+<div class="quiz">
+<p>Q2: SubQuery 的两种参数模式（MyBatis 占位符 vs {0} 占位符）分别用于什么场景？</p>
+<label class="opt"><input type="radio" name="q2"> A. 两种模式通用，可以互换使用</label>
+<label class="opt"><input type="radio" name="q2"> B. MyBatis 占位符模式用于 LambdaQueryBuilder（通过 wrapper.eqSql 嵌入），{0} 模式用于 LambdaJoinQueryBuilder（通过 wrapper.apply 嵌入）</label>
+<label class="opt"><input type="radio" name="q2"> C. MyBatis 占位符模式用于 MySQL，{0} 模式用于 Oracle</label>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p><b>B</b>。两种模式对应不同的嵌入方式。LambdaQueryBuilder 通过 <code>wrapper.eqSql(column, subquerySql)</code> 嵌入子查询，MyBatis 的 <code>#{...}</code> 占位符会被 SqlSession 自动处理。而 LambdaJoinQueryBuilder（MPJ）通过 <code>wrapper.apply(sql, params...)</code> 嵌入，参数需要单独传递，所以用 <code>{0}</code> 索引占位符，然后通过 <code>subQuery.params()</code> 获取参数数组传给 apply。</p>
+</details>
+
+<div class="quiz">
+<p>Q3: AggregateLambdaQueryWrapper 的 getSqlSelect() 重写逻辑中，什么情况下返回父类的 getSqlSelect()？</p>
+<label class="opt"><input type="radio" name="q3"> A. aggregateSqlSelect 为 null 时</label>
+<label class="opt"><input type="radio" name="q3"> B. 调用过 selectSum 方法后</label>
+<label class="opt"><input type="radio" name="q3"> C. 永远不会返回父类方法</label>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p><b>A</b>。当 <code>aggregateSqlSelect</code> 为 null（即尚未调用任何聚合方法，或调用了 <code>select()</code> 触发了 <code>resetAggregateSelect()</code>）时，返回父类的默认 getSqlSelect()。这意味着它支持"普通查询"和"聚合查询"两种模式的无缝切换。</p>
+</details>
+
+<div class="reminder">
+<b>本课小结</b>：PageQuery 通过 build() 统一了分页 + 多字段排序的入口，AggregateLambdaQueryWrapper 通过子类重写 getSqlSelect() 实现了聚合查询而不修改 MP 源码，SqlAggregateFunction 枚举统一了全模块的聚合函数生成，SubQuery 通过两种参数模式适配了不同 Builder 的嵌入需求，AggregateSelectUtils 的 checkAlias 提供了 SQL 注入防护——这五个组件共同构成了 ruoyi-common-mybatis 的"分页与聚合"能力矩阵。
+</div>
+
+<div class="cite">
+<b>涉及文件</b>：
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/page/PageQuery.java</a> — 分页查询实体<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/AggregateLambdaQueryWrapper.java</a> — 聚合查询包装器<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/SqlAggregateFunction.java</a> — 聚合函数枚举<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/SubQuery.java</a> — 子查询构造器<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/AggregateSelectUtils.java</a> — 聚合 SQL 工具<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/LambdaQueryBuilder.java</a> — 单表查询构建器（聚合部分）<br>
+<a href="#">ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/LambdaJoinQueryBuilder.java</a> — 联表查询构建器（聚合部分）<br>
+</div>
+
+<div class="nav"><a href="0005.html">&laquo; 上一课</a> | 第 6 课 | 下一课 &raquo;</div>
+
+</body>
+</html>

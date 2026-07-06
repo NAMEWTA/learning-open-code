@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ruoyi-common-security 速查表</title>
+<style>
+  body { max-width: 800px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; font-size: 13px; line-height: 1.55; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #1a1a1a; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.05rem; margin-top: 1.5rem; border-bottom: 1px solid #ddd; padding-bottom: 0.2rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; font-size: 12px; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; font-weight: 600; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 11px; }
+  pre { background: #f8f8f8; padding: 0.6rem; border-radius: 4px; overflow-x: auto; font-size: 11px; border: 1px solid #eee; }
+  .locator { color: #666; font-size: 11px; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+<h1>ruoyi-common-security 速查表</h1>
+<div class="locator">Maven: org.dromara:ruoyi-common-security | 源码: ruoyi-common-security/src/main/java/org/dromara/common/security/</div>
+
+<h2>定位</h2>
+<p>在 <code>ruoyi-common-satoken</code> 提供的基础 Sa-Token 能力之上，用 <strong>3 个 Java 类</strong>搭建应用级安全横切配置——上下文过滤器重注册、路由鉴权链、URL 自动收集。</p>
+
+<h2>核心文件</h2>
+<table>
+<tr><th>类名</th><th>路径</th><th>职责</th></tr>
+<tr><td><code>SecurityConfig</code></td><td>config/SecurityConfig.java</td><td>一站式安全装配点：重注册 Sa-Token 上下文过滤器（覆盖 ASYNC/ERROR）、注册 SaInterceptor 路由鉴权链、注册 actuator Basic Auth 过滤器</td></tr>
+<tr><td><code>SecurityProperties</code></td><td>config/properties/SecurityProperties.java</td><td><code>@ConfigurationProperties(prefix="security")</code>，仅含 <code>String[] excludes</code>，定义无需登录鉴权的路径</td></tr>
+<tr><td><code>AllUrlHandler</code></td><td>handler/AllUrlHandler.java</td><td>实现 <code>InitializingBean</code>，从 RequestMappingHandlerMapping 收集全系统 URL，<code>{xxx}</code> 替换为 <code>*</code> 通配符，供 SaRouter.match() 使用</td></tr>
+</table>
+
+<h2>术语速查</h2>
+<table>
+<tr><th>术语</th><th>解释</th></tr>
+<tr><td>Sa-Token</td><td>Dromara 轻量级 Java 权限认证框架，核心 API 为 <code>StpUtil</code>，提供登录认证、权限认证、Session 会话等能力</td></tr>
+<tr><td>SecurityConfig</td><td>本模块核心配置类，注册三条安全防线：上下文过滤器 → 路由拦截器 → actuator Basic Auth 过滤器</td></tr>
+<tr><td>AllUrlHandler</td><td>URL 扫描收集器，在 Spring 容器初始化后自动收集所有 @RequestMapping 路径</td></tr>
+<tr><td>FilterRegistrationBean</td><td>Spring Boot Servlet Filter 注册 API，用于重注册 Sa-Token 上下文过滤器，关键设置 <code>setDispatcherTypes(REQUEST, ASYNC, ERROR)</code></td></tr>
+<tr><td>SaInterceptor + SaRouter</td><td>路由拦截器与链式路由匹配 API：<code>SaRouter.match(urls).check(() -> { ... })</code> 对所有匹配 URL 执行鉴权</td></tr>
+<tr><td>LoginHelper</td><td>登录用户工具类（ruoyi-common-satoken），提供 <code>CLIENT_KEY</code>、<code>CLIENT_ACCESS_PATH_KEY</code>、<code>CLIENT_IP_WHITELIST_KEY</code> 等 token 扩展字段 key</td></tr>
+<tr><td>InitializingBean</td><td>Spring 生命周期接口，AllUrlHandler 在 <code>afterPropertiesSet()</code> 中执行 URL 收集——是唯一正确时机（RequestMapping 已注册完、拦截器未装配）</td></tr>
+</table>
+
+<h2>三层安全防线</h2>
+<table>
+<tr><th>防线</th><th>Bean/组件</th><th>时机</th><th>职责</th></tr>
+<tr><td>第1层</td><td><code>saTokenContextFilterRegistration()</code></td><td>Filter 链最前端</td><td>重注册 Sa-Token 上下文过滤器，覆盖 ASYNC/ERROR 分发，保证 SSE/WebSocket 场景下 StpUtil 可用</td></tr>
+<tr><td>第2层</td><td><code>addInterceptors()</code> 中的 SaInterceptor</td><td>Spring Interceptor</td><td>登录校验 → clientId 一致性校验 → 客户端访问路径/IP 白名单校验</td></tr>
+<tr><td>第3层</td><td><code>actuatorBasicAuthFilter()</code></td><td>Filter（仅 actuator 路径）</td><td>对 /actuator/** 做 HTTP Basic Auth 保护</td></tr>
+</table>
+
+<h2>常用代码</h2>
+<pre><code>// yml 中排除鉴权路径
+security:
+  excludes:
+    - /auth/login
+    - /auth/register
+    - /public/**
+
+// AllUrlHandler 收集逻辑（关键行）
+Map&lt;RequestMappingInfo, HandlerMethod&gt; handlerMethods =
+    requestMappingHandlerMapping.getHandlerMethods();
+handlerMethods.forEach((info, handlerMethod) -&gt; {
+    info.getDirectPaths().stream()
+        .map(path -&gt; path.replaceAll("\\{(.*?)\\}", "*"))
+        .forEach(urls::add);
+});
+
+// SaInterceptor 鉴权链核心
+SaRouter.match(allUrlHandler.getUrls())
+    .check(r -&gt; {
+        StpUtil.checkLogin();  // 1. 登录校验
+        // 2. clientId 一致性校验 (header/param vs token)
+        // 3. validateClientAccessRules() 路径+IP白名单
+    });</code></pre>
+</body>
+</html>

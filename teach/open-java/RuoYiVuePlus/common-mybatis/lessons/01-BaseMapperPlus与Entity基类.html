@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BaseMapperPlus 与 Entity 基类</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>01 - BaseMapperPlus 与 Entity 基类</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 BaseMapperPlus 的双泛型设计与 VO 自动转换机制，掌握 BaseEntity 的 5 个审计字段如何通过 InjectionMetaObjectHandler 实现自动填充，并能说出 MybatisPlusConfig 注册的 8 个核心 Bean。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p><code>ruoyi-common-mybatis</code> 是全项目最核心的持久层模块（34 个 Java 文件），将 MyBatis-Plus 从"能用"拔高到"企业级生产就绪"。本课聚焦模块的两大基石：</p>
+<ul>
+  <li><strong>BaseMapperPlus&lt;T, V&gt;</strong>：双泛型 Mapper，提供 Entity 到 VO 的零模板转换</li>
+  <li><strong>BaseEntity</strong>：5 个审计字段 + 自动填充 = 无需手动 set 创建人/时间</li>
+</ul>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 BaseMapperPlus：为什么需要第二个泛型？</h3>
+<p>MyBatis-Plus 原生的 <code>BaseMapper&lt;T&gt;</code> 只有一个泛型（Entity 类型）。如果查询需要返回 VO，你需要手动写 <code>BeanUtil.copyProperties</code> 或 MapStruct 转换。BaseMapperPlus 通过 <strong>第二个泛型 &lt;V&gt;</strong> 解决了这个问题：</p>
+
+<pre>
+// MyBatis-Plus 原生写法（需要手动转换）
+SysUser user = userMapper.selectById(1L);
+SysUserVo vo = MapstructUtils.convert(user, SysUserVo.class);
+
+// BaseMapperPlus 写法（一条语句搞定）
+SysUserVo vo = userMapper.selectVoById(1L);
+</pre>
+
+<p>底层原理：<code>selectVoById</code> 内部先调用 <code>selectById</code> 获取 Entity，然后用 <code>MapstructUtils.convert(entity, voClass)</code> 自动转换。泛型 V 的 Class 对象通过反射从继承声明中提取。</p>
+
+<p>除了 VO 转换，BaseMapperPlus 还提供了 <code>selectVoList</code>、<code>selectVoPage</code>、<code>insertBatch</code>、<code>updateBatchById</code> 等便捷方法。入口文件：<code>core/mapper/BaseMapperPlus.java</code>。</p>
+
+<h3>2.2 BaseEntity：审计字段的自动填充</h3>
+<p>所有业务实体的基类，定义了 5 个公共字段：</p>
+
+<table>
+  <tr><th>字段</th><th>填充策略</th><th>含义</th></tr>
+  <tr><td><code>createDept</code></td><td>FieldFill.INSERT</td><td>创建部门</td></tr>
+  <tr><td><code>createBy</code></td><td>FieldFill.INSERT</td><td>创建者 ID</td></tr>
+  <tr><td><code>createTime</code></td><td>FieldFill.INSERT</td><td>创建时间</td></tr>
+  <tr><td><code>updateBy</code></td><td>FieldFill.INSERT_UPDATE</td><td>更新者 ID</td></tr>
+  <tr><td><code>updateTime</code></td><td>FieldFill.INSERT_UPDATE</td><td>更新时间</td></tr>
+</table>
+
+<p>填充链路：</p>
+<pre>
+业务代码 save(entity)
+  → MyBatis-Plus 检测 @TableField(fill = ...)
+    → MetaObjectHandler.insertFill()
+      → InjectionMetaObjectHandler.insertFill()
+        → LoginHelper.getLoginUser() 获取当前用户
+        → entity.setCreateBy(userId) / entity.setCreateTime(new Date())
+</pre>
+
+<p><strong>获取不到用户时填默认值 -1</strong>——代表无用户/系统自动操作，避免 NPE。</p>
+
+<h3>2.3 MybatisPlusConfig：模块的装配中枢</h3>
+<p>配置类 <code>config/MybatisPlusConfig.java</code> 注册了 8 个核心 Bean，构成了模块的完整能力：</p>
+
+<table>
+  <tr><th>Bean</th><th>作用</th></tr>
+  <tr><td><code>MybatisPlusInterceptor</code></td><td>内含数据权限 + 分页 + 乐观锁三个内部拦截器</td></tr>
+  <tr><td><code>DataPermissionPointcutAdvisor</code></td><td>数据权限切面，桥接注解与拦截器</td></tr>
+  <tr><td><code>SqlLogInterceptor</code></td><td>SQL 日志（条件装配，通过配置开关）</td></tr>
+  <tr><td><code>MetaObjectHandler</code></td><td>自动填充处理器（InjectionMetaObjectHandler）</td></tr>
+  <tr><td><code>IdentifierGenerator</code></td><td>雪花 ID 生成器（用网卡 MAC 防集群重复）</td></tr>
+  <tr><td><code>MybatisExceptionHandler</code></td><td>全局异常兜底（主键冲突 409、MyBatis 系统异常 500）</td></tr>
+  <tr><td><code>PostInitTableInfoHandler</code></td><td>逻辑删除开关（通过配置全局关闭逻辑删除）</td></tr>
+  <tr><td><code>@MapperScan</code></td><td>扫描 Mapper 包（从配置 <code>mybatis-plus.mapperPackage</code> 读取）</td></tr>
+</table>
+
+<blockquote><strong>关键点：</strong>雪花 ID 的 workerId 来自 <code>NetUtil.getLocalhost()</code>（网卡 MAC 地址），保证集群各节点的雪花 ID 不冲突。这是生产环境防止主键碰撞的重要措施。</blockquote>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么 BaseMapperPlus 需要两个泛型参数，而不是只用一个？</p>
+<p><strong>参考:</strong> 第一个泛型 T 是 Entity（数据库表映射），第二个 V 是 VO（返回给前端的对象）。双泛型使得 <code>selectVoById</code> 等方法在编译期就知道目标 VO 类型，避免运行时 Class 转换错误，同时省去每个业务 Mapper 中手写 convert 的重复代码。</p>
+<p><strong>Q2:</strong> InjectionMetaObjectHandler.updateFill() 为什么只填 updateBy 和 updateTime，不填 createBy 和 createTime？</p>
+<p><strong>参考:</strong> 因为 createBy/createTime 的填充策略是 <code>FieldFill.INSERT</code>，仅在插入时触发。updateFill 对应 <code>FieldFill.UPDATE</code> 和 <code>FieldFill.INSERT_UPDATE</code>（后者在插入时已由 insertFill 处理），只需更新 updateBy 和 updateTime 两个字段。</p>
+<p><strong>Q3:</strong> MybatisExceptionHandler 单独处理 DuplicateKeyException 的设计意义是什么？</p>
+<p><strong>参考:</strong> 主键冲突是业务层面可预期的错误（如重复提交），不应暴 500。返回 409（Conflict）HTTP 状态码 + 中文提示，让前端可以对用户展示友好提示，而不是"系统错误"这种无意义的信息。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<p>一次 insert 操作的完整路径：</p>
+<pre>
+Controller: service.save(entity)
+  → ServiceImpl: baseMapper.insert(entity)
+    → MybatisPlusInterceptor 链:
+      ① 数据权限拦截器（INSERT 不触发，跳过）
+      ② 分页拦截器（INSERT 不触发，跳过）
+      ③ 乐观锁拦截器（INSERT 不触发，跳过）
+    → MetaObjectHandler.insertFill(entity)
+      → entity.createTime = now()
+      → entity.createBy = LoginHelper.getLoginUser()
+    → IdentifierGenerator.nextId(entity)
+      → 雪花 ID = 时间戳 + 机器 ID + 序列号
+    → SQL: INSERT INTO ... (id, create_time, create_by, ...) VALUES (?, ?, ?, ...)
+    → SqlLogInterceptor 输出完整 SQL 到日志
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>BaseEntity 的设计思想来自 JPA 的 <code>@MappedSuperclass</code>，但实现上用了 MyBatis-Plus 的 <code>MetaObjectHandler</code>。这种「借思想、用实现」的做法避免了对 JPA 的依赖，同时保留了审计字段自动填充的便利。5 个字段看似简单，但配合 INSERT/INSERT_UPDATE 两种填充策略和 LoginHelper 的动态获取，形成了一套完整的「谁在什么时候创建/修改了这条数据」的追踪体系。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://baomidou.com/pages/4c6bcf/">MyBatis-Plus 自动填充文档</a> · 入口文件：<code>core/mapper/BaseMapperPlus.java</code> · <code>core/domain/BaseEntity.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课我们将深入数据权限的三层架构。</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-数据权限三层架构.html">下一课 →</a></div>
+</body>
+</html>

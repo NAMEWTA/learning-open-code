@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 | 响应增强与 JsonValueEnhancer 集成：处理器注册与条件脱敏</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>02 | 响应增强与 JsonValueEnhancer 集成：处理器注册与条件脱敏</h1>
+
+<p>上一课我们学习了 <code>@Sensitive</code> 注解和 17 种脱敏策略的定义层面。本课深入执行层——注解是如何被检测并处理的？JSON 序列化管道如何拦截字段？条件脱敏又如何与权限体系结合？答案在 <code>SensitiveJsonFieldProcessor</code>、<code>SensitiveConfig</code> 和 <code>SensitiveService</code> 之中。</p>
+
+<h2>1. SensitiveConfig：自动装配的入口</h2>
+
+<p>在 Spring Boot 的自动装配体系中，<code>SensitiveConfig</code> 是整个脱敏模块被激活的唯一入口。它极其简洁：</p>
+
+<pre>@AutoConfiguration
+public class SensitiveConfig {
+
+    @Bean
+    public SensitiveJsonFieldProcessor sensitiveJsonFieldProcessor() {
+        return new SensitiveJsonFieldProcessor(sensitiveService);
+    }
+
+    // sensitiveService 通过 @Autowired(required = false) 注入
+}</pre>
+
+<p>关键设计点：</p>
+<ul>
+  <li><strong><code>@AutoConfiguration</code></strong>：声明这是一个自动配置类，由 Spring Boot 的 <code>spring.factories</code> 或 <code>org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件发现。不需要任何手动 <code>@Import</code> 或 <code>@ComponentScan</code>。</li>
+  <li><strong>唯一的 <code>@Bean</code></strong>：整个模块只注册一个 Bean——<code>SensitiveJsonFieldProcessor</code>。这个处理器会被 <code>ruoyi-common-json</code> 模块的 <code>JsonValueEnhancer</code> 自动发现并纳入 JSON 增强管道。</li>
+  <li><strong><code>SensitiveService</code> 为可选依赖</strong>：如果项目中没有提供 <code>SensitiveService</code> 的实现，注入为 <code>null</code>，处理器仍然正常工作——只是对所有用户都执行脱敏。</li>
+</ul>
+
+<div class="insight">
+<strong>设计哲学：</strong><code>SensitiveConfig</code> 遵循了 Spring Boot 的"约定优于配置"原则。只要 ruoyi-common-sensitive 在 classpath 中，自动装配就生效；只要在实体类上加 <code>@Sensitive</code> 注解，脱敏就自动执行。对于 90% 的场景，零配置即可使用。
+</div>
+
+<h2>2. SensitiveJsonFieldProcessor：脱敏的执行引擎</h2>
+
+<p><code>SensitiveJsonFieldProcessor</code> 实现了 <code>JsonFieldProcessor</code> 接口，是整个脱敏逻辑的执行器。它被标注为 <code>@Order(100)</code>，确保在 JSON 字段增强管道中的执行顺序靠后（保证其他处理器先完成字段值的转换，脱敏作为最后一步）。</p>
+
+<h3>2.1 supports() —— 判断是否需要脱敏</h3>
+
+<pre>public boolean supports(JsonFieldContext fieldContext) {
+    return fieldContext.getAnnotation(Sensitive.class) != null;
+}</pre>
+
+<p><code>supports()</code> 的逻辑极其简单：检查字段上是否有 <code>@Sensitive</code> 注解。<code>JsonFieldContext</code> 是一个 Java 14 record，它封装了字段的完整上下文信息：</p>
+
+<table>
+  <tr><th>属性</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>owner</code></td><td><code>Object</code></td><td>字段所属的对象实例</td></tr>
+  <tr><td><code>propertyName</code></td><td><code>String</code></td><td>字段名（Java 属性名）</td></tr>
+  <tr><td><code>member</code></td><td><code>Member</code></td><td>字段的反射成员（Field 或 Method）</td></tr>
+  <tr><td><code>value</code></td><td><code>Object</code></td><td>字段的当前值</td></tr>
+</table>
+
+<p><code>getAnnotation(Class&lt;A&gt;)</code> 是 <code>JsonFieldContext</code> 上最关键的方法——它从 <code>member</code> 上反射读取注解，避免每个处理器都需要手动编写反射代码。干净的 API 设计。</p>
+
+<h3>2.2 process() —— 执行脱敏</h3>
+
+<pre>public Object process(Object value, JsonFieldContext fieldContext) {
+    Sensitive sensitive = fieldContext.getAnnotation(Sensitive.class);
+    SensitiveStrategy strategy = sensitive.strategy();
+
+    // 条件检查：判断当前用户是否需要脱敏
+    if (sensitiveService != null) {
+        boolean shouldDesensitize = sensitiveService.isSensitive(
+            sensitive.roleKey(),
+            sensitive.perms()
+        );
+        if (!shouldDesensitize) {
+            return value;  // 不需脱敏，原样返回
+        }
+    }
+
+    // 执行脱敏
+    if (value instanceof String) {
+        return strategy.desensitize((String) value);
+    }
+    return value;
+}</pre>
+
+<p>处理流程分三步：</p>
+<ol>
+  <li><strong>获取策略</strong>：从注解中拿到 <code>SensitiveStrategy</code> 枚举值。</li>
+  <li><strong>条件判断</strong>：如果 <code>sensitiveService</code> 不为 <code>null</code>，调用 <code>isSensitive()</code> 判断是否需要脱敏。不需要则直接返回原值。</li>
+  <li><strong>执行脱敏</strong>：调用 <code>strategy.desensitize(value)</code>，底层委托给 hutool 的 <code>DesensitizedUtil</code> 或 RuoYi 的 <code>DesensitizedUtils</code>。</li>
+</ol>
+
+<div class="mission">
+<strong>注意：</strong>process() 只处理 <code>String</code> 类型的值。如果字段是 <code>Integer</code>、<code>Long</code> 或其他类型，直接原样返回。这是合理的——脱敏本质上是字符串操作，数值类型的 ID 或编号不需要（也无法）用 * 替换。
+</div>
+
+<h2>3. JsonFieldProcessor 生命周期：理解 JSON 增强管道</h2>
+
+<p><code>SensitiveJsonFieldProcessor</code> 实现的 <code>JsonFieldProcessor</code> 接口来自 <code>ruoyi-common-json</code> 模块，它定义了标准的 JSON 字段处理三阶段生命周期：</p>
+
+<table>
+  <tr><th>阶段</th><th>方法</th><th>调用时机</th><th>用途</th></tr>
+  <tr><td>1. collect</td><td><code>collect(JsonFieldContext)</code></td><td>序列化准备阶段，收集需要处理的字段</td><td>翻译处理器用此阶段收集所有 <code>@Translation</code> 注解的字段，异步查询翻译数据</td></tr>
+  <tr><td>2. prepare</td><td><code>prepare()</code></td><td>所有字段收集完毕后，统一预处理</td><td>翻译处理器在此阶段批量查询数据库，将翻译数据加载到缓存</td></tr>
+  <tr><td>3. process</td><td><code>process(value, context)</code></td><td>对每个字段执行最终处理</td><td>脱敏处理器在此阶段直接对字段值做掩码替换</td></tr>
+</table>
+
+<p><strong>SensitiveJsonFieldProcessor 为什么只实现 supports() 和 process()？</strong></p>
+
+<p>因为脱敏是<strong>无状态、即时操作</strong>——它不需要预先收集数据（跳过 collect），也不需要批量查询（跳过 prepare）。传入一个字符串，立即返回脱敏后的结果。这是 <code>JsonFieldProcessor</code> 接口最简单的实现方式，也是该接口设计灵活性的体现：复杂的处理器（如翻译）利用全部三个阶段，简单的处理器（如脱敏）只用最后一步。</p>
+
+<div class="insight">
+<strong>架构要点：</strong>JsonFieldProcessor 的三阶段设计体现了"收集-准备-执行"的批处理模式。翻译处理器需要先收集所有翻译注解、再批量查数据库（避免 N+1 查询）、最后逐一替换——三个阶段缺一不可。脱敏处理器因为操作足够简单（纯 CPU 计算），只需要最后的执行阶段。这种设计让简单的事简单做、复杂的事结构化做。
+</div>
+
+<h2>4. SensitiveService：条件脱敏的闸门</h2>
+
+<p><code>SensitiveService</code> 是一个单一方法的接口：</p>
+
+<pre>public interface SensitiveService {
+    /**
+     * 判断当前请求是否需要脱敏
+     * @param roleKey  注解上配置的角色 key 数组
+     * @param perms    注解上配置的权限标识数组
+     * @return true 需要脱敏，false 不需要脱敏
+     */
+    boolean isSensitive(String[] roleKey, String[] perms);
+}</pre>
+
+<h3>4.1 OR 关系详解</h3>
+
+<p>当 <code>@Sensitive</code> 同时配置了 <code>roleKey</code> 和 <code>perms</code> 时，判断逻辑是 OR：</p>
+
+<pre>// 伪代码示例
+public boolean isSensitive(String[] roleKey, String[] perms) {
+    // 获取当前用户的角色和权限
+    Set&lt;String&gt; userRoles = getCurrentUserRoles();
+    Set&lt;String&gt; userPerms = getCurrentUserPerms();
+
+    // roleKey 命中 OR perms 命中 → 脱敏
+    for (String rk : roleKey) {
+        if (userRoles.contains(rk)) return true;
+    }
+    for (String p : perms) {
+        if (userPerms.contains(p)) return true;
+    }
+    return false;  // 都不命中则不脱敏
+}</pre>
+
+<h3>4.2 实战场景：管理员看明文，普通用户看脱敏</h3>
+
+<p>假设系统有两个角色 <code>admin</code> 和 <code>common</code>。管理员应该看到完整手机号，普通用户只能看到脱敏后的数据。</p>
+
+<pre>// 实体类
+public class UserVO {
+    @Sensitive(strategy = SensitiveStrategy.PHONE, roleKey = {"common"})
+    private String phone;
+}
+
+// SensitiveService 实现
+@Component
+public class DefaultSensitiveService implements SensitiveService {
+
+    @Override
+    public boolean isSensitive(String[] roleKey, String[] perms) {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        if (loginUser == null) return true;  // 未登录，默认脱敏
+
+        // 检查 roleKey
+        for (String rk : roleKey) {
+            if (loginUser.getRoles().contains(rk)) {
+                return true;  // 命中 common → 脱敏
+            }
+        }
+        // admin 不匹配任何 roleKey → 不脱敏，看到明文
+        return false;
+    }
+}</pre>
+
+<p>执行效果：</p>
+<ul>
+  <li>admin 用户请求 → <code>isSensitive(["common"], [])</code> → admin 不在 common 角色中 → 返回 <code>false</code> → 手机号原样输出：<code>13812345678</code></li>
+  <li>common 用户请求 → <code>isSensitive(["common"], [])</code> → common 在角色列表中 → 返回 <code>true</code> → 手机号脱敏输出：<code>138****5678</code></li>
+  <li>未登录请求 → <code>loginUser == null</code> → 返回 <code>true</code> → 脱敏，保守策略</li>
+</ul>
+
+<div class="mission">
+<strong>安全提示：</strong>默认策略应该是"未登录/无法判断时执行脱敏"——宁可多脱敏，不可少脱敏。这与安全领域的"默认拒绝"原则一致。如果你的实现中 <code>loginUser == null</code> 时返回 <code>false</code>，未登录用户可能看到本不该看到的明文数据。
+</div>
+
+<h2>5. 完整调用链路回顾</h2>
+
+<p>将两个课的内容串起来，一次完整的脱敏调用如下：</p>
+
+<pre>
+1. Controller 返回 UserVO {phone: "13812345678"}
+        │
+2. Jackson 序列化 UserVO 对象
+        │
+3. JsonValueEnhancer 拦截 phone 字段
+        │
+4. 遍历已注册的 JsonFieldProcessor 列表
+        │
+5. SensitiveJsonFieldProcessor.supports(fieldContext)
+   → fieldContext.getAnnotation(Sensitive.class) != null? ✓
+        │
+6. SensitiveJsonFieldProcessor.process("13812345678", fieldContext)
+   → 读取 @Sensitive(strategy=PHONE, roleKey={"common"})
+   → sensitiveService.isSensitive(["common"], []) → true (当前用户是 common 角色)
+   → SensitiveStrategy.PHONE.desensitize("13812345678")
+        │
+7. DesensitizedUtil.mobilePhone("13812345678")
+        │
+8. 返回 "138****5678"
+        │
+9. JSON 输出: {"phone": "138****5678", ...}
+</pre>
+
+<p>这条链路从 Controller 返回对象开始，经过 Jackson 序列化、JsonValueEnhancer 字段拦截、处理器链匹配、条件判断、策略选择、最终脱敏执行——9 步走完，开发者只需写一行 <code>@Sensitive(strategy = SensitiveStrategy.PHONE)</code>。</p>
+
+<h2>小结</h2>
+
+<p>本课覆盖了脱敏模块的执行层三个核心组件：</p>
+<ul>
+  <li><strong>SensitiveConfig</strong>：零配置自动装配，一个 Bean 激活整个脱敏能力。</li>
+  <li><strong>SensitiveJsonFieldProcessor</strong>：最小化的 JsonFieldProcessor 实现，仅用 supports + process 完成脱敏。</li>
+  <li><strong>SensitiveService</strong>：灵活的权限闸门，让不同角色看到不同级别的数据。</li>
+</ul>
+
+<p>结合上一课的注解和策略体系，ruoyi-common-sensitive 的完整架构已经清晰：它用 5 个文件、17 种策略、一个处理器，实现了企业级的数据脱敏——简洁而强大。</p>
+
+<div class="quiz">
+  <details>
+    <summary>&#128221; 课后测验（点击展开）</summary>
+    <ol>
+      <li><strong>为什么 SensitiveJsonFieldProcessor 不需要实现 collect() 和 prepare() 方法？</strong><br>
+      因为脱敏是<strong>无状态、即时、纯 CPU 计算</strong>的操作。它不需要像翻译处理器那样先收集注解字段（collect）、再批量查询数据库（prepare）、最后逐一替换（process）。脱敏只需拿到字符串和策略，立即返回结果。这体现了 JsonFieldProcessor 接口的灵活性——简单处理器只用 process()，复杂处理器用全部三个阶段。</li>
+      <li><strong>如果项目中不提供 SensitiveService 的实现，脱敏还会工作吗？</strong><br>
+      会。<code>SensitiveService</code> 的注入是 <code>@Autowired(required = false)</code>，当它为空时，<code>SensitiveJsonFieldProcessor.process()</code> 跳过条件检查，<strong>对所有用户的所有字段都执行脱敏</strong>。这是一种安全的默认行为——"全脱敏"比"不脱敏"更安全。</li>
+      <li><strong>process() 方法中，如果字段值是 Integer 类型会怎样？</strong><br>
+      直接原样返回。<code>process()</code> 中有 <code>if (value instanceof String)</code> 的类型检查，非 String 类型不会被执行脱敏。这是合理的设计——像 userId 这样的数值型 ID 不适合用 * 替换。如果需要脱敏数值，应先在实体类中将字段声明为 String 类型。</li>
+    </ol>
+  </details>
+</div>
+
+<div class="cite">
+<strong>参考文件：</strong>
+<code>SensitiveJsonFieldProcessor.java</code> (org.dromara.common.sensitive.handler)、
+<code>SensitiveConfig.java</code> (org.dromara.common.sensitive.config)、
+<code>SensitiveService.java</code> (org.dromara.common.sensitive.core)、
+<code>JsonFieldProcessor.java</code> (ruoyi-common-json 模块)、
+<code>JsonFieldContext.java</code> (ruoyi-common-json 模块)
+</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav">
+  <span><a href="01-17种脱敏策略.html">&#8592; 上一课：01 | 17种脱敏策略</a></span>
+  <span></span>
+</div>
+
+</body>
+</html>

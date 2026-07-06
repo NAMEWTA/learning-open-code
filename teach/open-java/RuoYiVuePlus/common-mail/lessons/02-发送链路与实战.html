@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第2课 · 发送链路与实战：从 of() 到 SMTP 的每一步</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第2课 · 发送链路与实战：从 of() 到 SMTP 的每一步</h1>
+<div class="mission"><strong>本节目标：</strong>学完你能完整追踪 <code>MailBuilder.of().to("xx@xx.com").subject("测试").text("hello").send()</code> 的每一步执行路径——从私有构造器到 Jakarta Mail 的 SMTP 协议交互。能解释 <code>resolveMailAccount()</code> 的"克隆+覆盖"策略为何必须深拷贝、为何会影响 useGlobalSession。能写出纯文本、HTML、HTML+附件+抄送三种生产级邮件发送代码，并知道每个链式方法在 MailBuilder.java 中的精确行号。</div>
+
+<p>上一课我们看清了三层架构的静态结构。本课聚焦动态行为——当你的代码写下 <code>.send()</code> 并按下回车的那一瞬间，到底发生了什么？我们将沿着真实源码的执行路径，从第一个字符追踪到 SMTP 服务器返回 message-id。</p>
+
+<h2>一、完整发送链路：7 步从 Java 到 SMTP</h2>
+
+<p>以最简单的纯文本邮件为例：</p>
+
+<pre><code>MailBuilder.of()
+    .to("user@example.com")
+    .subject("测试邮件")
+    .text("Hello World")
+    .send();</code></pre>
+
+<p>这行代码在 JVM 内部的执行路径如下——每一步都对应 MailBuilder.java 中的准确行号：</p>
+
+<pre>步骤         方法                       行号      作用
+────         ────                       ────      ────
+① 构造      private MailBuilder()       90        new 一个空 Builder，useGlobalSession=true
+② 收件人    to("user@example.com")      166       调用 splitAddress → normalizeAddresses → tos.add
+③ 标题      subject("测试邮件")         232       this.subject = "测试邮件"
+④ 正文      text("Hello World")         243       this.content = "Hello World"; this.html = false
+⑤ 校验      validate()                  345       检查 tos 非空、subject 非空、content 非 null
+⑥ 解析账户  resolveMailAccount()        362       获取 MailAccount（从容器或克隆后覆盖）
+⑦ 发送      JakartaMail.create().send() 320-336   组装邮件对象 → SMTP 协议交互 → 返回 message-id</pre>
+
+<p>下面我们逐帧拆解其中最关键的三个步骤：<code>send()</code>、<code>validate()</code>、<code>resolveMailAccount()</code>。</p>
+
+<h2>二、send() 方法：23 行的终止操作</h2>
+
+<p><code>send()</code>（第 317-340 行）是 Builder 模式的"终止操作"——调用它，前面所有链式设值的参数才真正组合、校验、发送。它的完整源码：</p>
+
+<pre><code>public String send() {
+    validate();                                          // ① 前置校验
+    MailAccount account = resolveMailAccount();          // ② 解析邮件账户
+    JakartaMail mail = JakartaMail.create(account)       // ③ 创建 Hutool 邮件对象
+        .setUseGlobalSession(useGlobalSession);          //    设置是否复用全局 Session
+    mail.setTos(tos.toArray(new String[0]));             // ④ 填充收件人列表
+    if (CollUtil.isNotEmpty(ccs)) {
+        mail.setCcs(ccs.toArray(new String[0]));         //    填充抄送（可选）
+    }
+    if (CollUtil.isNotEmpty(bccs)) {
+        mail.setBccs(bccs.toArray(new String[0]));       //    填充密送（可选）
+    }
+    mail.setTitle(subject);                              //    设置标题
+    mail.setContent(content);                            //    设置正文
+    mail.setHtml(html);                                  //    标记是否 HTML
+    mail.setFiles(files);                                //    设置附件
+    try {
+        if (MapUtil.isNotEmpty(images)) {
+            images.forEach(mail::addImage);              // ⑤ 添加内联图片
+        }
+        return mail.send();                              // ⑥ 真正发送！返回 message-id 字符串
+    } finally {
+        images.values().forEach(IoUtil::close);          // ⑦ finally 保底关闭所有图片流
+    }
+}</code></pre>
+
+<p>这 23 行代码里藏着三个重要的工程实践：</p>
+
+<h3>2.1 JakartaMail.create(account) — Hutool 做了什么？</h3>
+
+<p><code>cn.hutool.extra.mail.JakartaMail.create(MailAccount)</code> 是 Hutool 邮件工具的核心工厂方法。它根据 MailAccount 的配置信息（host、port、auth、ssl 等），内部调用 Jakarta Mail API 创建 <code>javax.mail.Session</code> 并包装为 <code>JakartaMail</code> 对象。<code>setUseGlobalSession(useGlobalSession)</code> 控制这个 Session 是复用 JVM 级全局单例还是每次创建新实例。</p>
+
+<h3>2.2 mail.send() — 从 Java 对象到 SMTP 协议</h3>
+
+<p><code>JakartaMail.send()</code> 内部会：根据 tos/ccs/bccs 构造 <code>MimeMessage</code> 的收件人头部（To/Cc/Bcc）；根据 subject 设置邮件标题；根据 content + html 标志设置 MIME 正文（纯文本用 text/plain，HTML 用 text/html）；如果有附件和内联图片，构建 multipart/mixed 或 multipart/related MIME 结构；通过 <code>Transport.send()</code> 连接 SMTP 服务器，完成 EHLO → AUTH LOGIN → MAIL FROM → RCPT TO → DATA 等 SMTP 协议交互；SMTP 服务器返回的 message-id 字符串作为方法返回值。</p>
+
+<h3>2.3 try-finally 保图片流不泄漏</h3>
+
+<p>注意图片 InputStream 的关闭逻辑被放在 finally 块中，而不是 try 块的末尾——这意味着<strong>即使 mail.send() 抛出异常</strong>（SMTP 连接超时、认证失败、网络中断等），图片流也会被关闭。如果不关，文件句柄会累积泄漏，最终导致 "Too many open files" 的系统级故障。这是资源管理中经典的"无论如何都要释放"模式。</p>
+
+<h2>三、validate()：三道防线</h2>
+
+<p>在真正发送之前，MailBuilder 会先做三项校验（第 345-355 行）：</p>
+
+<pre><code>private void validate() {
+    if (CollUtil.isEmpty(tos)) {
+        throw new IllegalArgumentException("邮件收件人不能为空");
+    }
+    if (StrUtil.isBlank(subject)) {
+        throw new IllegalArgumentException("邮件标题不能为空");
+    }
+    if (content == null) {                     // 注意：只检查 null
+        throw new IllegalArgumentException("邮件正文不能为空");
+    }
+}</code></pre>
+
+<p>三个检查，三个细节：</p>
+
+<table>
+<tr><th>检查项</th><th>条件</th><th>说明</th></tr>
+<tr><td>收件人</td><td><code>CollUtil.isEmpty(tos)</code></td><td>List 为 null 或 size=0 均会触发。注意 tos 在构造时已初始化为 new ArrayList&lt;&gt;()，所以不会是 null，只可能是空列表。</td></tr>
+<tr><td>标题</td><td><code>StrUtil.isBlank(subject)</code></td><td>null、空字符串、纯空白字符都会触发。标题是邮件的基本门面，SMTP 协议虽然允许无标题邮件，但业务上不可接受。</td></tr>
+<tr><td>正文</td><td><code>content == null</code></td><td><strong>注意不是 isBlank</strong>——允许发送空字符串 "" 的邮件。这是有意为之：有些场景确实只需要标题（如提醒类邮件），开发者如果传了空字符串说明他知道自己在做什么。但 null 意味着"忘记设置正文了"，属于编程错误。</td></tr>
+</table>
+
+<blockquote>为什么不用 JSR-303 Bean Validation（@NotNull 注解）？因为 MailBuilder 不是 Spring Bean——它是每次通过 <code>new</code> 创建的普通 POJO，不在 Spring 容器管理范围内，@Validated 切面不会拦截它。手写的 validate() 方法更直接，而且抛出的异常消息是中文的，对调用方更友好。</blockquote>
+
+<h2>四、resolveMailAccount()：克隆的艺术</h2>
+
+<p>这是整个 MailBuilder 最体现设计功力的一笔（第 362-375 行）。它要解决一个核心矛盾：<strong>如何在"共享全局账户"和"临时覆盖个别字段"之间安全切换，而不污染其他使用者的状态。</strong></p>
+
+<pre><code>private MailAccount resolveMailAccount() {
+    // 步骤①：检查是否传入了自定义账户
+    MailAccount account = mailAccount;
+    if (account == null) {
+        // 步骤②：没有自定义账户 → 从 Spring 容器拿全局 Bean
+        account = SpringUtils.getBean(MailAccount.class);
+    }
+
+    // 步骤③：检查是否有字段覆盖需求
+    if (StringUtils.isAllBlank(from, user, pass)) {
+        // 没有覆盖 → 直接返回原对象（全局 Bean 或自定义账户）
+        return account;
+    }
+
+    // 步骤④：有覆盖 → 克隆 + 逐字段覆盖
+    MailAccount copy = ObjectUtil.clone(account);         // 深拷贝！
+    copy.setFrom(StringUtils.blankToDefault(from, copy.getFrom()));
+    copy.setUser(StringUtils.blankToDefault(user, copy.getUser()));
+    copy.setPass(StringUtils.blankToDefault(pass, copy.getPass()));
+    return copy;
+}</code></pre>
+
+<h3>4.1 三种分支路径</h3>
+
+<p>这个方法基于两个判断条件（mailAccount 是否为 null、from/user/pass 是否全空），产生三种执行路径：</p>
+
+<pre>路径A：mailAccount != null  &&  from/user/pass 全空
+  → 直接返回调用者传入的 account
+  → 场景：MailBuilder.of(customAccount).to(...).send()
+  → useGlobalSession 已在 account() 方法中设为 false
+
+路径B：mailAccount == null  &&  from/user/pass 全空
+  → SpringUtils.getBean(MailAccount.class) 获取全局 Bean
+  → 直接返回（不克隆）
+  → 场景：MailBuilder.of().to(...).send()（最常见）
+  → useGlobalSession = true（默认值，未被动过）
+
+路径C：from/user/pass 任一非空
+  → 先获取账户（自定义或全局 Bean）
+  → 克隆一份 → 在克隆体上覆盖非空字段 → 返回克隆体
+  → 场景：MailBuilder.of().from("boss@company.com").to(...).send()
+  → useGlobalSession 已在 from()/user()/pass() 方法中设为 false</pre>
+
+<h3>4.2 为什么必须克隆？</h3>
+
+<p>假设没有克隆，直接修改全局 Bean：</p>
+
+<pre><code>// 危险的反例（这是 MailBuilder 刻意避免的）
+MailAccount account = SpringUtils.getBean(MailAccount.class);
+account.setFrom("boss@company.com");  // ← 直接改了全局单例！
+// 此时其他线程正在用这个 Bean 发送邮件
+// 它们的 From 地址全变成了 "boss@company.com" —— 灾难！</code></pre>
+
+<p>MailBuilder 的做法是：<strong>克隆一份副本</strong>（通过 <code>ObjectUtil.clone()</code> 做 JDK 序列化深拷贝），在副本上修改覆盖字段。原始全局 Bean 保持不受影响，其他线程的邮件发送不受干扰。这是"不可变共享对象 + 写时复制（Copy-on-Write）"的经典模式。</p>
+
+<h3>4.3 blankToDefault 的巧妙语义</h3>
+
+<pre><code>copy.setFrom(StringUtils.blankToDefault(from, copy.getFrom()));</code></pre>
+
+<p>这行代码的意思是：「如果 from（调用者覆盖的值）不为空，用 from；如果为空，用 copy.getFrom()（原账户的值）作为默认值」。</p>
+
+<p>这意味着<strong>三个覆盖字段是独立生效的</strong>——你可以只覆盖 from 而 user 和 pass 沿用原值；也可以只覆盖 pass 而 from 和 user 不变；甚至覆盖所有三个。空白字段会自动 fallback 到原账户配置，不需要调用者手动填"不需要覆盖"的字段。</p>
+
+<h3>4.4 ObjectUtil.clone() 的底层机制</h3>
+
+<p>Hutool 的 <code>MailAccount</code> 实现了 <code>Serializable</code> 接口。<code>ObjectUtil.clone()</code> 利用 JDK 的 <code>ByteArrayOutputStream</code> + <code>ObjectOutputStream</code> + <code>ObjectInputStream</code> 做序列化/反序列化深拷贝。这意味着：克隆体与原对象在内存中完全独立，互不影响；但代价是序列化有性能开销（包括反射和 IO）。好在邮件发送本身是低频操作（不像 HTTP 请求每秒数千次），这个开销完全可以接受。</p>
+
+<h2>五、三个真实使用场景</h2>
+
+<h3>5.1 场景一：纯文本邮件（最简用法）</h3>
+
+<pre><code>// 代码来源：ruoyi-admin/.../CaptchaController.java:112
+String code = RandomUtil.randomNumbers(6);
+MailBuilder.of()
+    .to("user@example.com")
+    .subject("登录验证码")
+    .text("您本次验证码为：" + code + "，有效期为5分钟，请尽快填写。")
+    .send();
+// 先发邮件，再存 Redis
+RedisUtils.setCacheObject(Constants.CAPTCHA_CODE_KEY + email, code,
+    Duration.ofMinutes(Constants.CAPTCHA_EXPIRATION));</code></pre>
+
+<p>注意执行顺序：<strong>先发邮件，成功后才存 Redis</strong>。如果反过来——先存 Redis 再发邮件——而邮件发送失败（网络超时、SMTP 拒绝），Redis 里就有了一个"用户永远收不到"的验证码。先发后存的顺序保证了数据一致性：发送失败时异常会中断后续代码，Redis 写入不会执行。</p>
+
+<h3>5.2 场景二：HTML 邮件 + 附件 + 抄送（完整组合）</h3>
+
+<pre><code>MailBuilder.of()
+    .to("team@example.com")                    // 主收件人
+    .cc("manager@example.com")                 // 抄送给经理
+    .bcc("archive@example.com")                // 密送给归档邮箱
+    .subject("Q3 季度报告")
+    .html("&lt;h1&gt;Q3 工作总结&lt;/h1&gt;" +
+          "&lt;p&gt;本季度完成以下里程碑：&lt;/p&gt;" +
+          "&lt;ul&gt;" +
+          "&lt;li&gt;Feature A 上线&lt;/li&gt;" +
+          "&lt;li&gt;Bug 修复率提升 40%&lt;/li&gt;" +
+          "&lt;/ul&gt;" +
+          "&lt;img src='cid:chart'&gt;")        // 引用内联图片
+    .image("chart", new FileInputStream(       // 内联图片，cid=chart
+        "/data/reports/chart.png"))
+    .files(                                     // 附件
+        new File("/data/reports/Q3-Report.pdf"),
+        new File("/data/reports/Q3-Data.xlsx"))
+    .send();</code></pre>
+
+<p>这个例子展示了 MailBuilder 的全能力：HTML 正文中的 <code>cid:chart</code> 会被替换为内联图片的二进制数据；两个附件以 multipart/mixed MIME 结构打包；抄送和密送分别设置收件人头部。发送后的邮件在 Outlook/Gmail 中会显示为带图表的 HTML 正文 + 两个下载附件。</p>
+
+<h3>5.3 场景三：临时切换发件人（覆盖账户字段）</h3>
+
+<pre><code>// 使用 yml 默认的 163 账户，但发件人临时改为老板的显示名
+MailBuilder.of()
+    .from("CEO &lt;ceo@company.com&gt;")            // 覆盖发件人
+    .to("all@company.com")
+    .subject("全员通知")
+    .text("周五下午茶，请大家到茶水间。")
+    .send();
+// 注意：调用 from() 后 useGlobalSession 自动变为 false
+// resolveMailAccount() 会克隆全局 Bean 并覆盖 from 字段</code></pre>
+
+<p>这个场景展示了覆盖字段的正确用法：不改 yml 配置，不改全局 Bean，单次发送时临时切换发件人。函数式编程的思维——"不要修改共享状态，创建一个新状态"。</p>
+
+<h2>六、与 ruoyi-common-sms 的发送链路对比</h2>
+
+<p>两个模块的发送链路在设计哲学上有本质区别，将两者放在一起对比能加深对各自设计选择的理解：</p>
+
+<table>
+<tr><th>链路步骤</th><th>ruoyi-common-mail</th><th>ruoyi-common-sms</th></tr>
+<tr>
+  <td><strong>① 入口</strong></td>
+  <td><code>MailBuilder.of()</code> — 静态工厂创建 Builder 实例</td>
+  <td>直接注入 <code>SmsBlend</code>（sms4j 接口）— 无 Builder 封装</td>
+</tr>
+<tr>
+  <td><strong>② 参数组装</strong></td>
+  <td>链式调用 <code>.to().subject().text().html()</code> 等方法逐步构建邮件对象，每个方法返回 this</td>
+  <td>调用方自行构造 <code>SmsBlend.sendMessage()</code> 的参数（手机号、模板ID、模板参数 Map），无中间对象</td>
+</tr>
+<tr>
+  <td><strong>③ 前置校验</strong></td>
+  <td><code>validate()</code> — 收件人、标题、正文三项必填检查，抛出 IllegalArgumentException</td>
+  <td>无前置校验 — sms4j 框架在发送时内部校验手机号格式，不合法时抛 SmsBlendException</td>
+</tr>
+<tr>
+  <td><strong>④ 账户/配置解析</strong></td>
+  <td><code>resolveMailAccount()</code> — 从 Spring 容器获取 MailAccount Bean，有覆盖需求时克隆+覆盖。精细的三分支逻辑</td>
+  <td>sms4j starter 在启动时已通过 <code>@ConfigurationProperties</code> 解析 yml 配置并注入 SmsBlend 实例，模块无需额外解析</td>
+</tr>
+<tr>
+  <td><strong>⑤ 实际发送</strong></td>
+  <td><code>JakartaMail.create(account).send()</code> — Hutool 封装 Jakarta Mail API，通过 SMTP 协议发送，返回 message-id</td>
+  <td><code>SmsBlend.sendMessage()</code> — sms4j 框架内部根据配置选择短信渠道（阿里云/腾讯云等），调用对应 SDK 发送</td>
+</tr>
+<tr>
+  <td><strong>⑥ 异常处理</strong></td>
+  <td>无模块级异常处理 — 异常向上抛给调用方或全局异常处理器。图片流在 finally 中关闭</td>
+  <td><code>SmsExceptionHandler</code> 全局 <code>@RestControllerAdvice</code> — 捕获 SmsBlendException，返回统一的 R.fail("短信发送失败，请稍后再试...")</td>
+</tr>
+<tr>
+  <td><strong>⑦ 后置处理</strong></td>
+  <td>finally 块关闭所有图片 InputStream，防止文件句柄泄漏</td>
+  <td>PlusSmsDao 在发送前后通过 Redis 做拦截计数（防刷），与发送链路并行而非串行</td>
+</tr>
+</table>
+
+<div class="insight"><strong>设计洞察：</strong>邮件模块的发送链路是一条"纵向深链"——从 Builder 参数收集到 account 解析到 SMTP 发送，数据单向流动，职责在 MailBuilder 一个类中层层递进。短信模块的发送链路是"横向展开"——配置由 sms4j starter 内部管理，发送由 SmsBlend 接口直接完成，异常由独立的 ExceptionHandler 兜底，Redis 缓存由 PlusSmsDao 管理。四个关注点分散在四个类中，通过 Spring 的 DI 和 AOP 编织在一起。两种风格没有优劣之分——邮件的一次性 IO 操作适合纵向封装，短信的多渠道+防刷场景适合横向解耦。</div>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<details>
+<summary>Q1. 写出 MailBuilder.of().to("a@b.com").subject("Hi").text("Hello").send() 的 7 步执行路径，标注每步对应的 MailBuilder.java 行号。</summary>
+<p>① 构造：private MailBuilder()（第 90 行）→ ② to("a@b.com")（第 166 行）→ ③ subject("Hi")（第 232 行）→ ④ text("Hello")（第 243 行）→ ⑤ validate()（第 345 行）→ ⑥ resolveMailAccount()（第 362 行）→ ⑦ JakartaMail.create().send()（第 320-336 行）。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q2. resolveMailAccount() 的三种分支路径分别是什么？什么场景走哪条？</summary>
+<p><strong>路径A</strong>：mailAccount != null 且 from/user/pass 全空 → 直接返回自定义账户（<code>MailBuilder.of(customAccount)</code> 场景）。</p>
+<p><strong>路径B</strong>：mailAccount == null 且 from/user/pass 全空 → 从 Spring 容器拿全局 Bean 直接返回（<code>MailBuilder.of()</code> 常规场景）。</p>
+<p><strong>路径C</strong>：from/user/pass 任一非空 → 克隆 + 逐字段覆盖后返回（调用了 from()/user()/pass() 的场景）。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q3. 为什么 validate() 检查 content == null 而不是 StrUtil.isBlank(content)？</summary>
+<p>这是有意为之的设计选择。content == null 表示"忘记设置正文"（编程错误），应该抛异常；content = ""（空字符串）表示"我知道正文为空"（可能是只靠标题传达信息的提醒类邮件），技术上 SMTP 允许空正文。如果改成 isBlank，空字符串也会被拦截——过于严格，剥夺了调用方的选择权。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q4. 写一段代码：发送 HTML 邮件，正文含内联图片（cid=logo），带两个附件，抄送 cc@example.com。</summary>
+<pre><code>MailBuilder.of()
+    .to("user@example.com")
+    .cc("cc@example.com")
+    .subject("产品发布通知")
+    .html("&lt;h1&gt;新产品已发布&lt;/h1&gt;&lt;img src='cid:logo'&gt;")
+    .image("logo", new FileInputStream("/path/to/logo.png"))
+    .files(new File("/path/to/manual.pdf"), new File("/path/to/changelog.txt"))
+    .send();</code></pre>
+<p>关键点：① image() 的 cid 参数必须与 HTML 中 &lt;img src='cid:xxx'&gt; 的 cid 一致；② files() 是覆盖式传入，所有附件一次设完；③ 别忘了最终调 send()。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q5. 对比 mail 和 sms 的发送链路，最本质的架构差异是什么？</summary>
+<p>mail 是"纵向深链"——参数收集、校验、账户解析、发送全在 MailBuilder 一个大类中层层递进，职责内聚。sms 是"横向展开"——配置（sms4j starter）、发送（SmsBlend 接口）、异常（SmsExceptionHandler）、缓存（PlusSmsDao）分散在四个独立组件中，通过 Spring DI 和 AOP 协作。这种差异源于业务特征：邮件是一次性 IO 操作，适合内聚封装；短信是多渠道+防刷场景，适合横向解耦。</p>
+</details>
+</div>
+
+<div class="cite">推荐一手资料：<a href="https://doc.hutool.cn/pages/JakartaMail/" target="_blank">Hutool 官方文档 · JakartaMail 邮件工具</a> — 对照本课的 send() 源码，看 JakartaMail.create() 和 mail.send() 的完整文档。另外推荐阅读 <a href="https://javaee.github.io/javamail/" target="_blank">Jakarta Mail 官方规范</a> 了解 MimeMessage 和 Transport 的底层机制。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。比如可以问：「send() 失败后，图片流真的会被关闭吗？」「如果要支持异步发送邮件（不阻塞 HTTP 请求线程），MailBuilder 需要怎么改造？」「ObjectUtil.clone 对大 MailAccount 的性能影响如何？」两节课覆盖了 ruoyi-common-mail 的静态结构（三层架构+条件装配）和动态行为（发送链路+克隆策略）——你现在应该能用一句话向同事讲清这个模块的全部设计密码了。</div>
+
+<div class="nav"><a href="01-MailBuilder与条件装配.html">← 上一课：MailBuilder与条件装配</a><a href="../">模块首页</a></div>
+</body>
+</html>

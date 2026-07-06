@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>05 布局系统与三导航模式</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>05 布局系统与三导航模式</h1>
+
+<p>RuoYi-Vue-Plus 的布局系统支持 <span class="keyword">LEFT</span>（左侧导航）、<span class="keyword">TOP</span>（顶部导航）、<span class="keyword">MIX</span>（混合导航）三种模式，通过 <code>settingsStore.navType</code> 动态切换。<strong>学完本课后，你将能画出 Layout 组件树的结构，并解释三种布局模式在 DOM 层面的异同。</strong></p>
+
+<h2>Layout 组件树</h2>
+
+<pre><code>Layout (src/layout/index.vue)
+├── Sidebar (侧边栏)           — LEFT/MIX 模式显示
+│   ├── Logo (Logo 组件)
+│   ├── el-scrollbar (滚动容器)
+│   └── el-menu
+│       └── SidebarItem (递归渲染菜单项)
+│           └── SidebarItem (子菜单递归自身)
+├── main-container (主区域)
+│   ├── layout-header
+│   │   ├── Navbar (顶部导航栏)
+│   │   │   ├── Hamburger (折叠按钮)
+│   │   │   ├── Breadcrumb (面包屑)
+│   │   │   └── TopBar (顶部菜单，TOP 模式)
+│   │   └── TagsView (标签页)
+│   └── AppMain (页面内容区)
+│       └── &lt;router-view /&gt; (含 keep-alive + transition)
+└── Settings (右侧设置抽屉)</code></pre>
+
+<h2>Layout 模板：条件渲染驱动三模式</h2>
+
+<pre><code>&lt;template&gt;
+  &lt;div :class="classObj" class="app-wrapper"&gt;
+    &lt;!-- 移动端遮罩层 --&gt;
+    &lt;div v-if="device === 'mobile' &amp;&amp; sidebar.opened"
+         class="drawer-bg" @click="handleClickOutside" /&gt;
+
+    &lt;!-- 侧边栏：仅 LEFT 或 MIX 模式显示 --&gt;
+    &lt;side-bar v-if="showSidebar" class="sidebar-container" /&gt;
+
+    &lt;div class="main-container"&gt;
+      &lt;div class="layout-header"&gt;
+        &lt;navbar @set-layout="setLayout" /&gt;
+        &lt;tags-view v-if="needTagsView" /&gt;
+      &lt;/div&gt;
+      &lt;app-main /&gt;
+      &lt;settings ref="settingRef" /&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/template&gt;</code></pre>
+
+<p>关键计算属性 <code>showSidebar</code> 决定了侧边栏的可见性：</p>
+
+<pre><code>const layout = computed(() => settingsStore.navType);
+
+const showSidebar = computed(() => {
+  if (sidebar.value.hide) return false;    // 全局隐藏标志
+  return layout.value === NavTypeEnum.LEFT
+      || layout.value === NavTypeEnum.MIX; // TOP 模式不显示侧边栏
+});</code></pre>
+
+<h2>NavTypeEnum 枚举</h2>
+
+<pre><code>export enum NavTypeEnum {
+  LEFT = 'left', // 左侧导航：侧边栏固定显示，顶部无菜单
+  TOP  = 'top',  // 顶部导航：侧边栏隐藏，菜单在顶栏水平排列
+  MIX  = 'mix'   // 混合导航：侧边栏 + 顶栏同时显示
+}</code></pre>
+
+<h2>SidebarItem：递归菜单组件</h2>
+
+<p>侧边栏菜单使用 <code>SidebarItem</code> 组件递归渲染，这是整个布局中最精妙的部分：</p>
+
+<pre><code>&lt;template&gt;
+  &lt;div v-if="!item.hidden"&gt;
+    &lt;!-- 情况1: 只有一个可见子路由 → 直接渲染为菜单项 --&gt;
+    &lt;template v-if="hasOneShowingChild(item, item.children) &amp;&amp; !item.alwaysShow"&gt;
+      &lt;app-link :to="resolvePath(onlyOneChild.path)"&gt;
+        &lt;el-menu-item :index="resolvePath(onlyOneChild.path)"&gt;
+          &lt;svg-icon :icon-class="onlyOneChild.meta.icon" /&gt;
+          &lt;template #title&gt;
+            &lt;span class="menu-title"&gt;{{ onlyOneChild.meta.title }}&lt;/span&gt;
+          &lt;/template&gt;
+        &lt;/el-menu-item&gt;
+      &lt;/app-link&gt;
+    &lt;/template&gt;
+
+    &lt;!-- 情况2: 多个子路由 → 渲染为 el-sub-menu + 递归 children --&gt;
+    &lt;el-sub-menu v-else :index="resolvePath(item.path)" teleported&gt;
+      &lt;template #title&gt;
+        &lt;svg-icon :icon-class="item.meta.icon" /&gt;
+        &lt;span&gt;{{ item.meta?.title }}&lt;/span&gt;
+      &lt;/template&gt;
+      &lt;sidebar-item
+        v-for="child in item.children"
+        :key="child.path"
+        :item="child"
+        :is-nest="true"
+        :base-path="resolvePath(child.path)"
+        class="nest-menu"
+      /&gt;
+    &lt;/el-sub-menu&gt;
+  &lt;/div&gt;
+&lt;/template&gt;</code></pre>
+
+<p><span class="keyword">hasOneShowingChild</span> 的判断逻辑：如果一个父路由只有一个可见的子路由，则跳过父级菜单项，直接显示子菜单项。这避免了"系统管理 -> 用户管理"这种只有一项的冗余折叠。但如果设置了 <code>alwaysShow: true</code>，则强制显示父级。</p>
+
+<blockquote>
+  <strong>与 React 对比：</strong> React 中递归路由菜单通常通过 <code>useRoutes()</code> 配置 <code>children</code> 属性在 Route 层级实现，UI 组件渲染由不同的 <code>&lt;Outlet /&gt;</code> + Sidebar render 函数组合。Vue 这边的 SidebarItem 递归模式更加直观——它同时是"路由配置"和"UI 组件"的混合体，通过 <code>hidden</code>、<code>alwaysShow</code>、<code>meta.icon</code> 等字段控制。
+</blockquote>
+
+<h2>TopBar：顶部导航</h2>
+
+<p>在 TOP 和 MIX 模式下，菜单由 TopBar 组件渲染为水平排列的胶囊按钮：</p>
+
+<pre><code>&lt;el-menu mode="horizontal" class="topbar-menu"&gt;
+  &lt;!-- 可见菜单（前 N 个） --&gt;
+  &lt;sidebar-item
+    v-for="menuRoute in topMenus"
+    :item="menuRoute"
+    :base-path="menuRoute.path"
+    popper-class="topbar-menu-popper"
+  /&gt;
+  &lt;!-- 溢出菜单（"更多菜单"下拉） --&gt;
+  &lt;el-sub-menu v-if="moreRoutes.length > 0" index="more"&gt;
+    &lt;template #title&gt;&lt;span&gt;更多菜单&lt;/span&gt;&lt;/template&gt;
+    &lt;sidebar-item v-for="menuRoute in moreRoutes" ... /&gt;
+  &lt;/el-sub-menu&gt;
+&lt;/el-menu&gt;</code></pre>
+
+<p>TopBar 通过 <code>visibleNumber</code> 计算属性自适应屏幕宽度：</p>
+
+<pre><code>const visibleNumber = ref(5);
+const topMenus = computed(() =>
+  permissionStore.sidebarRouters
+    .filter(f => !f.hidden)
+    .slice(0, visibleNumber.value)
+);
+const moreRoutes = computed(() =>
+  permissionStore.sidebarRouters
+    .filter(f => !f.hidden)
+    .slice(visibleNumber.value)  // 超出部分放入"更多菜单"
+);
+
+function setVisibleNumber() {
+  let width = document.body.getBoundingClientRect().width;
+  if (width >= 1000) width -= 420;
+  visibleNumber.value = Math.max(1, Math.floor(width / 3 / 92) + 2);
+}</code></pre>
+
+<h2>响应式断点：桌面/移动端切换</h2>
+
+<p>Layout 组件通过 <code>useWindowSize</code> 监听窗口宽度变化，以 992px 为断点：</p>
+
+<pre><code>const { width } = useWindowSize();
+const WIDTH = 992;
+
+watch(width, w => {
+  if (w - 1 < WIDTH) {
+    useAppStore().toggleDevice('mobile');
+    useAppStore().closeSideBar({ withoutAnimation: true }); // 移动端关闭侧边栏
+  } else {
+    useAppStore().toggleDevice('desktop');
+  }
+}, { immediate: true });</code></pre>
+
+<p>在 mobile 模式下，侧边栏通过绝对定位覆盖在主内容上方，点击遮罩层可关闭。</p>
+
+<h2>AppMain：KeepAlive 与过渡动画</h2>
+
+<p>页面内容区通过组件名实现缓存控制：</p>
+
+<pre><code>&lt;!-- AppMain.vue --&gt;
+&lt;section class="app-main"&gt;
+  &lt;router-view v-slot="{ Component, route }"&gt;
+    &lt;transition name="fade-transform" mode="out-in"&gt;
+      &lt;keep-alive :include="cachedViews"&gt;  &lt;!-- 只缓存 tagsView 中列出的组件名 --&gt;
+        &lt;component :is="Component" :key="route.path" /&gt;
+      &lt;/keep-alive&gt;
+    &lt;/transition&gt;
+  &lt;/router-view&gt;
+&lt;/section&gt;</code></pre>
+
+<p><code>cachedViews</code> 来自 tagsView store，是当前所有标签页的组件 name 列表。未被缓存的页面每次导航都会重新挂载。组件 name 由 <code>createCustomNameComponent</code> 保证注入。</p>
+
+<div class="tip">
+  <strong>三种布局模式的 DOM 差异：</strong>
+  <br>LEFT：有 <code>.sidebar-container</code>，固定左侧，main-container 通过 <code>margin-left</code> 留出空间
+  <br>TOP：无 <code>.sidebar-container</code>，main-container 占满宽，TopBar 在 Navbar 中渲染
+  <br>MIX：有 <code>.sidebar-container</code> + TopBar，main-container 既要有 margin-left 又要容纳顶部菜单
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://element-plus.org/zh-CN/component/menu.html">Element Plus - Menu 组件</a> · <a href="https://vueuse.org/core/useWindowSize/">VueUse - useWindowSize</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以追问：「keep-alive 的 include 是如何和组件 name 匹配的？」「为什么 AppMain 中路由的 key 是 route.path 而不是 route.name？」「三种布局模式下 fixedHeader 的 CSS 计算有什么不同？」</div>
+</body>
+</html>

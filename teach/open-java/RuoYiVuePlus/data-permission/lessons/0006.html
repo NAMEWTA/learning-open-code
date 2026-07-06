@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>06 Handler 大脑下 — buildDataFilter 详解</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>06 Handler 大脑下 — buildDataFilter 详解</h1>
+
+<blockquote><strong>本节目标：</strong>你能逐行解释 <code>buildDataFilter</code> 的每一个步骤，包括角色遍历、SpEL 渲染、NullSafe 兜底、ignore 防递归，理解为什么每个设计选择存在。</blockquote>
+
+<h2>buildDataFilter 全貌</h2>
+
+<p><code>PlusDataPermissionHandler.java:107-179</code>。这个方法按六个阶段执行：</p>
+
+<pre><code>阶段1: 确定 joinStr → 阶段2: 构建 SpEL 上下文 → 阶段3: 筛选参与角色
+→ 阶段4: 注册列名变量 → 阶段5: 逐角色遍历渲染模板 → 阶段6: 组装最终 SQL</code></pre>
+
+<h2>阶段1：确定拼接符 joinStr</h2>
+
+<pre><code>// Handler:109-112
+String joinStr = isSelect ? " OR " : " AND ";       // 默认：SELECT→OR, UPDATE/DELETE→AND
+if (StringUtils.isNotBlank(dataPermission.joinStr())) {
+    joinStr = " " + dataPermission.joinStr() + " ";  // 注解显式指定则覆盖
+}</code></pre>
+
+<p>假设用户有两个角色（部门经理 dataScope=4 + 普通用户 dataScope=5），SELECT 场景下最终条件为：</p>
+
+<pre><code>dept_id IN (103,104,105) OR create_by = 1</code></pre>
+
+<p>即"能看到部门及以下的数据，<strong>或者</strong>自己创建的"。OR 逻辑意味着权限是累加的。</p>
+
+<h2>阶段2：构建 SpEL 上下文</h2>
+
+<pre><code>// Handler:113-117
+Object defaultValue = "-1";                           // ① null 的兜底值
+NullSafeStandardEvaluationContext context =           // ② 自定义上下文（变量为null返回"-1"）
+    new NullSafeStandardEvaluationContext(defaultValue);
+context.addPropertyAccessor(new NullSafePropertyAccessor(...));
+context.setBeanResolver(beanResolver);                // ③ 让 #{@sdss.xxx} 可以调Spring Bean
+DataPermissionHelper.getContext().forEach(context::setVariable); // ④ 注入扩展变量</code></pre>
+
+<p>四个关键设计：</p>
+
+<ul>
+  <li><strong>defaultValue = "-1"</strong>：当 SpEL 变量取不到（用户没部门、没角色）时，返回 "-1"。这样 <code>IN (-1)</code> 或 <code>= -1</code> 不会导致数据库语法错误，也不会匹配任何真实数据。</li>
+  <li><strong>NullSafeStandardEvaluationContext</strong>（Handler:335-358）：覆写了 <code>lookupVariable()</code>，变量为 null 时返回 "-1" 而非 null。</li>
+  <li><strong>NullSafePropertyAccessor</strong>（Handler:365-447）：装饰原 <code>PropertyAccessor</code>，对象属性读取为 null 时返回 "-1"。</li>
+  <li><strong>beanResolver</strong>：让 <code>@sdss</code> 这样的 bean 引用能被 SpEL 解析。</li>
+</ul>
+
+<div class="tip"><strong>为什么用 "-1"？</strong>如果 <code>IN ()</code> 空参数或 <code>= null</code>，数据库会直接报错。用 "-1" 让它生成 <code>IN (-1)</code>，不报错但也查不到数据——安全失败而非崩溃。</div>
+
+<h2>阶段3：筛选参与数据权限的角色</h2>
+
+<pre><code>// Handler:119-126
+DataPermissionAccess access = currentAccess();        // 当前接口的权限约束
+List&lt;RoleDTO&gt; scopeRoles = scopeRoles(user, access);   // 筛选角色
+if (CollUtil.isEmpty(scopeRoles)) {
+    if (access.constrained()) {
+        return " 1 = 0 ";    // 接口有约束但用户无匹配角色 → 查不到数据
+    }
+    return StringUtils.EMPTY; // 无角色约束 → 不加过滤
+}</code></pre>
+
+<p><code>scopeRoles()</code>（Handler:219-250）的逻辑：</p>
+<ul>
+  <li>接口没有权限注解约束 → 使用用户的<strong>全部角色</strong></li>
+  <li>接口有 <code>@SaCheckPermission("system:user:list")</code> → 从 <code>user.dataScopeRoleMap</code> 中查找<strong>真正拥有该权限码</strong>的角色子集</li>
+</ul>
+
+<p>这项"接口约束"是新版加入的精细控制：用户可能有多个角色，但当前接口只允许其中某个角色的数据权限生效。防止角色 A（全部数据）的宽松范围被带进角色 B 才能进的接口。</p>
+
+<h2>阶段4：注册列名变量</h2>
+
+<pre><code>// Handler:128-138
+for (DataColumn dataColumn : dataPermission.value()) {
+    // key 和 value 数组长度必须一致
+    if (dataColumn.key().length != dataColumn.value().length) {
+        throw new ServiceException("角色数据范围异常 => key与value长度不匹配");
+    }
+    for (int i = 0; i < dataColumn.key().length; i++) {
+        context.setVariable(dataColumn.key()[i], dataColumn.value()[i]);
+        // 即: #deptName = "dept_id", #userName = "create_by"
+    }
+    keys.addAll(Arrays.stream(dataColumn.key()).map(key -> "#" + key).toList());
+}</code></pre>
+
+<p>把注解的 key→value 映射注入 SpEL 上下文。此刻 <code>#deptName</code> 在 SpEL 里的值就是字符串 <code>"dept_id"</code>。</p>
+
+<h2>阶段5：逐角色遍历，渲染模板</h2>
+
+<p>这是最核心的循环，Handler:140-173：</p>
+
+<pre><code>for (RoleDTO role : scopeRoles) {
+    context.setVariable("roleId", role.getRoleId());         // 注入 #roleId
+    DataScopeType type = DataScopeType.findCode(role.getDataScope()); // 查枚举
+    if (type == DataScopeType.ALL) {
+        return StringUtils.EMPTY;  // 任一角色是ALL → 整个不过滤！
+    }
+    boolean isSuccess = false;
+    for (DataColumn dataColumn : dataPermission.value()) {    // 遍历每个 DataColumn
+        // 模板不含这个 key → 跳过这个 DataColumn
+        if (!StringUtils.containsAny(type.getSqlTemplate(), keys.toArray(String[]::new))) continue;
+        if (!StringUtils.containsAny(type.getSqlTemplate(), dataColumn.key())) continue;
+        // ★ 关键：ignore 包裹，防止 SpEL 里 @sdss 再查 DB 时触发数据权限死循环
+        String sql = DataPermissionHelper.ignore(() ->
+            parser.parseExpression(type.getSqlTemplate(), parserContext)
+                  .getValue(context, String.class));
+        conditions.add(joinStr + sql);
+        isSuccess = true;
+    }
+    // 模板没匹配上任何列 → 用 elseSql 兜底（通常是 " 1 = 0 "）
+    if (!isSuccess && StringUtils.isNotBlank(type.getElseSql())) {
+        conditions.add(joinStr + type.getElseSql());
+    }
+}</code></pre>
+
+<p><strong>为什么需要 DataPermissionHelper.ignore？</strong></p>
+
+<p>看 CUSTOM 的模板：<code>#{#deptName} IN ( #{@sdss.getRoleCustom( #roleId )} )</code></p>
+
+<p><code>@sdss.getRoleCustom(roleId)</code> → <code>roleDeptMapper.lambda().select(...)</code> → 这个 Mapper 方法可能也标了 <code>@DataPermission</code>！如果不 ignore，就进入 <strong>无限递归</strong>：拼 SQL 触发 SQL 解析 → 再进 buildDataFilter → 再拼 SQL → …</p>
+
+<p><code>DataPermissionHelper.ignore(Supplier)</code>（Helper:145-152）调 <code>DataPermissionIgnoreContext.enable()</code>，用反射操作 MyBatis-Plus 的 <code>IGNORE_STRATEGY_LOCAL</code> ThreadLocal，把 <code>dataPermission=true</code>，从而让 <code>InterceptorIgnoreHelper.willIgnoreDataPermission()</code> 返回 true，后续 SQL 不再触发数据权限。</p>
+
+<h2>阶段6：组装最终 SQL</h2>
+
+<pre><code>// Handler:175-178
+if (CollUtil.isNotEmpty(conditions)) {
+    String sql = StreamUtils.join(conditions, Function.identity(), "");
+    return sql.substring(joinStr.length());   // 去掉开头的多余 joinStr
+}</code></pre>
+
+<p>conditions 里存的格式是 <code>" OR dept_id IN (103,104,105)"</code>、<code>" OR create_by = 1"</code>。join 后变成 <code>" OR dept_id IN (103,104,105) OR create_by = 1"</code>，再 substring 去掉开头的 <code>" OR "</code>，得到干净的过滤片段。</p>
+
+<h2>完整流程总结</h2>
+
+<pre><code>buildDataFilter(注解, 用户, isSelect)
+ │
+ ├─ joinStr = isSelect ? "OR" : "AND"
+ ├─ 构建 SpEL 上下文（NullSafe + beanResolver + 自定义变量）
+ ├─ scopeRoles: 接口权限约束 → 筛选角色
+ │   └─ 无角色 + 有约束 → "1=0"
+ │   └─ 无角色 + 无约束 → 空
+ │
+ ├─ 注册 key→value 列名映射
+ │
+ ├─ 逐角色循环:
+ │   ├─ ALL? → 直接返回空！（短路）
+ │   ├─ 找 DataScopeType 枚举
+ │   ├─ 模板含此注解的 key? → ignore 包裹 → SpEL 渲染 → 加入 conditions
+ │   └─ 模板不含? → elseSql 兜底
+ │
+ └─ 组装: conditions.join → 去开头 joinStr → 返回</code></pre>
+
+<div class="cite">📖 推荐一手资料：源码 <code>PlusDataPermissionHandler.java:107-179</code> — buildDataFilter 是数据权限体系的大脑，建议对照本课逐行阅读。</div>
+<div class="reminder">💡 试试问"如果用户有两个角色，一个 CUSTOM(depIds=101,102)，一个 DEPT(deptId=103)，两个角色使用同一个注解(key deptName → value dept_id)，最终的 conditions 集合里会有几个条件？它们的拼接关系是什么？"</div>
+
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>15 · ruoyi-common-log + doc：操作日志与API文档</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>15 · ruoyi-common-log + doc：操作日志与API文档</h1>
+
+<p><strong>核心问题：</strong>如何用一行注解记录任何 Controller 方法的操作日志？如何自动生成带有权限说明的 OpenAPI 文档？</p>
+
+<h2>Part A: ruoyi-common-log — 操作日志</h2>
+
+<h3>@Log 注解</h3>
+<pre><code>@Log(title = "用户管理", businessType = BusinessType.DELETE)
+@DeleteMapping("/{userIds}")
+public R&lt;Void&gt; remove(@PathVariable Long[] userIds) {
+    // 自动记录：谁、什么时候、删除了什么、耗时多久
+    return toAjax(userService.deleteUserByIds(userIds));
+}
+</code></pre>
+
+<table>
+<tr><th>属性</th><th>说明</th></tr>
+<tr><td>title</td><td>模块名称</td></tr>
+<tr><td>businessType</td><td>OTHER/INSERT/UPDATE/DELETE/GRANT/EXPORT/IMPORT/FORCE/GENCODE/CLEAN</td></tr>
+<tr><td>operatorType</td><td>OTHER/MANAGE/MOBILE</td></tr>
+<tr><td>isSaveRequestData</td><td>是否保存请求参数（默认 true）</td></tr>
+<tr><td>isSaveResponseData</td><td>是否保存响应参数（默认 true）</td></tr>
+<tr><td>excludeParamNames</td><td>排除的请求参数字段名</td></tr>
+</table>
+
+<h3>LogAspect — AOP 切面实现</h3>
+<pre><code>@Around("@annotation(controllerLog)")
+public Object around(ProceedingJoinPoint point, Log controllerLog) {
+    StopWatch stopWatch = new StopWatch();  // 计时开始
+    // 执行目标方法
+    Object result = point.proceed();
+    // 无论成功异常都执行 handleLog()
+    handleLog(point, controllerLog, result, stopWatch, exception);
+}
+
+// handleLog 组装 OperLogEvent（24 个字段）:
+//   operId, title, businessType, businessTypes, method, requestMethod, operatorType,
+//   operName, userId, deptId, deptName, clientKey,
+//   deviceType, browser, os, operUrl, operIp, operLocation,
+//   operParam, jsonResult, status, errorMsg, operTime, costTime
+
+// 通过 SpringUtils.context().publishEvent(operLog) 发布事件
+// 日志记录异常不影响业务执行（try-catch 包裹）
+</code></pre>
+
+<p><strong>前端对应：</strong><code>plus-ui-vue/src/views/monitor/operlog/</code> 操作日志页面，调用 <code>api/monitor/operlog.ts</code> 的 list/delete/clean 等接口。</p>
+
+<h3>LoginInfoEvent — 登录日志</h3>
+<pre><code>// 在登录 Service 中使用无参构造 + setter 模式发布
+LoginInfoEvent event = new LoginInfoEvent();
+event.setUsername(username);
+event.setStatus(status);
+event.setMessage(message);
+// ... 设置其他字段（request、args 等）
+SpringUtils.context().publishEvent(event);
+// 异步监听器记录到数据库 sys_logininfor 表
+</code></pre>
+
+<h2>Part B: ruoyi-common-doc — API 文档生成</h2>
+
+<div class="info">
+<strong>技术栈：</strong>SpringDoc (OpenAPI 3.0) + Knife4j。8 个 Java 文件。通过自定义的 ClassTagOperationCustomizer 和 JavadocOperationCustomizer 增强文档质量。
+</div>
+
+<h3>核心特性</h3>
+
+<table>
+<tr><th>特性</th><th>实现</th></tr>
+<tr><td>类级标签增强</td><td>从 Controller 类 JavaDoc 第一行提取标签名，替代 SpringDoc 的类名分裂标签</td></tr>
+<tr><td>方法 JavaDoc 增强</td><td>从方法 JavaDoc 提取摘要（首句）和完整描述注入 Operation</td></tr>
+<tr><td>权限说明自动生成</td><td>解析 @SaCheckRole、@SaCheckPermission、@SaIgnore 注解，生成 Markdown 权限说明</td></tr>
+<tr><td>路径前缀处理</td><td>自动为所有 API 路径添加 Servlet Context Path 前缀</td></tr>
+</table>
+
+<h3>SaTokenAnnotationMetadataJavadocResolver</h3>
+<pre><code>// 自动解析 Controller 方法上的 Sa-Token 注解
+@SaCheckPermission("system:user:list")
+@SaCheckRole("admin")
+public R&lt;List&lt;SysUserVo&gt;&gt; list(...) { ... }
+
+// 在 Swagger 文档中自动生成：
+// > **权限要求**
+// > - 权限码: `system:user:list`
+// > - 角色: `admin`
+</code></pre>
+
+<h3>配置方式</h3>
+<pre><code># 通过 springdoc.api-docs.enabled 控制开关
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+  info:
+    title: RuoYi-Vue-Plus API
+    version: 6.0.0</code></pre>
+
+<h2>验证要点</h2>
+<ol>
+<li>在 Controller 方法上加 @Log 注解，执行操作后在「操作日志」页面查看记录</li>
+<li>启动项目后访问 /swagger-ui.html，观察 API 文档中的权限说明</li>
+<li>查看 OperLogEvent 的 22 个字段中哪些是从当前请求/登录用户自动获取的</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://springdoc.org/">SpringDoc 官方文档</a> 和 <a href="https://doc.xiaominfo.com/">Knife4j 文档</a></div>
+<div class="reminder"> 想知道如何自定义操作日志的存储方式（如发送到 Elasticsearch 而非数据库）？直接问我。</div>
+
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 第 2 课：AnyLine 元数据引擎与动态数据源桥接</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.3rem; line-height: 1.3; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.9rem 1.1rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.08rem 0.45rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; margin: 0.6rem 0; }
+  th { background: #eef4ff; padding: 0.35rem 0.5rem; text-align: left; color: #1d6fd6; }
+  td { padding: 0.35rem 0.5rem; border-top: 1px solid #eee; vertical-align: top; }
+  .file { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; }
+  .oneliner { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.5rem 0.9rem; border-radius: 0 6px 6px 0; margin: 0.8rem 0; font-size: 0.88rem; font-weight: 600; }
+  .warn { background: #fff3f3; border-left: 3px solid #e05555; padding: 0.5rem 0.9rem; border-radius: 0 6px 6px 0; margin: 0.8rem 0; font-size: 0.85rem; }
+  .nav { margin-top: 2rem; font-size: 0.82rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 02 · AnyLine 元数据引擎与动态数据源桥接 <span class="tag">cheat sheet</span></h1>
+
+<h2>核心矛盾：为什么需要桥接器？</h2>
+
+<div class="warn">
+baomidou 的 DynamicRoutingDataSource 是路由代理，包裹多个真实数据源。@DS 注解只改路由目标，但 AnyLine 看到的 JdbcTemplate 始终是<strong>同一个对象</strong>。AnyLine 默认假设 1 个 JdbcTemplate = 1 种数据库类型，会缓存固定 adapter —— 数据源切换后就会用错 adapter。
+</div>
+
+<h2>MyBatisDataSourceMonitor 四个关键方法</h2>
+
+<table>
+<tr><th>方法</th><th>作用</th><th>核心代码/逻辑</th></tr>
+<tr>
+  <td>构造函数</td>
+  <td>禁用 AnyLine 默认缓存，由 Monitor 接管</td>
+  <td class="file">ConfigTable.KEEP_ADAPTER = 2; // 自定义模式<br>ConfigTable.METADATA_CACHE_SCOPE = 0; // 禁用元数据缓存</td>
+</tr>
+<tr>
+  <td class="file">keepAdapter()</td>
+  <td>告诉 AnyLine 是否缓存 adapter</td>
+  <td class="file">return !(ds instanceof DynamicRoutingDataSource);</td>
+</tr>
+<tr>
+  <td class="file">key()</td>
+  <td>用 baomidou 当前数据源名当唯一键</td>
+  <td class="file">return DynamicDataSourceContextHolder.peek();</td>
+</tr>
+<tr>
+  <td class="file">feature()</td>
+  <td>构造 adapter 匹配指纹</td>
+  <td class="file">meta.getDatabaseProductName() + "_" + meta.getURL();<br>// 从 JDBC Connection 元数据获取，缓存到 Map&lt;String,String&gt;</td>
+</tr>
+</table>
+
+<h2>桥接方案完整链路</h2>
+
+<pre><code>@DS("#genTable.dataName")           → 切到目标数据源
+  │
+keepAdapter() → false               → 不缓存 adapter，每次都重新匹配
+  │
+key() → dataSourceName              → 用数据源名区分不同连接
+  │
+feature() → "mysql_jdbc:mysql://..." → 产品名决定方言，URL 区分实例
+  │
+AnyLine 根据 feature 匹配 adapter   → 用正确的方言解析元数据
+  │
+ServiceProxy.metadata().tables()    → 正确读取表结构</code></pre>
+
+<div class="oneliner">
+@DS 切库 → keepAdapter=false 禁止缓存 → key() 用数据源名区分 → feature() 用 DB产品名+URL 匹配 adapter → metadata() 正确读表结构。五个环节，环环相扣。
+</div>
+
+<h2>AnyLine 元数据 API 两种典型调用</h2>
+
+<table>
+<tr><th>场景</th><th>API</th><th>返回值</th></tr>
+<tr>
+  <td>列出数据库中所有表</td>
+  <td class="file">ServiceProxy.metadata().tables()</td>
+  <td>LinkedHashMap&lt;String, Table&gt;，过滤 sai_/sj_/flow_/gen_ 前缀</td>
+</tr>
+<tr>
+  <td>读指定表的列详情</td>
+  <td class="file">ServiceProxy.metadata().table(tableName)</td>
+  <td>Table → getColumns() → Column: name, comment, originType, isPrimaryKey, isNullable, isAutoIncrement, position</td>
+</tr>
+</table>
+
+<h2>导入表流程（带防并发）</h2>
+
+<pre><code>POST /tool/gen/importTable?tables=sys_user&dataName=master
+  │
+  ├─ GenController.importTableSave()
+  │   · @Lock4j(keys={"#dataName"})        ← 同一数据源串行导入
+  │   · @RepeatSubmit()                     ← 防重复提交（基于 Redis）
+  │
+  ├─ selectDbTableListByNames(tables, dataName)
+  │   · @DS("#dataName") → AnyLine 读表
+  │
+  └─ importGenTable(tableList, dataName)
+      · @DSTransactional                    ← 跨库事务
+      · for each table:
+           GenUtils.initTable(table)         ← 表名→类名，设默认值
+           tableMapper.insert(table)         ← 保存 gen_table 记录
+           SpringUtils.getAopProxy(this)     ← ⚠️ 必须用 AOP 代理！
+             .selectDbTableColumnsByName()   ← @DS 才能生效
+           GenUtils.initColumnField()        ← 推断字段类型
+           columnMapper.insertBatch()        ← 批量保存列配置</code></pre>
+
+<h2>关键陷阱：AOP 代理调用</h2>
+
+<table>
+<tr><th>写法</th><th>结果</th></tr>
+<tr><td class="file">this.selectDbTableColumnsByName()</td><td>❌ @DS 不生效 → 读错数据源</td></tr>
+<tr><td class="file">SpringUtils.getAopProxy(this).selectDbTableColumnsByName()</td><td>✅ AOP 拦截 → @DS 正确切数据源</td></tr>
+</table>
+
+<p>原因：<code>@DSTransactional</code> 和 <code>@DS</code> 都是 AOP 切面。直接 <code>this.xxx()</code> 绕过代理，切面不触发。</p>
+
+<h2>系统表过滤前缀</h2>
+
+<p>导入时自动过滤以下前缀的表：<code>sai_</code>、<code>sj_</code>、<code>flow_</code>、<code>gen_</code>（代码生成器自身的两张表）。</p>
+
+<div class="nav">速查 02 / 共 4 课 · 返回 <a href="../lessons/02.html">课程正文</a></div>
+
+</body>
+</html>

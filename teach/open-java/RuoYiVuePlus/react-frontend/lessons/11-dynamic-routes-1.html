@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>11 · 动态路由（上）：后端路由树与菜单生成</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./10-persistence-auth.html">10 持久化</a> · → <a href="./12-dynamic-routes-2.html">12 动态路由下</a></div>
+
+<h1>11 · 动态路由（上）：后端路由树与菜单生成</h1>
+
+<p><strong>胜利条件：</strong>能说出 ruoyi-react 动态路由的完整流程（后端 API → 路由树 → 菜单格式化 → ProLayout 渲染）；理解 BackendRoute 的数据结构和 meta 字段的含义；能解释为什么路由不走前端 routes.ts 而是从后端获取。</p>
+
+<h2>一、为什么需要动态路由？</h2>
+
+<blockquote>
+后台管理系统的菜单<strong>因人而异</strong>——普通用户只能看自己的菜单，管理员才能看所有菜单。如果路由写死在前端，每个用户都会看到全部页面（即使打不开）。动态路由让<strong>后端根据用户权限返回他能访问的路由树</strong>，前端据此渲染菜单。
+</blockquote>
+
+<h2>二、数据源头：后端返回什么？</h2>
+
+<p>API: <code>GET /system/menu/getRouters</code>，后端返回一个<strong>树形结构</strong>：</p>
+
+<p><span class="file-ref">src/api/types.ts</span> — BackendRoute 类型</p>
+
+<pre><code>export interface BackendRoute {
+  name: string;            // 路由名称，如 'System'
+  path: string;            // 路由路径，如 '/system'
+  component: string;       // 前端组件路径，如 '@/views/system/user/index'
+  redirect?: string;       // 重定向
+  query?: string;          // 查询参数
+  meta: {
+    title: string;         // 显示标题，如 '用户管理'
+    icon?: string;         // 图标名称，如 'user' 或 'ant-design:user-outlined'
+    visible: boolean;      // 是否在菜单中显示（false=隐藏但路由可用）
+    isLink?: boolean;      // 是否外链
+    isFrame?: boolean;     // 是否 iframe 内嵌
+    isCache?: boolean;     // 是否缓存页面
+  };
+  children?: BackendRoute[]; // 子路由（递归结构）
+}</code></pre>
+
+<p>实际返回的例子（/system/user 路由）：</p>
+
+<pre><code>{
+  name: 'System',
+  path: '/system',
+  component: '',
+  meta: { title: '系统管理', icon: 'system', visible: true },
+  children: [
+    {
+      name: 'User',
+      path: '/system/user',
+      component: '@/views/system/user/index',
+      meta: { title: '用户管理', icon: 'user', visible: true },
+    },
+    {
+      name: 'Role',
+      path: '/system/role',
+      component: '@/views/system/role/index',
+      meta: { title: '角色管理', icon: 'peoples', visible: true },
+    },
+    // ... 更多子菜单
+  ]
+}</code></pre>
+
+<h2>三、reloadMenus：路由加载的起点</h2>
+
+<p><span class="file-ref">src/stores/permissionStore.ts</span></p>
+
+<pre><code>reloadMenus: async () => {
+  // 1. 并行请求：用户信息 + 路由树
+  const [userRes, routeRes] = await Promise.all([
+    getInfo(),
+    getRouters(),
+  ]);
+
+  // 2. 写入 userStore
+  userStore.getState().setUserInfo(userRes.data);
+
+  // 3. 拿到后端路由树
+  const backendRoutes = routeRes.data;  // BackendRoute[]
+
+  // 4. 格式化成菜单数据
+  const menuData = generateMenuData(backendRoutes);
+
+  // 5. 提取权限标识
+  const permissions = extractPermissions(backendRoutes);
+
+  // 6. 更新 store
+  set({ backendRoutes, menuData, permissions });
+}</code></pre>
+
+<h2>四、菜单格式化：从 BackendRoute[] → MenuDataItem[]</h2>
+
+<p><span class="file-ref">src/api/menu.ts</span>（或 permissionStore 内部）——这是整个流程中最"繁琐"的环节：</p>
+
+<pre><code>// 核心转换逻辑（简化）
+function generateMenuData(routes: BackendRoute[]): MenuDataItem[] {
+  return routes
+    .filter(route => route.meta?.visible !== false)  // 过滤隐藏菜单
+    .map(route => {
+      const menu: MenuDataItem = {
+        key: route.path,                    // ProLayout 用 path 当 key
+        path: route.path,
+        name: route.meta?.title,
+        icon: resolveIcon(route.meta?.icon), // 图标名 → 图标组件
+      };
+
+      // 递归处理子路由（如果还有嵌套）
+      if (route.children && route.children.length > 0) {
+        menu.children = generateMenuData(route.children);
+      }
+
+      return menu;
+    });
+}
+
+// 图标解析：支持两种格式
+function resolveIcon(iconName?: string): React.ReactNode {
+  if (!iconName) return null;
+
+  // 格式 1: "ant-design:user-outlined" → 使用 @iconify/react
+  if (iconName.includes(':')) {
+    const [prefix, name] = iconName.split(':');
+    return &lt;Icon icon={`${prefix}:${name}`} /&gt;;
+  }
+
+  // 格式 2: "user" → 从 @ant-design/icons 按名映射
+  const AntIcon = antdIconsMap[iconName];
+  return AntIcon ? &lt;AntIcon /&gt; : null;
+}</code></pre>
+
+<h2>五、完整数据流</h2>
+
+<div class="diagram"><code>
+用户登录 → 跳转首页
+  ↓
+BasicLayout mount
+  ↓
+useEffect(() => { reloadMenus() }, [])
+  ↓
+Promise.all([getInfo(), getRouters()])
+  │
+  ├── getInfo() → { user: { nickName, avatar, roles, permissions } }
+  │   → useUserStore.setUserInfo(user)
+  │
+  └── getRouters() → BackendRoute[]
+      │
+      ├── 保存原始树 → permissionStore.backendRoutes
+      │                 （DynamicPage 用来匹配页面组件）
+      │
+      ├── generateMenuData() → MenuDataItem[]
+      │   → permissionStore.menuData
+      │   → ProLayout.menuDataRender 使用
+      │   → 渲染左侧导航栏
+      │
+      └── extractPermissions() → string[]
+          → permissionStore.permissions
+          → 按钮级权限控制用</code></div>
+
+<h2>六、meta 字段详解</h2>
+
+<table>
+<tr><th>字段</th><th>作用</th><th>影响</th></tr>
+<tr><td><code>visible: false</code></td><td>隐藏菜单项</td><td>不在侧边栏显示，但路由可用（直接输 URL 可访问）</td></tr>
+<tr><td><code>isLink: true</code></td><td>外链</td><td>点击打开新窗口/新标签到外部 URL</td></tr>
+<tr><td><code>isFrame: true</code></td><td>内嵌 iframe</td><td>在页面上用 iframe 加载 path 指向的 URL</td></tr>
+<tr><td><code>isCache: true</code></td><td>缓存页面</td><td>页面切换后组件不被销毁（keep-alive），状态保留</td></tr>
+<tr><td><code>icon</code></td><td>菜单图标</td><td>支持 ant-design 图标（如 <code>user</code>）和 Iconify 格式（如 <code>ant-design:user-outlined</code>）</td></tr>
+</table>
+
+<h2>七、实战检验</h2>
+
+<ol>
+  <li>打开 Chrome DevTools → Network → 搜索 <code>getRouters</code> 请求，查看返回的 JSON，找一条最复杂的路由（含多级 children）</li>
+  <li>打开 <span class="file-ref">src/stores/permissionStore.ts</span>，找到 <code>reloadMenus</code>，定位菜单格式化的代码段</li>
+  <li>在菜单格式化代码中打断点，刷新页面，在调试器中逐步看一个路由如何变成菜单项</li>
+  <li>思考：如果后端新增了一个"报表管理"菜单，前端需要改代码吗？什么情况下需要改？</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://umijs.org/docs/guides/routes">UmiJS 官方文档 — 路由</a> + 阅读 <span class="file-ref">src/api/types.ts</span> 的 BackendRoute 类型定义</div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："如果后端返回的路由路径前端没有对应的页面文件，会发生什么？DynamicPage 怎么兜底？"</div>
+
+</body>
+</html>

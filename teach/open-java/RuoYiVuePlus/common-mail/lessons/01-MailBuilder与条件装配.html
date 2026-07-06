@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第1课 · MailBuilder与条件装配：三层架构的设计密码</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第1课 · MailBuilder与条件装配：三层架构的设计密码</h1>
+<div class="mission"><strong>本节目标：</strong>学完你能说清 <code>ruoyi-common-mail</code> 的三层架构如何各司其职——<code>MailProperties</code> 映射 yml 配置、<code>MailConfig</code> 条件装配 Bean、<code>MailBuilder</code> 流式发送邮件。能解释 <code>@ConditionalOnProperty</code> 为何是邮件模块的"总开关"，以及 Builder 模式中的 <code>useGlobalSession</code> 标志在何时为何变化。能对比本模块与 <code>ruoyi-common-sms</code> 的架构同构与设计差异。</div>
+
+<p>打开 <code>ruoyi-common-mail</code> 模块源码，你会看到极致的精简——整个模块只有 5 个文件。但对这 5 个文件的设计理解，决定了你能否在生产环境中正确、安全地使用它。本课从鸟瞰开始，逐个击破三层架构的设计密码。</p>
+
+<h2>一、模块全景：5 个文件，三层职责</h2>
+
+<p>模块目录结构一目了然：</p>
+
+<pre>ruoyi-common-mail/
+├── pom.xml                           ← 依赖：ruoyi-common-core + jakarta.mail-api + angus-mail
+└── src/main/
+    ├── java/org/dromara/common/mail/
+    │   ├── config/
+    │   │   ├── MailConfig.java                ← 装配层：把 MailProperties 转成 MailAccount Bean
+    │   │   └── properties/
+    │   │       └── MailProperties.java        ← 数据层：绑定 yml 的 mail.* 配置
+    │   └── core/
+    │       └── MailBuilder.java               ← API 层：流式构建器，对外唯一入口
+    └── resources/META-INF/spring/
+        └── org.springframework.boot.autoconfigure.AutoConfiguration.imports  ← 发现机制</pre>
+
+<p><strong>3 个 Java 类 + 1 个配置清单 + 1 个 pom。</strong>这个规模与 <code>ruoyi-common-sms</code> 的 3 个 Java 类 + 1 个 imports + 1 个 pom 完全一致——两者共享同一套"RuoYi common 模块标准范式"。但文件内部的职责划分和设计选择各有千秋，后文会逐项对比。</p>
+
+<p>三层架构的数据流方向是单向的：</p>
+
+<pre>yml 配置文件
+    │
+    ▼  @ConfigurationProperties 绑定
+MailProperties  (数据层 — 10 个字段的 POJO)
+    │
+    ▼  toMailAccount() 转换
+MailConfig      (装配层 — 条件开关 + Bean 注册)
+    │
+    ▼  @Bean 注册到 Spring 容器
+MailAccount Bean (Hutool 的邮件账户对象)
+    │
+    ▼  SpringUtils.getBean() 获取
+MailBuilder     (API 层 — 流式构建 + 发送)</pre>
+
+<div class="insight"><strong>设计洞察：</strong>模块本身<strong>没有一行 SMTP 协议代码</strong>。真正的网络通信、MIME 编码、SSL 握手全部在 Hutool（<code>JakartaMail</code> + <code>MailAccount</code>）和底层的 Jakarta Mail（jakarta.mail-api + Eclipse Angus 实现）中完成。<code>ruoyi-common-mail</code> 的本质是一层"流畅封装（fluent wrapper）"——它让业务代码能用 <code>.to().subject().text().send()</code> 一行链式调用发出邮件，而不需要直接操作 Hutool 的 API。</div>
+
+<h2>二、数据层：MailProperties — 10 个 yml 属性一把抓</h2>
+
+<p><code>config/properties/MailProperties.java</code> 只有 97 行，核心是两样东西：10 个 Lombok 字段 + 一个 <code>toMailAccount()</code> 转换方法。</p>
+
+<h3>2.1 字段绑定机制</h3>
+
+<pre><code>@Data
+@ConfigurationProperties(prefix = "mail")
+public class MailProperties {
+    private Boolean enabled;          // 总开关
+    private String host;              // SMTP 服务器地址
+    private Integer port;             // SMTP 端口
+    private Boolean auth;             // 是否需要认证
+    private String user;              // 登录用户名
+    private String pass;              // 密码/授权码
+    private String from;              // 发件人（RFC-822 标准）
+    private Boolean starttlsEnable;   // STARTTLS 加密
+    private Boolean sslEnable;        // SSL 加密
+    private Long timeout;             // SMTP 超时（毫秒）
+    private Long connectionTimeout;   // Socket 连接超时（毫秒）
+    // ... toMailAccount() 方法
+}</code></pre>
+
+<p><code>@ConfigurationProperties(prefix = "mail")</code> 注解告诉 Spring Boot：扫描 yml/properties 文件中所有以 <code>mail.</code> 开头的键，通过 setter 方法（Lombok <code>@Data</code> 生成）注入到对应字段。配套的 yml 配置长这样：</p>
+
+<pre><code># application-dev.yml
+mail:
+  enabled: false           # 默认关闭！
+  host: smtp.163.com
+  port: 465                # SSL 端口
+  auth: true
+  from: xxx@163.com
+  user: xxx@163.com
+  pass: xxxxxxxxxx         # 注意：SMTP 授权码，非登录密码
+  starttlsEnable: true
+  sslEnable: true
+  # timeout 和 connectionTimeout 省略 → null → 不超时</code></pre>
+
+<h3>2.2 toMailAccount()：从 POJO 到 Hutool 对象的关键转换</h3>
+
+<p>为什么需要这个方法？因为发送邮件的是 Hutool 的 <code>MailAccount</code> 对象，不是 <code>MailProperties</code>。这个方法把 10 个分散的字段逐个 set 进 <code>MailAccount</code>：</p>
+
+<pre><code>public MailAccount toMailAccount() {
+    MailAccount account = new MailAccount();
+    account.setHost(host);
+    account.setPort(port);
+    account.setAuth(auth);
+    account.setFrom(from);
+    account.setUser(user);
+    account.setPass(pass);
+    account.setSocketFactoryPort(port);   // ← 关键细节
+    account.setStarttlsEnable(starttlsEnable);
+    account.setSslEnable(sslEnable);
+    account.setTimeout(timeout);
+    account.setConnectionTimeout(connectionTimeout);
+    return account;
+}</code></pre>
+
+<blockquote>注意 <code>setSocketFactoryPort(port)</code>：SSL 连接时 SMTP 通信和 SSL 握手在同一端口完成，所以 Socket 工厂端口必须等于 SMTP 端口（如 465）。Hutool 的 MailAccount 区分了 <code>port</code>（SMTP 端口）和 <code>socketFactoryPort</code>（SSL Socket 端口），RuoYi 将其统一设为一个值。</blockquote>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>典型值</th><th>说明</th></tr>
+<tr><td><code>enabled</code></td><td>Boolean</td><td>false</td><td>总开关，默认关闭，需显式改为 true</td></tr>
+<tr><td><code>host</code></td><td>String</td><td>smtp.163.com</td><td>SMTP 服务器域名</td></tr>
+<tr><td><code>port</code></td><td>Integer</td><td>465 / 587</td><td>465=SSL，587=STARTTLS</td></tr>
+<tr><td><code>auth</code></td><td>Boolean</td><td>true</td><td>几乎所有邮箱都需要 SMTP 认证</td></tr>
+<tr><td><code>user</code></td><td>String</td><td>xxx@163.com</td><td>登录用户名（通常等于发件人）</td></tr>
+<tr><td><code>pass</code></td><td>String</td><td>授权码</td><td>SMTP 授权码，非邮箱登录密码</td></tr>
+<tr><td><code>from</code></td><td>String</td><td>name&lt;xx@xx.com&gt;</td><td>RFC-822 格式，可包含显示名称</td></tr>
+<tr><td><code>starttlsEnable</code></td><td>Boolean</td><td>true</td><td>端口 587 场景使用 STARTTLS 升级加密</td></tr>
+<tr><td><code>sslEnable</code></td><td>Boolean</td><td>true</td><td>端口 465 场景使用纯 SSL 连接</td></tr>
+<tr><td><code>timeout</code></td><td>Long</td><td>null / 10000</td><td>SMTP 协议超时，null 表示不限制</td></tr>
+<tr><td><code>connectionTimeout</code></td><td>Long</td><td>null / 5000</td><td>Socket 连接超时，null 表示不限制</td></tr>
+</table>
+
+<h2>三、装配层：MailConfig — 一个注解决定模块生死</h2>
+
+<p><code>config/MailConfig.java</code> 是三个类中最短的——全文仅 31 行。但麻雀虽小五脏俱全，四个注解各怀绝技：</p>
+
+<pre><code>@AutoConfiguration
+@EnableConfigurationProperties(MailProperties.class)
+public class MailConfig {
+
+    @Bean
+    @ConditionalOnProperty(value = "mail.enabled", havingValue = "true")
+    public MailAccount mailAccount(MailProperties mailProperties) {
+        return mailProperties.toMailAccount();
+    }
+}</code></pre>
+
+<h3>3.1 @AutoConfiguration — 如何被发现？</h3>
+
+<p>这是 Spring Boot 3.x 的自动配置标准入口。不同于旧版的 <code>spring.factories</code> 文件，Spring Boot 3.x 通过 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件发现自动配置类。这个文件只有一行：</p>
+
+<pre><code>org.dromara.common.mail.config.MailConfig</code></pre>
+
+<p>任何模块只要在 pom.xml 中依赖了 <code>ruoyi-common-mail</code>，Spring Boot 启动时就会扫描这个 jar 中的 imports 文件，加载 MailConfig。这就是 RuoYi 所有 common 模块的"依赖即生效"统一入口——不需要在业务代码中写 <code>@Import</code> 或 <code>@ComponentScan</code>。</p>
+
+<blockquote>与 sms 模块的细微差异：<code>SmsAutoConfiguration</code> 用了 <code>@AutoConfiguration(after = DataRedisAutoConfiguration.class)</code> 来保证 Redis 先就绪（因为 PlusSmsDao 依赖 Redis）。MailConfig 没有 <code>after</code> 约束——它只依赖 MailProperties（纯 POJO 绑定），不需要任何外部中间件先启动。</blockquote>
+
+<h3>3.2 @EnableConfigurationProperties — 激活配置绑定</h3>
+
+<p>这个注解做两件事：① 将 <code>MailProperties</code> 注册为 Spring Bean（尽管它自己没有 <code>@Component</code> 注解）；② 触发 <code>@ConfigurationProperties(prefix = "mail")</code> 的 yml 属性绑定。没有它，MailProperties 的 10 个字段全是 null。</p>
+
+<h3>3.3 @ConditionalOnProperty — 邮件模块的"总开关"</h3>
+
+<p>这是本模块与 sms 模块<strong>最显著的设计差异</strong>，也是最值得深入理解的一笔：</p>
+
+<pre><code>@ConditionalOnProperty(value = "mail.enabled", havingValue = "true")</code></pre>
+
+<p>翻译成人话：<strong>只有当 yml 中 <code>mail.enabled</code> 的值等于字符串 <code>"true"</code> 时，<code>mailAccount()</code> 方法才会被执行，<code>MailAccount</code> Bean 才会被创建。</strong></p>
+
+<p>这意味着两种截然不同的运行时状态：</p>
+
+<pre>mail.enabled = true  → @ConditionalOnProperty 满足 → 创建 MailAccount Bean
+                     → MailBuilder.of().send() 正常发送邮件
+
+mail.enabled = false → @ConditionalOnProperty 不满足 → 容器中没有 MailAccount Bean
+                     → MailBuilder.of() 仍可调用（它不依赖 Spring）
+                     → 但 .send() 时 resolveMailAccount() 调用 SpringUtils.getBean(MailAccount.class)
+                     → Spring 找不到 Bean → 抛出 NoSuchBeanDefinitionException</pre>
+
+<div class="insight"><strong>设计洞察：</strong>为什么 sms 模块不需要条件开关？因为 sms4j 是一个"要么用要么不引"的框架——引入 <code>sms4j-spring-boot-starter</code> 依赖本身就意味着你决定要用短信了，所以 <code>SmsAutoConfiguration</code> 无条件装配（通过 <code>@Primary</code> 覆盖默认实现）。但 Jakarta Mail 的依赖是 mail 模块自带的，任何依赖 <code>ruoyi-common-mail</code> 的业务模块都会间接引入 Jakarta Mail jar——但不一定配置了 SMTP。所以需要 <code>@ConditionalOnProperty</code> 给开发者一个显式的"我已准备好 SMTP 配置，请启用邮件功能"的声明。默认值 <code>false</code> 是一种"安全默认"（safe by default）——不配置 SMTP 就不创建 Bean，避免运行时因为 host=null 而炸掉。</div>
+
+<h3>3.4 启动时序完整走一遍</h3>
+
+<pre>应用启动
+  │
+  ├─ ① Spring Boot 扫描所有 jar 中的 AutoConfiguration.imports
+  │     → 发现 org.dromara.common.mail.config.MailConfig
+  │
+  ├─ ② 解析 @AutoConfiguration（无 after 约束，直接排队）
+  │
+  ├─ ③ 执行 @EnableConfigurationProperties(MailProperties.class)
+  │     → 注册 MailProperties 为 Bean
+  │     → @ConfigurationProperties(prefix="mail") 绑定 yml 属性
+  │     → 10 个字段被填充
+  │
+  ├─ ④ 评估 @ConditionalOnProperty(value="mail.enabled", havingValue="true")
+  │     ├─ yml 中 mail.enabled = true  → 继续执行步骤⑤
+  │     └─ yml 中 mail.enabled = false → 跳过 mailAccount()，不注册 MailAccount Bean
+  │
+  └─ ⑤ mailProperties.toMailAccount() → 逐字段 set → 注册 MailAccount Bean → 启动完成</pre>
+
+<h2>四、API 层：MailBuilder — Builder 模式的教科书级实现</h2>
+
+<p><code>core/MailBuilder.java</code> 共 409 行，是三个类中最大、也是最精妙的一个。它不仅是模块对外的唯一 API，更是一份 Builder 模式 + Fluent API 的教科书级示例。</p>
+
+<h3>4.1 设计骨架：private 构造器 + static 工厂</h3>
+
+<pre><code>public final class MailBuilder {                    // final → 禁止继承
+
+    // ── 账户相关 ──
+    private MailAccount mailAccount;                 // 可选的自定义账户
+    private boolean useGlobalSession = true;         // 全局会话标志（默认 true）
+
+    // ── 邮件参数 ──
+    private final List&lt;String&gt; tos = new ArrayList&lt;&gt;();
+    private final List&lt;String&gt; ccs = new ArrayList&lt;&gt;();
+    private final List&lt;String&gt; bccs = new ArrayList&lt;&gt;();
+    private final Map&lt;String, InputStream&gt; images = new LinkedHashMap&lt;&gt;();
+    private File[] files = new File[0];
+    private String from;                             // 可选覆盖
+    private String user;                             // 可选覆盖
+    private String pass;                             // 可选覆盖
+    private String subject;
+    private String content;
+    private boolean html;
+
+    private MailBuilder() {}                         // 私有构造器！外部不能 new
+
+    public static MailBuilder of() {                 // 静态工厂方法
+        return new MailBuilder();
+    }
+
+    public static MailBuilder of(MailAccount mailAccount) {
+        return new MailBuilder().account(mailAccount);
+    }
+}</code></pre>
+
+<p><strong>为什么用 private 构造器？</strong>这是 Builder 模式的核心约束——强制所有创建路径都必须通过静态工厂 <code>of()</code>。好处：① 入口统一，未来可以在工厂方法中加初始化逻辑；② 语义化——<code>MailBuilder.of()</code> 比 <code>new MailBuilder()</code> 更清晰地表达"开始构建邮件"的意图；③ 两个 <code>of()</code> 重载对应两种使用场景（默认账户 vs 自定义账户），调用者不需要知道内部实现。</p>
+
+<h3>4.2 链式 API：每个 setter 返回 this</h3>
+
+<p>MailBuilder 提供了约 18 个链式方法，分三类：</p>
+
+<p><strong>第一类：账户覆盖方法（4 个）— 设了它们，useGlobalSession 自动变 false</strong></p>
+
+<table>
+<tr><th>方法</th><th>签名行号</th><th>作用</th><th>副作用</th></tr>
+<tr><td><code>account(MailAccount)</code></td><td>118</td><td>使用指定的邮件账户</td><td>useGlobalSession = false</td></tr>
+<tr><td><code>from(String)</code></td><td>130</td><td>覆盖发件人地址</td><td>useGlobalSession = false</td></tr>
+<tr><td><code>user(String)</code></td><td>142</td><td>覆盖登录用户名</td><td>useGlobalSession = false</td></tr>
+<tr><td><code>pass(String)</code></td><td>154</td><td>覆盖登录密码/授权码</td><td>useGlobalSession = false</td></tr>
+</table>
+
+<p><strong>第二类：内容设置方法（10 个）— 收件人/抄送/主题/正文</strong></p>
+
+<table>
+<tr><th>方法</th><th>签名行号</th><th>说明</th></tr>
+<tr><td><code>to(String)</code></td><td>166</td><td>逗号或分号分隔的收件人字符串</td></tr>
+<tr><td><code>to(Collection&lt;String&gt;)</code></td><td>177</td><td>收件人集合</td></tr>
+<tr><td><code>cc(String)</code></td><td>188</td><td>抄送人字符串</td></tr>
+<tr><td><code>cc(Collection&lt;String&gt;)</code></td><td>199</td><td>抄送人集合</td></tr>
+<tr><td><code>bcc(String)</code></td><td>210</td><td>密送人字符串</td></tr>
+<tr><td><code>bcc(Collection&lt;String&gt;)</code></td><td>221</td><td>密送人集合</td></tr>
+<tr><td><code>subject(String)</code></td><td>232</td><td>邮件主题</td></tr>
+<tr><td><code>text(String)</code></td><td>243</td><td>纯文本正文（html=false）</td></tr>
+<tr><td><code>html(String)</code></td><td>255</td><td>HTML 正文（html=true）</td></tr>
+<tr><td><code>content(String, boolean)</code></td><td>268</td><td>通用正文设置（手动指定是否 HTML）</td></tr>
+</table>
+
+<p><strong>第三类：附件与图片方法（3 个）</strong></p>
+
+<table>
+<tr><th>方法</th><th>签名行号</th><th>说明</th></tr>
+<tr><td><code>image(String cid, InputStream)</code></td><td>281</td><td>添加内联图片（cid 对应 HTML 中的 &lt;img src="cid:xxx"&gt;）</td></tr>
+<tr><td><code>images(Map&lt;String, InputStream&gt;)</code></td><td>294</td><td>批量添加内联图片</td></tr>
+<tr><td><code>files(File...)</code></td><td>307</td><td>设置附件（<strong>覆盖式</strong>，非追加）</td></tr>
+</table>
+
+<p>观察 <code>to()</code>/<code>cc()</code>/<code>bcc()</code> 三个方法族的设计：每个都有 String 和 Collection 两个重载，内部先调 <code>splitAddress()</code>（先用分号替换逗号、再用 StrUtil.splitTrim 切分、去空白），再调 <code>normalizeAddresses()</code>（过滤空值、trim）。这种"输入宽松、内部严格"的策略让调用者可以用任意格式传邮箱地址，而内部始终保证数据干净。</p>
+
+<h3>4.3 useGlobalSession：一个容易被忽视但至关重要的标志</h3>
+
+<p>这个布尔字段（默认 <code>true</code>）控制 Jakarta Mail 的全局 Session 复用行为。理解它的关键在于 Jakarta Mail 的架构：</p>
+
+<blockquote>Jakarta Mail 在 JVM 级别维护一个全局的 <code>javax.mail.Session</code> 对象。当 <code>useGlobalSession = true</code> 时，Hutool 的 <code>JakartaMail.create(account)</code> 会复用这个全局 Session——所有使用同一账户的邮件发送共享同一个连接池和认证信息，效率更高。当 <code>useGlobalSession = false</code> 时，每次 create 都会创建一个新的独立 Session——完全隔离，但每次都要重新建立连接和认证。</blockquote>
+
+<p>那么 useGlobalSession 何时从 true 变成 false？答案在四个账户覆盖方法中：</p>
+
+<pre><code>public MailBuilder account(MailAccount mailAccount) {
+    this.mailAccount = Objects.requireNonNull(mailAccount);
+    this.useGlobalSession = false;              // ← 自定义账户 → 不共用全局 Session
+    return this;
+}
+
+public MailBuilder from(String from) {
+    this.from = from;
+    this.useGlobalSession = false;              // ← 覆盖发件人 → 不共用全局 Session
+    return this;
+}
+// user() 和 pass() 同理</code></pre>
+
+<p><strong>为什么要这样设计？</strong>因为当你覆盖了 from/user/pass 之后，最终发送时 <code>resolveMailAccount()</code> 会克隆一份 MailAccount 并在克隆体上设新值（见第 2 课详解）。克隆出来的账户对象和原始全局 Bean 是两个不同的实例，如果还共用全局 Session，可能导致线程 A 用克隆账户发邮件时，Session 里缓存的是原始账户的认证信息——认证失败。所以一旦有任何覆盖行为，必须切到独立 Session，隔离不同账户的认证上下文。</p>
+
+<div class="insight"><strong>设计洞察：</strong>这个设计体现了"默认安全、主动降级"的原则。最常见的使用场景（80%+）是不覆盖任何账户信息，直接用 yml 配置的全局账户发邮件——这时 <code>useGlobalSession = true</code>，享受连接复用带来的性能优势。少数需要临时切换账户的场景，通过覆盖方法自动关闭全局 Session，保证隔离性。调用者不需要手动管理这个标志——框架帮你做了正确的选择。</div>
+
+<h2>五、与 ruoyi-common-sms 的全维度对比</h2>
+
+<p>两个模块在文件数量和组织方式上高度同构（都是 3 个 Java 类 + AutoConfiguration.imports + pom），但设计选择各有侧重。理解这些差异，等于理解两种不同的"公共模块封装策略"：</p>
+
+<table>
+<tr><th>对比维度</th><th>ruoyi-common-mail</th><th>ruoyi-common-sms</th></tr>
+<tr>
+  <td><strong>底层依赖</strong></td>
+  <td>Hutool JakartaMail + Jakarta Mail API（jakarta.mail-api + Eclipse Angus 实现）</td>
+  <td>sms4j 3.3.5（sms4j-spring-boot-starter 聚合框架）</td>
+</tr>
+<tr>
+  <td><strong>模块依赖</strong></td>
+  <td>只需 ruoyi-common-core（Hutool 传递引入）</td>
+  <td>需要 ruoyi-common-redis（PlusSmsDao 用 Redis 做拦截计数）</td>
+</tr>
+<tr>
+  <td><strong>配置属性类</strong></td>
+  <td>✅ <code>MailProperties</code> — 显式声明 10 个字段 + toMailAccount() 转换方法</td>
+  <td>❌ 无独立 Properties 类 — 配置由 sms4j starter 内部通过 <code>@ConfigurationProperties</code> 自行解析</td>
+</tr>
+<tr>
+  <td><strong>Bean 注册策略</strong></td>
+  <td><code>@ConditionalOnProperty(mail.enabled)</code> — 条件装配，默认关闭</td>
+  <td><code>@Primary</code> — 无条件装配，通过优先权覆盖默认实现</td>
+</tr>
+<tr>
+  <td><strong>自动配置排序</strong></td>
+  <td>无 <code>after</code> 约束（不依赖 Redis）</td>
+  <td><code>after = DataRedisAutoConfiguration</code>（需要 Redis 先就绪）</td>
+</tr>
+<tr>
+  <td><strong>注册的 Bean 数量</strong></td>
+  <td>1 个：<code>MailAccount</code></td>
+  <td>2 个：<code>PlusSmsDao</code> + <code>SmsExceptionHandler</code></td>
+</tr>
+<tr>
+  <td><strong>API 风格</strong></td>
+  <td>✅ Builder 模式 — <code>MailBuilder.of().to().subject().text().send()</code> — 链式 API，400+ 行私有实现</td>
+  <td>❌ 无 Builder — 直接调用 sms4j 的 <code>SmsBlend.sendMessage()</code>，业务方自己拼参数</td>
+</tr>
+<tr>
+  <td><strong>异常处理</strong></td>
+  <td>❌ 无 — 运行时抛 IllegalArgumentException 或 Jakarta Mail 原生异常，由业务方或全局异常处理器兜底</td>
+  <td>✅ <code>SmsExceptionHandler</code> — <code>@RestControllerAdvice</code> 全局兜底，捕获 SmsBlendException 并返回统一 R.fail 响应</td>
+</tr>
+<tr>
+  <td><strong>缓存/存储</strong></td>
+  <td>❌ 无 — 邮件是一次性 IO 操作，无需缓存</td>
+  <td>✅ <code>PlusSmsDao</code> — 基于 Redis 的短信发送拦截计数（防刷）</td>
+</tr>
+<tr>
+  <td><strong>Session 管理</strong></td>
+  <td>✅ 精细控制 — <code>useGlobalSession</code> 标志自动管理全局/独立 Session 切换</td>
+  <td>❌ 无 — sms4j 框架内部管理连接，模块不关心</td>
+</tr>
+</table>
+
+<p>画龙点睛的总结：短信模块是"适配垫片"（把 sms4j 的接口用 RuoYi 自己的 Redis、异常处理器重新包裹）；邮件模块是"流畅封装"（对 Hutool 的邮件 API 做 Builder 模式包装，提升调用体验）。两者底层的脏活累活都由成熟三方库兜底，RuoYi 只做"最后一公里"的开发体验优化——这正是 common 模块的价值所在。</p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<details>
+<summary>Q1. 说出 ruoyi-common-mail 的三层架构及每层的核心类。</summary>
+<p><strong>数据层</strong>：<code>MailProperties</code> — 通过 <code>@ConfigurationProperties(prefix = "mail")</code> 绑定 yml 的 10 个属性，提供 <code>toMailAccount()</code> 将 POJO 转为 Hutool MailAccount。</p>
+<p><strong>装配层</strong>：<code>MailConfig</code> — 通过 <code>@AutoConfiguration</code> + <code>AutoConfiguration.imports</code> 被 Spring 发现，在 <code>mail.enabled=true</code> 时创建 MailAccount Bean。</p>
+<p><strong>API 层</strong>：<code>MailBuilder</code> — 私有构造器 + 静态工厂 + 链式 API，组合邮件参数并调用 Hutool 发送。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q2. mail.enabled=false 时，MailBuilder.of().to("a@b.com").subject("Hi").text("Hello").send() 会发生什么？</summary>
+<p>前三步（of、to、subject、text）都正常执行——MailBuilder 是普通 Java 对象，不依赖 Spring 容器。但 <code>send()</code> 内部调用 <code>resolveMailAccount()</code> 时，<code>SpringUtils.getBean(MailAccount.class)</code> 在容器中找不到 MailAccount 类型的 Bean（因为 @ConditionalOnProperty 条件不满足，MailConfig 没创建它），抛出 <strong>NoSuchBeanDefinitionException</strong>。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q3. useGlobalSession 何时从 true 变成 false？为什么？</summary>
+<p>当调用四个账户覆盖方法中的任意一个时——<code>account()</code>、<code>from()</code>、<code>user()</code>、<code>pass()</code>——useGlobalSession 被设为 false。因为这些方法会触发 resolveMailAccount() 克隆 MailAccount 对象，克隆后的对象不应与原全局 Bean 共用同一个 Session，否则认证信息可能冲突。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>Q4. 对比 ruoyi-common-mail 和 ruoyi-common-sms，最核心的三个差异是什么？</summary>
+<p><strong>① API 风格</strong>：mail 有 Builder 模式（MailBuilder 链式 API），sms 无（直接调 sms4j 接口）。</p>
+<p><strong>② 启用控制</strong>：mail 用 @ConditionalOnProperty 条件开关（默认关闭），sms 用 @Primary 无条件装配。</p>
+<p><strong>③ 辅助组件</strong>：sms 有异常处理器（SmsExceptionHandler）和 Redis 缓存（PlusSmsDao），mail 都没有——邮件是一次性 IO 操作，不需要这些。</p>
+</details>
+</div>
+
+<div class="cite">推荐一手资料：<a href="https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html" target="_blank">Spring Boot 官方 · Auto-configuration</a> — 读 @ConditionalOnProperty 的 matchIfMissing 和 havingValue 参数。另外对照阅读 <code>MailProperties.java</code>、<code>MailConfig.java</code>、<code>MailBuilder.java</code> 三个源文件，它们加起来不到 550 行，半小时可以精读一遍。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。比如可以问：「为什么 MailProperties 不用 @Component 注解？」「toMailAccount() 中 socketFactoryPort 设为 port 的原因？」「如果要支持多个邮箱账户（163+QQ 同时在线），MailConfig 需要怎么改？」下一课我们将追踪 <code>MailBuilder.of().send()</code> 的完整发送链路——从 <code>validate()</code> 到 <code>resolveMailAccount()</code> 到 <code>JakartaMail.create().send()</code>，逐步拆解每一步的真实现场。</div>
+
+<div class="nav"><a href="../">模块首页</a><a href="02-发送链路与实战.html">下一课：发送链路与实战 →</a></div>
+</body>
+</html>

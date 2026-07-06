@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · 任务编写与调度实战</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; font-size: 0.78rem; overflow-x: auto; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  .note { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.4rem 0.7rem; margin: 0.6rem 0; font-size: 0.82rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · 任务编写与调度实战</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-job 定时任务模块</p>
+
+<h2>任务代码模板</h2>
+<pre>@Component
+@JobExecutor(name = "任务唯一标识")
+public class XxxTask {
+    public ExecuteResult jobExecute(JobArgs jobArgs) {
+        // 1. 获取参数（可选）
+        // String params = (String) jobArgs.getJobParams();
+
+        // 2. 执行业务逻辑
+        // doSomething(params);
+
+        // 3. 记录日志（推荐用 REMOTE 回传 Server）
+        SnailJobLog.REMOTE.info("任务执行中...关键信息");
+
+        // 4. 返回结果
+        return ExecuteResult.success("任务完成");
+        // 或 return ExecuteResult.failure("失败原因");
+    }
+}</pre>
+
+<h2>核心约定</h2>
+<table>
+<tr><th>元素</th><th>必须满足</th><th>错了会怎样</th></tr>
+<tr><td>类注解</td><td><code>@Component</code> 必须（注册 Spring Bean）+ <code>@JobExecutor(name)</code> 必须</td><td>SnailJob 找不到任务类</td></tr>
+<tr><td>name 值</td><td>必须与 Server 控制台「执行器名称」<b>完全一致</b></td><td>调度指令到达但找不到执行器</td></tr>
+<tr><td>方法参数</td><td><code>JobArgs jobArgs</code></td><td>反射调用失败</td></tr>
+<tr><td>返回类型</td><td><code>ExecuteResult</code></td><td>反射调用失败</td></tr>
+<tr><td>日志</td><td>用 <code>SnailJobLog.REMOTE</code> 而非 <code>@Slf4j</code> 的 Logger</td><td>日志不回传 Server</td></tr>
+</table>
+
+<h2>任务类型对比</h2>
+<table>
+<tr><th>类型</th><th>必需注解</th><th>关键 API</th><th>适用场景</th></tr>
+<tr><td>普通任务</td><td><code>@JobExecutor</code></td><td><code>jobExecute(JobArgs)</code></td><td>单一操作定时执行</td></tr>
+<tr><td>广播任务</td><td><code>@JobExecutor</code></td><td><code>jobExecute(JobArgs)</code> + 服务端选「广播」</td><td>所有节点刷新缓存</td></tr>
+<tr><td>静态分片</td><td><code>@JobExecutor</code></td><td><code>jobArgs.getJobParams()</code> 解析分片参数</td><td>按范围批量处理</td></tr>
+<tr><td>Map 任务</td><td>+ <code>@MapExecutor</code></td><td><code>mapHandler.doMap(data, "taskName")</code></td><td>动态拆分并行执行</td></tr>
+<tr><td>MapReduce</td><td>+ <code>@MapExecutor</code> + <code>@ReduceExecutor</code></td><td>+ <code>reduceArgs.getMapResult()</code> 聚合</td><td>拆分+汇总</td></tr>
+<tr><td>DAG 工作流</td><td><code>@JobExecutor</code></td><td><code>jobArgs.getWfContext()</code> / <code>appendContext()</code></td><td>多步骤有依赖编排</td></tr>
+</table>
+
+<h2>完整执行链路</h2>
+<div class="note">
+写代码（@JobExecutor） → 配 yml（enabled=true + Server 地址） → 启 Server（8800/snail-job） → 启客户端应用 → Server 控制台创建任务（填执行器名称 = name） → 等 cron 触发 → Server 分发 → 客户端执行 → 日志回传（SnailLogbackAppender + SnailJobLog.REMOTE） → 控制台查看结果
+</div>
+
+<h2>常见故障排查</h2>
+<table>
+<tr><th>现象</th><th>排查顺序</th></tr>
+<tr><td>任务不执行</td><td>① <code>enabled: true</code>？② Server 在运行？③ <code>token</code> 一致？④ <code>group</code> 存在？⑤ name 拼写一致？</td></tr>
+<tr><td>控制台无日志</td><td>① 是否用了 <code>SnailJobLog.REMOTE</code>？② Appender 是否挂载成功（看启动日志）？</td></tr>
+<tr><td>任务报错</td><td>① 参数类型是否匹配？② 业务异常是否被 catch 了（应抛出或返回 failure）？</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><code>@JobExecutor(name = "xxx")</code> 的 name = Server 控制台的「执行器名称」——<b>必须一致</b>。</li>
+<li>用 <code>SnailJobLog.REMOTE</code> 而非 <code>@Slf4j</code> 的 Logger 输出关键日志——运维在控制台才能看到。</li>
+<li>任务执行失败有两种处理方式：抛 RuntimeException（SnailJob 记录失败状态）或 <code>return ExecuteResult.failure("原因")</code>。</li>
+<li>Map 和 MapReduce 的拆分逻辑写在代码里（<code>mapHandler.doMap()</code>），静态分片的拆分参数在服务端配。</li>
+<li>DAG 工作流通过 <code>jobArgs.appendContext()</code> / <code>getWfContext()</code> 传递数据，在 Server 控制台拖拽编排。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：@JobExecutor、JobArgs、ExecuteResult、SnailJobLog</p>
+</body>
+</html>

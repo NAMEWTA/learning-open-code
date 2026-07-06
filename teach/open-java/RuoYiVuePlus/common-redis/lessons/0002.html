@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 地基：RedisConfig 与 Redisson 序列化</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .danger { background: #fff2f0; border-left: 3px solid #e8503a; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .danger b { color: #c0341d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 地基：<code>RedisConfig</code> 与 Redisson 序列化 <span class="tag">配置区</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #2）</b>：学完你能解释「为什么选 Redisson 而不是 RedisTemplate」，并讲清 <code>RedisConfig</code> 里三处定制——<strong>组合序列化</strong>、<strong>key 前缀</strong>、<strong>单机/集群双模式</strong>——各自解决了什么问题，外加 Jackson 3.x 那处反序列化安全设计。
+</div>
+
+<p>第 1 课我们说整个模块是「Redisson 的业务封装层」。这节课就钻进那块<strong>地基</strong>：<code>config/RedisConfig.java</code>。它在 Spring 启动时跑一次，决定了之后所有缓存操作的底层规则。</p>
+
+<h2>一、入口：一个"定制器"而非直接 new 客户端</h2>
+
+<p>注意 <code>RedisConfig</code> 没有自己创建 <code>RedissonClient</code>，而是返回一个 <code>RedissonAutoConfigurationCustomizer</code>：</p>
+
+<pre><code>@AutoConfiguration
+@EnableConfigurationProperties(RedissonProperties.class)
+public class RedisConfig {
+    @Bean
+    public RedissonAutoConfigurationCustomizer redissonCustomizer() {
+        return config -> { /* 在这里改 config */ };
+    }
+}</code></pre>
+
+<div class="why">
+<b>为什么用 Customizer？</b><br>
+Redisson 的 Spring Boot Starter 会自己读 <code>spring.data.redis.*</code> 创建客户端。RuoYi 不想从头接管这个过程，只想<strong>在它创建前插一脚改几个参数</strong>。Customizer 就是 starter 暴露的「定制回调」——你拿到半成品 <code>config</code>，改完交还给 starter 去 new。这是「扩展而非替换」的典型做法。
+</div>
+
+<h2>二、定制点 1：组合序列化 CompositeCodec</h2>
+
+<pre><code>JsonMapper jsonMapper = JsonMapper.builder()
+    .addModules(simpleModule)           // LocalDateTime 用 yyyy-MM-dd HH:mm:ss
+    .activateDefaultTyping(...)          // 存对象时带上全类名，反序列化能还原类型
+    .build();
+TypedJsonJackson3Codec jsonCodec = new TypedJsonJackson3Codec(Object.class, jsonMapper);
+// key 用 String，value 用 JSON
+CompositeCodec codec = new CompositeCodec(StringCodec.INSTANCE, jsonCodec, jsonCodec);
+config.setCodec(codec);</code></pre>
+
+<p><code>CompositeCodec</code> 的三个参数分别是 <strong>map-key 编解码、value 编解码、其它</strong>。这里的安排是：</p>
+<table>
+<tr><th>部分</th><th>用什么</th><th>好处</th></tr>
+<tr><td>key</td><td><code>StringCodec</code></td><td>在 <code>redis-cli</code> 里直接能读懂 key，不是一串二进制乱码</td></tr>
+<tr><td>value</td><td>JSON（带类型信息）</td><td>能存任意复杂对象，反序列化时还能还原成原本的类</td></tr>
+</table>
+
+<div class="side">
+💡 <code>activateDefaultTyping(..., NON_FINAL)</code> 是关键：它让 JSON 里<strong>额外保存对象的全类名</strong>。否则反序列化时 Jackson 不知道该还原成 <code>SysUser</code> 还是 <code>Map</code>。代价是 JSON 体积变大、且引入了反序列化安全问题（见下）。
+</div>
+
+<h2>三、一个安全彩蛋：反序列化漏洞防护</h2>
+
+<p>代码注释里专门写了一大段，讲 Jackson 3.x 的变化：</p>
+
+<div class="danger">
+<b>反序列化漏洞</b>：当 JSON 里带类型信息、且数据来源不可信时，攻击者可以构造一个「全类名指向危险类」的 payload，让程序在反序列化时实例化恶意对象（著名的 fastjson/jackson 漏洞家族）。<br><br>
+Jackson 2.x 时代常用 <code>LaissezFaireSubTypeValidator</code>（放行一切）。Jackson 3.x 出于安全<strong>禁止外部引用它</strong>，本模块改用 <code>BasicPolymorphicTypeValidator</code>：
+</div>
+
+<pre><code>// 当前：默认放行所有类型（行为等价 Jackson 2.x 的 LaissezFaire）
+.activateDefaultTyping(
+    BasicPolymorphicTypeValidator.builder()
+        .allowIfSubType((ctxt, clazz) -> true)   // ← 全放行
+        .build(),
+    DefaultTyping.NON_FINAL)</code></pre>
+
+<p>注释里还给了<strong>更安全的建议写法</strong>——用包名白名单只放行自己项目的类：</p>
+<pre><code>BasicPolymorphicTypeValidator.builder()
+    .allowIfBaseType("org.dromara")
+    .allowIfSubType("org.dromara")
+    .build()</code></pre>
+
+<div class="why"><b>读到这里要带走的判断力</b>：默认配置图省事放行所有类型，在「Redis 数据可能被外部污染」的场景下是有风险的。如果你做安全加固，这就是一个该收紧成白名单的点。</div>
+
+<h2>四、定制点 2：key 前缀（接上 KeyPrefixHandler）</h2>
+
+<pre><code>config.setNameMapper(new KeyPrefixHandler(redissonProperties.getKeyPrefix()));</code></pre>
+
+<p>第 1 课见过 <code>KeyPrefixHandler</code>：它实现 Redisson 的 <code>NameMapper</code>，<code>map()</code> 存时加前缀、<code>unmap()</code> 取时去前缀。逻辑很轻：</p>
+<pre><code>// 构造时：前缀为空则空，否则补一个冒号
+this.keyPrefix = StringUtils.isBlank(keyPrefix) ? "" : keyPrefix + ":";
+// map：还没加前缀才加，避免重复
+if (isNotBlank(keyPrefix) && !name.startsWith(keyPrefix)) return keyPrefix + name;</code></pre>
+
+<p>效果：业务写 <code>setCacheObject("login_tokens:123", ...)</code>，Redis 里实际是 <code>ruoyi:login_tokens:123</code>，而你读回来时看到的还是原始 key。<strong>对业务完全透明</strong>。</p>
+
+<h2>五、定制点 3：单机 / 集群双模式</h2>
+
+<p>剩下半段在读 <code>RedissonProperties</code>（映射 yml 的 <code>redisson.*</code>），哪个配置块非空就用哪种模式：</p>
+
+<div class="flow">redissonProperties.getSingleServerConfig()  != null  →  config.useSingleServer()...
+redissonProperties.getClusterServersConfig() != null  →  config.useClusterServers()...</div>
+
+<p>两个配置块都是 <code>RedissonProperties</code> 的内部静态类，字段类似（连接池大小、超时、空闲超时、订阅连接池等），集群版多了 <code>readMode</code>（读 SLAVE）和 <code>subscriptionMode</code>（订阅走 MASTER）。<code>RedisConfig</code> 底部的大段注释给了完整的集群 yml 示例。</p>
+
+<div class="side">💡 还有两个全局参数：<code>setThreads</code> / <code>setNettyThreads</code>（默认都是 CPU 核数 × 2），以及 <code>setUseScriptCache(true)</code>——因为 <strong>Redisson 大量功能基于 Lua 脚本</strong>，缓存脚本能减少每次把脚本传给 Redis 的网络开销。</div>
+
+<h2>六、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. <code>CompositeCodec(StringCodec, jsonCodec, jsonCodec)</code> 里 key 用 String、value 用 JSON 的主要好处是？</p>
+<span class="opt">A. 加快网络传输速度，String 比 JSON 快</span>
+<span class="opt">B. key 在 redis-cli 里人能读懂，value 又能存复杂对象并还原类型</span>
+<span class="opt">C. 节省内存，String 不占空间</span>
+<span class="opt">D. 兼容老版本 Redis，新版本不支持 JSON</span>
+<details><summary>看答案</summary><b>B</b>。key 用 <code>StringCodec</code> 保证可读性（便于排查），value 用带类型的 JSON 保证能存任意对象且反序列化可还原类型。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 <code>RedisConfig</code> 返回 <code>RedissonAutoConfigurationCustomizer</code> 而不是直接创建 <code>RedissonClient</code>？</p>
+<span class="opt">A. 因为 RedissonClient 不能被 Spring 管理</span>
+<span class="opt">B. 想在 starter 创建客户端前插一脚改参数，扩展而非替换默认装配</span>
+<span class="opt">C. 因为单机和集群需要两个不同的客户端</span>
+<span class="opt">D. 这是唯一能配置序列化的方式，没有别的办法</span>
+<details><summary>看答案</summary><b>B</b>。Redisson starter 会自己读配置创建客户端，Customizer 是它暴露的定制回调，让你只改几个参数而不接管整个创建过程。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 当前 <code>BasicPolymorphicTypeValidator</code> 配成"放行所有类型"，在安全角度的隐患与官方建议是？</p>
+<span class="opt">A. 没有隐患，放行所有类型是最佳实践</span>
+<span class="opt">B. 数据源不可信时有反序列化漏洞风险，建议改成 org.dromara 包名白名单</span>
+<span class="opt">C. 会导致序列化变慢，建议关闭类型信息</span>
+<span class="opt">D. 会让 key 变长，建议缩短前缀</span>
+<details><summary>看答案</summary><b>B</b>。带类型信息的反序列化在数据可被污染时存在漏洞，代码注释明确建议用 <code>allowIfBaseType("org.dromara")</code> 白名单收紧。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/4.-data-serialization" target="_blank">Redisson Wiki · Data serialization</a>——本课的 Codec / CompositeCodec 概念在这一章有完整说明。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「<code>setUseScriptCache</code> 不开会怎样？」「集群模式 readMode=SLAVE 有什么读一致性影响？」下一课进入<strong>切面区</strong>，讲透 <code>@RateLimiter</code> 限流的完整链路与令牌桶。</div>
+
+<div class="nav">课程 0002 / 使命：全面读懂 ruoyi-common-redis · 上一课：全景鸟瞰 · 下一课：@RateLimiter 限流链路</div>
+
+</body>
+</html>

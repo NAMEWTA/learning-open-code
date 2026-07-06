@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>03 Pinia 状态管理五模块</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.9rem; }
+  th { background: #f5f5f5; text-align: left; padding: 0.5rem 0.8rem; border: 1px solid #e5e5e5; }
+  td { padding: 0.5rem 0.8rem; border: 1px solid #e5e5e5; }
+</style>
+</head>
+<body>
+
+<h1>03 Pinia 状态管理五模块</h1>
+
+<p>RuoYi-Vue-Plus 前端使用 Pinia（Vue 3 的官方状态管理库）管理 7 个 store 模块。其中 5 个核心模块（<span class="keyword">app</span>、<span class="keyword">user</span>、<span class="keyword">permission</span>、<span class="keyword">settings</span>、<span class="keyword">tagsView</span>）承担了应用运行时的状态中枢。所有 store 均采用 <strong>Setup Store 语法</strong>（与 Composition API 风格一致）。<strong>学完本课后，你将能画出这 5 个 store 的职责边界和数据流向。</strong></p>
+
+<h2>五大 Store 职责一览</h2>
+
+<table>
+<tr><th>Store</th><th>核心状态</th><th>持久化</th><th>职责</th></tr>
+<tr>
+  <td><strong>user</strong></td>
+  <td>token, roles, permissions, name, avatar</td>
+  <td>token 存 localStorage</td>
+  <td>登录/注销/获取用户信息，维护角色权限数组</td>
+</tr>
+<tr>
+  <td><strong>permission</strong></td>
+  <td>routes, sidebarRouters, topbarRouters</td>
+  <td>无</td>
+  <td>从后端拉取菜单生成路由表，区分侧边栏/顶栏/默认路由</td>
+</tr>
+<tr>
+  <td><strong>app</strong></td>
+  <td>sidebar(状态), device, language, size, locale</td>
+  <td>sidebarStatus, language, size</td>
+  <td>侧边栏开/关、设备类型、Element Plus 语言包和组件尺寸</td>
+</tr>
+<tr>
+  <td><strong>settings</strong></td>
+  <td>theme, navType, tagsView, sideTheme, dark...</td>
+  <td>layout-setting</td>
+  <td>主题色、布局模式、标签页开关等所有可配置项</td>
+</tr>
+<tr>
+  <td><strong>tagsView</strong></td>
+  <td>visitedViews, cachedViews, iframeViews</td>
+  <td>可选 (tagsViewPersist)</td>
+  <td>标签页的增删改查、缓存管理、持久化恢复</td>
+</tr>
+</table>
+
+<h2>User Store：认证与权限的锚点</h2>
+
+<p>user store 是所有权限判断的数据源——后面的 permission store、auth 插件、v-hasPermi 指令都依赖它的 <code>roles</code> 和 <code>permissions</code> 数组：</p>
+
+<pre><code>export const useUserStore = defineStore('user', () => {
+  const token = ref(getToken());            // 从 localStorage 恢复
+  const name = ref('');                     // 登录名
+  const nickname = ref('');                 // 显示名
+  const avatar = ref('');
+  const roles = ref&lt;Array&lt;string&gt;&gt;([]);       // 角色编码：['admin', 'common']
+  const permissions = ref&lt;Array&lt;string&gt;&gt;([]); // 权限编码：['system:user:list', ...]
+
+  const login = async (userInfo) => {
+    const [err, res] = await to(loginApi(userInfo));
+    const data = res.data;
+    setToken(data.access_token);             // 存入 localStorage
+    token.value = data.access_token;         // 同步到响应式状态
+  };
+
+  const getInfo = async () => {
+    const [err, res] = await to(getUserInfo());
+    const data = res.data;
+    roles.value = data.roles;              // 来自后端 /system/user/getInfo
+    permissions.value = data.permissions;  // 来自后端
+    if (data.roles.length === 0) {
+      roles.value = ['ROLE_DEFAULT'];      // 回退角色
+    }
+    name.value = data.user.userName;
+    nickname.value = data.user.nickName;
+  };
+
+  const logout = async () => {
+    await logoutApi();
+    token.value = '';
+    roles.value = [];
+    permissions.value = [];
+    removeToken();                          // 清除 localStorage
+  };
+
+  return { token, name, roles, permissions, login, getInfo, logout };
+});</code></pre>
+
+<div class="warn">
+  <strong>注意 await-to-js 模式：</strong> <code>const [err, res] = await to(promise)</code> 是 Go 风格的错误处理，避免了 try/catch 嵌套。该库将 promise 的 reject 转为 <code>[Error, undefined]</code>，resolve 转为 <code>[null, Data]</code>。代码中先判断 <code>if (res)</code> 再解构，隐式跳过了错误分支。
+</div>
+
+<h2>Permission Store：路由表的管理者</h2>
+
+<p>permission store 不直接持有权限数据（权限在 user store 中），而是持有路由表：</p>
+
+<pre><code>export const usePermissionStore = defineStore('permission', () => {
+  const routes = ref&lt;RouteRecordRaw[]&gt;([]);       // 完整路由表
+  const sidebarRouters = ref&lt;RouteRecordRaw[]&gt;([]); // 侧边栏菜单
+  const topbarRouters = ref&lt;RouteRecordRaw[]&gt;([]);  // 顶栏菜单
+  const defaultRoutes = ref&lt;RouteRecordRaw[]&gt;([]);  // 默认路由
+
+  const generateRoutes = async () => {
+    const res = await getRouters();              // 调后端
+    const data = Array.isArray(res.data) ? res.data : [];
+
+    // structuredClone 三份独立数据，分别用于不同 Layout 模式
+    const sidebarRoutes = filterAsyncRouter(structuredClone(data));
+    const rewriteRoutes = filterAsyncRouter(structuredClone(data), undefined, true);
+    const defaultRoutes = filterAsyncRouter(structuredClone(data));
+
+    // 过滤本地动态路由
+    const asyncRoutes = filterDynamicRoutes(dynamicRoutes);
+    asyncRoutes.forEach(route => { router.addRoute(route); });
+
+    // 存入状态
+    setRoutes(rewriteRoutes);
+    setSidebarRouters(constantRoutes.concat(sidebarRoutes));
+    setTopbarRoutes(defaultRoutes);
+
+    duplicateRouteChecker(asyncRoutes, sidebarRoutes);
+    return rewriteRoutes;
+  };
+  // ...
+});</code></pre>
+
+<blockquote>
+  <strong>与 React 对比：</strong> React 生态中路由权限通常在 <code>react-router</code> 的 loader 或自定义 <code>&lt;AuthRoute&gt;</code> 中处理，路由表由 JSX 声明。Vue/Pinia 方案将路由表作为响应式状态管理，侧边栏和顶栏直接通过 <code>computed</code> 从 store 中派生 UI，不需要额外的 Provider 传递。
+</blockquote>
+
+<h2>App Store：UI 壳层状态</h2>
+
+<p>app store 管理侧边栏状态、设备类型、Element Plus 国际化配置：</p>
+
+<pre><code>export const useAppStore = defineStore('app', () => {
+  const sidebarStatus = useStorage('sidebarStatus', '1'); // 自动 localStorage 读写
+  const sidebar = reactive({
+    opened: sidebarStatus.value ? !!+sidebarStatus.value : true,
+    withoutAnimation: false,
+    hide: false
+  });
+  const device = ref('desktop');   // 'desktop' | 'mobile'
+  const size = useStorage('size', 'default');    // Element Plus 组件尺寸
+  const language = useStorage('language', 'zh_CN');
+
+  const locale = computed(() => {
+    return { zh_CN: zhCN, en_US: enUS }[language.value];
+  });
+
+  const toggleSideBar = (withoutAnimation) => {
+    sidebar.opened = !sidebar.opened;
+    sidebarStatus.value = sidebar.opened ? '1' : '0'; // 同步到 localStorage
+  };
+
+  return { device, sidebar, language, locale, size, toggleSideBar, ... };
+});</code></pre>
+
+<p><span class="keyword">useStorage</span> 来自 VueUse 库，它把 <code>ref()</code> 的值自动同步到 <code>localStorage</code>——任何对 ref 的写入都会自动持久化，页面刷新后自动恢复。这是比手动 <code>watch</code> + <code>localStorage.setItem</code> 更优雅的方案。</p>
+
+<h2>Settings Store：主题与布局配置</h2>
+
+<p>settings store 使用 <code>useStorage</code> 将用户定制化的布局偏好持久化：</p>
+
+<pre><code>const storageSetting = useStorage('layout-setting', {
+  tagsView: true,      // 显示标签页
+  fixedHeader: true,   // 固定头部
+  sidebarLogo: true,   // 显示 Logo
+  navType: NavTypeEnum.LEFT, // 左侧导航
+  theme: '#409EFF',    // 主题色
+  sideTheme: 'theme-dark',   // 侧边栏深色主题
+  // ...
+});
+
+// 每个独立配置项也通过 useStorage 引用 storageSetting 中的键
+const theme = ref(storageSetting.value.theme);
+const navType = ref(storageSetting.value.navType || NavTypeEnum.LEFT);</code></pre>
+
+<h2>TagsView Store：标签页管理</h2>
+
+<p>tagsView store 维护三个核心数组：</p>
+
+<ul>
+  <li><strong>visitedViews</strong>：用户打开过的所有标签页</li>
+  <li><strong>cachedViews</strong>：被 <code>keep-alive</code> 缓存的组件 name 列表</li>
+  <li><strong>iframeViews</strong>：内嵌的 iframe 标签页</li>
+</ul>
+
+<pre><code>export const useTagsViewStore = defineStore('tagsView', () => {
+  const visitedViews = ref&lt;TagView[]&gt;([]);
+  const cachedViews = ref&lt;string[]&gt;([]);
+  const iframeViews = ref&lt;TagView[]&gt;([]);
+
+  const addView = (view) => {
+    addVisitedView(view);  // 去重后加入 visitedViews
+    addCachedView(view);   // 若非 noCache，加入 cachedViews
+  };
+
+  const delView = (view) => {
+    delVisitedView(view);  // 从 visitedViews 移除
+    delCachedView(view);   // 从 cachedViews 移除
+  };
+
+  const delOthersViews = (view) => {
+    // 只保留 affix 标签和当前标签
+    visitedViews = visitedViews.filter(v => v.meta?.affix || v.path === view.path);
+  };
+
+  const loadPersistedViews = () => {
+    // 若开启 tagsViewPersist，从 localStorage 恢复标签页
+    loadVisitedViews().forEach(view => { visitedViews.push(...); });
+  };
+});</code></pre>
+
+<div class="tip">
+  <strong>数据流向图：</strong> user.getInfo() 填充 roles/permissions → permission.generateRoutes() 依据这些权限过滤菜单 → 路由注入后 Layout 组件从 permission store 读取 sidebarRouters 渲染侧边栏 → tagsView store 追踪当前打开的所有页面 → app store 控制侧边栏折叠/设备适配 → settings store 控制主题/布局模式。
+</div>
+
+<h2>额外模块：dict 和 notice</h2>
+
+<p>除五大核心 store 外，还有两个辅助模块：</p>
+
+<pre><code>// dict store — 字典数据缓存
+const dict = ref&lt;Map&lt;string, DictDataOption[]&gt;&gt;(new Map());
+// 用法：先 setDict('sys_user_sex', [{value:'0',label:'男'},...])
+//       再 getDict('sys_user_sex') → [{...}, {...}]
+
+// notice store — 站内通知管理
+const state = reactive({ notices: [] as NoticeItem[] });
+const unreadCount = computed(() => state.notices.filter(item => !item.read).length);</code></pre>
+
+<div class="cite">📖 推荐一手资料：<a href="https://pinia.vuejs.org/zh/core-concepts/">Pinia 官方文档</a> · <a href="https://vueuse.org/core/useStorage/">VueUse - useStorage</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以追问：「为什么用 structuredClone 而不是浅拷贝？」「useStorage 的竞态问题如何解决？」「为什么 permission store 需要三份路由数据？」</div>
+</body>
+</html>

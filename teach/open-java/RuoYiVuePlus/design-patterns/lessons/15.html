@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 15 课 · 前端拦截器与路由守卫 — Axios 中间件链 + Router Guards</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 15 课 · 前端拦截器与路由守卫 — Axios 中间件链 + Router Guards <span class="tag">责任链模式</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：理解 Axios 拦截器链如何实现请求/响应的双向中间件管道，掌握路由守卫的三级决策树（token 检查 → 用户信息 → 动态路由），能解释 <code>isRelogin</code> 门面守卫如何防止重登录弹窗重复弹出。
+</div>
+
+<p>在 HTTP 客户端和前端路由两个层面，RuoYi-Vue-Plus 都使用了<b>责任链模式（Chain of Responsibility）</b>的变体。Axios 的拦截器本质是请求/响应的双向管道；Vue Router 的导航守卫是异步决策树。本节逐一拆解。</p>
+
+<h2>一、Axios 拦截器链全景图</h2>
+
+<div class="diagram">请求方向 (request interceptor) → 服务端 → 响应方向 (response interceptor)
+
+┌──────────────────────────────────────────────────────────────────┐
+│                    请求拦截器链（按执行顺序）                        │
+│                                                                   │
+│  ① 注入 Content-Language 头 (getLanguage())                        │
+│  ② 注入 Authorization: Bearer {token}                            │
+│  ③ GET 请求参数映射到 URL (tansParams)                             │
+│  ④ 重复提交检查 (sessionStorage + 500ms 间隔比对)                  │
+│  ⑤ AES 加密 (条件: VITE_APP_ENCRYPT=true 且 isEncrypt=true)        │
+│  ⑥ FormData 去 Content-Type 头                                    │
+│                                                                   │
+├───────────────────────────────────────────────────────────────────┤
+│                    响应拦截器链（按执行顺序）                        │
+│                                                                   │
+│  ① AES 解密 (条件: VITE_APP_ENCRYPT=true 且有 encrypt-key 头)       │
+│  ② 二进制数据直通 (blob/arraybuffer → 不解包直接返回)               │
+│  ③ 状态码路由:                                                     │
+│     401 → isRelogin 守卫 → 重登录弹窗 (只弹一次)                    │
+│     500 → ElMessage.error                                          │
+│     601 → ElMessage.warning                                        │
+│     其他错误码 → ElNotification.error                                │
+│     200  → 正常 resolve                                             │
+│  ④ 网络错误处理器 (Network Error / timeout / status code)           │
+└──────────────────────────────────────────────────────────────────┘</div>
+
+<h2>二、请求拦截器：6 层管道</h2>
+
+<p>打开 <code>plus-ui-vue/src/utils/request.ts</code>，请求拦截器注册在第 110-176 行：</p>
+
+<h3>2.1 语言与认证头注入</h3>
+
+<pre><code>service.interceptors.request.use((config: any) =&gt; {
+  // 层 1：国际化语言标识
+  config.headers['Content-Language'] = getLanguage();
+
+  // 层 2：Token 注入（如果存在且未被显式禁用）
+  const isToken = config.headers?.isToken === false;
+  if (getToken() && !isToken) {
+    config.headers['Authorization'] = 'Bearer ' + getToken();
+  }
+  // ...
+});</code></pre>
+
+<div class="side">
+💡 <b>设计精妙之处</b>：<code>isToken === false</code> 的检查提供了<b>反向控制</b>——默认所有请求都带 token（安全优先），但允许个别请求通过 header 标记跳过。这是「默认安全」（Secure by Default）原则的体现，类似 Java 安全框架中的 <code>@PermitAll</code> 注解思路。
+</div>
+
+<h3>2.2 GET 参数序列化</h3>
+
+<pre><code>// 层 3：GET 请求参数展开到 URL
+if (config.method === 'get' && config.params) {
+  let url = config.url + '?' + tansParams(config.params);
+  url = url.slice(0, -1);
+  config.params = {};
+  config.url = url;
+}</code></pre>
+
+<p><code>tansParams</code> 函数来自 <code>@/utils/ruoyi</code>，将对象参数展开为 <code>key=val&amp;key=val</code> 格式，并直接拼接到 URL 上。这样做而非依赖 axios 的 params 序列化，原因是可以自定义数组/对象的序列化规则。</p>
+
+<h3>2.3 重复提交防护</h3>
+
+<pre><code>// 层 4：基于 sessionStorage + 时间戳的重复提交检测
+const isRepeatSubmit = config.headers?.repeatSubmit === false;
+if (!isRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
+  const requestObj = {
+    url: config.url,
+    data: typeof config.data === 'object' ? JSON.stringify(config.data) : config.data,
+    time: new Date().getTime()
+  };
+  const sessionObj = cache.session.getJSON('sessionObj');
+  if (sessionObj) {
+    const s_url = sessionObj.url;
+    const s_data = sessionObj.data;
+    const s_time = sessionObj.time;
+    const interval = 500; // 500ms 内同一 URL + 同一 body → 拒绝
+    if (s_data === requestObj.data && requestObj.time - s_time &lt; interval
+        && s_url === requestObj.url) {
+      return Promise.reject(new Error('数据正在处理，请勿重复提交'));
+    }
+  }
+  cache.session.setJSON('sessionObj', requestObj);
+}</code></pre>
+
+<div class="step">
+<span class="num">1</span> <b>三次比对</b>：URL + JSON 序列化后的 data + 500ms 时间窗口。三个条件同时满足才算重复。只比 URL 不够（同一 URL 不同参数），只比时间不够（正常连续操作），三要素交集确保了精度。 <span class="where">request.ts:132-153</span>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>可跳过机制</b>：通过 <code>repeatSubmit: false</code> header 标记可绕过此检查。这为批量导入、文件上传等合理高频场景留了后门。 <span class="where">request.ts:117</span>
+</div>
+
+<div class="step">
+<span class="num">3</span> <b>sessionStorage 而非 localStorage</b>：sessionStorage 在标签页关闭时自动清除，不会留下过期数据污染。这是有意的生命周期选择。 <span class="where">request.ts:139</span>
+</div>
+
+<h3>2.4 条件 AES 加密</h3>
+
+<pre><code>// 层 5：条件加密（仅在全局开关 + 单请求开关同时为 true 时启用）
+if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+  if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+    const aesKey = generateAesKey();                          // 32字节随机 key
+    config.headers[encryptHeader] = encrypt(encryptBase64(aesKey)); // RSA 加密 key
+    config.data = typeof config.data === 'object'
+      ? encryptWithAes(JSON.stringify(config.data), aesKey)   // AES 加密 body
+      : encryptWithAes(config.data, aesKey);
+  }
+}</code></pre>
+
+<p>加密策略将在第 17 课详细展开，这里先理解它在请求管道中的位置——在所有公共头注入之后、在请求发出之前。</p>
+
+<h3>2.5 FormData 边界处理</h3>
+
+<pre><code>// 层 6：文件上传时不设 Content-Type，让浏览器自动带 boundary
+if (config.data instanceof FormData) {
+  delete config.headers['Content-Type'];
+}</code></pre>
+
+<p>这是 HTML5 FormData 上传的标准做法。如果手动设置了 <code>Content-Type: multipart/form-data</code>，浏览器不会自动追加 <code>boundary=...</code> 参数，导致服务端无法解析。</p>
+
+<h2>三、响应拦截器：状态码路由表</h2>
+
+<p>打开 <code>plus-ui-vue/src/utils/request.ts</code>，响应拦截器在第 179-257 行：</p>
+
+<pre><code>service.interceptors.response.use(
+  (res: any) =&gt; {
+    // 第一步：AES 解密（如果加密开关开启且有 encrypt-key 头）
+    if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+      const keyStr = res.headers[encryptHeader];
+      if (keyStr != null && keyStr != '') {
+        const base64Str = decrypt(keyStr);                    // RSA 解密
+        const aesKey = decryptBase64(base64Str.toString());   // base64 解码
+        res.data = JSON.parse(decryptWithAes(res.data, aesKey)); // AES 解密
+      }
+    }
+
+    const code = res.data.code || HttpStatus.SUCCESS;
+
+    // 第三步：状态码路由
+    if (code === 401) {
+      // ── isRelogin 门面守卫 ──
+      if (!isRelogin.show) {
+        isRelogin.show = true;
+        ElMessageBox.confirm(
+          '登录状态已过期，您可以继续留在该页面，或者重新登录',
+          '系统提示',
+          { confirmButtonText: '重新登录', cancelButtonText: '取消', type: 'warning' }
+        ).then(() =&gt; {
+          isRelogin.show = false;
+          useUserStore().logout().then(() =&gt; {
+            router.replace({ path: '/login', query: {
+              redirect: encodeURIComponent(router.currentRoute.value.fullPath || '/')
+            }});
+          });
+        }).catch(() =&gt; { isRelogin.show = false; });
+      }
+      return Promise.reject('无效的会话，或者会话已过期，请重新登录。');
+    } else if (code === HttpStatus.SERVER_ERROR) {  // 500
+      ElMessage({ message: msg, type: 'error' });
+      return Promise.reject(createHandledError(msg));
+    } else if (code === HttpStatus.WARN) {           // 601
+      ElMessage({ message: msg, type: 'warning' });
+      return Promise.reject(createHandledError(msg));
+    } else if (code !== HttpStatus.SUCCESS) {        // 其他非 200
+      ElNotification.error({ title: msg });
+      return Promise.reject(createHandledError(msg));
+    } else {
+      return Promise.resolve(res.data);              // 200 → 正常
+    }
+  },
+  async (error: any) =&gt; {                             // 网络错误
+    const message = (await extractErrorMessage(error)) || errorCode['default'];
+    ElMessage({ message, type: 'error', duration: 5 * 1000 });
+    error.isHandled = true;
+    return Promise.reject(error);
+  }
+);</code></pre>
+
+<div class="warn">
+⚠️ <b>isRelogin 门面守卫的缘由</b>：如果页面上同时发起 3 个 API 请求且全部返回 401，没有 <code>isRelogin.show</code> 守卫的话，屏幕上会弹出 3 个"登录已过期"的确认框。这是一个典型的<b>并发去重</b>问题，<code>isRelogin.show</code> 是一个线程安全的门面布尔标志（JS 单线程保证了安全性）。
+</div>
+
+<h3>createHandledError：防止重复弹窗的标记模式</h3>
+
+<pre><code>function createHandledError(message: string) {
+  const error = new Error(message) as Error & { isHandled?: boolean };
+  error.isHandled = true;    // ★ 标记为 "已处理"，业务层可跳过
+  return error;
+}
+
+// 业务层使用：
+const [err] = await to(someApi());
+if (err) {
+  if (!isHandledRequestError(err)) {  // 拦截器已弹窗 → 跳过
+    ElMessage.error(err.message);     // 拦截器未弹窗 → 补充弹窗
+  }
+}</code></pre>
+
+<p>这解决了<b>双重弹窗问题</b>：拦截器中已弹出错误提示，如果业务层的错误处理逻辑再弹一次，用户就会看到两条相同的错误信息。<code>isHandled</code> 标志在拦截器层和业务层之间建立了信息通道。</p>
+
+<h2>四、路由守卫：三级决策树</h2>
+
+<p>打开 <code>plus-ui-vue/src/permission.ts</code>，守卫注册在第 22-77 行：</p>
+
+<div class="diagram">router.beforeEach(to, from)
+
+│
+├─ ① 有 token 吗？
+│   ├─ NO  → 在白名单中？  YES → 放行 | NO → 跳转 /login?redirect=...
+│   └─ YES →
+│       ├─ 目标路径是 /login？ → 重定向到 /
+│       ├─ 在白名单中？ → 放行
+│       └─ 其他路径 →
+│           ├─ ② 已加载用户角色？ (roles.length > 0)
+│           │   ├─ NO  → fetch getInfo() → generateRoutes() → addRoute → hack 重定向
+│           │   └─ YES → 放行
+│
+router.afterEach → NProgress.done()</div>
+
+<h3>4.1 白名单模式</h3>
+
+<pre><code>const whiteList = ['/login', '/register', '/social-callback', '/register*', '/register/*'];
+
+const isWhiteList = (path: string) =&gt; {
+  return whiteList.some(pattern =&gt; isPathMatch(pattern, path));
+};</code></pre>
+
+<p><code>isPathMatch</code> 来自 <code>@/utils/validate</code>，它支持通配符匹配（如 <code>/register/*</code> 匹配 <code>/register/step1</code>），比简单的数组 <code>includes</code> 检查更灵活。</p>
+
+<h3>4.2 Hack 重定向：确保 addRoute 完成</h3>
+
+<pre><code>// hack 方法 确保 addRoutes 已完成
+return {
+  path: to.path,
+  replace: true,   // ★ 替换当前历史记录，不回退到中间态
+  params: to.params,
+  query: to.query,
+  hash: to.hash,
+  name: to.name as string
+};</code></pre>
+
+<p>这是 Vue Router 动态路由的标准 hack——首次进入时触发 <code>generateRoutes()</code> 后，不能直接 <code>next()</code>（因为新路由尚未注册），而是用目标路径的完整信息重新发起导航。第二次进入时 <code>roles.length > 0</code> 为 true，直接放行。</p>
+
+<h3>4.3 三级错误处理</h3>
+
+<p>整个守卫中的错误处理有三层：</p>
+
+<ol>
+  <li><b>Axios 拦截器层</b>：HTTP 错误码 → 弹窗 + <code>createHandledError</code> 标记</li>
+  <li><b>await-to-js 层</b>：<code>const [err] = await to(fn)</code> 捕获异步错误，避免 try/catch 嵌套</li>
+  <li><b>守卫路由层</b>：<code>isHandledRequestError(err)</code> 判断是否需要补充弹窗</li>
+</ol>
+
+<pre><code>const [err] = await tos(useUserStore().getInfo());
+if (err) {
+  await useUserStore().logout();
+  if (!isHandledRequestError(err)) {   // 拦截器已弹窗 → 跳过
+    ElMessage.error(err instanceof Error ? err.message : String(err));
+  }
+  return { path: '/' };
+}</code></pre>
+
+<h2>五、权限指令：v-hasPermi 和 v-hasRoles</h2>
+
+<p>打开 <code>plus-ui-vue/src/directive/permission/index.ts</code>：</p>
+
+<pre><code>export const hasPermi: Directive = {
+  mounted(el: HTMLElement, binding: DirectiveBinding) {
+    const { permissions } = useUserStore();
+    const { value } = binding;
+    if (value && value instanceof Array && value.length > 0) {
+      const hasPermission = permissions.some((permi: string) =&gt; {
+        return permi === '*:*:*' || value.includes(permi);  // 超级管理员通配
+      });
+      if (!hasPermission) {
+        el.parentNode && el.parentNode.removeChild(el);     // ★ DOM 级删除
+      }
+    }
+  }
+};</code></pre>
+
+<div class="side">
+💡 <b>为什么不隐藏而删除？</b> <code>v-if</code> 只是不渲染，但 <code>v-hasPermi</code> 直接 <code>removeChild</code>。这有几个好处：(1) DOM 中不存在该元素，前端调试时也看不到；(2) 比 <code>v-if</code> 更彻底——即使有人通过浏览器 DevTools 强制设置 <code>display: block</code>，元素还在，但 removeChild 真正销毁了元素。不过需要注意的是，<code>mounted</code> 阶段执行删除，在 SSR 场景下可能有问题。
+</div>
+
+<h2>六、自测</h2>
+
+<div class="quiz">
+<p>1. <code>isRelogin.show</code> 守卫的主要作用是什么？</p>
+<label class="opt"><input type="radio" name="q1"> A. 控制是否允许用户重新登录</label>
+<label class="opt"><input type="radio" name="q1"> B. 防止多个并发 401 响应导致重复弹出登录过期确认框</label>
+<label class="opt"><input type="radio" name="q1"> C. 控制 token 是否已过期</label>
+</div>
+
+<div class="quiz">
+<p>2. 请求拦截器中，重复提交检测的判定条件不包括以下哪项？</p>
+<label class="opt"><input type="radio" name="q2"> A. URL 路径相同</label>
+<label class="opt"><input type="radio" name="q2"> B. 请求体 JSON 序列化后相同</label>
+<label class="opt"><input type="radio" name="q2"> C. 用户角色相同</label>
+</div>
+
+<div class="quiz">
+<p>3. <code>createHandledError()</code> 的设计目的是什么？</p>
+<label class="opt"><input type="radio" name="q3"> A. 统一错误格式，便于服务端解析</label>
+<label class="opt"><input type="radio" name="q3"> B. 标记错误已被拦截器处理过，防止业务层重复弹窗</label>
+<label class="opt"><input type="radio" name="q3"> C. 替代 console.error 进行错误日志记录</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — 在单页面应用中，多个并发请求可能同时返回 401，isRelogin.show 作为布尔门面标志确保弹窗只出现一次。<br>
+<b>2. C</b> — 重复提交检测的三要素是 URL、请求体内容和 500ms 时间窗口，与用户角色无关。<br>
+<b>3. B</b> — 在 Axios 拦截器中，状态码错误已经弹窗通知用户；业务层通过 isHandledRequestError() 检查此标记，避免再次弹窗。</p>
+</details>
+
+<div class="nav">← <a href="14.html">第 14 课 · Composable + Pinia</a> | 下一课：<a href="16.html">第 16 课 · 动态路由工厂 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://axios-http.com/docs/interceptors" target="_blank">Axios Interceptors 文档</a> ·
+<a href="https://router.vuejs.org/guide/advanced/navigation-guards.html" target="_blank">Vue Router 导航守卫</a> ·
+查看源码：<code>plus-ui-vue/src/utils/request.ts</code> 和 <code>plus-ui-vue/src/permission.ts</code>
+</div>
+<div class="reminder">💡 有疑问？直接问我。下一课将讲解前端动态路由工厂——后端菜单 JSON 如何编译为 Vue Router 路由表，以及 Vite glob import 的静态分析魔法。</div>
+
+</body>
+</html>

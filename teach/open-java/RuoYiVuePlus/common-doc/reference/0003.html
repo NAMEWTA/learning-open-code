@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · Javadoc 定制器与解析器扩展点</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · Javadoc 定制器与解析器扩展点</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-doc 接口文档模块</p>
+
+<h2>两个定制器对比</h2>
+<table>
+<tr><th></th><th>JavadocOperationCustomizer</th><th>ClassTagOperationCustomizer</th></tr>
+<tr><td>实现接口</td><td>GlobalOperationCustomizer</td><td>GlobalOperationCustomizer + GlobalOpenApiCustomizer</td></tr>
+<tr><td>定制目标</td><td>方法级：JavaDoc → summary/description</td><td>类级：JavaDoc 第一行 → Tag 名</td></tr>
+<tr><td>注入依赖</td><td>JavadocProvider + List&lt;JavadocResolver&gt;</td><td>JavadocProvider + PropertyResolverUtils</td></tr>
+<tr><td>触发次数</td><td>每个 Operation 生成时 1 次</td><td>每个 Operation 1 次 + OpenAPI 构建完 1 次</td></tr>
+</table>
+
+<h2>JavadocOperationCustomizer 两阶段</h2>
+<div class="chain">阶段一：取 JavadocProvider
+  → getMethodJavadocDescription(method)
+  → getFirstSentence(desc)  → operation.summary（首句）
+  → desc                    → operation.description（全文）
+
+阶段二：遍历 javadocResolvers
+  → .sorted()               → 按 getOrder() 升序
+  → .filter(supports(hm))   → 只调支持的
+  → .map(resolve(hm, op))   → 执行解析
+  → .filter(notBlank)       → 过滤空结果
+  → description.append      → 拼到原描述末尾</div>
+
+<h2>ClassTagOperationCustomizer Tag 替换流程</h2>
+<div class="chain">customize(op, hm):
+  ① 有 @Tag/@Tags 注解？→ 用注解值（尊重显式声明）→ return
+  ② 无注解 → getClassJavadocTagName(beanType)
+     取类 JavaDoc 第一行（IoUtil.readLines → filter notBlank → findFirst）
+  ③ autoTagName = splitCamelCase(beanType.getSimpleName())
+     例: SysUserController → "Sys User Controller"
+  ④ shouldUseClassJavadocTag？operation 无 tags 或包含 autoTagName → true
+  ⑤ removeOperationTag(autoTagName) + addOperationTag(javadocTagName)
+     replacedAutoTagNames.add(autoTagName)
+     tags.putIfAbsent(javadocTagName, new Tag(...))
+
+customise(openApi):
+  ① openApi.getTags().removeIf(tag → replacedAutoTagNames.contains(tag.getName()))
+  ② tags 中有但 openApi.tags 中没有的 → addTagsItem</div>
+
+<h2>JavadocResolver 扩展点接口</h2>
+<table>
+<tr><th>方法</th><th>职责</th></tr>
+<tr><td><code>supports(HandlerMethod)</code></td><td>判断是否处理该方法（如：有 @SaCheckPermission？）</td></tr>
+<tr><td><code>resolve(HandlerMethod, Operation)</code></td><td>解析并返回追加的描述文本</td></tr>
+<tr><td><code>getOrder()</code></td><td>排序（default = LOWEST_PRECEDENCE）</td></tr>
+<tr><td><code>compareTo(JavadocResolver)</code></td><td>按 order 比较（default 实现）</td></tr>
+</table>
+
+<h2>AbstractMetadataJavadocResolver 工具方法</h2>
+<div class="chain">泛型 &lt;M&gt; 管理元数据对象
+Supplier&lt;M&gt; 每次 resolve 创建新实例（避免状态污染）
+
+注解检测：hasMethodAnnotation / hasClassAnnotation / hasAnnotation
+值读取：  getMethodAnnotationValueMap / getClassAnnotationValueMap
+         支持 Class 参数和字符串类名两种方式</div>
+
+<h2>新增 Resolver 三步法</h2>
+<div class="chain">1. 写类继承 AbstractMetadataJavadocResolver&lt;YourMeta&gt;
+   实现 supports() + resolve(hm, op, meta)
+2. 在任意 @Configuration 中注册 @Bean
+3. Spring 自动注入到 List&lt;JavadocResolver&gt; → 零修改现有代码</div>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：GlobalOperationCustomizer、JavadocProvider、JavadocResolver、HandlerMethod</p>
+</body>
+</html>

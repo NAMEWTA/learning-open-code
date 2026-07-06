@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第6课：部门树与祖级路径 — 无限级树形结构的工程实践</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+  .warn { background: #f8d7da; padding: 0.5rem 1rem; border-left: 4px solid #dc3545; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🌲 第6课：部门树与祖级路径 — 无限级树形结构的工程实践</h1>
+
+<p><strong>胜利目标：</strong>理解 <code>ancestors</code> 字段的设计原理，能解释部门移动时如何更新所有子孙节点的祖先路径。</p>
+
+<h2>1. 两种树形存储方案对比</h2>
+
+<table>
+  <thead><tr><th>方案</th><th>存储</th><th>查子节点</th><th>查祖先</th><th>移动节点</th></tr></thead>
+  <tbody>
+    <tr><td>邻接表</td><td>只存 parent_id</td><td>递归查询（慢）</td><td>递归查询（慢）</td><td>只改一行（快）</td></tr>
+    <tr><td>路径枚举（ruoyi 方案）</td><td>parent_id + ancestors</td><td><code>FIND_IN_SET</code>（快）</td><td><code>FIND_IN_SET</code> 反查（快）</td><td>需更新所有子孙（慢）</td></tr>
+    <tr><td>嵌套集</td><td>left + right</td><td>范围查询（快）</td><td>范围查询（快）</td><td>需重算大部分（很慢）</td></tr>
+  </tbody>
+</table>
+
+<div class="highlight">
+  <strong>ruoyi 选择路径枚举的原因：</strong>部门的读操作远多于移动操作。用冗余的 ancestors 字段换取查询性能，是典型的"以空间换时间"策略。
+</div>
+
+<h2>2. ancestors 字段的设计</h2>
+
+<pre><code>
+假设部门树结构：
+  总公司 (dept_id=100, parent_id=0, ancestors="0")
+    ├── 技术部 (dept_id=200, parent_id=100, ancestors="0,100")
+    │   ├── 前端组 (dept_id=300, parent_id=200, ancestors="0,100,200")
+    │   └── 后端组 (dept_id=301, parent_id=200, ancestors="0,100,200")
+    └── 市场部 (dept_id=400, parent_id=100, ancestors="0,100")
+
+ancestors = "0,100,200" 的含义：
+  → 该部门的祖先依次是：根(0) → 总公司(100) → 技术部(200)
+  → 最后一位是直接父级
+  → 新增时：ancestors = 父部门的 ancestors + "," + 父部门的 dept_id
+</code></pre>
+
+<h2>3. 核心操作实现</h2>
+
+<h3>3.1 新增部门 — 自动计算 ancestors</h3>
+
+<pre><code>// SysDeptServiceImpl.insertDept()
+public int insertDept(SysDeptBo bo) {
+    SysDept info = deptMapper.selectById(bo.getParentId());
+    if (ObjectUtil.isNull(info)) {
+        throw new ServiceException("父部门不存在");
+    }
+    if (!SystemConstants.NORMAL.equals(info.getStatus())) {
+        throw new ServiceException("部门停用，不允许新增");  // 父部门停用则禁止新增
+    }
+    SysDept dept = MapstructUtils.convert(bo, SysDept.class);
+    // 🔑 核心：拼接祖先路径
+    dept.setAncestors(info.getAncestors() + "," + dept.getParentId());
+    return deptMapper.insert(dept);
+}</code></pre>
+
+<h3>3.2 查询子部门 — 一条 SQL 搞定</h3>
+
+<pre><code>// 查询 dept_id=200 的所有子部门（包括孙子、曾孙...）
+// SQL: SELECT * FROM sys_dept WHERE FIND_IN_SET(200, ancestors)
+deptMapper.lambda()
+    .findInSet(deptId, SysDept::getAncestors)
+    .list();
+
+// 查询正常状态的子部门数量
+public long selectNormalChildrenDeptById(Long deptId) {
+    return deptMapper.lambda()
+        .eq(SysDept::getStatus, SystemConstants.NORMAL)
+        .findInSet(deptId, SysDept::getAncestors)
+        .count();
+}</code></pre>
+
+<h3>3.3 移动部门 — 最复杂的操作</h3>
+
+<pre><code>// SysDeptServiceImpl.updateDept() — 部门移动逻辑
+public int updateDept(SysDeptBo bo) {
+    SysDept dept = MapstructUtils.convert(bo, SysDept.class);
+    SysDept oldDept = deptMapper.selectById(dept.getDeptId());
+
+    if (!oldDept.getParentId().equals(dept.getParentId())) {
+        // 🔑 父部门变了！需要更新自身及所有子孙的 ancestors
+
+        // 1. 校验新父部门权限
+        this.checkDeptDataScope(dept.getParentId());
+
+        // 2. 获取新父部门的 ancestors
+        SysDept newParent = deptMapper.selectById(dept.getParentId());
+        String newAncestors = newParent.getAncestors() + "," + newParent.getDeptId();
+        String oldAncestors = oldDept.getAncestors();
+
+        // 3. 更新当前部门的 ancestors
+        dept.setAncestors(newAncestors);
+
+        // 4. 🔑 批量更新所有子孙节点的 ancestors
+        updateDeptChildren(dept.getDeptId(), newAncestors, oldAncestors);
+    }
+    // ...
+}
+
+// updateDeptChildren — 替换所有子孙的祖先路径
+private void updateDeptChildren(Long deptId, String newAncestors, String oldAncestors) {
+    // 查出所有 ancestors 中包含当前部门ID的记录（即所有子孙）
+    List&lt;SysDept&gt; children = deptMapper.lambda()
+        .findInSet(deptId, SysDept::getAncestors)
+        .list();
+
+    // 将每个子孙的 ancestors 中的 oldAncestors 替换为 newAncestors
+    for (SysDept child : children) {
+        child.setAncestors(
+            StringUtils.replaceOnce(child.getAncestors(), oldAncestors, newAncestors)
+        );
+    }
+    deptMapper.updateBatchById(list);
+}</code></pre>
+
+<div class="warn">
+  <strong>移动部门的性能注意：</strong>如果部门层级很深、子节点很多，<code>updateDeptChildren()</code> 需要更新大量行的 ancestors 字段。但 ruoyi 的假设是部门层级通常不深（3-5层），子节点量级可控（几百个），因此这种方案是合理的。
+</div>
+
+<h2>4. 启用/停用的级联控制</h2>
+
+<pre><code>// 启用部门时 — 自动启用所有上级部门
+if (SystemConstants.NORMAL.equals(dept.getStatus())
+    && StringUtils.isNotEmpty(dept.getAncestors())) {
+    updateParentDeptStatusNormal(dept);  // 遍历 ancestors，逐一启用上级
+}
+
+// 停用部门时 — Controller 层有严格校验
+if (SystemConstants.DISABLE.equals(dept.getStatus())) {
+    if (deptService.selectNormalChildrenDeptById(deptId) > 0) {
+        return R.fail("该部门包含未停用的子部门!");  // 必须先停用子部门
+    }
+    if (deptService.checkDeptExistUser(deptId)) {
+        return R.fail("该部门下存在已分配用户，不能禁用!");  // 必须先移除用户
+    }
+}
+// → 停用是严格的"自下而上"：必须先清空用户→停用子部门→停用父部门
+// → 启用是宽松的"自下而上"：启用一个部门时自动启用所有上级
+</code></pre>
+
+<h2>5. 树结构构建 — TreeBuildUtils</h2>
+
+<pre><code>// 构建部门下拉树（支持多根节点）
+TreeBuildUtils.buildMultiRoot(depts,
+    SysDeptVo::getDeptId,       // ID 获取器
+    SysDeptVo::getParentId,     // 父ID 获取器
+    (node, treeNode) -> treeNode
+        .setId(node.getDeptId())
+        .setParentId(node.getParentId())
+        .setName(node.getDeptName())
+        .setWeight(node.getOrderNum())
+        .putExtra("disabled", DISABLE.equals(node.getStatus()))
+);
+
+// 构建菜单树（单根节点，根节点ID=0）
+TreeBuildUtils.build(menus, Constants.TOP_PARENT_ID,
+    SysMenu::getParentId,
+    (menu, nodeTreeMaps) -> {
+        menu.setChildren(nodeTreeMaps.getOrDefault(menu.getMenuId(), emptyList()));
+    });
+// 内部使用动态规划（HashMap 分组），一次遍历完成树构建，复杂度 O(n)
+</code></pre>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>解释 ancestors 字段的值 "0,100,200" 代表什么含义</li>
+  <li>写出查询部门 200 的所有子部门的 MyBatis-Plus 代码</li>
+  <li>描述部门从"技术部"移动到"市场部"时 ancestors 的更新过程</li>
+  <li>解释为什么停用是"自下而上"而启用是"自下而上反向"</li>
+  <li>对比邻接表和路径枚举两种方案的优缺点</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>SysDeptServiceImpl</code> 源码 — 重点关注 <code>insertDept()</code>、<code>updateDept()</code>、<code>updateDeptChildren()</code> 三个方法</div>
+<div class="reminder">💡 有疑问？直接问我。例如："如果部门树有 10000 个节点，ancestors 方案还适用吗？" 或 "为什么不使用 WITH RECURSIVE CTE 递归查询？"</div>
+
+</body>
+</html>

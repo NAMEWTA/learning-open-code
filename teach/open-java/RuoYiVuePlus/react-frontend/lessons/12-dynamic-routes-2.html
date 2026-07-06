@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>12 · 动态路由（下）：DynamicPage 匹配与权限控制</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./11-dynamic-routes-1.html">11 动态路由上</a> · → <a href="./13-page-composition.html">13 页面组成</a></div>
+
+<h1>12 · 动态路由（下）：DynamicPage 匹配与权限控制</h1>
+
+<p><strong>胜利条件：</strong>能画出 DynamicPage 的完整匹配流程（URL→路由树查找→migratedPages映射→渲染）；理解 migratedPages 映射表的作用和为什么存在；能独立添加一个新的页面映射到动态路由中。</p>
+
+<h2>一、DynamicPage：动态路由的"调度中心"</h2>
+
+<blockquote>
+在 config.ts 中，<code>path: '*'</code>（catch-all）指向 <span class="file-ref">src/pages/dynamicPage.tsx</span>。所有不在静态路由中的 URL，都会进入这个组件，由它在<strong>运行时</strong>决定渲染哪个页面。
+</blockquote>
+
+<div class="diagram"><code>
+用户访问 /system/user
+  ↓
+UmiJS 路由匹配
+  ├── /login?        → 不匹配
+  ├── /index?        → 不匹配
+  ├── /user/profile? → 不匹配
+  └── * (catch-all)  → 匹配！→ 渲染 DynamicPage
+                            ↓
+                     DynamicPage 运行时匹配
+                       ↓
+                     找到 → 渲染 SystemUserPage
+                     找不到 → 显示迁移占位卡片</code></div>
+
+<h2>二、DynamicPage 核心逻辑</h2>
+
+<p><span class="file-ref">src/pages/dynamicPage.tsx</span></p>
+
+<pre><code>const DynamicPage: React.FC = () => {
+  const pathname = useLocation().pathname;                    // 当前 URL
+  const { backendRoutes } = usePermissionStore();             // 后端路由树
+
+  // === 第 1 步：在路由树中查找 ===
+  const matchedRoute = useMemo(() => {
+    return findRouteByPath(backendRoutes, pathname);
+  }, [backendRoutes, pathname]);
+
+  // === 第 2 步：没找到 → 404 ===
+  if (!matchedRoute) {
+    return &lt;Result status="404" title="页面不存在" /&gt;;
+  }
+
+  // === 第 3 步：外链模式 ===
+  if (matchedRoute.meta?.isLink && matchedRoute.path) {
+    return &lt;IframePage src={matchedRoute.path} /&gt;;
+  }
+
+  // === 第 4 步：iframe 嵌入模式 ===
+  if (matchedRoute.meta?.isFrame) {
+    return &lt;IframePage src={matchedRoute.path} /&gt;;
+  }
+
+  // === 第 5 步：查找对应的 React 组件 ===
+  const componentKey = matchedRoute.component;
+  // componentKey 格式: '@/views/system/user/index'（Vue 风格路径）
+  const PageComponent = migratedPages[componentKey];
+
+  if (PageComponent) {
+    return &lt;PageComponent /&gt;;     // ✅ 找到！渲染 React 页面
+  }
+
+  // === 第 6 步：没有 React 组件→显示占位 ===
+  return &lt;MigrationPlaceholder route={matchedRoute} /&gt;;
+};
+</code></pre>
+
+<h2>三、migratedPages：路径→组件的映射表</h2>
+
+<blockquote>
+这是 ruoyi-react 的<strong>迁移架构</strong>核心。后端返回的 component 路径仍是 Vue 时代的 <code>@/views/system/user/index</code>，而 migractedPages 把 Vue 路径映射到实际的 React 组件。
+</blockquote>
+
+<pre><code>// src/pages/dynamicPage.tsx 中的映射表（部分）
+const migratedPages: Record&lt;string, React.FC&gt; = {
+  // 系统管理
+  '@/views/system/user/index': SystemUserPage,
+  '@/views/system/role/index': SystemRolePage,
+  '@/views/system/menu/index': SystemMenuPage,
+  '@/views/system/dept/index': SystemDeptPage,
+  '@/views/system/dict/index': SystemDictPage,
+  '@/views/system/config/index': SystemConfigPage,
+  '@/views/system/notice/index': SystemNoticePage,
+  '@/views/system/post/index': SystemPostPage,
+  '@/views/system/oss/index': SystemOssPage,
+  '@/views/system/client/index': SystemClientPage,
+
+  // 监控管理
+  '@/views/monitor/cache/index': MonitorCachePage,
+  '@/views/monitor/online/index': MonitorOnlinePage,
+  '@/views/monitor/operlog/index': MonitorOperlogPage,
+  '@/views/monitor/logininfo/index': MonitorLogininfoPage,
+
+  // 工作流
+  '@/views/workflow/category/index': WorkflowCategoryPage,
+  '@/views/workflow/processDefinition/index': WorkflowDefinitionPage,
+  '@/views/workflow/processInstance/index': WorkflowInstancePage,
+  // ... 更多映射
+};</code></pre>
+
+<h2>四、findRouteByPath：递归路由树查找</h2>
+
+<pre><code>// 在路由树（含嵌套 children）中查找匹配 pathname 的路由
+function findRouteByPath(
+  routes: BackendRoute[],
+  targetPath: string
+): BackendRoute | null {
+  for (const route of routes) {
+    // 精确匹配
+    if (route.path === targetPath) {
+      return route;
+    }
+    // 递归查找子路由
+    if (route.children?.length) {
+      const found = findRouteByPath(route.children, targetPath);
+      if (found) return found;
+    }
+  }
+  return null;
+}</code></pre>
+
+<h2>五、权限控制的两层过滤</h2>
+
+<p>ruoyi-react 的权限控制分两层：</p>
+
+<h3>第 1 层：菜单级（后端控制）</h3>
+<p>后端 <code>getRouters</code> 已经根据用户角色过滤了路由树——用户没有权限的菜单根本不返回。所以侧边栏自然看不到。</p>
+
+<h3>第 2 层：按钮级（前端指令）</h3>
+<p><span class="file-ref">src/stores/permissionStore.ts</span> 中的 <code>permissions</code> 数组（从路由树提取的权限标识）用于控制页面内按钮的显隐：</p>
+
+<pre><code>// permissions 数组示例
+['system:user:list', 'system:user:add', 'system:user:edit', 'system:user:remove']
+
+// 在页面中判断
+const { permissions } = usePermissionStore();
+const hasAddPermission = permissions.includes('system:user:add');
+
+return (
+  &lt;&gt;
+    {hasAddPermission && &lt;Button&gt;新增用户&lt;/Button&gt;}
+  &lt;/&gt;
+);</code></pre>
+
+<h2>六、如何新增一个动态路由页面？</h2>
+
+<blockquote>
+假设后端已经配好菜单，前端只需两步。
+</blockquote>
+
+<h3>步骤 1：创建页面组件</h3>
+
+<pre><code>// src/pages/report/index.tsx
+const ReportPage: React.FC = () => {
+  return (
+    &lt;PageContainer&gt;
+      &lt;ProCard title="报表管理"&gt;
+        {/* 页面内容 */}
+      &lt;/ProCard&gt;
+    &lt;/PageContainer&gt;
+  );
+};
+export default ReportPage;</code></pre>
+
+<h3>步骤 2：在 DynamicPage 中注册映射</h3>
+
+<pre><code>// src/pages/dynamicPage.tsx
+import ReportPage from './report';
+
+const migratedPages = {
+  // ... 已有映射
+  '@/views/report/index': ReportPage,  // ← 新增这一行
+};</code></pre>
+
+<p>Done！刷新页面，访问 <code>/report</code> 就能看到新页面了。</p>
+
+<h2>七、完整的动态路由追踪</h2>
+
+<div class="diagram"><code>
+1. 管理员在后台给"张三"分配了"用户管理"和"角色管理"菜单
+2. 张三登录 → getRouters 返回：
+   [{
+     path: '/system',
+     children: [
+       { path: '/system/user', component: '@/views/system/user/index' },
+       { path: '/system/role', component: '@/views/system/role/index' },
+     ]
+   }]
+   （注意：没有 /system/menu，因为张三没权限）
+3. reloadMenus → backendRoutes + menuData → 侧边栏只有 2 项
+4. 张三点击"用户管理"→ history.push('/system/user')
+5. UmiJS 路由匹配 → '*' catch-all → DynamicPage
+6. DynamicPage: findRouteByPath(backendRoutes, '/system/user')
+   → 找到 { path: '/system/user', component: '@/views/system/user/index' }
+7. migratedPages['@/views/system/user/index'] → SystemUserPage
+8. 渲染 &lt;SystemUserPage /&gt;</code></div>
+
+<h2>八、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/pages/dynamicPage.tsx</span>，逐行阅读完整代码，找出 <code>migratedPages</code> 映射表</li>
+  <li>在 Chrome DevTools 中给 DynamicPage 的 <code>matchedRoute</code> 处打断点，点击不同菜单观察 matchedRoute 的值</li>
+  <li>人为改变 mappedPages 中某个 key，访问该页面，观察是否显示迁移占位卡片</li>
+  <li>在任意页面 console 中执行：<code>usePermissionStore.getState().permissions</code>，查看当前用户的权限列表</li>
+  <li>练习：在 DynamicPage 的 migractedPages 中添加一个新映射，确认页面能正常渲染</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://reactrouter.com/en/main/start/concepts">React Router 官方文档 — 核心概念</a> + 阅读 <span class="file-ref">src/pages/dynamicPage.tsx</span> 源码</div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："为什么 ruoyi-react 需要 migratedPages 这种映射表？为什么不直接把后端的 component 路径改成 React 的？迁移完成后这层映射还需要吗？"</div>
+
+</body>
+</html>

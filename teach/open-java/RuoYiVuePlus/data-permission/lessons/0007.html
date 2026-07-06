@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>07 角色配置与 sdss 服务 — 数据权限的"原材料"从哪来</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>07 角色配置与 sdss 服务 — 数据权限的"原材料"从哪来</h1>
+
+<blockquote><strong>本节目标：</strong>你能说清数据权限从角色配置到运行时数据的完整数据流：角色 dataScope 字段 → 登录态组装 → sdss 方法 → SpEL 模板渲染。</blockquote>
+
+<h2>整体数据流</h2>
+
+<pre><code>角色配置（前端） → sys_role.dataScope + sys_role_dept（数据库）
+    → 登录时组装 LoginUser.roles / dataScopeRoleMap（登录态）
+        → 运行时 Handler 读取 #user / #roleId（SpEL 变量）
+            → @sdss 方法查 DB/缓存生成 id 串（SpEL Bean 调用）
+                → 渲染进 SQL 模板（最终 SQL 片段）</code></pre>
+
+<h2>第一层：角色数据范围落库</h2>
+
+<h3>sys_role 表 — dataScope 字段</h3>
+
+<p><code>SysRole.java:47</code> 的 <code>dataScope</code> 字段（String 类型，存 "1"~"6"）是角色级别的核心标记。一个角色一个 dataScope。</p>
+
+<h3>sys_role_dept 表 — 自定义部门关联</h3>
+
+<p>只有 dataScope=2（自定义）时需要。实体 <code>SysRoleDept</code>（角色ID + 部门ID），由 <code>SysRoleServiceImpl.updateRolePermission()</code>（第 337 行起）维护：</p>
+
+<pre><code>// 先删旧记录，再批量插入
+roleDeptMapper.delete(roleDeptLambda.eq(SysRoleDept::getRoleId, roleId));
+// ...
+roleDeptMapper.insertBatch(roleDepts);  // 按 bo.getDeptIds() 逐条插入</code></pre>
+
+<p>提交时带 <code>@CacheEvict(cacheNames = CacheNames.SYS_ROLE_CUSTOM)</code> 清理缓存。</p>
+
+<h2>第二层：登录态组装</h2>
+
+<p><code>SysLoginService.buildLoginUser()</code>（<code>SysLoginService.java:149</code>）：</p>
+
+<pre><code>// 1. 查出用户角色列表
+List&lt;RoleDTO&gt; roles = roleService.selectRolesByUserId(userId);
+// 2. 放入 LoginUser
+loginUser.setRoles(roles);
+// 3. 构建权限码→角色ID的映射（供接口约束使用）
+loginUser.setDataScopeRoleMap(permissionService.getDataScopeRoleMap(roles));
+// 4. 设置用户部门ID
+loginUser.setDeptId(sysUser.getDeptId());</code></pre>
+
+<p><strong>dataScopeRoleMap 的构建</strong>（<code>SysPermissionServiceImpl.java:72</code>）：</p>
+
+<pre><code>// 遍历角色 → 查每个角色的菜单权限 → 构建 权限码 → [角色ID列表]
+Map&lt;String, List&lt;Long&gt;&gt; dataScopeRoleMap = new HashMap<>();
+for (RoleDTO role : roles) {
+    List&lt;String&gt; perms = menuService.selectMenuPermsByRoleId(role.getRoleId());
+    perms.forEach(perm -> dataScopeRoleMap.computeIfAbsent(perm, k -> new ArrayList&lt;&gt;())
+                                          .add(role.getRoleId()));
+}</code></pre>
+
+<p>结果样例如：<code>{"system:user:list": [100, 101], "system:user:edit": [100]}</code></p>
+
+<p>当用户访问 <code>/system/user/list</code> 接口（注解 <code>@SaCheckPermission("system:user:list")</code>），<code>resolveAccess()</code>（Handler:257-281）读到 perms=<code>["system:user:list"]</code>，<code>scopeRoles()</code> 从 dataScopeRoleMap 反查出角色 100 和 101——只有这两个角色参与数据权限计算。角色 102（即使也是用户角色，但无 system:user:list 权限）被排除。</p>
+
+<h2>第三层：sdss 服务 — 运行时生成 ID 串</h2>
+
+<p><code>SysDataScopeServiceImpl.java</code>（<code>@Service("sdss")</code>）提供两个核心方法：</p>
+
+<h3>getRoleCustom(roleId) — 自定义数据用</h3>
+
+<pre><code>// SysDataScopeServiceImpl:42-54
+@Cacheable(cacheNames = CacheNames.SYS_ROLE_CUSTOM, key = "#roleId")
+public String getRoleCustom(Long roleId) {
+    if (ObjectUtil.isNull(roleId)) return "-1";
+    List&lt;SysRoleDept&gt; list = roleDeptMapper.lambda()
+        .select(SysRoleDept::getDeptId)
+        .eq(SysRoleDept::getRoleId, roleId)
+        .list();
+    return CollUtil.isNotEmpty(list)
+        ? StreamUtils.join(list, rd -> Convert.toStr(rd.getDeptId()))
+        : "-1";
+}</code></pre>
+
+<p>查 <code>sys_role_dept</code> 表，返回逗号分隔的部门 ID 串，如 <code>"101,102,103"</code>。无配置返回 <code>"-1"</code>。</p>
+
+<h3>getDeptAndChild(deptId) — 部门及以下用</h3>
+
+<pre><code>// SysDataScopeServiceImpl:64-69
+@Cacheable(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, key = "#deptId")
+public String getDeptAndChild(Long deptId) {
+    if (ObjectUtil.isNull(deptId)) return "-1";
+    List&lt;Long&gt; deptIds = deptMapper.selectDeptAndChildById(deptId);
+    return CollUtil.isNotEmpty(deptIds)
+        ? StreamUtils.join(deptIds, Convert::toStr)
+        : "-1";
+}</code></pre>
+
+<p><code>deptMapper.selectDeptAndChildById</code> 用 <code>findInSet</code> 递归查出所有子部门 ID，加上本身。</p>
+
+<div class="warn"><strong>⚠️ 循环调用陷阱：</strong>这个类注释明确警告"此 Service 内不允许调用标注数据权限注解的方法"（<code>SysDataScopeServiceImpl:20-23</code>）。原因是 SpEL 渲染时 <code>DataPermissionHelper.ignore</code> 已启用忽略，但类内直接调用（不走代理）Ignore 不生效，会触发循环解析。解决方案是 <code>deptMapper</code> 内部只用不标注解的方法。</div>
+
+<h2>运行时数据组装总览</h2>
+
+<table>
+<tr><th>运行时需要的值</th><th>来源</th><th>SpEL 写法</th><th>示例</th></tr>
+<tr><td>用户角色列表</td><td>LoginUser.roles（登录时查 DB）</td><td>(遍历用)</td><td>[RoleDTO(dataScope="4", roleId=100)]</td></tr>
+<tr><td>当前遍历的角色 ID</td><td>Handler 循环注入</td><td><code>#roleId</code></td><td>100</td></tr>
+<tr><td>角色的 dataScope</td><td>RoleDTO.dataScope</td><td>(查找枚举用)</td><td>"4"</td></tr>
+<tr><td>用户部门 ID</td><td>LoginUser.deptId</td><td><code>#user.deptId</code></td><td>103</td></tr>
+<tr><td>用户 ID</td><td>LoginUser.userId</td><td><code>#user.userId</code></td><td>1</td></tr>
+<tr><td>自定义部门 ID 串</td><td>sdss.getRoleCustom(roleId)</td><td><code>#{@sdss.getRoleCustom(#roleId)}</code></td><td>"101,102"</td></tr>
+<tr><td>部门及子部门 ID 串</td><td>sdss.getDeptAndChild(deptId)</td><td><code>#{@sdss.getDeptAndChild(#user.deptId)}</code></td><td>"103,104,105"</td></tr>
+<tr><td>列名字符串</td><td>注解 key→value 映射</td><td><code>#deptName</code></td><td>"dept_id"</td></tr>
+</table>
+
+<div class="cite">📖 推荐一手资料：<code>SysDataScopeServiceImpl.java:29-72</code> — 这个类虽小，却是 CUSTOM 和 DEPT_AND_CHILD 两种最常用范围的数据源。理解它的缓存策略和循环调用警告。</div>
+<div class="reminder">💡 试试问"如果 sdss.getRoleCustom 返回 '-1'，最终 SQL 会变成什么？这对数据安全意味着什么？"</div>
+
+</body>
+</html>

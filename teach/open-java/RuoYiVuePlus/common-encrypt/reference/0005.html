@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 05 · 加密上下文与工厂速查</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>速查 05 · 加密上下文与工厂速查</h1>
+<p class="a">配套课程：lessons/0005.html</p>
+
+<h2>一句话</h2>
+<div class="chain">「@EncryptField 注解 → EncryptContextFactory.create(field) 合并默认值 → EncryptContext 五字段 → EncryptorManager 双缓存调度 → IEncryptor 执行加解密」</div>
+
+<h2>EncryptContext 五字段</h2>
+<table>
+<tr><th>字段</th><th>类型</th><th>用途</th></tr>
+<tr><td><code>algorithm</code></td><td><code>AlgorithmType</code></td><td>算法：BASE64 / AES / RSA / SM2 / SM4</td></tr>
+<tr><td><code>password</code></td><td><code>String</code></td><td>对称密钥，AES/SM4 使用</td></tr>
+<tr><td><code>publicKey</code></td><td><code>String</code></td><td>非对称公钥，RSA/SM2 加密使用</td></tr>
+<tr><td><code>privateKey</code></td><td><code>String</code></td><td>非对称私钥，RSA/SM2 解密使用</td></tr>
+<tr><td><code>encode</code></td><td><code>EncodeType</code></td><td>编码方式：BASE64 / HEX</td></tr>
+</table>
+
+<h2>EncryptContextFactory 优先级逻辑</h2>
+<table>
+<tr><th>属性</th><th>注解值</th><th>结果</th></tr>
+<tr><td><code>algorithm</code></td><td><code>AlgorithmType.DEFAULT</code></td><td>使用 <code>defaultProperties.getAlgorithm()</code></td></tr>
+<tr><td><code>algorithm</code></td><td><code>AlgorithmType.AES</code></td><td>使用 <code>AES</code></td></tr>
+<tr><td><code>password</code></td><td><code>""</code>（空字符串）</td><td>使用 <code>defaultProperties.getPassword()</code></td></tr>
+<tr><td><code>password</code></td><td><code>"my-key"</code></td><td>使用 <code>"my-key"</code></td></tr>
+<tr><td><code>encode</code></td><td><code>EncodeType.DEFAULT</code></td><td>使用 <code>defaultProperties.getEncode()</code></td></tr>
+<tr><td><code>publicKey</code></td><td><code>""</code></td><td>使用 <code>defaultProperties.getPublicKey()</code></td></tr>
+<tr><td><code>privateKey</code></td><td><code>""</code></td><td>使用 <code>defaultProperties.getPrivateKey()</code></td></tr>
+</table>
+<p class="a">规则：枚举用 <code>== DEFAULT</code> 判等；字符串用 <code>StringUtils.isBlank()</code> 判空。</p>
+
+<h2>EncryptorManager 双缓存架构</h2>
+<div class="chain">
+  EncryptorManager
+  │
+  ├── encryptorMap: Map&lt;EncryptorCacheKey, IEncryptor&gt;
+  │   ├── key = (algorithm, encode, password, publicKey, privateKey)
+  │   └── value = 加密器实例（AesEncryptor / RsaEncryptor / ...）
+  │
+  └── fieldCache: Map&lt;Class&lt;?&gt;, Set&lt;Field&gt;&gt;
+      ├── key = 实体类 Class 对象
+      └── value = 标记了 @EncryptField 且类型为 String 的字段集合
+</div>
+
+<h2>ENCRYPT_HEADER 机制</h2>
+<table>
+<tr><th>常量</th><th>值</th></tr>
+<tr><td><code>Constants.ENCRYPT_HEADER</code></td><td><code>"ENC_"</code></td></tr>
+</table>
+<table>
+<tr><th>操作</th><th>条件</th><th>行为</th></tr>
+<tr><td><code>encrypt()</code></td><td>值以 <code>"ENC_"</code> 开头</td><td>直接返回原值（已加密，跳过）</td></tr>
+<tr><td><code>encrypt()</code></td><td>值不以 <code>"ENC_"</code> 开头</td><td>加密 + 在前面加上 <code>"ENC_"</code> 前缀</td></tr>
+<tr><td><code>decrypt()</code></td><td>值不以 <code>"ENC_"</code> 开头</td><td>直接返回原值（明文，跳过）</td></tr>
+<tr><td><code>decrypt()</code></td><td>值以 <code>"ENC_"</code> 开头</td><td>去掉前缀 + 解密</td></tr>
+</table>
+
+<h2>EncryptorCacheKey 结构</h2>
+<div class="chain">
+  private record EncryptorCacheKey(
+      AlgorithmType algorithm,   // 如 AES
+      EncodeType encode,         // 如 BASE64
+      String password,           // 如 "secret-key"
+      String publicKey,          // 如 "MIGfMA0..."
+      String privateKey          // 如 "MIICdg..."
+  )
+  // record 类型 = 不可变 + 自动 equals/hashCode = 完美 HashMap key
+</div>
+
+<h2>getFieldCache 过滤规则</h2>
+<div class="chain">
+  public Set&lt;Field&gt; getFieldCache(Class&lt;?&gt; sourceClazz) {
+      跳过 ← isPrimitive()         // int, long, boolean ...
+      跳过 ← isArray()              // int[], String[] ...
+      跳过 ← isEnum()               // 枚举类
+      跳过 ← isAnnotation()         // 注解类
+      跳过 ← isPrimitiveOrWrapper() // Integer, Long, Boolean ...
+      跳过 ← name.startsWith("java.") // java.lang.String, java.util.Date ...
+      否则 → fieldCache.computeIfAbsent(sourceClazz, this::getEncryptFieldSetFromClazz)
+  }
+</div>
+
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 完整社交登录链路</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 完整社交登录链路</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code> · 以 Gitee 登录为例</p>
+
+<h2>链路六帧</h2>
+<div class="chain">帧 1: 前端 → GET /auth/login?source=gitee
+帧 2: 后端 → SocialUtils.getAuthRequest("gitee") → new AuthGiteaRequest(config, STATE_CACHE)
+帧 3: 后端 → authorize(state) → state 存 Redis + 返回授权 URL → 302 重定向
+帧 4: 用户 → Gitee 页面授权 → 回调 redirect_uri?code=xxx&state=xxx
+帧 5: 后端 → SocialUtils.loginAuth() → login(callback) → state 校验 → code→token → token→user
+帧 6: 后端 → AuthUser 注册/登录 → 签发 token → 返回前端</div>
+
+<h2>各环节关键类与 Redis 操作</h2>
+<table>
+<tr><th>帧</th><th>关键类</th><th>Redis 操作</th></tr>
+<tr><td>1</td><td>(前端)</td><td>无</td></tr>
+<tr><td>2</td><td>SocialUtils, SocialProperties, SocialLoginConfigProperties</td><td>无（只读 yml 配置）</td></tr>
+<tr><td>3</td><td>AuthGiteaRequest, AuthGiteaSource, AuthDefaultRequest</td><td><b>SET</b> social_auth_code:{state} = state EX 180</td></tr>
+<tr><td>4</td><td>(Gitea OAuth Server)</td><td>无</td></tr>
+<tr><td>5a</td><td>AuthRedisStateCache, AuthGiteaRequest</td><td><b>EXISTS</b> social_auth_code:{state} (校验)</td></tr>
+<tr><td>5b</td><td>AuthGiteaRequest.getAccessToken()</td><td>无 (HTTP POST to Gitea)</td></tr>
+<tr><td>5c</td><td>AuthGiteaRequest.getUserInfo()</td><td>无 (HTTP GET to Gitea)</td></tr>
+<tr><td>6</td><td>AuthController, SocialAuthStrategy, LoginHelper</td><td>无（业务层处理）</td></tr>
+</table>
+
+<h2>SocialUtils.loginAuth() 内部展开</h2>
+<div class="chain">loginAuth(source, code, state, socialProperties)
+  ├── authRequest = getAuthRequest(source, socialProperties)
+  │   └── switch(source) → new AuthGiteaRequest(config, STATE_CACHE)
+  ├── callback = new AuthCallback(code, state)
+  └── authRequest.login(callback)  ← JustAuth AuthDefaultRequest.login()
+      ├── state 校验 → Redis EXISTS social_auth_code:{state}
+      ├── getAccessToken(callback) → POST token endpoint
+      │   └── Form: client_id + client_secret + code + grant_type + redirect_uri
+      └── getUserInfo(authToken) → GET userInfo endpoint
+          └── Header: Authorization: Bearer {accessToken}</div>
+
+<h2>配置来源链</h2>
+<div class="chain">application.yml
+  justauth:
+    type:
+      gitea:
+        client-id: xxx
+        client-secret: xxx
+        redirect-uri: xxx
+        server-url: https://gitea.example.com
+
+→ SocialProperties.type["gitea"] → SocialLoginConfigProperties
+→ AuthConfig.builder().clientId(...).clientSecret(...).redirectUri(...)
+→ new AuthGiteaRequest(config, STATE_CACHE)
+→ AuthGiteaSource.GITEA.authorize() = server-url + "/login/oauth/authorize"</div>
+
+<h2>异常场景速查</h2>
+<table>
+<tr><th>场景</th><th>发生的环节</th><th>结果</th></tr>
+<tr><td>不支持的 platform</td><td>getAuthRequest: obj == null</td><td>AuthException("不支持的第三方登录类型")</td></tr>
+<tr><td>state 过期 (> 3 min)</td><td>login: containsKey → false</td><td>AuthException("state 校验失败")</td></tr>
+<tr><td>state 被篡改</td><td>login: get(state) 不匹配</td><td>AuthException("state 校验失败")</td></tr>
+<tr><td>Gitea token 接口报错</td><td>getAccessToken: error field</td><td>AuthException(error_description)</td></tr>
+<tr><td>Gitea userInfo 接口报错</td><td>getUserInfo: message field</td><td>AuthException(message)</td></tr>
+</table>
+
+<h2>涉及的模块依赖</h2>
+<table>
+<tr><th>模块</th><th>提供的能力</th></tr>
+<tr><td><code>ruoyi-common-social</code></td><td>SocialUtils, AuthRedisStateCache, AuthGiteaRequest/Source, 自动装配</td></tr>
+<tr><td>JustAuth</td><td>AuthDefaultRequest.login(), AuthRequest, AuthSource, AuthConfig, AuthCallback, AuthToken, AuthUser</td></tr>
+<tr><td><code>ruoyi-common-core</code></td><td>GlobalConstants.SOCIAL_AUTH_CODE_KEY, SpringUtils</td></tr>
+<tr><td><code>ruoyi-common-redis</code></td><td>RedisUtils (setCacheObject, getCacheObject, hasKey)</td></tr>
+<tr><td><code>ruoyi-common-json</code></td><td>JsonUtils (Gitea/MaxKey/TopIAM 的 JSON 解析)</td></tr>
+<tr><td><code>ruoyi-admin</code></td><td>AuthController, SocialAuthStrategy (业务入口)</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+  <li>整个链路 ruoyi-common-social 只负责「生成授权 URL」和「处理回调」两个环节——中间用户和第三方平台的交互不参与。</li>
+  <li>Redis 只在两个地方使用：① authorize 时 SET state ② login 时 EXISTS 校验 state。</li>
+  <li>完整链路涉及 6 个模块、10+ 个关键类——但核心只有 SocialUtils（调度） + AuthRedisStateCache（缓存） + 平台 Request/Source（执行）。</li>
+</ul>
+
+<p class="a">→ 相关术语见 GLOSSARY.md：所有术语。恭喜完成全部 5 节课！</p>
+</body>
+</html>

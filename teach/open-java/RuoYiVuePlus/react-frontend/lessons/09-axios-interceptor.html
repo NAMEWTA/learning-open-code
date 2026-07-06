@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>09 · HTTP 请求层：Axios 拦截器链与请求封装</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./08-zustand-stores.html">08 Zustand下</a> · → <a href="./10-persistence-auth.html">10 持久化</a></div>
+
+<h1>09 · HTTP 请求层：Axios 拦截器链与请求封装</h1>
+
+<p><strong>胜利条件：</strong>能画出"组件调 API → 请求拦截器 → 发送 → 响应拦截器 → 组件"的完整链路；理解 ruoyi-react 在拦截器中附加了哪些逻辑（token、加密、去重）；能解释 401 处理、RSA+AES 两层加密的原理。</p>
+
+<h2>一、一个请求的完整旅程</h2>
+
+<p><span class="file-ref">src/api/request.ts</span> 是 ruoyi-react HTTP 层核心。每个 API 调用都走这条链：</p>
+
+<div class="diagram"><code>
+组件调用 service.get('/system/user/list', { params })
+  ↓
+① 请求拦截器（request interceptor）
+  ├── 附加 Token → headers.Authorization = 'Bearer xxx'
+  ├── 参数序列化 → GET 请求的 params 转成 URL query string
+  ├── 防重复提交 → 检查是否 500ms 内相同请求
+  └── 加密（可选）→ RSA 加密 AES Key + AES 加密请求体
+  ↓
+② 发送 HTTP 请求到后端
+  ↓
+③ 响应拦截器（response interceptor）
+  ├── 解密（可选）→ AES 解密响应体
+  ├── 处理 401 → 弹出重新登录 Modal
+  ├── 处理其他错误 → 统一错误提示
+  └── 返回 res.data
+  ↓
+组件拿到数据 → setState → 渲染</code></div>
+
+<h2>二、请求拦截器：出门前"打扮"请求</h2>
+
+<p><span class="file-ref">src/api/request.ts</span> 中的请求拦截器：</p>
+
+<pre><code>service.interceptors.request.use((config) => {
+  // 1. 附加 Token（除非标记 isToken: false）
+  if (getToken() && config.headers?.isToken !== false) {
+    config.headers.Authorization = 'Bearer ' + getToken();
+  }
+
+  // 2. GET 请求参数序列化
+  if (config.method === 'get' && config.params) {
+    config.paramsSerializer = (params) => qs.stringify(params, {
+      arrayFormat: 'repeat',  // ids=[1,2,3] → ids=1&ids=2&ids=3
+    });
+  }
+
+  // 3. 防重复提交（500ms 内相同 URL + 参数 + 方法的请求去重）
+  if (config.headers?.repeatSubmit !== false) {
+    const requestKey = JSON.stringify({ url, method, params, data });
+    if (requestCache.has(requestKey)) {
+      return Promise.reject(new Error('重复请求'));
+    }
+    requestCache.set(requestKey, true);
+    setTimeout(() => requestCache.delete(requestKey), 500);
+  }
+
+  // 4. 加密（标记 isEncrypt: true 时触发）
+  if (config.headers?.isEncrypt) {
+    const aesKey = generateAesKey();          // 随机 16 位 AES 密钥
+    const encryptedBody = aesEncrypt(JSON.stringify(config.data), aesKey);
+    const encryptedKey = rsaEncrypt(aesKey, publicKey);
+    config.data = { body: encryptedBody, key: encryptedKey };
+  }
+
+  return config;
+});</code></pre>
+
+<h2>三、RSA + AES 两层加密原理</h2>
+
+<blockquote>
+为什么不用单纯的 RSA 或 AES？因为 RSA 不适合加密大量数据，AES 的密钥传输不安全。两层加密取各自所长：<strong>AES 加密数据体（快），RSA 加密 AES 密钥（安全）</strong>。
+</blockquote>
+
+<div class="diagram"><code>
+客户端                                    服务端
+  │                                        │
+  │  1. 生成随机 AES 密钥 (16位)            │
+  │  2. AES 加密请求体                      │
+  │     encryptedBody = AES(body, aesKey)   │
+  │  3. RSA 加密 AES 密钥                   │
+  │     encryptedKey = RSA(aesKey, 公钥)    │
+  │                                        │
+  │  4. 发送 { body: encryptedBody,         │
+  │            key: encryptedKey }          │
+  ├──────────────────────────────────────→│
+  │                                        │  5. RSA 私钥解密 → 拿到 AES 密钥
+  │                                        │  6. AES 密钥解密 body → 拿到明文</code></div>
+
+<p>公钥在 <span class="file-ref">.env.development</span> 中配置，私钥在后端。</p>
+
+<h2>四、响应拦截器：回家后"检查"响应</h2>
+
+<pre><code>service.interceptors.response.use((response) => {
+  // 1. 解密（如果响应被加密）
+  if (response.config.headers?.isEncrypt) {
+    const decrypted = aesDecrypt(response.data.body, aesKey);
+    response.data = JSON.parse(decrypted);
+  }
+
+  // 2. 检查业务 code
+  const { code, msg } = response.data;
+  if (code === 200) {
+    return response.data;  // 成功，返回数据
+  }
+
+  // 3. 处理各种错误码
+  if (code === 401) {
+    handleReLogin();  // → 弹出重新登录 Modal
+  } else {
+    message.error(msg || '请求失败');
+  }
+
+  return Promise.reject(new Error(msg));
+}, (error) => {
+  // 4. 网络错误
+  message.error('网络连接失败');
+  return Promise.reject(error);
+});</code></pre>
+
+<h2>五、401 处理：一个精妙的防重复设计</h2>
+
+<pre><code>let isRelogin = { show: false };  // 模块级变量，防重复弹窗
+
+const handleReLogin = () => {
+  if (isRelogin.show) return;     // 已经弹着了，不再弹
+  isRelogin.show = true;
+
+  Modal.confirm({
+    title: '系统提示',
+    content: '登录状态已过期，请重新登录',
+    onOk: () => {
+      isRelogin.show = false;
+      removeToken();
+      history.push('/login');
+    },
+    onCancel: () => {
+      isRelogin.show = false;
+    },
+  });
+};</code></pre>
+
+<p>如果 3 个 API 同时返回 401，<strong>只有第一个会弹出 Modal</strong>，后两个因为 <code>isRelogin.show === true</code> 直接 return。</p>
+
+<h2>六、API 调用封装：从原始 axios 到业务调用</h2>
+
+<p>API 定义分两层：</p>
+
+<pre><code>// 第 1 层：request.ts 导出带拦截器的 service
+export const service = axios.create({ baseURL, timeout });
+// ...拦截器配置...
+
+// 第 2 层：业务 API（src/api/system/user/index.ts）
+export const getUserList = (params: UserQuery) =>
+  service.get&lt;R&lt;PageResult&lt;User&gt;&gt;&gt;('/system/user/list', { params });
+
+export const addUser = (data: AddUserParams) =>
+  service.post&lt;R&lt;void&gt;&gt;('/system/user', data);
+
+export const updateUser = (data: UpdateUserParams) =>
+  service.put&lt;R&lt;void&gt;&gt;('/system/user', data);
+
+export const deleteUser = (ids: string[]) =>
+  service.delete&lt;R&lt;void&gt;&gt;(`/system/user/${ids.join(',')}`);</code></pre>
+
+<h2>七、API 类型体系（响应包装）</h2>
+
+<p><span class="file-ref">src/api/types.ts</span></p>
+
+<pre><code>// 后端统一响应格式
+interface R&lt;T&gt; {
+  code: number;
+  msg: string;
+  data: T;
+}
+
+// 分页查询参数
+interface PageQuery {
+  pageNum: number;
+  pageSize: number;
+  [key: string]: any;  // 其他搜索条件
+}
+
+// 分页结果
+interface PageResult&lt;T&gt; {
+  rows: T[];
+  total: number;
+}</code></pre>
+
+<h2>八、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/api/request.ts</span>，逐行阅读请求拦截器和响应拦截器，画出流程图</li>
+  <li>打开浏览器 DevTools → Network 标签，找一个 <code>/system/user/list</code> 请求，查看 Request Headers 中的 <code>Authorization</code> 字段</li>
+  <li>Chrome DevTools → Sources → 在 request.ts 拦截器中加断点（找到 <code>config.headers.Authorization</code> 那行），刷新页面触发请求，查看 token 的值</li>
+  <li>找 login 请求的 Network 记录，看请求体是否被加密（应该看到 <code>{body: "...", key: "..."}</code> 格式）</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://axios-http.com/docs/interceptors">Axios 官方文档 — Interceptors</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："请求拦截器和响应拦截器的执行顺序是怎样的？如果加了多个拦截器怎么排？"</div>
+
+</body>
+</html>

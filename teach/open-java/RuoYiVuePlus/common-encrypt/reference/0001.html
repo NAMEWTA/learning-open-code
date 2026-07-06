@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 01 · ruoyi-common-encrypt 模块全景</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<h1>速查 01 · ruoyi-common-encrypt 模块全景</h1>
+
+<p><strong>定位：</strong>RuoYi-Vue-Plus 数据加解密基础设施，提供 API 通信加密（Filter）和 DB 字段加密（MyBatis Interceptor）两套独立通道，共用同一算法体系。</p>
+<p class="a">包路径：org.dromara.common.encrypt | 行数：约 800 行 Java | 外部类：24 个</p>
+
+<h2>双通道对比</h2>
+
+<table>
+  <tr><th></th><th>API 通信加密</th><th>DB 字段加密</th></tr>
+  <tr><td>触发注解</td><td><code>@ApiEncrypt(response=true)</code> 标注 Controller 方法</td><td><code>@EncryptField</code> 标注实体 String 字段</td></tr>
+  <tr><td>拦截机制</td><td>Servlet Filter — <code>CryptoFilter</code></td><td>MyBatis Plugin — <code>MybatisEncryptInterceptor</code> + <code>MybatisDecryptInterceptor</code></td></tr>
+  <tr><td>加密算法</td><td>固定 RSA + AES 混合（RSA 加密 AES 密钥，AES 加密报文）</td><td>可选 BASE64 / AES / RSA / SM2 / SM4（注解级可配置）</td></tr>
+  <tr><td>密钥来源</td><td><code>api-decrypt.public-key</code> / <code>api-decrypt.private-key</code></td><td>@EncryptField 注解优先 &gt; <code>mybatis-encryptor.*</code> yml 默认</td></tr>
+  <tr><td>启用开关</td><td><code>api-decrypt.enabled=true</code></td><td><code>mybatis-encryptor.enable=true</code></td></tr>
+  <tr><td>加密标识</td><td>请求头 <code>encrypt-key</code>（可自定义）</td><td>值前缀 <code>ENC_</code>（Constants.ENCRYPT_HEADER）</td></tr>
+</table>
+
+<h2>各通道关键类</h2>
+
+<table>
+  <tr><th>通道</th><th>类</th><th>职责</th></tr>
+  <tr><td rowspan="4">API</td><td><code>CryptoFilter</code></td><td>检测 @ApiEncrypt 注解，协调请求解密与响应加密；构造时校验 RSA 密钥</td></tr>
+  <tr><td><code>DecryptRequestBodyWrapper</code></td><td>解密请求体：RSA 私钥解密 Header → Base64 解码得 AES 密钥 → AES 解密请求体</td></tr>
+  <tr><td><code>EncryptResponseBodyWrapper</code></td><td>加密响应体：随机 AES 密钥 → RSA 公钥加密 AES 密钥放 Header → AES 加密响应体</td></tr>
+  <tr><td><code>ApiDecryptAutoConfiguration</code></td><td>@ConditionalOnProperty("api-decrypt.enabled=true") 注册 CryptoFilter</td></tr>
+  <tr><td rowspan="6">DB</td><td><code>EncryptorManager</code></td><td>中央管理器：encryptorMap 缓存 + fieldCache 缓存 + ENC_ 前缀处理 + 反射实例化</td></tr>
+  <tr><td><code>EncryptContextFactory</code></td><td>注解值优先、yml 默认回退 组装 EncryptContext</td></tr>
+  <tr><td><code>EncryptedFieldProcessor</code></td><td>递归字段加解密（对象/Map/Collection）+ FieldSnapshot 恢复</td></tr>
+  <tr><td><code>MybatisEncryptInterceptor</code></td><td>拦截 ParameterHandler.setParameters，入参加密，finally 恢复快照</td></tr>
+  <tr><td><code>MybatisDecryptInterceptor</code></td><td>拦截 ResultSetHandler.handleResultSets，出参解密</td></tr>
+  <tr><td><code>EncryptorAutoConfiguration</code></td><td>@ConditionalOnProperty("mybatis-encryptor.enable=true")，after MybatisPlusAutoConfiguration</td></tr>
+  <tr><td rowspan="2">共用</td><td><code>IEncryptor</code> + 5 实现</td><td>加密器接口与实现（见速查 02）</td></tr>
+  <tr><td><code>EncryptUtils</code></td><td>Hutool SecureUtil/SmUtil 静态封装 + 密钥生成/校验</td></tr>
+</table>
+
+<h2>算法速查</h2>
+
+<table>
+  <tr><th>算法</th><th>类型</th><th>密钥</th><th>是否真加密</th><th>Encoder</th></tr>
+  <tr><td>BASE64</td><td>编码</td><td>无</td><td>否</td><td>Base64Encryptor</td></tr>
+  <tr><td>AES</td><td>对称</td><td>password (16/24/32B)</td><td>是</td><td>AesEncryptor</td></tr>
+  <tr><td>RSA</td><td>非对称</td><td>publicKey + privateKey (&ge;1024bit)</td><td>是</td><td>RsaEncryptor</td></tr>
+  <tr><td>SM2</td><td>非对称(国密)</td><td>publicKey + privateKey</td><td>是</td><td>Sm2Encryptor</td></tr>
+  <tr><td>SM4</td><td>对称(国密)</td><td>password (恰好16B)</td><td>是</td><td>Sm4Encryptor</td></tr>
+</table>
+
+<h2>ENC_ 前缀机制</h2>
+
+<div class="chain">
+<b>加密时：</b>EncryptorManager.encrypt(value, ctx)
+  → if (value.startsWith("ENC_")) return value;  // 已加密，跳过
+  → encryptor.encrypt(value, encode)
+  → return "ENC_" + encryptedValue;
+
+<b>解密时：</b>EncryptorManager.decrypt(value, ctx)
+  → if (!value.startsWith("ENC_")) return value;  // 未加密，跳过
+  → value = value.substring(4);  // 去除前缀
+  → return encryptor.decrypt(value);
+</div>
+<p>目的：防止对已加密值重复加密（双重加密），以及防止对未加密值误解密。</p>
+
+<h2>配置示例（application.yml）</h2>
+
+<div class="chain">
+# API 加密通道（RSA+AES 混合）
+api-decrypt:
+  enabled: true
+  header-flag: encrypt-key
+  public-key: MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC...
+  private-key: MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBA...
+
+# DB 字段加密通道（可选五种算法）
+mybatis-encryptor:
+  enable: true
+  algorithm: aes           # 默认算法：BASE64|AES|RSA|SM2|SM4
+  password: your16bytekey!    # AES/SM4 的密钥
+  public-key: MIGfMA0G...     # RSA/SM2 的公钥
+  private-key: MIICdgIB...    # RSA/SM2 的私钥
+  encode: base64              # 编码方式：BASE64|HEX
+</div>
+
+<h2>关键注意事项</h2>
+<ul>
+  <li><b>Base64 不是加密：</b>生产环境不要用 BASE64 作为 DB 字段加密算法，它是明文编码</li>
+  <li><b>API 通道不支持自定义算法：</b>CryptoFilter 内部硬编码 RSA+AES，不经过 AlgorithmType 选择</li>
+  <li><b>RSA 密钥最低 1024 位：</b>CryptoFilter 构造时校验，不满足则启动失败</li>
+  <li><b>注解覆盖 yml：</b>@EncryptField 的 algorithm=SM4 会覆盖 yml 中配置的 algorithm=AES</li>
+  <li><b>Snapshot 恢复：</b>入参加密后原始值会被恢复，业务层始终操作明文</li>
+  <li><b>反射缓存：</b>encryptorMap 和 fieldCache 均为 ConcurrentHashMap，线程安全</li>
+</ul>
+
+</body>
+</html>

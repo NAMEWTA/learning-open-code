@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 13 课 · 多级缓存架构 — Caffeine L1 + Redis L2 + 事务感知</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 13 课 · 多级缓存架构 <span class="tag">Multi-level Cache</span></h1>
+<h1>Caffeine L1 + Redis L2 + 事务感知</h1>
+
+<div class="mission">
+  <b>本课目标：</b>掌握 RuoYi-Vue-Plus 的三层缓存装饰器链 —— <code>CaffeineCacheDecorator</code>（L1 本地）、<code>RedissonCache</code>（L2 分布式）和 <code>TransactionAwareCacheDecorator</code>（事务感知），理解读写路径和缓存命名 DSL。
+</div>
+
+<h2>1. 为什么需要多级缓存</h2>
+
+<blockquote>
+  单靠 Redis 已经不够快了吗？是的，在微秒级响应场景下，网络往返（RTT）是不可忽视的开销。
+</blockquote>
+
+<table>
+  <tr><th>缓存层级</th><th>技术</th><th>典型延迟</th><th>相对速度</th><th>容量</th></tr>
+  <tr><td><b>L1 本地缓存</b></td><td>Caffeine（JVM 堆内）</td><td>~50 ns</td><td>1x（基准）</td><td>MB 级</td></tr>
+  <tr><td><b>L2 分布式缓存</b></td><td>Redis（Redisson）</td><td>~0.5 ms</td><td>10,000x 慢于 L1</td><td>GB 级</td></tr>
+  <tr><td><b>L3 数据库</b></td><td>MySQL</td><td>~10 ms</td><td>20,000x 慢于 L2</td><td>TB 级</td></tr>
+</table>
+
+<p>单次 Redis 调用比 Caffeine 慢 10,000 倍。如果 90% 的缓存请求能被 L1 命中，系统吞吐量可以提升一个数量级。</p>
+
+<h2>2. 缓存架构全景图</h2>
+
+<div class="diagram">
+@Cacheable / @CachePut / @CacheEvict  (Spring Cache 抽象层)
+        |
+        v
+PlusSpringCacheManager.getCache("sys_user_name#30d")
+        |
+        |-- 解析 DSL: "sys_user_name" + TTL=30d + maxIdle=0 + maxSize=0 + local=1
+        |
+        v
+[Outer] TransactionAwareCacheDecorator    ——  事务提交后执行 put/evict
+        |
+        v
+[Middle] CaffeineCacheDecorator           ——  L1: JVM 堆内，30s TTL, max 1000 条
+        |    .get() → caffeine.get(key, k -> cache.get(key))  [L1 miss 时穿透到 L2]
+        |    .put() → invalidate L1, 再 write L2
+        |    .evict() → evict L2, 成功则 invalidate L1
+        v
+[Inner] RedissonCache                     ——  L2: Redis 分布式缓存
+        |
+        v
+Redis (持久化、多节点共享)
+</div>
+
+<h2>3. 核心组件 1：CaffeineCacheDecorator（L1 本地缓存）</h2>
+
+<div class="step">
+  <span class="num">1</span>
+  <span class="where">ruoyi-common/ruoyi-common-redis/src/main/java/org/dromara/common/redis/manager/CaffeineCacheDecorator.java</span>
+</div>
+
+<p>这是一个 Spring <code>Cache</code> 接口的装饰器实现，在 Redisson L2 缓存前面加了一层本地 Caffeine 缓存：</p>
+
+<pre><code>public class CaffeineCacheDecorator implements Cache {
+
+    private final Cache cache;  // 被装饰的 L2 缓存（RedissonCache）
+
+    private final com.github.benmanes.caffeine.cache.Cache&lt;Object, Object&gt; caffeine;
+
+    /** 构造唯一键：cacheName:key */
+    private String getUniqueKey(Object key) {
+        return name + ":" + key;
+    }
+
+    // ===== L1 → L2 的读穿透 =====
+    @Override
+    public ValueWrapper get(Object key) {
+        // caffeine.get(key, loaderFunction) 是原子的"取或加载"
+        Object o = caffeine.get(getUniqueKey(key), k -> cache.get(key));
+        // L1 命中 → 直接返回（~50ns）
+        // L1 未命中 → 从 L2 加载 → 存入 L1 → 返回
+        return (ValueWrapper) o;
+    }
+
+    // ===== 写入时先失效 L1，再写 L2 =====
+    @Override
+    public void put(Object key, Object value) {
+        caffeine.invalidate(getUniqueKey(key));  // Step 1: 失效本地
+        cache.put(key, value);                    // Step 2: 写入 Redis
+    }
+
+    // ===== 逐出时先删 L2，成功再失效 L1 =====
+    @Override
+    public boolean evictIfPresent(Object key) {
+        boolean result = cache.evictIfPresent(key);  // Step 1: 删除 Redis
+        if (result) {
+            caffeine.invalidate(getUniqueKey(key));  // Step 2: 失效本地
+        }
+        return result;
+    }
+
+    // ===== 清空本地缓存（供手动刷新） =====
+    @Override
+    public void clearLocalCache() {
+        caffeine.asMap().keySet().removeIf(key ->
+            key.toString().startsWith(name + ":"));
+    }
+}</code></pre>
+
+<div class="side">
+  <b>关键设计：</b><code>caffeine.get(key, loaderFunction)</code> 是线程安全的读穿透实现。多个线程同时 miss L1 时，Caffeine 保证只有一个线程去加载 L2，其他线程等待结果。这避免了<b>缓存击穿</b>（多个请求同时穿透到 Redis/DB）。
+</div>
+
+<h2>4. 核心组件 2：PlusSpringCacheManager（缓存管理器 + DSL 解析）</h2>
+
+<div class="step">
+  <span class="num">2</span>
+  <span class="where">ruoyi-common/ruoyi-common-redis/src/main/java/org/dromara/common/redis/manager/PlusSpringCacheManager.java</span>
+</div>
+
+<p>这是<b>自定义的 RedissonSpringCacheManager 分支</b>，最独特的特性是缓存名称 DSL 解析：</p>
+
+<pre><code>public class PlusSpringCacheManager extends RedissonSpringCacheManager {
+
+    private boolean transactionAware = true;  // 默认开启事务感知
+
+    @Override
+    public Cache getCache(String name) {
+        // name = "sys_user_name#30d#0#0#1"
+        String[] array = name.split("#");
+        String cacheName = array[0];           // "sys_user_name"
+        String ttl = array.length > 1 ? array[1] : null;       // "30d"
+        String maxIdle = array.length > 2 ? array[2] : null;   // "0"
+        String maxSize = array.length > 3 ? array[3] : null;   // "0"
+        String local = array.length > 4 ? array[4] : "1";      // "1"
+
+        // 动态创建缓存实例
+        Cache cache = createMapCache(cacheName, name, config, isLocal(local));
+        // ...
+    }
+
+    // 装饰器链构建
+    private Cache createMapCache(String cacheName, String name,
+                                  CacheConfig config, int local) {
+        RMapCache&lt;Object, Object&gt; map = RedisUtils.getClient().getMapCache(name);
+        Cache cache = new RedissonCache(map, config, allowNullValues);
+        // Step 1: 包装 L1 缓存
+        if (local == 1 && caffeine != null) {
+            cache = new CaffeineCacheDecorator(cacheName, cache, caffeine);
+        }
+        // Step 2: 包装事务感知
+        if (transactionAware) {
+            cache = new TransactionAwareCacheDecorator(cache);
+        }
+        return cache;
+    }
+}</code></pre>
+
+<h3>4.1 DSL 语法</h3>
+
+<p>缓存名称中可以嵌入 5 个参数，用 <code>#</code> 分隔：</p>
+
+<table>
+  <tr><th>格式</th><th>示例</th><th>含义</th></tr>
+  <tr><td><code>name#ttl#maxIdle#maxSize#local</code></td>
+    <td><code>demo:cache#60s#10m#20#1</code></td>
+    <td>每个字段都可单独配置</td>
+  </tr>
+</table>
+
+<table>
+  <tr><th>参数</th><th>说明</th><th>默认值</th><th>示例</th></tr>
+  <tr><td><code>ttl</code></td><td>过期时间（支持 s/m/h/d）</td><td>0（不过期）</td><td><code>60s</code>、<code>30d</code>、<code>2h</code></td></tr>
+  <tr><td><code>maxIdleTime</code></td><td>最大空闲时间（LRU 清理）</td><td>0（不检测）</td><td><code>10m</code></td></tr>
+  <tr><td><code>maxSize</code></td><td>最大条目数（LRU 溢出）</td><td>0（无限）</td><td><code>1000</code></td></tr>
+  <tr><td><code>local</code></td><td>是否启用 L1 本地缓存</td><td>1（开启）</td><td><code>1</code> 开启、<code>0</code> 关闭</td></tr>
+</table>
+
+<p>实际使用示例：</p>
+<ul>
+  <li><code>test#60s</code> — TTL=60s，其余默认</li>
+  <li><code>test#0#60s</code> — TTL=0（不过期），MaxIdle=60s</li>
+  <li><code>test#1h#0#500</code> — TTL=1h，MaxSize=500</li>
+  <li><code>test#1h#0#500#0</code> — TTL=1h，MaxSize=500，<b>禁用 L1</b></li>
+</ul>
+
+<div class="side">
+  <b>设计优势：</b>每个缓存区域可以独立配置过期策略和容量限制，不需要写任何 Java 配置代码。业务开发者只需在 <code>@Cacheable(cacheNames = "xxx#30d")</code> 中声明参数即可，PlusSpringCacheManager 自动解析并创建对应配置的缓存实例。
+</div>
+
+<h2>5. 核心组件 3：TransactionAwareCacheDecorator（事务感知）</h2>
+
+<p>这是 Spring Framework 自带的类（<code>org.springframework.cache.transaction.TransactionAwareCacheDecorator</code>），项目直接使用。它的核心行为：</p>
+
+<div class="diagram">
+<b>无事务感知（原始行为）：</b>
+@Transactional
+public void updateUser(UserBo bo) {
+    // 1. 更新数据库
+    baseMapper.update(bo);
+    // 2. 立即更新缓存
+    cache.put("user:1", bo);   // ← 缓存已更新
+    // 3. 如果事务回滚 → 数据库恢复了，但缓存中的数据是脏的！
+}
+
+<b>有事务感知（TransactionAwareCacheDecorator）：</b>
+@Transactional
+public void updateUser(UserBo bo) {
+    // 1. 更新数据库
+    baseMapper.update(bo);
+    // 2. 缓存 put 操作被推迟
+    cache.put("user:1", bo);   // ← 暂存在事务上下文中，不执行
+    // 3. 事务提交 → 触发注册的回调 → 执行真正的 cache.put()
+    // OR: 事务回滚 → 丢弃暂存的操作 → 缓存保持不变
+}
+</div>
+
+<div class="warn">
+  <b>正确性优先：</b>TransactionAwareCacheDecorator 解决了"数据库和缓存不一致"的经典问题。代价是：在事务提交之前，其他线程看到的缓存可能是旧数据。这是一个<b>正确性 vs 实时性</b>的权衡 —— RuoYi-Vue-Plus 选择了正确性。
+</div>
+
+<h2>6. 完整的读写路径</h2>
+
+<h3>6.1 读路径（@Cacheable 注解）</h3>
+
+<div class="diagram">
+请求到达 Service 方法
+        |
+        v
+TransactionAwareCacheDecorator.get(key)
+        |  （事务感知对读操作无影响，直接透传）
+        v
+CaffeineCacheDecorator.get(key)
+        |
+        ├── L1 命中 ──→ 返回缓存值（~50ns）
+        |
+        └── L1 未命中
+                |
+                v
+        RedissonCache.get(key)  ← 从 Redis 加载
+                |
+                ├── L2 命中 ──→ 回填 L1 + 返回（~0.5ms）
+                |
+                └── L2 未命中
+                        |
+                        v
+                执行方法体（数据库查询）──→ 回填 L2 + L1 + 返回（~10ms）
+</div>
+
+<h3>6.2 写路径（@CachePut / @CacheEvict 注解）</h3>
+
+<div class="diagram">
+@CachePut → Service 方法执行完毕
+        |
+        v
+TransactionAwareCacheDecorator.put(key, value)
+        |  注册到事务同步回调，等待事务提交
+        |  （事务未提交 = 操作被暂存）
+        v
+【事务提交后】
+        |
+        v
+CaffeineCacheDecorator.put(key, value)
+        |
+        ├── Step 1: caffeine.invalidate(key)   // 先失效 L1
+        |
+        └── Step 2: cache.put(key, value)      // 再更新 L2（Redis）
+
+@CacheEvict 同理：
+TransactionAwareCacheDecorator.evictIfPresent(key)
+        |  （等待事务提交）
+        v
+CaffeineCacheDecorator.evictIfPresent(key)
+        ├── Step 1: cache.evictIfPresent(key)  // 先删除 L2
+        └── Step 2: caffeine.invalidate(key)   // 再失效 L1
+</div>
+
+<div class="side">
+  <b>为什么写入要先失效 L1 再写 L2，而不是先写 L2 再失效 L1？</b>如果先写 L2 再失效 L1，在两步之间可能有其他线程读到旧的 L1 数据。先失效 L1 确保了后续的读操作会穿透到 L2 获取最新数据。虽然 L2 在极短时间内可能也是旧数据，但这个窗口比"旧 L1 + 新 L2"组合导致的长期不一致要安全得多。
+</div>
+
+<h2>7. CacheNames 常量 — 集中管理缓存命名空间</h2>
+
+<div class="step">
+  <span class="num">3</span>
+  <span class="where">ruoyi-common/ruoyi-common-core/src/main/java/org/dromara/common/core/constant/CacheNames.java</span>
+</div>
+
+<pre><code>public interface CacheNames {
+
+    /** 演示缓存: TTL=60s, MaxIdle=10m, MaxSize=20, L1=启用(默认) */
+    String DEMO_CACHE = "demo:cache#60s#10m#20";
+
+    /** 不设过期时间的缓存 */
+    String SYS_CONFIG = "sys_config";
+    String SYS_DICT = "sys_dict";
+
+    /** TTL=30天的缓存 */
+    String SYS_CLIENT = "sys_client#30d";
+    String SYS_USER_NAME = "sys_user_name#30d";
+    String SYS_NICKNAME = "sys_nickname#30d";
+    String SYS_DEPT = "sys_dept#30d";
+    String SYS_OSS = "sys_oss#30d";
+    String SYS_ROLE_CUSTOM = "sys_role_custom#30d";
+    String SYS_DEPT_AND_CHILD = "sys_dept_and_child#30d";
+}</code></pre>
+
+<p>实际使用：</p>
+
+<pre><code>// SysUserServiceImpl.java
+@Cacheable(cacheNames = CacheNames.SYS_USER_NAME, key = "#userId")
+@Override
+public String selectUserNameById(Long userId) { ... }
+
+// SysConfigServiceImpl.java — 写入时同步更新缓存
+@CachePut(cacheNames = CacheNames.SYS_CONFIG, key = "#bo.configKey")
+@Override
+public String insertConfig(SysConfigBo bo) { ... }
+
+// SysClientServiceImpl.java — 删除时逐出缓存
+@CacheEvict(cacheNames = CacheNames.SYS_CLIENT, key = "#clientId")
+@Override
+public int updateClientStatus(String clientId, String status) { ... }
+
+// SysDeptServiceImpl.java — 一个操作影响多个缓存区域
+@Caching(evict = {
+    @CacheEvict(cacheNames = CacheNames.SYS_DEPT, key = "#bo.deptId"),
+    @CacheEvict(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, allEntries = true)
+})
+@Override
+public int updateDept(SysDeptBo bo) { ... }</code></pre>
+
+<h2>8. Caffeine 基础配置</h2>
+
+<div class="step">
+  <span class="num">4</span>
+  <span class="where">ruoyi-common/ruoyi-common-redis/src/main/java/org/dromara/common/redis/config/CacheConfig.java</span>
+</div>
+
+<pre><code>@AutoConfiguration
+@EnableCaching  // 启用 Spring Cache 抽象
+public class CacheConfig {
+
+    @Bean
+    public Cache&lt;Object, Object&gt; caffeine() {
+        return Caffeine.newBuilder()
+            .expireAfterWrite(30, TimeUnit.SECONDS)  // L1 的 TTL: 30 秒
+            .initialCapacity(100)
+            .maximumSize(1000)                        // L1 最多 1000 条
+            .build();
+    }
+
+    @Bean
+    public CacheManager cacheManager() {
+        return new PlusSpringCacheManager();  // Caffeine Bean 通过 Spring 注入
+    }
+}</code></pre>
+
+<div class="warn">
+  <b>注意 L1 和 L2 的 TTL 是独立的：</b>Caffeine 的 <code>expireAfterWrite(30s)</code> 是 L1 的过期时间，与 CacheNames 中定义的 <code>#30d</code>（L2 Redis 的 TTL）是完全独立的两个配置。L1 的短 TTL（30 秒）意味着本地缓存会频繁刷新，确保数据最终一致性，而 L2 的长 TTL（30 天）减少了数据库查询。
+</div>
+
+<h2>9. 常用缓存操作模式总结</h2>
+
+<table>
+  <tr><th>模式</th><th>注解</th><th>典型场景</th><th>示例</th></tr>
+  <tr><td><b>读穿透</b></td><td><code>@Cacheable</code></td><td>高频查询、低频变更</td><td>用户名、部门名、字典数据</td></tr>
+  <tr><td><b>写穿透</b></td><td><code>@CachePut</code></td><td>插入/更新后同步缓存</td><td>系统配置、字典类型</td></tr>
+  <tr><td><b>逐出</b></td><td><code>@CacheEvict</code></td><td>删除/禁用后清理缓存</td><td>客户端状态变更、部门删除</td></tr>
+  <tr><td><b>组合逐出</b></td><td><code>@Caching</code></td><td>一个操作影响多个缓存</td><td>部门更新 → 逐出 SYS_DEPT + SYS_DEPT_AND_CHILD</td></tr>
+  <tr><td><b>编程式操作</b></td><td><code>CacheUtils.evict()</code></td><td>循环中逐出、复杂条件</td><td>批量更新子部门时逐个逐出</td></tr>
+</table>
+
+<h2>自测题</h2>
+
+<div class="quiz">
+  <p>Q1：为什么 CaffeineCacheDecorator 的 <code>put()</code> 方法先失效 L1 再写 L2，而 <code>get()</code> 方法先查 L1 再查 L2？这两个顺序是巧合还是精心设计的？</p>
+</div>
+<details>
+  <summary>查看答案</summary>
+  <p>是<b>精心设计的</b>。<br><b>读路径（get）：</b>先 L1 后 L2 是自然的读穿透模式 —— 越快的层越先查，命中率最高。<br><b>写路径（put）：</b>先失效 L1 再写 L2 的原因是<b>避免长期不一致</b>。如果先写 L2 再失效 L1，在两步之间其他线程可能从 L1 读到旧数据。先失效 L1 后，其他线程的读请求会穿透到 L2 获取最新值，虽然 L2 在极短时间内可能也是旧数据（还没写入），但这个窗口远小于 L1 持有多分钟甚至多天的旧数据。</p>
+</details>
+
+<div class="quiz">
+  <p>Q2：TransactionAwareCacheDecorator 将缓存操作推迟到事务提交后执行。如果一个事务耗时 5 秒，这 5 秒内其他请求读到的缓存是旧数据还是新数据？这会引发问题吗？</p>
+</div>
+<details>
+  <summary>查看答案</summary>
+  <p>会读到<b>旧数据</b>。因为在事务提交前，新的缓存值还未写入 Redis 或 Caffeine，其他请求读到的仍然是修改前的数据。<br>这确实是一个权衡：<b>性能和最终一致性 vs 强一致性</b>。RuoYi-Vue-Plus 选择了正确性优先（保证缓存和数据库的一致性），代价是事务期间的缓存可能是旧数据。对于大多数管理后台场景（用户管理、角色管理、字典配置），这种短暂的不一致是可以接受的。如果需要强一致性，可以考虑使用分布式锁或直接读数据库。</p>
+</details>
+
+<div class="quiz">
+  <p>Q3：CacheNames 中 <code>SYS_USER_NAME = "sys_user_name#30d"</code> 指定了 Redis TTL=30 天，但 Caffeine L1 的 TTL 是 30 秒。为什么 L1 的 TTL 短这么多？</p>
+</div>
+<details>
+  <summary>查看答案</summary>
+  <p>三个原因：<br>1. <b>内存容量：</b>L1 是 JVM 堆内存，最大 1000 条，长 TTL 会导致高价值数据被踢出（LRU 逐出）。30 秒的短 TTL 确保热点数据常驻，冷数据自然淘汰。<br>2. <b>数据一致性：</b>如果 L1 也有 30 天 TTL，那么某个用户改完名后，其他节点的 L1 可能还缓存着 30 天前的旧名字（尽管通过 Redisson 发布订阅可以失效，但不是 100% 可靠）。30 秒的短 TTL 提供了一个"安全网"——即使失效通知丢失，30 秒后本地缓存自动过期。<br>3. <b>性能平衡：</b>30 秒的 L1 TTL 已经能覆盖绝大多数重复查询（同一用户在同一请求链路中可能被查多次），更长的 TTL 边际收益递减。</p>
+</details>
+
+<div class="nav">← <a href="12.html">上一课</a> | 下一课：<a href="14.html">第 14 课 · 前端组合式函数与状态管理 →</a></div>
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/ben-manes/caffeine">Caffeine 官方仓库</a> | <a href="https://github.com/redisson/redisson">Redisson 官方文档</a> | <a href="https://docs.spring.io/spring-framework/reference/integration/cache.html">Spring Cache Abstraction 官方文档</a></div>
+<div class="reminder">💡 有疑问？直接问我。相关课程：<a href="11.html">第 11 课 · 分层架构</a> — 理解缓存模块在分层中的位置 | <a href="12.html">第 12 课 · 依赖倒置</a> — 缓存注解如何与 API 合约方法结合</div>
+
+</body>
+</html>

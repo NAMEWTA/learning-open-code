@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 发码-登录全链路 + 多厂商配置</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 发码-登录全链路 + 多厂商配置</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code></p>
+
+<h2>全链路一句话</h2>
+<div class="chain">SmsFactory.getSmsBlend("config1").sendMessage(...) 发送 → 发成功存 Redis(global:captcha_codes:{phone}=code) → SmsAuthStrategy 用同 key 取回比对 → 匹配则登录</div>
+
+<h2>完整链路</h2>
+<table>
+<tr><th>步骤</th><th>文件</th><th>动作</th></tr>
+<tr><td>1</td><td><code>CaptchaController.java:62</code></td><td><code>smsCode()</code> 入口，@RateLimiter 限流</td></tr>
+<tr><td>2</td><td>同方法内</td><td>生成 4 位随机码，SmsFactory.getSmsBlend("config1") 取厂商发送器</td></tr>
+<tr><td>3</td><td>sms4j 内部 ⇒ PlusSmsDao</td><td>查拦截计数（minute-max / account-max）</td></tr>
+<tr><td>4</td><td>sms4j ⇒ 厂商 API</td><td>sendMessage() 调阿里/腾讯等 SDK</td></tr>
+<tr><td>5a</td><td>失败 throw → SmsExceptionHandler</td><td>全局兜底 R.fail("短信发送失败...")</td></tr>
+<tr><td>5b</td><td>成功 → <code>RedisUtils.setCacheObject</code></td><td>存 <code>global:captcha_codes:{phone}=code</code>（5 分钟过期）</td></tr>
+<tr><td>6</td><td><code>SmsAuthStrategy.java:82</code></td><td><code>RedisUtils.getCacheObject(key)</code> 取回比对</td></tr>
+<tr><td>7</td><td>同方法</td><td>匹配 → LoginHelper.login() 签发 token</td></tr>
+</table>
+
+<h2>yml 多厂商配置速查</h2>
+<table>
+<tr><th>配置键</th><th>示例值</th><th>说明</th></tr>
+<tr><td><code>config-type</code></td><td>yaml / interface</td><td>配置来源</td></tr>
+<tr><td><code>restricted</code></td><td>true</td><td>开启短信拦截</td></tr>
+<tr><td><code>minute-max</code></td><td>1</td><td>单号每分钟上限</td></tr>
+<tr><td><code>account-max</code></td><td>30</td><td>单号每日上限</td></tr>
+<tr><td><code>blends.{id}.supplier</code></td><td>alibaba / tencent / huawei / ...</td><td>厂商标识</td></tr>
+<tr><td><code>blends.{id}.access-key-id</code></td><td>您的 accessKey</td><td>密钥 ID</td></tr>
+<tr><td><code>blends.{id}.access-key-secret</code></td><td>您的 secret</td><td>密钥</td></tr>
+<tr><td><code>blends.{id}.signature</code></td><td>签名内容</td><td>短信签名</td></tr>
+</table>
+
+<h2>三道防刷</h2>
+<ol style="font-size:0.85rem">
+<li><code>@RateLimiter(key="#phoneNumber", time=60, count=1)</code> — 接口级限流</li>
+<li>sms4j <code>minute-max</code> / <code>account-max</code> — 框架级拦截（计数走 PlusSmsDao → Redis）</li>
+<li>验证码 Redis key 5 分钟过期 — 时效性限制</li>
+</ol>
+
+<h2>加新厂商（能力在配置、不碰代码）</h2>
+<div class="chain">yml blends 下新增一段：
+  hw1:
+    supplier: huawei     # 厂商标识
+    access-key-id: ...
+    ...
+代码里 SmsFactory.getSmsBlend("hw1").sendMessage(...) 即可用</div>
+
+<h2>关键 Redis Key</h2>
+<table>
+<tr><th>Key</th><th>来源</th></tr>
+<tr><td><code>global:captcha_codes:{手机号}</code></td><td>GlobalConstants.CAPTCHA_CODE_KEY + phoneNumber</td></tr>
+<tr><td><code>global:sms:*</code></td><td>PlusSmsDao.clean() 清理范围</td></tr>
+</table>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SmsBlend、SmsResponse、CaptchaCodeKey · 前序速查全系列</p>
+</body>
+</html>

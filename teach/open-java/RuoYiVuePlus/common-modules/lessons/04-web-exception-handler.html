@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>04 · ruoyi-common-web：全局异常处理与响应增强</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>04 · ruoyi-common-web：全局异常处理与响应增强</h1>
+
+<p><strong>核心问题：</strong>一个 Controller 方法可能抛出 20+ 种不同类型的异常，如何统一处理并返回一致的前端响应格式？</p>
+
+<h2>1. GlobalExceptionHandler — 16 个异常处理分支</h2>
+
+<div class="info">
+<strong>技术栈：</strong><code>@RestControllerAdvice</code> + <code>@ExceptionHandler</code>。共 <strong>19 个</strong> @ExceptionHandler 方法。Spring 的异常匹配遵循「最具体优先」原则。
+</div>
+
+<h3>业务异常分支</h3>
+<table>
+<tr><th>异常类型</th><th>处理逻辑</th></tr>
+<tr><td><code>ServiceException</code></td><td>返回 R.fail(code, msg)。如果 e.getCode() != null 则使用指定 code</td></tr>
+<tr><td><code>BaseException</code></td><td>国际化异常。调用 getMessage() 走 i18n 翻译，返回 R.fail(msg)</td></tr>
+<tr><td><code>SseException</code></td><td>@ResponseStatus(401)。直接返回 JSON 字符串（非 R 包装），适配 SSE 协议</td></tr>
+</table>
+
+<h3>参数校验异常分支（4 种）</h3>
+<table>
+<tr><th>异常类型</th><th>触发场景</th></tr>
+<tr><td><code>BindException</code></td><td>@Valid 在 Controller 参数上绑定失败</td></tr>
+<tr><td><code>ConstraintViolationException</code></td><td>@Validated 在 Service 层或方法参数上校验失败</td></tr>
+<tr><td><code>MethodArgumentNotValidException</code></td><td>@Valid 在 @RequestBody 上校验失败</td></tr>
+<tr><td><code>HandlerMethodValidationException</code></td><td>Spring Boot 3.x 新增的 @Validated 方法级校验</td></tr>
+</table>
+<p>这 4 种处理器的共同模式（实际使用项目统一的 <code>StreamUtils.join()</code>）：</p>
+<pre><code>// 提取校验错误信息，用 ", " 拼接
+// BindException:
+String message = StreamUtils.join(e.getAllErrors(),
+    DefaultMessageSourceResolvable::getDefaultMessage, ", ");
+// ConstraintViolationException:
+String message = StreamUtils.join(e.getConstraintViolations(),
+    ConstraintViolation::getMessage, ", ");
+// MethodArgumentNotValidException:
+String message = StreamUtils.join(e.getBindingResult().getAllErrors(),
+    DefaultMessageSourceResolvable::getDefaultMessage, ", ");
+// HandlerMethodValidationException:
+String message = StreamUtils.join(e.getAllErrors(),
+    MessageSourceResolvable::getDefaultMessage, ", ");
+return R.fail(message);</code></pre>
+
+<h3>兜底异常分支</h3>
+<table>
+<tr><th>异常类型</th><th>处理方式</th></tr>
+<tr><td><code>RuntimeException</code></td><td>生成 8 位随机 errorId，记录完整堆栈，返回含 errorId 的提示</td></tr>
+<tr><td><code>Exception</code></td><td>兜底，同样生成 errorId</td></tr>
+<tr><td><code>ServletException</code></td><td>记录堆栈，返回"发生未知异常"</td></tr>
+</table>
+
+<div class="warn">
+<strong>errorId 机制：</strong>对于 RuntimeException 和 Exception，返回 <code>"系统异常，错误代码：" + errorId</code>，用户可凭此 ID 反馈给管理员。日志中用 ERROR 级别记录完整堆栈和 errorId。
+</div>
+
+<h3>SSE 特殊处理</h3>
+<p><code>AsyncRequestTimeoutException</code> → 完全静默（空方法体）。<code>IOException</code> 且请求路径包含 SSE 路径 → 静默吞掉。这是为了防止 SSE 长连接频繁断开产生噪音日志。</p>
+
+<h3>其他分支</h3>
+<table>
+<tr><th>异常</th><th>场景</th></tr>
+<tr><td><code>HttpRequestMethodNotSupportedException</code></td><td>请求方法不对（POST 访问 GET 接口）</td></tr>
+<tr><td><code>MissingPathVariableException</code></td><td>缺少路径变量</td></tr>
+<tr><td><code>MethodArgumentTypeMismatchException</code></td><td>参数类型不匹配（如期望 Long 传入 String）</td></tr>
+<tr><td><code>NoHandlerFoundException</code></td><td>404</td></tr>
+<tr><td><code>JsonParseException</code></td><td>JSON 格式错误</td></tr>
+<tr><td><code>HttpMessageNotReadableException</code></td><td>请求体反序列化失败</td></tr>
+<tr><td><code>ExpressionException</code></td><td>SpEL 表达式异常</td></tr>
+</table>
+
+<h2>2. ResponseEnhancementAdvice — 响应体后处理</h2>
+
+<p>实现 <code>ResponseBodyAdvice&lt;Object&gt;</code>，在 Jackson 序列化之前对响应对象做增强：</p>
+<pre><code>// beforeBodyWrite 核心逻辑
+Object enhancedBody = JsonValueEnhancer.enhance(body);
+// JsonValueEnhancer 来自 ruoyi-common-json 模块
+// 递归遍历响应对象树，执行 JsonFieldProcessor 链：
+//   - TranslationJsonFieldProcessor → 字段翻译（字典/用户/部门/OSS）
+//   - SensitiveJsonFieldProcessor → 字段脱敏（手机号/身份证等）
+</code></pre>
+
+<p>对应前端：翻译后的字段直接展示、脱敏后的字段自动隐藏部分内容。</p>
+
+<h2>3. 前后端协作全景图</h2>
+
+<pre>
+后端抛出异常
+    │
+    ▼
+GlobalExceptionHandler 捕获 → R.fail(code, msg)
+    │
+    ▼
+Jackson 序列化 → {"code":500,"msg":"用户不存在","data":null}
+    │
+    ▼
+前端 request.ts 响应拦截器
+    ├── code=200 → Promise.resolve(res.data)
+    ├── code=401 → 弹出重新登录确认框
+    ├── code=500 → ElMessage.error(msg) + reject
+    ├── code=601 → ElMessage.warning(msg) + reject
+    └── 其他 → ElNotification.error + reject
+</pre>
+
+<h2>4. BaseController — 便捷方法</h2>
+<pre><code>public class BaseController {
+    protected R&lt;Void&gt; toAjax(int rows) {
+        return rows > 0 ? R.ok() : R.fail();
+    }
+    protected R&lt;Void&gt; toAjax(boolean result) {
+        return result ? R.ok() : R.fail();
+    }
+    protected String redirect(String url) {
+        return StringUtils.format("redirect:{}", url);
+    }
+}</code></pre>
+<p>注意：目前业务 Controller 大多数直接使用 <code>R.ok()</code> / <code>R.fail()</code> 而非继承 BaseController。</p>
+
+<h2>5. 验证要点</h2>
+<ol>
+<li>故意在登录时输入错误验证码，追踪 <code>CaptchaException</code> → GlobalExceptionHandler 的分支</li>
+<li>在 Controller 中 throw new ServiceException()，观察前端弹窗显示的错误消息</li>
+<li>查看 <code>PlusWebInvokeTimeInterceptor</code> 日志中的脱敏参数，确认敏感字段被替换为 ***</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-advice.html">Spring @ControllerAdvice 官方文档</a></div>
+<div class="reminder"> 想知道如何为自定义异常添加新的 @ExceptionHandler？直接问我。</div>
+
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 响应体与异常体系 — R、PageResult 与分层异常设计</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .insight { background: linear-gradient(135deg, #f0faf5, #e6f7ee); border: 1px solid #c3e6d3; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .insight b { color: #1a7a4c; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · 响应体与异常体系 <span class="tag">R / PageResult / Exception</span></h1>
+
+<div class="mission">
+<b>本节目标</b>：学完你能说清 <code>R&lt;T&gt;</code> 的统一响应设计、<code>PageResult&lt;T&gt;</code> 的分页结构、以及三层异常体系（BaseException 分支 / ServiceException / SseException）各自的使用场景和设计动机。
+</div>
+
+<p><code>ruoyi-common-core</code> 模块包含约 65 个 Java 文件，是整个 RuoYi-Vue-Plus 项目<strong>所有其它模块的基石</strong>。任何一个 Controller 的返回值、任何一个 Service 抛出的异常、任何一个工具类的调用，最终都追溯到 core 模块。今天我们先看其中最核心的两块：统一响应体和分层异常体系。</p>
+
+<h2>一、统一响应体 R&lt;T&gt; — 前后端数据契约</h2>
+
+<p><code>R.java</code> 位于 <code>org.dromara.common.core.domain.R</code>，是所有 Controller 返回值的标准信封。前端解析任何一个 API 响应时，都会看到这三个字段：</p>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>code</code></td><td>int</td><td>响应状态码，默认成功为 <code>HttpStatus.SUCCESS (200)</code>，失败为 <code>HttpStatus.ERROR (500)</code></td></tr>
+<tr><td><code>msg</code></td><td>String</td><td>提示信息，如 "操作成功"、"用户名已存在"</td></tr>
+<tr><td><code>data</code></td><td>T（泛型）</td><td>业务数据载荷，可以是单个对象、List、Map 或 null</td></tr>
+</table>
+
+<h3>静态工厂方法</h3>
+
+<p>R 的设计模式是<strong>私有构造 + 公开静态工厂方法</strong> — 外部不能 new，只能通过以下工厂方法创建实例：</p>
+
+<pre><code>// 成功场景
+R.ok()              → code=200, msg="操作成功", data=null
+R.ok(data)          → code=200, msg="操作成功", data=具体值
+R.ok(msg, data)     → code=200, msg=自定义, data=具体值
+
+// 失败场景
+R.fail()            → code=500, msg="操作失败"
+R.fail(msg)         → code=500, msg=自定义
+R.fail(code, msg)   → code=自定义, msg=自定义
+
+// 警告场景（业务警告，非系统错误）
+R.warn(msg)         → code=601 (HttpStatus.WARN)
+
+// 语义别名
+R.data(data)        → 等价于 R.ok(data)，让调用更自然</code></pre>
+
+<p>所有工厂方法最终都汇入私有方法 <code>restResult(T data, int code, String msg)</code>，完成三个字段的赋值。</p>
+
+<div class="side">
+<b>前端解析契约</b>：前端统一检查 <code>response.code === 200</code> 判断成功，取 <code>response.msg</code> 弹 toast 提示，从 <code>response.data</code> 取业务数据。这个契约一旦确定，整个项目的前后端交互就有了统一的沟通语言。
+</div>
+
+<div class="insight">
+<b>设计洞察 — 为什么是 601 而不是 200 的子码？</b> 业务警告（如"库存不足，已自动调整为最大可用数量"）并非系统错误，用 500 不合适；但它也不是完全成功，用 200 又会让前端误以为一切正常。独立一个 601 作为 WARN 码，前端可以单独处理（比如橙色提示而非绿色/红色），这是 <b>语义精确性</b> 的体现。
+</div>
+
+<h2>二、分页响应 PageResult&lt;T&gt; — 与 MyBatis-Plus 的解耦</h2>
+
+<p><code>PageResult.java</code> 位于 <code>org.dromara.common.core.domain.PageResult</code>，是分页查询的统一返回结构：</p>
+
+<pre><code>public class PageResult&lt;T&gt; {
+    private long total;              // 总记录数（注意是 long，不是 int）
+    private Collection&lt;T&gt; rows;      // 当前页数据集合
+
+    // 推荐：用 build() 工厂方法创建
+    public static &lt;T&gt; PageResult&lt;T&gt; build() {
+        PageResult&lt;T&gt; pageResult = new PageResult&lt;&gt;();
+        pageResult.setRows(new ArrayList&lt;&gt;());  // 内置空集合兜底
+        return pageResult;
+    }
+}</code></pre>
+
+<p>关键设计点对比：</p>
+
+<table>
+<tr><th>设计点</th><th>PageResult（RuoYi）</th><th>MyBatis-Plus PageInfo</th></tr>
+<tr><td>定位</td><td>通用分页响应结构，与持久层无关</td><td>MyBatis-Plus 专用，紧耦合框架</td></tr>
+<tr><td>依赖</td><td>不依赖任何 ORM 框架</td><td>依赖 MyBatis-Plus IPage</td></tr>
+<tr><td>兜底</td><td><code>build()</code> 自动初始化空 ArrayList</td><td>无内置兜底</td></tr>
+<tr><td>用途</td><td>Controller 返回给前端</td><td>Service 层内部分页查询</td></tr>
+</table>
+
+<div class="side">
+<b>为什么不用 MyBatis-Plus 的 PageInfo？</b> 架构分层原则：Controller 层不应该暴露持久层框架的实现细节。PageResult 是纯 POJO，即使将来换掉 MyBatis-Plus，前端契约不受影响。Service 层拿到 MyBatis-Plus 的 IPage 后，映射为 PageResult 再返回给 Controller。
+</div>
+
+<h2>三、分层异常体系 — 三条并行分支</h2>
+
+<p>core 模块的异常设计不是一棵单继承树，而是<strong>三条独立分支并行发展</strong>，各司其职：</p>
+
+<pre><code>RuntimeException
+│
+├── 【分支 A】BaseException（国际化异常基类）
+│   │   ├── module: String     ← 归属模块标识
+│   │   ├── code: String       ← i18n 消息键
+│   │   ├── args: Object[]     ← 消息参数
+│   │   └── defaultMessage     ← 回退默认消息
+│   │
+│   ├── FileException (module="file")
+│   │   ├── FileNameLengthLimitExceededException
+│   │   ├── FileSizeLimitExceededException
+│   │   └── ...
+│   │
+│   └── UserException (module="user")
+│       ├── CaptchaException           (code="user.jcaptcha.error")
+│       └── CaptchaExpireException      (code="user.jcaptcha.expire")
+│
+├── 【分支 B】ServiceException（final，通用业务异常）
+│   └── 消息模板 + {} 占位符，链式调用
+│
+└── 【分支 C】SseException（final，SSE 专用异常）
+    └── 结构类似 ServiceException，但独立类便于全局异常处理器差异化处理</code></pre>
+
+<h3>BaseException — 支持国际化的异常基类</h3>
+
+<p><code>BaseException</code> 位于 <code>org.dromara.common.core.exception.base.BaseException</code>，重写了 <code>getMessage()</code>：</p>
+
+<pre><code>@Override
+public String getMessage() {
+    return MessageUtils.message(code, args);
+}</code></pre>
+
+<p>当抛出 <code>new UserException("user.not.exists", new Object[]{userId})</code> 时，<code>getMessage()</code> 会调用 <code>MessageUtils.message("user.not.exists", ...)</code> 去 i18n 资源文件中查找对应的中文/英文消息。</p>
+
+<p>BaseException 有四个核心字段：</p>
+<ul>
+  <li><code>module</code> — 模块标识（如 "file"、"user"），方便全局异常处理器按模块分流</li>
+  <li><code>code</code> — 消息键，对应 i18n 文件的 key</li>
+  <li><code>args</code> — 消息占位符参数，如用户 ID、文件名等动态值</li>
+  <li><code>defaultMessage</code> — 当 i18n 文件中找不到对应 key 时的回退消息</li>
+</ul>
+
+<h3>ServiceException — 追求极简使用的业务异常</h3>
+
+<p><code>ServiceException</code> 位于 <code>org.dromara.common.core.exception.ServiceException</code>，是 <code>final</code> 类，<strong>独立于 BaseException 继承树</strong>。它不依赖 i18n，而是通过 Hutool 的 <code>StrFormatter</code> 做 <code>{}</code> 占位符格式化：</p>
+
+<pre><code>// 一行抛异常，不需要配 i18n 文件
+throw new ServiceException("用户{}不存在", userId);
+
+// 支持链式调用
+throw new ServiceException("操作失败").setCode(403);
+</code></pre>
+
+<p>全局异常处理器捕获到 ServiceException 后，统一转为 <code>R.fail(code, message)</code> 返回前端。</p>
+
+<div class="insight">
+<b>设计洞察 — 为什么 ServiceException 不继承 BaseException？</b> 这是两种不同哲学的选择：BaseException 分支走的是<b>规范化路线</b> — 需要预先配好 i18n 文件、定义模块归属、归类异常类型。适合文件模块、用户模块这种跨语言、多场景的领域。而 ServiceException 走的是<b>实用主义路线</b> — 开发者写代码时随手一抛即可，不需要提前规划。两条分支并存，各取所需，互不干扰。
+</div>
+
+<h3>SseException — 为 SSE 长连接单独设类</h3>
+
+<p><code>SseException</code> 位于 <code>org.dromara.common.core.exception.SseException</code>，结构上与 ServiceException 非常相似（同样有 code、message、占位符格式化），但它是<strong>一个独立的类</strong>。原因：</p>
+
+<ol>
+  <li>全局异常处理器通过 <code>instanceof SseException</code> 做差异化分流 — SSE 场景不能返回 JSON 格式的 R，而要向 EventStream 写入错误事件</li>
+  <li>语义清晰 — 代码中看到 <code>SseException</code> 就知道是推送相关异常，方便日志检索和问题排查</li>
+</ol>
+
+<h2>四、异常体系的完整流转链路</h2>
+
+<pre><code>Controller → Service → throw new ServiceException("库存不足")
+                           │
+                           ▼
+              GlobalExceptionHandler
+              @ExceptionHandler(ServiceException.class)
+                           │
+                           ▼
+              return R.fail(e.getCode(), e.getMessage())
+                           │
+                           ▼
+              HTTP Response: {"code":500, "msg":"库存不足", "data":null}</code></pre>
+
+<p>整个链路中，Controller 和 Service 都不需要 try-catch — 全局异常处理器统一兜底，保证所有异常最终都以 R 的 JSON 格式返回给前端。</p>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>R.warn("库存不足，已自动调整")</code> 返回的 code 值是多少？</p>
+<span class="opt">A. 200</span>
+<span class="opt">B. 400</span>
+<span class="opt">C. 500</span>
+<span class="opt">D. 601</span>
+<details><summary>看答案</summary><b>D. 601</b>。R.warn() 调用 R.restResult(code=HttpStatus.WARN=601)。区别于 R.fail() 的 500 和 R.ok() 的 200。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. BaseException 和 ServiceException 的核心区别是什么？</p>
+<span class="opt">A. 没有本质区别，只是作者写了两个类</span>
+<span class="opt">B. BaseException 通过 MessageUtils 做 i18n 解析，ServiceException 通过 StrFormatter 做 {} 占位符替换，两者继承树独立</span>
+<span class="opt">C. BaseException 是 checked exception，ServiceException 是 runtime exception</span>
+<span class="opt">D. BaseException 只能用于文件模块</span>
+<details><summary>看答案</summary><b>B</b>。BaseException 重写 getMessage() 走 i18n 路径，子类 FileException/UserException 继承它；ServiceException 是 final 类，独立于 BaseException 继承树，用 Hutool StrFormatter 做占位符替换。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么 SseException 要独立于 ServiceException 成为一个单独的类？</p>
+<span class="opt">A. 因为 SSE 异常需要更多字段</span>
+<span class="opt">B. 为了让全局异常处理器能够通过 instanceof 做差异化处理，SSE 场景不能返回 JSON 格式的 R</span>
+<span class="opt">C. 因为 SseException 继承的是不同的父类</span>
+<span class="opt">D. 没有特别原因</span>
+<details><summary>看答案</summary><b>B</b>。SSE 长连接场景下，异常不能以 JSON 格式返回 — 需要向 EventStream 发送错误事件。全局异常处理器通过 instanceof 区分 SseException 和 ServiceException，执行不同的处理逻辑。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. PageResult.build() 为什么要在构造时初始化一个空 ArrayList？</p>
+<span class="opt">A. 为了性能优化</span>
+<span class="opt">B. 为了防止前端收到 null 导致空指针异常，这是防御性编程</span>
+<span class="opt">C. MyBatis-Plus 要求必须初始化</span>
+<span class="opt">D. 这只是代码风格问题</span>
+<details><summary>看答案</summary><b>B</b>。build() 中 setRows(new ArrayList<>()) 保证即使查询返回空结果，前端拿到的也是 [] 而非 null，避免前端空指针判断的遗漏。</details>
+</div>
+
+<div class="cite">&#x1F4D6; 推荐一手资料：<code>org.dromara.common.core.domain.R</code> — 读私有方法 <code>restResult()</code>；<code>org.dromara.common.core.exception.base.BaseException</code> — 读重写的 <code>getMessage()</code>；<code>org.dromara.common.core.exception.ServiceException</code> — 读构造函数中的 <code>StrFormatter.format()</code>。</div>
+
+<div class="reminder">&#x1F4A1; 有疑问？直接问我。比如：「BaseException 的 defaultMessage 和 MessageUtils 返回的消息是什么优先级关系？」「为什么 PageResult 的 total 用 long 而不是 int？」下一课我们进入<strong>常量枚举与设计模式</strong> — 看 core 模块如何用 interface 常量、枚举状态机和缓存命名协议来管理全局约定。</div>
+
+<div class="nav">课程 01 · ruoyi-common-core 响应体与异常体系 → <a href="02-常量枚举与设计模式.html">下一课：02-常量枚举与设计模式</a></div>
+
+</body>
+</html>

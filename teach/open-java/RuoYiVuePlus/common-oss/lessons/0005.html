@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 实战串联：从一行 upload() 到 OSS 返回 URL 的完整旅程</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#e6f7f0; color:#1a7a4c; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 实战串联：从一行 upload() 到 OSS 返回 URL 的完整旅程 <span class="tag">实战</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能从 <code>OssFactory.instance().upload(file)</code> 一行代码追踪到底层 S3 API 调用，理解 <code>BucketUrlUtil</code> 的两种 URL 风格，知道切换阿里云 OSS → 腾讯云 COS → MinIO 只需要改数据库配置。
+</div>
+
+<p>前几课我们拆解了各个零件：工厂、配置、异常、IO。这一课把它们串起来——从 Controller 里一行 <code>upload()</code> 出发，追踪数据在 17 个类之间如何流动，直到 OSS 返回一个可访问的 URL。</p>
+
+<h2>一、完整上传链路 — 一行代码的背后</h2>
+
+<p>假设 Controller 写了这样一行：</p>
+
+<pre><code>PutObjectResult result = OssFactory.instance().upload(file);</code></pre>
+
+<p>下面逐步追踪这条调用链。每一步标注了发生位置。</p>
+
+<h3>阶段 A：获取客户端实例</h3>
+
+<div class="step"><span class="num">1</span> <span class="where">OssFactory.java</span> <code>OssFactory.instance()</code> — 从 Redis 读取默认配置 key → 调用 <code>instance(defaultConfigKey)</code></div>
+
+<div class="step"><span class="num">2</span> <span class="where">OssFactory.java</span> <code>instance(configKey)</code> — 从 <code>CacheUtils.get(CacheNames.SYS_OSS_CONFIG, configKey)</code> 读取 JSON → 反序列化为 <code>OssProperties</code> → 调用 <code>OssClientConfig.formProperties(properties)</code> 转换为配置对象</div>
+
+<div class="step"><span class="num">3</span> <span class="where">OssFactory.java</span> 获取 per-configKey 的 <code>ReentrantLock</code>，双重检查缓存：如果已有客户端且 <code>client.verifyConfig(config)</code> 通过，直接返回；如果配置变更了，先 <code>client.close()</code> 再重建</div>
+
+<div class="step"><span class="num">4</span> <span class="where">OssFactory.java</span> <code>new DefaultOssClientImpl(configKey, config)</code> → 调用父类构造函数 → <code>AbstractOssClientImpl.initialize()</code> → <code>doInitialize()</code> 创建 <code>S3AsyncClient</code>、<code>S3TransferManager</code>、<code>S3Presigner</code> — 存入缓存返回</div>
+
+<h3>阶段 B：路由到抽象层</h3>
+
+<div class="step"><span class="num">5</span> <span class="where">OssClient.java / AbstractOssClientImpl.java</span> <code>upload(File file)</code> → <code>bucketUpload(defaultBucket(), buildPathKey(fileName), file)</code> — 自动选择默认 bucket（无参版本）</div>
+
+<div class="step"><span class="num">6</span> <span class="where">AbstractOssClientImpl.java</span> <code>buildPathKey(fileName)</code> — 拼接：<code>prefix + yyyy/MM/dd + UUID + 文件后缀</code>，得到类似 <code>"ruoyi/2026/07/05/a1b2c3d4e5f6.jpg"</code> 的 key</div>
+
+<h3>阶段 C：类型转换链</h3>
+
+<div class="step"><span class="num">7</span> <span class="where">AbstractOssClientImpl.java</span> <code>bucketUpload(bucket, key, File)</code> → <code>File</code> 转为 <code>RandomAccessFile</code> → 读取 <code>ReadableByteChannel</code>（<code>contentLength</code> 来自 <code>file.length()</code>）</div>
+
+<div class="step"><span class="num">8</span> <span class="where">AbstractOssClientImpl.java</span> <code>bucketUpload(bucket, key, ReadableByteChannel, contentLength, Options)</code> — 如果是 <code>SeekableByteChannel</code> 用 <code>byteChannel.size()</code> 获取精确长度；否则包装为 <code>InputStream</code>（通过 <code>Channels.newInputStream</code>）→ 创建临时文件 → 拷贝流 → 从临时文件 <code>Path</code> 创建 <code>AsyncRequestBody</code></div>
+
+<h3>阶段 D：核心上传</h3>
+
+<div class="step"><span class="num">9</span> <span class="where">AbstractOssClientImpl.java</span> 私有方法 <code>bucketUpload(bucket, key, AsyncRequestBody, Options)</code> — 所有上传路径的汇聚点。解析 <code>contentLength</code>、<code>contentType</code>、<code>md5Digest</code>、<code>metadata</code>、<code>transferListeners</code>，调用 <code>doCustomUpload(body, putObjectBuilder, handleAsyncAction)</code></div>
+
+<div class="step"><span class="num">10</span> <span class="where">AbstractOssClientImpl.java</span> <code>doCustomUpload(AsyncRequestBody body, Consumer&lt;PutObjectRequest.Builder&gt; putBuilderConsumer, BiFunction&lt;CompletedUpload, Throwable, HandleAsyncResult&lt;PutObjectResult&gt;&gt; handleAsyncAction)</code> — 构建 <code>UploadRequest</code> → <code>s3TransferManager.upload(uploadRequestBuilder)</code> → 返回 <code>CompletableFuture</code> → <code>.handleAsync(handleAsyncAction)</code> → <code>.join()</code></div>
+
+<div class="step"><span class="num">11</span> <span class="where">AbstractOssClientImpl.java</span> 成功回调：从 <code>CompletedUpload</code> 提取信息 → <code>PutObjectResult.form(bucketUrl + "/" + key, key, eTag, size)</code>。得到的 URL 形如 <code>https://bucket.oss-cn-beijing.aliyuncs.com/ruoyi/2026/07/05/a1b2c3d4e5f6.jpg</code></div>
+
+<div class="step"><span class="num">12</span> <span class="where">AbstractOssClientImpl.java</span> <code>finally</code> 块：对于 InputStream 路径创建的临时文件，在此处删除</div>
+
+<div class="flow">
+Controller
+  │  OssFactory.instance()
+  │  └─ Redis → OssProperties → OssClientConfig → DefaultOssClientImpl (cached)
+  │
+  │  .upload(file)
+  ▼
+AbstractOssClientImpl
+  │  upload(key, file) → bucketUpload(bucket, buildPathKey(name), file)
+  │  buildPathKey → prefix + yyyy/MM/dd + uuid + .jpg
+  │  bucketUpload → File→RandomAccessFile→ReadableByteChannel
+  │              → InputStream→temp file→AsyncRequestBody
+  │  private bucketUpload → doCustomUpload(body, builder, handler)
+  ▼
+S3TransferManager.upload(UploadRequest)
+  │  → CompletableFuture → .handleAsync(handler) → .join()
+  ▼
+PutObjectResult { url, key, eTag, size }
+  │  url = bucketUrl + "/" + key
+  │  e.g. https://bucket.oss-cn-beijing.aliyuncs.com/ruoyi/2026/07/05/abc.jpg
+</div>
+
+<p>一句话总结上传链路：<b>工厂从 Redis 取配置创建客户端 → 客户端把 Java 对象逐层转为 AWS SDK 的 AsyncRequestBody → S3TransferManager 异步上传 → CompletableFuture 同步等待 → 拼接 bucket URL 返回</b>。</p>
+
+<h2>二、完整下载链路</h2>
+
+<p>下载比上传简单——输入是 key，输出是文件或流。</p>
+
+<div class="step"><span class="num">1</span> <code>download(key)</code> → <code>bucketDownload(defaultBucket(), key, path)</code> — 自动选取默认 bucket</div>
+
+<div class="step"><span class="num">2</span> <code>bucketDownload(bucket, key, Path)</code> → <code>OutputStreamDownloadSubscriber.create(path)</code> — 将输出目标包装为 Reactive Streams Subscriber</div>
+
+<div class="step"><span class="num">3</span> <code>doCustomDownload(getReqBuilder, AsyncResponseTransformer.toPublisher())</code> → 构建 <code>DownloadRequest</code> → <code>s3TransferManager.download(downloadRequest)</code> → 返回 <code>Publisher&lt;ByteBuffer&gt;</code></div>
+
+<div class="step"><span class="num">4</span> <code>Publisher&lt;ByteBuffer&gt;</code> → <code>.subscribe(outputStreamDownloadSubscriber)</code> — ByteBuffer 逐块写入目标文件</div>
+
+<div class="step"><span class="num">5</span> 从 <code>GetObjectResponse</code> 的 metadata 构建 <code>GetObjectResult</code>：<code>key</code>、<code>eTag</code>、<code>lastModified</code>（UTC LocalDateTime）、<code>size</code>、<code>contentType</code>、<code>contentDisposition</code>、<code>contentRange</code>、<code>contentEncoding</code>、<code>contentLanguage</code>、<code>metadata</code>（Map）</div>
+
+<div class="flow">
+download(key)
+  │  bucketDownload(bucket, key, path)
+  ▼
+OutputStreamDownloadSubscriber.create(path)  ←─ Reactive Streams Subscriber
+  │
+  │  doCustomDownload(builder, transformer)
+  ▼
+S3TransferManager.download(DownloadRequest)
+  │  → Publisher&lt;ByteBuffer&gt;
+  │  → .subscribe(subscriber)
+  ▼
+GetObjectResult { key, eTag, lastModified, size, contentType, ... }
+</div>
+
+<h2>三、BucketUrlUtil — URL 的两种面孔</h2>
+
+<p>同一个 bucket，有两种 URL 表示方式。这个工具类决定了最终返回给前端的 URL 长什么样。</p>
+
+<h3>Path-Style（路径风格）</h3>
+
+<p>bucket 名出现在 URL 路径中：</p>
+
+<div class="flow">格式: {protocol}://{base}/{bucketName}
+示例: https://s3.example.com/my-bucket</div>
+
+<p>适用于：自建 MinIO、非标准 S3 兼容服务。当你部署 MinIO 在 <code>http://192.168.1.100:9000</code> 时，bucket URL 就是 <code>http://192.168.1.100:9000/my-bucket</code>。</p>
+
+<h3>Site-Style（虚拟主机风格，Virtual-Hosted）</h3>
+
+<p>bucket 名出现在子域名中：</p>
+
+<div class="flow">格式: {protocol}://{bucketName}.{base}
+示例: https://my-bucket.s3.example.com</div>
+
+<p>适用于：阿里云 OSS、腾讯云 COS、七牛云。阿里云的 endpoint 如 <code>oss-cn-beijing.aliyuncs.com</code>，最终 URL 为 <code>https://bucket.oss-cn-beijing.aliyuncs.com</code>。</p>
+
+<h3>四个核心方法</h3>
+
+<table>
+<tr><th>方法</th><th>作用</th><th>示例</th></tr>
+<tr><td><code>rebuildUrlHeader(boolean isHttps, String base)</code></td><td>剥离已有协议头，重新拼接 http:// 或 https://</td><td><code>rebuildUrlHeader(true, "s3.example.com")</code> → <code>"https://s3.example.com"</code></td></tr>
+<tr><td><code>removeHttpProtocolHeader(String url)</code></td><td>去掉 http:// 和 https:// 前缀（大小写不敏感）</td><td><code>removeHttpProtocolHeader("https://s3.example.com")</code> → <code>"s3.example.com"</code></td></tr>
+<tr><td><code>getPathStyleBucketUrl(boolean isHttps, String base, String bucketName)</code></td><td>拼接路径风格 URL</td><td><code>getPathStyleBucketUrl(true, "s3.example.com", "images")</code> → <code>"https://s3.example.com/images"</code></td></tr>
+<tr><td><code>getSiteStyleBucketUrl(boolean isHttps, String base, String bucketName)</code></td><td>拼接站点风格 URL</td><td><code>getSiteStyleBucketUrl(true, "oss-cn-beijing.aliyuncs.com", "images")</code> → <code>"https://images.oss-cn-beijing.aliyuncs.com"</code></td></tr>
+</table>
+
+<h3>在哪里决定用哪种风格</h3>
+
+<p>关键在 <code>OssClientConfig.getBucketUrl(String bucket)</code> 方法中：</p>
+
+<pre><code>public String getBucketUrl(String bucket) {
+    if (usePathStyleAccess) {
+        return BucketUrlUtil.getPathStyleBucketUrl(useHttps, getEndpointUrl(), bucket);
+    }
+    return BucketUrlUtil.getSiteStyleBucketUrl(useHttps, getEndpointUrl(), bucket);
+}</code></pre>
+
+<p><code>usePathStyleAccess</code> 在 <code>OssClientConfig.formPropertiesBuilder()</code> 中通过 <code>resolvePathStyleAccess(properties)</code> 自动判断：遍历 <code>OssConstant.CLOUD_SERVICE</code> 数组（含 <code>"aliyun"</code>、<code>"qcloud"</code>、<code>"qiniu"</code>、<code>"obs"</code>），如果 endpoint 包含其中任一关键词 → 使用 site-style（<code>false</code>）；否则 → path-style（<code>true</code>）。</p>
+
+<h2>四、多厂商切换实战</h2>
+
+<h3>场景 1：阿里云 OSS → 腾讯云 COS</h3>
+
+<p>只需要在数据库配置表里修改 4 个字段：</p>
+
+<table>
+<tr><th>字段</th><th>阿里云 OSS</th><th>→ 腾讯云 COS</th></tr>
+<tr><td>endpoint</td><td><code>oss-cn-beijing.aliyuncs.com</code></td><td><code>cos.ap-beijing.myqcloud.com</code></td></tr>
+<tr><td>accessKey</td><td>LTAI5t...</td><td>AKID...</td></tr>
+<tr><td>secretKey</td><td>（阿里云密钥）</td><td>（腾讯云密钥）</td></tr>
+<tr><td>bucketName</td><td>my-bucket</td><td>my-bucket-1234567890</td></tr>
+</table>
+
+<p>代码一行不变。因为 SDK 对话的对象是 S3 协议，不是厂商 API。</p>
+
+<h3>场景 2：公有云 → MinIO 自建</h3>
+
+<p>将 endpoint 改为自建 MinIO 地址，如 <code>http://192.168.1.100:9000</code>。由于 endpoint 不含 <code>CLOUD_SERVICE</code> 中的任何关键词，<code>resolvePathStyleAccess</code> 自动设为 path-style，无需手动配置。</p>
+
+<h3>场景 3：双厂商并存</h3>
+
+<p>在 <code>sys_oss_config</code> 表中创建两条记录，configKey 分别为 <code>"oss_aliyun"</code> 和 <code>"oss_minio"</code>。使用时：</p>
+
+<pre><code>OssClient aliyunClient = OssFactory.instance("oss_aliyun");
+OssClient minioClient  = OssFactory.instance("oss_minio");
+aliyunClient.upload(file);   // 上阿里云
+minioClient.upload(file);    // 上 MinIO</code></pre>
+
+<p>每个 configKey 在工厂中有独立的锁和缓存，互不干扰。</p>
+
+<div class="side">
+💡 <b>S3 兼容性的魔法</b>：因为 SDK 底层全程使用 S3 协议（REST API），任何兼容 S3 协议的服务都能即插即用。阿里云 OSS、腾讯云 COS、七牛云 Kodo、华为云 OBS、MinIO、Ceph RGW — 只要实现了 S3 API，就无需修改任何 Java 代码。
+</div>
+
+<h2>五、异常处理体系</h2>
+
+<h3>S3StorageException — 统一异常包装</h3>
+
+<p><code>S3StorageException</code> 继承 <code>RuntimeException</code>，提供 4 个构造函数和 4 个静态工厂方法 <code>form()</code>：</p>
+
+<table>
+<tr><th>签名</th><th>用途</th></tr>
+<tr><td><code>S3StorageException(String message)</code></td><td>纯消息异常，如 "bucket not configured"</td></tr>
+<tr><td><code>S3StorageException(String message, Throwable cause)</code></td><td>包装底层异常，保留原因链</td></tr>
+<tr><td><code>S3StorageException(Throwable cause)</code></td><td>仅包装异常</td></tr>
+<tr><td><code>S3StorageException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace)</code></td><td>完整控制</td></tr>
+</table>
+
+<blockquote><code>form()</code> 静态工厂与构造函数的参数一一对应，语义等价的别名。</blockquote>
+
+<h3>异常抛出点</h3>
+
+<table>
+<tr><th>位置</th><th>条件</th><th>消息</th></tr>
+<tr><td><code>OssFactory.instance()</code></td><td>Redis 中读不到配置</td><td>"oss configKey [xxx] not found"</td></tr>
+<tr><td><code>DefaultOssClientImpl.doInitialize()</code></td><td>accessKey 或 secretKey 为空</td><td>"accessKey or secretKey is empty"</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>bucket 未配置</td><td>"bucket not configured"</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>上传返回 null</td><td>"upload response is empty"</td></tr>
+<tr><td><code>AbstractOssClientImpl</code></td><td>S3 SDK 抛出任何异常</td><td>经 <code>toStorageException()</code> 转换</td></tr>
+</table>
+
+<h3>toStorageException() — 异步异常解包</h3>
+
+<p>核心逻辑：</p>
+
+<ol>
+  <li><code>unwrapAsyncException(Throwable)</code> — 循环 while cause 是 <code>CompletionException</code> 或 <code>ExecutionException</code>，逐层剥开拿到真正的根因</li>
+  <li>如果剥开后已经是 <code>S3StorageException</code>，直接返回</li>
+  <li>否则 <code>new S3StorageException(message, unwrapped)</code> 包装</li>
+</ol>
+
+<p>业务层捕获方式：</p>
+
+<pre><code>try {
+    PutObjectResult result = OssFactory.instance().upload(file);
+    return R.ok(result.getUrl());
+} catch (S3StorageException e) {
+    return R.fail(e.getMessage());
+}</code></pre>
+
+<h2>六、预签名 URL — 临时访问凭证</h2>
+
+<p>预签名 URL 让前端可以直接与 OSS 交互，不经过后端服务器中转数据。</p>
+
+<table>
+<tr><th>方法</th><th>作用</th></tr>
+<tr><td><code>presignGetUrl(String key, Duration expiredTime)</code></td><td>生成限时 GET URL，浏览器直接下载文件</td></tr>
+<tr><td><code>presignPutUrl(String key, Duration expiredTime, Map&lt;String, String&gt; metadata)</code></td><td>生成限时 PUT URL，浏览器直接上传文件到 OSS</td></tr>
+</table>
+
+<p>实现原理：</p>
+
+<pre><code>s3Presigner.presignGetObject(req ->
+    req.bucket(bucket)
+       .key(key)
+       .signatureDuration(expiredTime)
+);</code></pre>
+
+<p>典型应用场景：前端请求后端获取预签名 PUT URL → 前端直接用该 URL 上传文件到 OSS → 上传完成后通知后端记录文件信息。后端不处理文件数据流，只负责签发凭证和记录元数据。</p>
+
+<h2>七、PutObjectResult 与 GetObjectResult — 结果模型</h2>
+
+<p>两个 Java <code>record</code>，纯数据载体，简洁无冗余。</p>
+
+<h3>PutObjectResult</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>url</code></td><td><code>String</code></td><td>拼接后的完整访问 URL</td></tr>
+<tr><td><code>key</code></td><td><code>String</code></td><td>对象在 bucket 中的路径</td></tr>
+<tr><td><code>eTag</code></td><td><code>String</code></td><td>文件内容的哈希标识（用于断点续传比对）</td></tr>
+<tr><td><code>size</code></td><td><code>long</code></td><td>文件字节数</td></tr>
+</table>
+
+<h3>GetObjectResult</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>key</code></td><td><code>String</code></td><td>对象 key</td></tr>
+<tr><td><code>eTag</code></td><td><code>String</code></td><td>内容哈希</td></tr>
+<tr><td><code>lastModified</code></td><td><code>LocalDateTime</code></td><td>最后修改时间（<b>UTC 时区</b>）</td></tr>
+<tr><td><code>size</code></td><td><code>long</code></td><td>文件大小（字节）</td></tr>
+<tr><td><code>contentType</code></td><td><code>String</code></td><td>MIME 类型</td></tr>
+<tr><td><code>contentDisposition</code></td><td><code>String</code></td><td>内容展示方式（inline / attachment）</td></tr>
+<tr><td><code>contentRange</code></td><td><code>String</code></td><td>范围请求信息</td></tr>
+<tr><td><code>contentEncoding</code></td><td><code>String</code></td><td>内容编码（如 gzip）</td></tr>
+<tr><td><code>contentLanguage</code></td><td><code>String</code></td><td>内容语言</td></tr>
+<tr><td><code>metadata</code></td><td><code>Map&lt;String, String&gt;</code></td><td>自定义元数据</td></tr>
+</table>
+
+<h2>课后自测</h2>
+
+<div class="quiz">
+<p>1. 在完整上传链路中，所有输入类型（File、Path、InputStream、byte[] 等）最终汇聚到哪个私有方法？</p>
+<span class="opt">A. <code>doCustomUpload()</code></span>
+<span class="opt">B. <code>private bucketUpload(bucket, key, AsyncRequestBody, Options)</code></span>
+<span class="opt">C. <code>s3TransferManager.upload()</code></span>
+<span class="opt">D. <code>AbstractOssClientImpl.upload()</code></span>
+</div>
+
+<details>
+<summary>查看答案</summary>
+<p><b>B</b>。所有上传方法（6 种输入类型 x 2 种 bucket 选择 = 12 个方法）最终都收敛到 <code>private bucketUpload(bucket, key, AsyncRequestBody body, Options options)</code>，再由它调用 <code>doCustomUpload()</code>。</p>
+</details>
+
+<div class="quiz">
+<p>2. 将一个正在使用阿里云 OSS 的项目切换到 MinIO，<code>resolvePathStyleAccess()</code> 返回什么？为什么？</p>
+<span class="opt">A. <code>false</code>，因为 MinIO 是云服务</span>
+<span class="opt">B. <code>true</code>，因为 MinIO 的 endpoint 不含 <code>CLOUD_SERVICE</code> 数组中的关键词，无匹配则默认 path-style</span>
+<span class="opt">C. <code>false</code>，需要在数据库配置中手动设置</span>
+<span class="opt">D. <code>null</code>，由 SDK 自动选择</span>
+</div>
+
+<details>
+<summary>查看答案</summary>
+<p><b>B</b>。<code>resolvePathStyleAccess()</code> 遍历 <code>CLOUD_SERVICE = {"aliyun", "qcloud", "qiniu", "obs"}</code>，检查 endpoint 是否包含其中任一。MinIO 的 endpoint 如 <code>"http://192.168.1.100:9000"</code> 不含任何匹配，返回默认值 <code>true</code>（path-style）。</p>
+</details>
+
+<div class="quiz">
+<p>3. <code>toStorageException()</code> 中 <code>unwrapAsyncException()</code> 的作用是什么？</p>
+<span class="opt">A. 将所有异常转为 <code>S3StorageException</code></span>
+<span class="opt">B. 跳过 <code>CompletionException</code> 和 <code>ExecutionException</code> 包装层，取出真正的根因</span>
+<span class="opt">C. 将异常信息写入日志</span>
+<span class="opt">D. 将多个异步异常合并为一个</span>
+</div>
+
+<details>
+<summary>查看答案</summary>
+<p><b>B</b>。CompletableFuture 在发生异常时会将真实异常包装在 <code>CompletionException</code>（或 <code>ExecutionException</code>）中。通过 while 循环持续调用 <code>cause.getCause()</code> 直到不再是这两种类型，取出真正的根因（如网络超时、认证失败等），然后再包装为 <code>S3StorageException</code> 返回给业务层。</p>
+</details>
+
+<div class="reminder">
+📌 <b>课后练习</b>：在本地启动一个 MinIO 容器，将项目的 OSS 配置指向它。用 <code>OssFactory.instance().upload()</code> 上传一张图片，然后尝试用 <code>presignGetUrl()</code> 让浏览器直接下载该图片。观察 URL 是 path-style 还是 site-style。
+</div>
+
+<div class="cite">
+参考源文件：<br>
+<code>OssFactory.java</code> — 客户端缓存、双重检查锁、JSON → OssProperties 转换<br>
+<code>AbstractOssClientImpl.java</code> — bucketUpload 汇聚、buildPathKey、toStorageException<br>
+<code>DefaultOssClientImpl.java</code> — doInitialize、S3AsyncClient 创建<br>
+<code>BucketUrlUtil.java</code> — 两种 URL 风格、协议头重建<br>
+<code>OssClientConfig.java</code> — resolvePathStyleAccess、getBucketUrl<br>
+<code>S3StorageException.java</code> — 异常包装体系<br>
+<code>PutObjectResult.java / GetObjectResult.java</code> — 结果记录<br>
+<code>OssConstant.java</code> — CLOUD_SERVICE 常量数组<br>
+<br>
+配套速查：<a href="../reference/0005.html">速查 05 · 实战链路与多厂商切换</a>
+</div>
+
+<div class="nav">
+← <a href="0004.html">第 4 课</a> &nbsp;|&nbsp; <a href="../GLOSSARY.md">术语表</a>
+</div>
+
+</body>
+</html>

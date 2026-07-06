@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SaTokenConfig 与 JWT 集成</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>01 - SaTokenConfig 与 JWT 集成</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 SaTokenConfig 中四个 Bean 的注册原因及其在框架中的角色，掌握 PlusSaTokenDao 的 Redis + Caffeine 两级缓存策略，能说清 JWT 模式与 Redis 模式的切换原理。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p><code>ruoyi-common-satoken</code> 是认证骨干模块，聚焦 5 个 Java 文件 + 1 个 yml 配置。它将 Sa-Token 轻量认证框架适配到 RuoYi-Vue-Plus 的生产环境中——JWT 化 Token、Redis + Caffeine 持久化、统一异常处理。</p>
+
+<p>架构总览：</p>
+<pre>
+客户端请求 (Authorization: Bearer &lt;JWT&gt;)
+  ↓
+Sa-Token 过滤器 (自动读取 Token)
+  ↓
+StpLogicJwtForSimple (JWT 简单模式、解析 Token)
+  ↓
+PlusSaTokenDao (两级缓存读用户数据)
+  ├─ L1: Caffeine 本地缓存 (纳秒级)
+  └─ L2: Redis 分布式缓存 (毫秒级)
+  ↓
+StpInterface → SaPermissionImpl (获取权限/角色)
+  ↓
+放行 or 拒绝 (NotLoginException / NotPermissionException)
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 SaTokenConfig：四个 Bean 的注册</h3>
+<p><code>SaTokenConfig.java</code> 是自动配置入口，注册了 4 个核心 Bean：</p>
+
+<table>
+  <tr><th>Bean</th><th>类型</th><th>角色</th><th>为什么需要注册？</th></tr>
+  <tr><td><code>StpLogic</code></td><td>StpLogicJwtForSimple</td><td>认证逻辑核心</td><td>替换默认的随机 Token 为 JWT——Token 从一段随机字符串变成自包含用户信息的 Base64 JWT</td></tr>
+  <tr><td><code>SaTokenDao</code></td><td>PlusSaTokenDao</td><td>数据持久层</td><td>替换默认的内存存储为 Redis + Caffeine——支持分布式、重启不丢 Token</td></tr>
+  <tr><td><code>StpInterface</code></td><td>SaPermissionImpl</td><td>权限获取</td><td>告诉框架「去数据库查权限/角色」，而非用固定的静态配置</td></tr>
+  <tr><td><code>SaTokenListener</code></td><td>自定义 Listener</td><td>事件监听</td><td>监听登录/退出/踢人等事件，做日志记录和业务联动</td></tr>
+</table>
+
+<blockquote><strong>关键理解：</strong>SaTokenConfig 不是简单「配置参数」，而是「替换框架默认行为」。默认的 Sa-Token 用内存存 Token（重启即丢失）、用随机字符串作为 Token（不可自解析）。SaTokenConfig 把这些全部替换为生产就绪的实现。</blockquote>
+
+<h3>2.2 StpLogicJwtForSimple：JWT 简单模式</h3>
+<p>Sa-Token 支持两种 JWT 模式：</p>
+<table>
+  <tr><th>模式</th><th>Token 格式</th><th>登录信息位置</th><th>额外适配</th></tr>
+  <tr><td>Mixin 模式</td><td>JWT</td><td>JWT 的 payload 中</td><td>需要自定义 StpLogic 混合代码</td></tr>
+  <tr><td><strong>Simple 模式（本项目）</strong></td><td>JWT</td><td>JWT 仅存基础数据，详细信息在 Redis Token Session</td><td>零额外代码</td></tr>
+</table>
+
+<p>Simple 模式的选择理由：</p>
+<ul>
+  <li>Token 变为标准 JWT 格式（其他语言可直接解析验证）</li>
+  <li>JWT 中只存 userId 等基础信息（Token 体量小）</li>
+  <li>用户详细数据（LoginUser、部门信息、权限列表）仍存 Redis（安全可控、可随时踢人）</li>
+</ul>
+
+<pre>
+// 生成的 JWT Token:
+eyJhbGciOiJIUzI1NiJ9.eyJsb2dpbklkIjoiMSIsImxvZ2luVHlwZSI6ImxvZ2luIiwiZXhwIjoxNzUxMjM0NTY3fQ.xxx
+
+// JWT Payload 解码:
+{
+  "loginId": "1",
+  "loginType": "login",
+  "exp": 1751234567
+}
+</pre>
+
+<h3>2.3 PlusSaTokenDao：两级缓存策略</h3>
+<p>实现 Sa-Token 的 <code>SaTokenDao</code> 接口，替换默认内存存储：</p>
+<pre>
+读数据流程:
+get("satoken:login:token:xxx")
+  → caffeine.getIfPresent(key)
+    ├─ 命中 → 直接返回（节省 Redis 网络调用）
+    └─ 未命中 → RedisUtils.getObject(key)
+                  ├─ 命中 → 写回 Caffeine → 返回
+                  └─ 未命中 → null
+</pre>
+
+<p><strong>什么时候读 Caffeine，什么时候回源 Redis？</strong></p>
+<ul>
+  <li><strong>Caffeine 本地缓存：</strong>30 秒过期，1000 条上限。适合高频读取的 Token/Session 数据（同一用户每次请求都鉴权）</li>
+  <li><strong>Redis 分布式缓存：</strong>持久存储，Token 的 master 数据源。Caffeine 过期后的回源目标</li>
+</ul>
+
+<blockquote><strong>与 PlusSmsDao 的对比：</strong>两者都用了 Caffeine + Redis 两级缓存，设计思想一致。但 PlusSaTokenDao 的本地缓存过期时间更短（30s vs Sms 的可能更长），因为权限数据需要更高的实时性——管理员改了用户权限后，30 秒内就能生效。</blockquote>
+
+<h3>2.4 common-satoken.yml 配置</h3>
+<pre>
+sa-token:
+  token-name: Authorization       # Token 在 Header 中的名称
+  token-prefix: Bearer             # Token 前缀（Authorization: Bearer xxx）
+  timeout: 86400                   # Token 有效期（秒，默认 1 天）
+  active-timeout: 1800             # 临时有效期（秒，30 分钟无操作则过期）
+  is-concurrent: true              # 是否允许同一账号并发登录
+  is-share: false                  # 多账号体系下是否共享 Token
+  is-log: true                     # 是否输出操作日志
+  jwt-secret-key: xxxxxx           # JWT 签名密钥
+</pre>
+
+<p><strong>timeout vs active-timeout：</strong>timeout 是绝对过期（1 天后无论如何过期），active-timeout 是临时过期（30 分钟无操作过期）。两者同时生效——取最小值。用户如果一直操作，Token 可以自动续期到 timeout；用户如果 30 分钟不动，Token 自动失效。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么 JWT Simple 模式比 Mixin 模式更适合本项目？</p>
+<p><strong>参考:</strong> Simple 模式零额外适配代码——引入 sa-token-jwt 依赖后不需要写任何 Mixin 混合逻辑。JWT 只存基础字段，详细数据仍在 Redis Token Session——这意味着「踢人下线」「封禁账号」「角色权限变更」等操作仍然实时生效（因为 Redis 中的 session 可以被删除/修改），而不会因为 JWT 没有失效机制而出现「踢了人但他还能用」的安全问题。</p>
+<p><strong>Q2:</strong> PlusSaTokenDao 的 Caffeine 为什么设置 30 秒过期而不是永久或更长时间？</p>
+<p><strong>参考:</strong> 30 秒是一个平衡值——足够覆盖同一用户短时间内多次请求的缓存命中（用户连续点击通常不超过 30 秒），又足够快地让权限变更生效（管理员改了权限后最多 30 秒生效）。如果永久缓存，管理员踢人/改权限后可能永远不生效（只要 Caffeine 不重启）。如果设 1 秒，缓存命中率太低，起不到减轻 Redis 压力的作用。</p>
+<p><strong>Q3:</strong> is-concurrent=true 意味着什么？设为 false 会有什么影响？</p>
+<p><strong>参考:</strong> true 表示同一账号可以多设备同时登录——用户可以在手机和电脑上同时在线。false 表示同一账号只能一个设备在线——新登录会踢掉旧登录。对于管理系统，true 更合理（用户可以多处登录办公）；对于需要严格控制登录数量的场景（如付费账号限制设备数），应该设 false。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 应用启动
+1. AutoConfiguration.imports → SaTokenConfig
+2. 注册 4 个 Bean:
+   → StpLogicJwtForSimple (JWT 模式)
+   → PlusSaTokenDao (Redis + Caffeine)
+   → SaPermissionImpl (权限查询)
+   → SaTokenListener (事件监听)
+
+// 用户请求 /api/user/list (Authorization: Bearer &lt;jwt&gt;)
+3. Sa-Token 全局过滤器 → 提取 Token
+   → 剥离 "Bearer " 前缀
+   → StpLogicJwtForSimple 解析 JWT
+     → 验证签名 (jwt-secret-key)
+     → 提取 loginId=1, loginType="login"
+4. PlusSaTokenDao.get("satoken:login:token:xxx")
+   → Caffeine 命中 → 返回 LoginUser
+5. SaPermissionImpl.getPermissionList(1, "login")
+   → 查数据库获取用户的权限码列表
+6. @SaCheckPermission("system:user:list") → 权限码匹配 → 放行
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>SaTokenConfig 的四 Bean 注册是一种「接口替换」模式——将框架默认的四个能力（认证逻辑、持久化、权限查询、事件监听）全部替换为生产级实现。这种设计的精髓在于：不改框架源码、不破坏框架约定，而是利用框架预留的 SPI（Service Provider Interface）扩展点注入自定义实现。SaTokenDao 的两级缓存虽然与 PlusSmsDao 结构相似，但过期策略更短（30s），反映了「认证数据比业务数据需要更高实时性」的设计权衡。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://sa-token.cc/doc.html#/up/jwt-extend">Sa-Token JWT 集成文档</a> · 入口文件：<code>config/SaTokenConfig.java</code> · <code>dao/PlusSaTokenDao.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解 SaPermissionImpl 权限校验与 LoginHelper 登录流程。</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-权限校验与LoginHelper.html">下一课 →</a></div>
+</body>
+</html>

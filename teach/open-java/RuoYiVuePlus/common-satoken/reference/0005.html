@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 05 · 完整链路与模式切换</title>
+<style>
+body { max-width: 760px; margin: 0 auto; padding: 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; color: #2c2c2c; background: #fff; }
+h1 { border-bottom: 2px solid #1a56db; padding-bottom: .4rem; font-size: 1.5rem; }
+h2 { margin-top: 2rem; color: #1e3a5f; font-size: 1.15rem; }
+h3 { margin-top: 1.5rem; font-size: 1rem; }
+code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+pre code { display: block; background: #1e2127; color: #abb2bf; padding: .8rem 1rem; border-radius: 5px; overflow-x: auto; font-size: .85em; line-height: 1.5; }
+.chain { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px solid #cbd5e1; padding: .8rem 1rem; border-radius: 4px; white-space: pre; font-size: .85em; line-height: 1.7; overflow-x: auto; }
+.a { color: #64748b; font-size: .85em; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; margin: .6rem 0; }
+th, td { border: 1px solid #e2e8f0; padding: .4rem .6rem; text-align: left; font-size: .9em; }
+th { background: #f1f5f9; font-weight: 600; }
+@media print { body { font-size: 11pt; } pre code, .chain { background: #f8f8f8; color: #000; border: 1px solid #ccc; } }
+</style>
+</head>
+<body>
+
+<h1>速查 05 · 完整链路与模式切换</h1>
+<p class="a">配套第 5 课学习</p>
+
+<h2>登录完整调用链</h2>
+<div class="chain">POST /login
+  → SysLoginController.login()
+    → SysLoginService.login()
+      → 校验用户名/密码/验证码
+      → 构建 LoginUser 对象
+      → LoginHelper.login(loginUser)
+        → fillRequestContext(loginUser)      // 自动填充IP/地点/设备
+        → StpUtil.login(loginId, parameter)  // Sa-Token核心登录
+          → StpLogicJwtForSimple.createLoginSession()
+            → 生成 JWT Token
+            → PlusSaTokenDao.setObject()     // 写Redis+失效Caffeine
+        → TokenSession.extra: userId等       // 写入常用字段
+        → TokenSession.object: LoginUser     // 写入完整用户对象
+      → 返回 Token 给前端</div>
+
+<h2>鉴权调用链</h2>
+<div class="chain">GET /system/user/list (Header: Authorization: Bearer {jwt})
+  → Sa-Token Interceptor
+    → 从Header读取Token, 剥离"Bearer "前缀
+    → StpLogicJwtForSimple 解析JWT(验签+提取loginId)
+    → @SaCheckPermission("system:user:list")
+      → StpUtil.checkPermission()
+        → SaPermissionImpl.getPermissionList(loginId)
+          → [路径1] LoginHelper.getLoginUser() → LoginUser.permissions
+          → [路径2] PermissionService.getMenuPermission(userId)
+        → 权限码匹配 → 通过/403
+    → Controller 执行业务逻辑</div>
+
+<h2>JWT模式 vs Redis模式 对比</h2>
+<table>
+  <thead>
+    <tr><th>对比维度</th><th>JWT模式(当前)</th><th>Redis模式</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Token格式</td><td>JWT (<code>eyJhb...</code>)</td><td>随机字符串</td></tr>
+    <tr><td>StpLogic实现</td><td><code>StpLogicJwtForSimple</code></td><td><code>StpLogicForDefault</code></td></tr>
+    <tr><td>Token验证方式</td><td>本地JWT验签</td><td>查Redis验证存在</td></tr>
+    <tr><td>踢人下线机制</td><td>清除Redis TokenSession(需等Caffeine 5秒过期)</td><td>直接删除Redis中的Token</td></tr>
+    <tr><td>每次请求Redis查询</td><td>仅查TokenSession(数据)</td><td>每次验证Token存在+查Session</td></tr>
+    <tr><td>网关友好度</td><td>高(网关可独立验JWT)</td><td>低(网关必须转发到后端)</td></tr>
+    <tr><td>切换方法</td><td>去掉 <code>sa-token-jwt</code> 依赖 + 改 StpLogic Bean</td><td>加上依赖 + 改 Bean</td></tr>
+  </tbody>
+</table>
+
+<h2>模式切换操作清单</h2>
+<ol>
+  <li><strong>pom.xml</strong>: 添加/移除 <code>sa-token-jwt</code> 依赖</li>
+  <li><strong>SaTokenConfig.java</strong>: 修改 <code>stpLogic()</code> Bean 的返回值</li>
+  <li><strong>common-satoken.yml</strong>: （无需修改，配置通用）</li>
+  <li><strong>PlusSaTokenDao.java</strong>: （无需修改，存储层不变）</li>
+  <li><strong>SaPermissionImpl.java</strong>: （无需修改，权限层不变）</li>
+  <li><strong>重启应用验证</strong></li>
+</ol>
+
+<h2>常见问题排查</h2>
+<table>
+  <thead>
+    <tr><th>问题现象</th><th>可能原因</th><th>排查步骤</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>登录成功但接口返回401</td>
+      <td>TokenSession未写入 / Caffeine未失效</td>
+      <td>检查Redis中TokenSession / 清除Caffeine</td>
+    </tr>
+    <tr>
+      <td>踢人后用户仍能访问</td>
+      <td>Caffeine 5秒缓存未过期（仅JWT模式）</td>
+      <td>等待5秒或重启 / 手动清Caffeine</td>
+    </tr>
+    <tr>
+      <td><code>@SaCheckPermission</code> 一直403</td>
+      <td>权限码未分配 / SaPermissionImpl返回空</td>
+      <td>检查权限表 / 调试 getPermissionList 返回值</td>
+    </tr>
+    <tr>
+      <td>切换JWT模式后登录失败</td>
+      <td>缺少JWT密钥配置</td>
+      <td>检查 <code>sa-token.jwt-secret-key</code> 配置</td>
+    </tr>
+    <tr>
+      <td>分布式环境下登录状态不一致</td>
+      <td>Redis未共享 / 各实例Caffeine缓存不一致</td>
+      <td>检查Redis连接 / 确认Caffeine仅本地</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="a">相关术语 — [[glossary:JWT]], [[glossary:StpLogicJwtForSimple]], [[glossary:StpLogic]], [[glossary:Caffeine]], [[glossary:Token Session]]</p>
+
+</body>
+</html>

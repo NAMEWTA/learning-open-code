@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 五种认证策略深度对比</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .highlight { background: #e8f5e9; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  .dim { color: #999; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 五种认证策略深度对比 <span class="tag">核心实现</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能对比 5 种认证策略的共性流程与差异点，能独立调试每种策略的认证失败原因（验证码过期、用户不存在、账号停用、密码错误、第三方未绑定等）。
+</div>
+
+<p>上一课我们看到了策略工厂如何分发请求。这一课逐行读完 5 个策略实现，找出它们的 <strong>共同骨架</strong> 和 <strong>独特之处</strong>。</p>
+
+<h2>一、共同的执行骨架</h2>
+
+<p>无论哪种认证方式，每个策略的 <code>login()</code> 方法都遵循同一模式：</p>
+
+<div class="diagram">1. 解析 body → 具体请求对象 (PasswordLoginBody / SmsLoginBody / ...)
+2. 校验 body 字段合法性 (ValidatorUtils.validate)
+3. 加载用户信息 (不同策略按不同字段查询)
+4. 校验用户状态 (是否存在? 是否停用?)
+5. 调用 loginService.checkLogin() 执行业务校验 (验证码/密码/第三方绑定)
+6. 调用 loginService.buildLoginUser() 构建 LoginUser
+7. 设置 clientKey 和 deviceType
+8. IAuthStrategy.buildLoginParameter(client) 构建 SaLoginParameter
+9. LoginHelper.login(loginUser, model) → Sa-Token 签发 token
+10. 构建 LoginVo 返回</div>
+
+<p>步骤 6-10 <strong>在所有策略中完全相同</strong>。差异在步骤 1-5。</p>
+
+<h2>二、策略 1：PasswordAuthStrategy — 密码登录</h2>
+
+<p>最传统的认证方式，也是最复杂的——因为集成了图片验证码和 BCrypt 密码校验。</p>
+
+<pre><code>@Override
+public LoginVo login(String body, SysClientVo client) {
+    // 1. 解析请求体
+    PasswordLoginBody loginBody = JsonUtils.parseObject(body, PasswordLoginBody.class);
+    ValidatorUtils.validate(loginBody);
+    String username = loginBody.getUsername();
+    String password = loginBody.getPassword();
+    String code = loginBody.getCode();
+    String uuid = loginBody.getUuid();
+
+    // 2. 可选的图片验证码校验
+    if (captchaProperties.getEnable()) {
+        validateCaptcha(username, code, uuid);  // 详见下文
+    }
+
+    // 3. 按用户名加载 + 状态校验
+    SysUserVo user = loadUserByUsername(username);
+
+    // 4. 密码校验 + 失败计数/锁定
+    //    注意：这里用了 Supplier 延迟执行，只有前面的校验通过才真正执行 BCrypt.checkpw
+    loginService.checkLogin(LoginType.PASSWORD, username,
+        () -> !BCrypt.checkpw(password, user.getPassword()));
+
+    // 5-10. 通用步骤
+    LoginUser loginUser = loginService.buildLoginUser(user);
+    loginUser.setClientKey(client.getClientKey());
+    loginUser.setDeviceType(client.getDeviceType());
+    SaLoginParameter model = IAuthStrategy.buildLoginParameter(client);
+    LoginHelper.login(loginUser, model);
+    // ... 构建 LoginVo
+}</code></pre>
+
+<h3>图片验证码校验细节</h3>
+<pre><code>private void validateCaptcha(String username, String code, String uuid) {
+    String verifyKey = GlobalConstants.CAPTCHA_CODE_KEY + uuid;  // "captcha_codes:" + uuid
+    String captcha = RedisUtils.getCacheObject(verifyKey);
+    RedisUtils.deleteObject(verifyKey);  // 一次性使用，取出即删
+
+    if (captcha == null) {
+        loginService.recordLoginInfo(username, Constants.LOGIN_FAIL, "验证码已失效");
+        throw new CaptchaExpireException();
+    }
+    if (!StringUtils.equalsIgnoreCase(code, captcha)) {
+        loginService.recordLoginInfo(username, Constants.LOGIN_FAIL, "验证码错误");
+        throw new CaptchaException();
+    }
+}</code></pre>
+
+<div class="side">
+💡 <b>一次性验证码</b>：<code>RedisUtils.deleteObject(verifyKey)</code> 在读取验证码后立即删除。这意味着：验证码只能使用一次，用完即失效。防止验证码重放攻击。
+</div>
+
+<h3>用户加载与状态校验</h3>
+<pre><code>private SysUserVo loadUserByUsername(String username) {
+    SysUserVo user = userMapper.lambda()
+        .eq(SysUser::getUserName, username)
+        .voOne();  // MyBatis-Plus 直接返回 VO，跳过 Entity 转换
+    if (ObjectUtil.isNull(user)) {
+        throw new UserException("user.not.exists", username);  // "登录用户：{} 不存在"
+    } else if (SystemConstants.DISABLE.equals(user.getStatus())) {
+        throw new UserException("user.blocked", username);     // "登录用户：{} 已被停用"
+    }
+    return user;
+}</code></pre>
+
+<h2>三、策略 2：SmsAuthStrategy — 短信登录</h2>
+
+<p>和密码登录非常相似，但：用手机号查用户、用短信验证码替代密码、没有图片验证码层。</p>
+
+<pre><code>@Override
+public LoginVo login(String body, SysClientVo client) {
+    SmsLoginBody loginBody = JsonUtils.parseObject(body, SmsLoginBody.class);
+    ValidatorUtils.validate(loginBody);
+    String phoneNumber = loginBody.getPhoneNumber();
+    String smsCode = loginBody.getSmsCode();
+
+    // 按手机号加载用户
+    SysUserVo user = loadUserByPhoneNumber(phoneNumber);
+
+    // 校验短信验证码
+    loginService.checkLogin(LoginType.SMS, user.getUserName(),
+        () -> !validateSmsCode(phoneNumber, smsCode));
+    // ... 后续完全相同
+}</code></pre>
+
+<p>短信验证码校验：从 Redis 取 <code>captcha_codes:{phoneNumber}</code>，比对后 <strong>不删除</strong>（允许重试），过期时间由 <code>Constants.CAPTCHA_EXPIRATION</code> 决定。</p>
+
+<h2>四、策略 3：EmailAuthStrategy — 邮箱登录</h2>
+
+<p>与短信登录几乎一模一样，区别仅在于查询字段（<code>email</code> 替代 <code>phoneNumber</code>）和请求体类型（<code>EmailLoginBody</code>）：</p>
+
+<pre><code>EmailLoginBody loginBody = JsonUtils.parseObject(body, EmailLoginBody.class);
+String email = loginBody.getEmail();
+String emailCode = loginBody.getEmailCode();
+SysUserVo user = loadUserByEmail(email);  // mapper.eq(SysUser::getEmail, email)
+loginService.checkLogin(LoginType.EMAIL, user.getUserName(),
+    () -> !validateEmailCode(email, emailCode));</code></pre>
+
+<div class="warn">
+⚠️ <b>注意</b>：短信和邮箱验证码的 Redis key 前缀是同一个 <code>GlobalConstants.CAPTCHA_CODE_KEY</code>（值为 <code>"captcha_codes:"</code>）。但因为后缀是手机号或邮箱地址，实际不会冲突。图片验证码用 UUID 作为后缀，更不会冲突。
+</div>
+
+<h2>五、策略 4：SocialAuthStrategy — 第三方登录</h2>
+
+<p>这是最"重"的策略，涉及 JustAuth 的 OAuth 流程和社交账号绑定校验：</p>
+
+<pre><code>@Override
+public LoginVo login(String body, SysClientVo client) {
+    SocialLoginBody loginBody = JsonUtils.parseObject(body, SocialLoginBody.class);
+    ValidatorUtils.validate(loginBody);
+
+    // 1. 调用 JustAuth 完成 OAuth 回调认证
+    AuthResponse&lt;AuthUser&gt; response = SocialUtils.loginAuth(
+        loginBody.getSource(),      // 如 "gitee", "github", "wechat_open"
+        loginBody.getSocialCode(),   // OAuth 回调返回的 code
+        loginBody.getSocialState(),  // OAuth state 参数
+        socialProperties);
+    if (!response.ok()) {
+        throw new ServiceException(response.getMsg());
+    }
+    AuthUser authUserData = response.getData();
+
+    // 2. 查询该第三方账号是否已绑定系统用户
+    List&lt;SysSocialVo&gt; list = sysSocialService.selectByAuthId(
+        authUserData.getSource() + authUserData.getUuid());
+    if (CollUtil.isEmpty(list)) {
+        throw new ServiceException("你还没有绑定第三方账号，绑定后才可以登录！");
+    }
+
+    // 3. 用绑定的 userId 加载用户
+    SysUserVo user = loadUser(list.getFirst().getUserId());
+    // ... 后续通用步骤
+}</code></pre>
+
+<p>关键差异：<strong>用户信息来源不是请求参数，而是 JustAuth 从第三方平台获取的 OAuth 用户数据</strong>。必须先通过 <code>sys_social</code> 表找到绑定的系统用户 ID，再加载用户信息。</p>
+
+<div class="side">
+💡 <b>JustAuth 支持 30+ 平台</b>：Gitee、GitHub、微信开放平台、QQ、微博、钉钉、百度、Coding、OSChina、支付宝、淘宝、Google、Facebook、抖音、企业微信、微软... 只需在 <code>socialProperties</code> 中配置对应平台的 appId 和 appSecret，不需要写任何平台特定代码。
+</div>
+
+<h2>六、策略 5：XcxAuthStrategy — 微信小程序登录</h2>
+
+<p>最特殊的一种：不经过完整的 OAuth 重定向流程，而是用微信小程序的 <code>wx.login()</code> 返回的临时 code 换取 openid。另外，它构建的 LoginUser 类型也不同。</p>
+
+<pre><code>@Override
+public LoginVo login(String body, SysClientVo client) {
+    XcxLoginBody loginBody = JsonUtils.parseObject(body, XcxLoginBody.class);
+    ValidatorUtils.validate(loginBody);
+    String xcxCode = loginBody.getXcxCode();  // wx.login() 返回的临时凭证
+    String appid = loginBody.getAppid();      // 支持多小程序
+
+    // 1. 用 code + appid + secret 调用微信接口换取 openid
+    AuthRequest authRequest = new AuthWechatMiniProgramRequest(AuthConfig.builder()
+        .clientId(appid)
+        .clientSecret("自行填写密钥")  // TODO: 从数据库或配置读取
+        .ignoreCheckRedirectUri(true)
+        .ignoreCheckState(true)
+        .build());
+    AuthCallback authCallback = new AuthCallback();
+    authCallback.setCode(xcxCode);
+    AuthResponse&lt;AuthUser&gt; resp = authRequest.login(authCallback);
+
+    String openid, unionId;
+    if (resp.ok()) {
+        AuthToken token = resp.getData().getToken();
+        openid = token.getOpenId();
+        unionId = token.getUnionId();  // 绑定开放平台后才有
+    } else {
+        throw new ServiceException(resp.getMsg());
+    }
+
+    // 2. 用 openid 查找本地绑定用户
+    SysUserVo user = loadUserByOpenid(openid);
+
+    // 3. 构建 XcxLoginUser（而非 LoginUser）
+    XcxLoginUser loginUser = new XcxLoginUser();
+    loginUser.setUserId(user.getUserId());
+    loginUser.setUsername(user.getUserName());
+    loginUser.setOpenid(openid);  // 小程序特有字段
+
+    // ... LoginHelper.login(loginUser, model)
+
+    // 4. LoginVo 也返回 openid
+    loginVo.setOpenid(openid);
+    return loginVo;
+}</code></pre>
+
+<div class="warn">
+⚠️ <b>注意 <code>XcxAuthStrategy</code> 的 <code>loadUserByOpenid()</code> 方法是桩代码</b>：它直接 <code>new SysUserVo()</code> 返回空对象，注释写着 <code>// todo 自行实现 userService.selectUserByOpenid(openid)</code>。这意味着小程序登录的完整实现需要开发者根据自己的业务补充用户绑定逻辑。
+</div>
+
+<h2>七、全景对比表</h2>
+
+<table>
+  <tr><th>维度</th><th>Password</th><th>SMS</th><th>Email</th><th>Social</th><th>Xcx</th></tr>
+  <tr><td><b>请求体</b></td><td><code>PasswordLoginBody</code></td><td><code>SmsLoginBody</code></td><td><code>EmailLoginBody</code></td><td><code>SocialLoginBody</code></td><td><code>XcxLoginBody</code></td></tr>
+  <tr><td><b>用户查询字段</b></td><td><code>userName</code></td><td><code>phoneNumber</code></td><td><code>email</code></td><td><code>userId</code> (通过绑定表)</td><td><code>openid</code></td></tr>
+  <tr><td><b>认证凭证</b></td><td>密码 (BCrypt)</td><td>短信验证码</td><td>邮箱验证码</td><td>OAuth code</td><td>wx.login() code</td></tr>
+  <tr><td><b>额外验证层</b></td><td>图片验证码 (可关闭)</td><td>无</td><td>无</td><td>第三方绑定关系检查</td><td>无 (待完善)</td></tr>
+  <tr><td><b>外部依赖</b></td><td>无</td><td>SMS4J</td><td>Java Mail</td><td>JustAuth</td><td>JustAuth (微信小程序)</td></tr>
+  <tr><td><b>LoginUser 类型</b></td><td><code>LoginUser</code></td><td><code>LoginUser</code></td><td><code>LoginUser</code></td><td><code>LoginUser</code></td><td><code>XcxLoginUser</code></td></tr>
+  <tr><td><b>LoginVo.openid</b></td><td><code>null</code></td><td><code>null</code></td><td><code>null</code></td><td><code>null</code></td><td>有值</td></tr>
+  <tr><td><b>LoginType 枚举</b></td><td><code>PASSWORD</code></td><td><code>SMS</code></td><td><code>EMAIL</code></td><td><code class="dim">(无 checkLogin)</code></td><td><code class="dim">(无 checkLogin)</code></td></tr>
+</table>
+
+<h2>八、SysLoginService.checkLogin()：失败计数与锁定</h2>
+
+<p>密码、短信、邮箱三种策略都调用了这个方法。第三方和小程序没有调用（因为它们的认证依赖外部平台，不需要本地失败计数）。</p>
+
+<pre><code>public void checkLogin(LoginType loginType, String username, Supplier&lt;Boolean&gt; supplier) {
+    String errorKey = CacheNames.PWD_ERR_CNT_KEY + username;
+    int errorNumber = ObjectUtil.defaultIfNull(RedisUtils.getCacheObject(errorKey), 0);
+
+    // 已达上限 → 锁定
+    if (errorNumber >= maxRetryCount) {
+        recordLoginInfo(username, LOGIN_FAIL, "密码错误次数超过限制({}), 请{}分钟后重试");
+        throw new UserException("密码错误次数超过限制");
+    }
+
+    // supplier.get() 返回 true 表示本次认证失败
+    if (supplier.get()) {
+        errorNumber++;
+        RedisUtils.setCacheObject(errorKey, errorNumber, Duration.ofMinutes(lockTime));
+        if (errorNumber >= maxRetryCount) {
+            throw new UserException("超过限制，锁定");  // 刚好达到上限
+        } else {
+            throw new UserException("错误次数：{}", errorNumber);  // 还有余量
+        }
+    }
+
+    // 登录成功 → 清空错误计数
+    RedisUtils.deleteObject(errorKey);
+}</code></pre>
+
+<div class="side">
+💡 <b>为什么用 Supplier 而不是直接传 boolean？</b> <code>Supplier&lt;Boolean&gt;</code> 实现了延迟计算。如果错误次数已达上限，直接抛异常，<code>supplier.get()</code> 永远不会执行（不会调用 BCrypt.checkpw 或 Redis 查询验证码），节省了不必要的计算。
+</div>
+
+<h2>九、自测</h2>
+
+<div class="quiz">
+<p>1. 在密码登录中，验证码校验通过后，验证码会被立即从 Redis 删除。这个设计是为了？</p>
+<label class="opt"><input type="radio" name="q1"> A. 节省 Redis 内存空间</label>
+<label class="opt"><input type="radio" name="q1"> B. 防止验证码重放攻击</label>
+<label class="opt"><input type="radio" name="q1"> C. 加快下一次获取验证码的速度</label>
+<label class="opt"><input type="radio" name="q1"> D. 符合 GDPR 隐私规范</label>
+</div>
+
+<div class="quiz">
+<p>2. 第三方登录（SocialAuthStrategy）中，用户身份是如何确定的？</p>
+<label class="opt"><input type="radio" name="q2"> A. 直接从请求参数中读取 username</label>
+<label class="opt"><input type="radio" name="q2"> B. 通过 JustAuth 获取 OAuth 用户数据 → 查询 sys_social 表 → 找到绑定的 userId → 加载用户</label>
+<label class="opt"><input type="radio" name="q2"> C. 从 Redis 缓存中读取登录状态</label>
+<label class="opt"><input type="radio" name="q2"> D. 随机分配一个测试用户</label>
+</div>
+
+<div class="quiz">
+<p>3. 为什么 SocialAuthStrategy 和 XcxAuthStrategy 没有调用 <code>loginService.checkLogin()</code>？</p>
+<label class="opt"><input type="radio" name="q3"> A. 这两个策略不需要任何校验</label>
+<label class="opt"><input type="radio" name="q3"> B. 认证依赖外部平台（微信/OAuth 服务商），本地不需要失败计数锁定机制</label>
+<label class="opt"><input type="radio" name="q3"> C. checkLogin() 方法有 bug，所以跳过</label>
+<label class="opt"><input type="radio" name="q3"> D. 这是一个遗漏，应该在后续版本补上</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — 验证码"阅后即焚"，同一个 code 不能使用两次。<br>
+<b>2. B</b> — 第三方账号通过 <code>sys_social</code> 表与系统用户关联，不能直接拿到系统用户的 username。<br>
+<b>3. B</b> — 密码错误锁定是针对本系统凭证的防护。第三方/OAuth 认证的合法性由外部平台保证，本地只需检查绑定关系。</p>
+</details>
+
+<div class="nav">← <a href="02-strategy-pattern.html">第 2 课 · 认证策略工厂</a> | 下一课：<a href="04-event-listener.html">第 4 课 · 事件监听与登录副作用处理 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://sa-token.cc/doc.html#/up/login-auth" target="_blank">Sa-Token 登录认证</a> ·
+<a href="https://justauth.wiki/" target="_blank">JustAuth 第三方登录文档</a> ·
+<a href="https://doc.hutool.cn/pages/Bcrypt/" target="_blank">Hutool BCrypt 加密</a> ·
+<a href="https://baomidou.com/guides/data-interface/" target="_blank">MyBatis-Plus voOne() 用法</a>
+</div>
+<div class="reminder">💡 有疑问？直接问我。相关课程：<a href="../../2026-06-30-teach-ruoyi-system/lessons/02.html">ruoyi-system 用户管理课程</a> 讲解了 SysUserVo 和用户表结构。</div>
+
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 实战 — 完整登录认证链路追踪与模式切换</title>
+<style>
+  body { max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.75; color: #2c2c2c; background: #fcfcfc; }
+  h1 { border-bottom: 3px solid #1a56db; padding-bottom: .5rem; margin-top: 0; font-size: 1.75rem; }
+  h2 { margin-top: 2.5rem; color: #1e3a5f; font-size: 1.3rem; }
+  h3 { margin-top: 1.8rem; font-size: 1.05rem; color: #333; }
+  code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+  pre code { display: block; background: #1e2127; color: #abb2bf; padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; line-height: 1.6; font-size: .88em; }
+  .mission { background: linear-gradient(135deg, #e8f0fe 0%, #d4e4fc 100%); border-left: 5px solid #1a56db; padding: 1rem 1.3rem; border-radius: 6px; margin: 1.2rem 0; }
+  .flow { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px dashed #94a3b8; padding: 1rem 1.3rem; border-radius: 5px; white-space: pre; line-height: 1.8; font-size: .88em; overflow-x: auto; }
+  .side { background: #fff9e6; border-left: 4px solid #f0b400; padding: .8rem 1.2rem; border-radius: 4px; margin: 1rem 0; font-size: .95em; }
+  .step { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.3rem; margin: .8rem 0; display: flex; gap: 1rem; align-items: flex-start; }
+  .step .num { background: #1a56db; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85em; flex-shrink: 0; }
+  .step .where { color: #64748b; font-size: .8em; margin-top: .2rem; }
+  .quiz { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.2rem; margin: .8rem 0; }
+  .quiz .opt { display: block; margin: .3rem 0; padding: .3rem .6rem; border-radius: 4px; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: #1a56db; font-weight: 600; }
+  .cite { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: .8rem 1.1rem; margin: 1.5rem 0; font-size: .9em; }
+  .reminder { background: #f1f5f9; border-radius: 6px; padding: .8rem 1.2rem; margin: 1rem 0; font-size: .95em; color: #475569; }
+  .nav { color: #94a3b8; font-size: .85em; margin-top: 2rem; text-align: center; }
+  .tag { display: inline-block; background: #06b6d4; color: #fff; padding: .15em .7em; border-radius: 12px; font-size: .8em; margin-left: .5rem; vertical-align: middle; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+  th, td { border: 1px solid #e2e8f0; padding: .5rem .7rem; text-align: left; font-size: .93em; }
+  th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 实战 — 完整登录认证链路追踪与模式切换 <span class="tag">实战闭环</span></h1>
+
+<div class="mission">
+<strong>本节目标</strong>：独立追踪从 POST /login 到 @SaCheckPermission 的完整调用链，理解 JWT 模式与 Redis 模式的切换原理，能独立完成认证相关问题的排查。
+</div>
+
+<p>前面四节课我们逐一剖析了 <code>SaTokenConfig</code>、<code>PlusSaTokenDao</code>、<code>SaPermissionImpl</code>、<code>SaTokenExceptionHandler</code> 和 <code>LoginHelper</code> 五个类的内部实现。本节课将它们串联成一条完整的链路，并对比 JWT 模式与 Redis 模式的设计差异 — 这是从"看懂代码"到"能排查问题"的关键跨越。</p>
+
+<h2>一、登录全链路追踪</h2>
+
+<p>从用户点击"登录"按钮到前端拿到 Token，后端经历了以下调用链：</p>
+
+<div class="step">
+  <div class="num">1</div>
+  <div>
+    <strong>POST /login → SysLoginController.login()</strong>
+    <div class="where">入口：ruoyi-admin 模块的 Controller 层</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">2</div>
+  <div>
+    <strong>SysLoginService.login() 校验用户名/密码/验证码</strong>
+    <div class="where">业务层：验证码校验 → 用户查询 → 密码匹配 → 状态检查</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">3</div>
+  <div>
+    <strong>构建 LoginUser 对象</strong>
+    <div class="where">封装 userId、userName、deptId、roles、permissions 等信息</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">4</div>
+  <div>
+    <strong>LoginHelper.login(loginUser)</strong> — sa-token 模块正式介入
+    <div class="where">位于 ruoyi-common-satoken 模块</div>
+    <div style="margin-top:.6rem;">
+      <p><strong>4a</strong> <code>fillRequestContext(loginUser)</code> — 填充 IP、地理位置、浏览器、操作系统信息到 LoginUser 的扩展字段</p>
+      <p><strong>4b</strong> <code>StpUtil.login(loginUser.getLoginId(), parameter)</code> — 调用 Sa-Token 核心登录</p>
+      <ul>
+        <li>Sa-Token 调用 <code>StpLogicJwtForSimple.createLoginSession()</code></li>
+        <li>StpLogic 通过 sa-token-jwt 插件生成 JWT Token（Header.Payload.Signature）</li>
+        <li>StpLogic 调用 <code>PlusSaTokenDao.setObject()</code> 将 TokenSession 数据写入存储层</li>
+        <li>PlusSaTokenDao 先写 Redis（持久化），再失效 Caffeine 中对应的旧缓存</li>
+      </ul>
+      <p><strong>4c</strong> 在 TokenSession 中写入扩展数据：userId、userName、deptId、deptName、deptCategory</p>
+      <p><strong>4d</strong> 调用 <code>LoginHelper.setLoginUser(loginUser)</code> 将完整的 LoginUser 对象写入 TokenSession（含部门列表、角色列表、权限码列表）</p>
+    </div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">5</div>
+  <div>
+    <strong>返回 Token 给前端</strong>
+    <div class="where">格式：String 类型，带 "Bearer " 前缀或原始 JWT 字符串 (eyJhbG...)</div>
+  </div>
+</div>
+
+<p class="side"><strong>注意执行顺序</strong>：fillRequestContext 先于 StpUtil.login 执行。因为 fillRequestContext 只是将请求上下文信息写入 LoginUser 对象（纯内存操作），而 StpUtil.login 会触发 JWT 生成和 Redis 写入（涉及网络 I/O）。登录成功后 TokenSession 中才有数据，所以 4c 和 4d 必须在 login() 之后执行。</p>
+
+<h2>二、Token 校验与权限鉴权链路</h2>
+
+<p>登录成功后，前端每次请求都携带 Token，后端拦截器的处理流程如下：</p>
+
+<div class="flow">┌──────────┐   Authorization: Bearer {jwt}   ┌─────────────────────┐
+│ 前端     │ ────────────────────────────────&gt; │ Sa-Token 拦截器      │
+└──────────┘                                  └─────────────────────┘
+                                                       │
+  ① 从 Header 读取 Token（is-read-header: true）         │
+  ② 剥离 "Bearer " 前缀                                 │
+  ③ StpLogicJwtForSimple.getTokenValue() 解析 JWT        │
+  ④ 使用配置的 secret-key 验证 JWT 签名                   │
+  ⑤ 从 JWT Payload 中提取 loginId                        │
+  ⑥ PlusSaTokenDao.getObject() 读取 TokenSession         │
+     ├─ 先查 Caffeine 本地缓存（快速路径）                  │
+     └─ 未命中 → 查 Redis → 回填 Caffeine → 返回          │
+                                                       │
+当遇到 @SaCheckPermission("system:user:list") 时：         │
+                                                       │
+  ⑦ Sa-Token 调用 SaPermissionImpl.getPermissionList()   │
+  ⑧ SaPermissionImpl 通过 LoginHelper 从 TokenSession     │
+     获取 LoginUser 对象                                 │
+  ⑨ 返回 LoginUser 中存储的权限码列表                      │
+  ⑩ Sa-Token 检查 "system:user:list" 是否在列表中          │
+     ├─ 在列表中 → 放行到 Controller                      │
+     └─ 不在列表中 → 抛出 NotPermissionException          │
+                      → SaTokenExceptionHandler 捕获       │
+                      → 返回 403 + 中文错误提示             │</div>
+
+<p>这条链路中，<strong>性能关键路径在步骤 6</strong>：Caffeine 命中时，一次鉴权只涉及 CPU 计算（验签）+ 本地缓存读取（纳秒级）。Redis 只在 Caffeine 未命中时被访问，这是 PlusSaTokenDao 双层缓存设计的核心价值。</p>
+
+<h2>三、JWT 模式 vs Redis 模式的切换原理</h2>
+
+<p>RuoYi-Vue-Plus 当前使用 JWT 模式，但架构上支持一键切换到 Redis 模式（传统 Token 模式）。两种模式的核心差异在于 <strong>StpLogic 实现类的选择</strong>：</p>
+
+<table>
+<tr><th>维度</th><th>JWT 模式（当前）</th><th>Redis 模式</th></tr>
+<tr><td>Token 格式</td><td>JWT 三段式（<code>eyJhbG...</code>）</td><td>随机字符串（uuid 风格）</td></tr>
+<tr><td>StpLogic 实现</td><td><code>StpLogicJwtForSimple</code></td><td><code>StpLogicForDefault</code></td></tr>
+<tr><td>Token 验证方式</td><td>本地验签，纯 CPU 计算，不依赖 Redis</td><td>必须查询 Redis 验证 Token 是否存在</td></tr>
+<tr><td>踢人下线机制</td><td>JWT 本身不过期，靠清除 Redis 中 TokenSession 使后续请求拿不到用户数据</td><td>直接删除 Redis 中的 Token 记录，请求立即失效</td></tr>
+<tr><td>性能</td><td>高（验签是纯 CPU 操作，无网络 I/O）</td><td>中（每次请求都需要 Redis 查询）</td></tr>
+<tr><td>服务端可控性</td><td>中（JWT 签发后内容不可修改，只能通过 Redis 侧数据间接控制）</td><td>高（Redis 中的数据可随时修改、删除、冻结）</td></tr>
+</table>
+
+<h3>如何切换？</h3>
+
+<p>切换过程极其简单，只需要两步：</p>
+
+<ol>
+  <li><strong>移除依赖</strong>：从 <code>pom.xml</code> 中删除 <code>sa-token-jwt</code> 依赖</li>
+  <li><strong>切换 Bean</strong>：修改 <code>SaTokenConfig.java</code>，将注入的 Bean 从 <code>StpLogicJwtForSimple</code> 替换为 <code>StpLogicForDefault</code></li>
+</ol>
+
+<pre><code>// JWT 模式（当前）
+@Bean
+public StpLogic stpLogic() {
+    return new StpLogicJwtForSimple();  // JWT Token
+}
+
+// 切换为 Redis 模式
+@Bean
+public StpLogic stpLogic() {
+    return new StpLogicForDefault();    // 随机字符串 Token
+}</code></pre>
+
+<p><strong>其他代码完全不变</strong> — <code>PlusSaTokenDao</code>、<code>SaPermissionImpl</code>、<code>SaTokenExceptionHandler</code>、<code>LoginHelper</code> 都不需要任何修改。这正是 Sa-Token 框架 Dao 层抽象和 StpLogic 多态设计的威力：<strong>上层业务代码零感知，底层存储和 Token 生成机制随意切换</strong>。</p>
+
+<p class="side"><strong>为什么 RuoYi 选择 JWT 模式？</strong> 微服务网关场景是关键原因。在网关层（如 Spring Cloud Gateway），网关可以直接验证 JWT 签名并提取用户信息，无需将请求转发到认证服务。如果使用 Redis 模式，网关每次验签都必须回调 Redis，在网络延迟和架构复杂度上都不可接受。JWT 的"自解释"特性天然适合网关鉴权。</p>
+
+<h2>四、实战练习：添加自定义权限码</h2>
+
+<p>下面通过一个完整的实战演练，亲手完成从权限码定义到接口保护的闭环：</p>
+
+<div class="step">
+  <div class="num">1</div>
+  <div>
+    <strong>添加权限码到菜单/权限表</strong>
+    <div class="where">数据库操作：在 sys_menu 表中插入一条权限记录</div>
+    <p>权限码：<code>system:user:export</code>，权限名称：用户导出</p>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">2</div>
+  <div>
+    <strong>将权限码分配给角色</strong>
+    <div class="where">后台管理 → 角色管理 → 编辑角色 → 勾选"用户导出"权限</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">3</div>
+  <div>
+    <strong>在 Controller 方法上添加注解</strong>
+    <pre><code>@SaCheckPermission("system:user:export")
+@GetMapping("/export")
+public R&lt;Void&gt; export() {
+    // 导出逻辑
+}</code></pre>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">4</div>
+  <div>
+    <strong>验证效果</strong>
+    <ul>
+      <li>拥有该权限的角色登录 → 访问接口 → <strong>200 OK</strong></li>
+      <li>没有该权限的角色登录 → 访问接口 → <strong>403 Forbidden</strong> + 中文错误提示</li>
+    </ul>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">5</div>
+  <div>
+    <strong>追踪代码路径</strong>
+    <div class="where">断点调试或日志追踪</div>
+    <p>在 <code>SaPermissionImpl.getPermissionList()</code> 方法中打断点，观察 Sa-Token 如何回调该方法、返回的权限列表包含哪些权限码、以及最终鉴权结果如何影响请求的放行与拒绝。</p>
+  </div>
+</div>
+
+<h2>🤔 想一想</h2>
+
+<details>
+<summary>JWT 模式下，管理员踢人后前端仍持有 JWT Token，为什么用户还是无法访问接口？</summary>
+<p><strong>JWT Token 本身仍然有效（签名正确、未过期），但 Redis 中的 TokenSession 已被清除。</strong></p>
+<p>当用户再次请求时，链路走到「PlusSaTokenDao.getObject() 读取 TokenSession」步骤 — Caffeine 已被踢人操作主动失效，Redis 中也无数据，返回 null。后续代码（如 SaPermissionImpl、LoginHelper）尝试从 TokenSession 获取 LoginUser 时得到 null，最终抛出 NotLoginException，由 SaTokenExceptionHandler 转换为"登录已过期，请重新登录"返回前端。</p>
+<p><strong>本质</strong>：JWT 模式下的踢人不是"让 Token 失效"，而是"让 Token 对应的服务端数据消失"。Token 是一个钥匙，但锁芯（TokenSession）被拆了，钥匙自然打不开门。</p>
+</details>
+
+<details>
+<summary>如果要在网关层做认证（不转发到后端），为什么必须选 JWT 模式？</summary>
+<p><strong>网关层无法访问 Redis。</strong> 微服务架构中，网关通常是独立的服务，它不一定有 Redis 的连接权限，也不应该依赖 Redis 来做鉴权（这会引入不必要的耦合和网络延迟）。</p>
+<p>JWT 模式的优势在于：网关只需拿到 JWT Token，用本地配置的 secret-key 验签，就能从 Payload 中提取 loginId、验证有效期，整个过程零网络调用。验证通过后，网关将解析出的用户信息通过 Header 传给下游服务，下游服务直接信任即可。</p>
+<p>如果使用 Redis 模式，网关每次请求都得连接 Redis 查询 Token 是否存在 — 这在高并发场景下会成为性能瓶颈，且将 Redis 暴露给网关增加了安全风险面。</p>
+</details>
+
+<h2>提取练习</h2>
+
+<div class="quiz">
+<strong>Q1. 登录链路中，fillRequestContext() 和 StpUtil.login() 哪个先执行？</strong>
+<div class="opt">A. StpUtil.login() 先执行，因为需要先生成 Token</div>
+<div class="opt">B. fillRequestContext() 先执行，因为它是纯内存操作，先准备好用户上下文信息</div>
+<div class="opt">C. 两者并发执行，互不依赖</div>
+<div class="opt">D. 顺序无关紧要</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。fillRequestContext() 填充 IP、地理位置、浏览器、操作系统到 LoginUser 对象（纯内存操作），StpUtil.login() 触发 JWT 生成和 Redis 写入（涉及网络 I/O）。先做轻量操作再触发重量操作是合理的设计。另外 fillRequestContext 填充的信息会随 LoginUser 存入 TokenSession，所以必须在 login() 之前完成。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q2. JWT 模式下，管理员踢人后会发生什么？</strong>
+<div class="opt">A. JWT Token 被立即标记为失效，前端请求直接被拦截器拒绝</div>
+<div class="opt">B. JWT Token 仍然有效，但 Redis 中的 TokenSession 被清除，后续请求无法获取用户数据而报错</div>
+<div class="opt">C. 前端会自动删除本地的 JWT Token</div>
+<div class="opt">D. 后端会向前端推送踢人通知，前端主动跳转到登录页</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。JWT 的无状态特性决定了它一旦签发就无法被服务端主动失效。踢人的本质是清除 Redis 中的 TokenSession 和失效 Caffeine 缓存，使后续鉴权流程在获取用户数据时返回 null，从而触发 NotLoginException。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q3. 以下哪个类负责生成 JWT Token？</strong>
+<div class="opt">A. PlusSaTokenDao</div>
+<div class="opt">B. SaPermissionImpl</div>
+<div class="opt">C. StpLogicJwtForSimple</div>
+<div class="opt">D. LoginHelper</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。StpLogicJwtForSimple 是 Sa-Token JWT 插件的核心实现类，负责 JWT 的生成（createLoginSession）、解析（getTokenValue）和验签。A 是存储层，B 是权限源，D 是封装工具类（它调用 StpUtil，进而委托给 StpLogicJwtForSimple）。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q4. 如何从 JWT 模式切换到 Redis 模式？</strong>
+<div class="opt">A. 重写 PlusSaTokenDao，改用不同的存储逻辑</div>
+<div class="opt">B. 修改 application.yml 中的 sa-token.mode 配置项</div>
+<div class="opt">C. 移除 sa-token-jwt 依赖，将 SaTokenConfig 中注入的 StpLogic 改为 StpLogicForDefault</div>
+<div class="opt">D. 替换整个 ruoyi-common-satoken 模块</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。切换只需两步：1) 移除 pom.xml 中的 sa-token-jwt 依赖；2) 将 SaTokenConfig 中 stpLogic() 方法的返回值从 StpLogicJwtForSimple 改为 StpLogicForDefault。PlusSaTokenDao、SaPermissionImpl、LoginHelper 等全部无需修改，体现了 Sa-Token 框架良好的分层解耦。
+</details>
+</div>
+
+<div class="cite">
+<strong>参考来源</strong><br>
+· <a href="https://sa-token.cc/doc.html#/plugin/jwt-extend">Sa-Token JWT 插件文档</a> — 了解 StpLogicJwtForSimple 与 StpLogicForDefault 的差异<br>
+· 模块源码：<code>SaTokenConfig.java</code> — 查看 StpLogic Bean 的注入方式<br>
+· 模块源码：<code>LoginHelper.java</code> — 追踪完整的 login() 方法调用链<br>
+· 模块源码：<code>PlusSaTokenDao.java</code> — 理解 Caffeine + Redis 双层缓存的读写流程<br>
+· 模块源码：<code>SaPermissionImpl.java</code> — 理解权限回调的触发时机和数据来源
+</div>
+
+<div class="reminder">
+🎉 恭喜你完成了 ruoyi-common-satoken 模块的全部 5 节课程！从认证架构到配置装配，从双层缓存到权限鉴权，从异常处理到完整链路追踪 — 你现在已经具备了独立排查认证相关问题的能力。日常开发中遇到 Token 失效、权限校验不通过、登录态异常等问题时，回顾本课程中的调用链路图即可快速定位。以下参考文件可作为日常开发的速查手册：<code>SaTokenConfig.java</code>、<code>PlusSaTokenDao.java</code>、<code>LoginHelper.java</code>、<code>SaPermissionImpl.java</code>、<code>SaTokenExceptionHandler.java</code>。
+</div>
+
+<div class="nav">第 5 课 / 共 5 课 · 上一课：异常处理与登录工具</div>
+
+</body>
+</html>

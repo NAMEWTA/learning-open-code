@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>数据权限三层架构</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>02 - 数据权限三层架构</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>完整追踪数据权限链路——从 @DataPermission 注解到 SQL WHERE 条件注入，理解切面层、拦截器层、处理器层三层协作机制，并能解释 6 种 DataScopeType 的 SQL 模板差异。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>数据权限是整个 ruoyi-common-mybatis 模块中最复杂的一块。它的目标很简单——<strong>不同角色看到不同的数据范围</strong>。但实现上涉及 8 个类、6 种范围类型、SpEL 模板解析、JSqlParser SQL 注入。一张图看懂三层架构：</p>
+<pre>
+Controller (业务方法)
+  ↓ 标注 @DataPermission
+━━━━━━━━━━━━━━━━━━━━━━━━━━ 切面层
+DataPermissionPointcut (切点匹配)
+  → DataPermissionAdvice (设 ThreadLocal)
+━━━━━━━━━━━━━━━━━━━━━━━━━━ 拦截器层
+PlusDataPermissionInterceptor
+  → beforeQuery(SELECT) / beforePrepare(UPDATE/DELETE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━ 处理器层
+PlusDataPermissionHandler
+  → getSqlSegment()  → SpEL 解析 → JSqlParser 注入 WHERE
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 切面层：从注解到 ThreadLocal</h3>
+<p><code>@DataPermission</code> 注解本身不执行任何 SQL 拼接——它只是标记。真正的工作在切面层完成：</p>
+<ul>
+  <li><strong>DataPermissionPointcut</strong>：匹配所有带 <code>@DataPermission</code> 的 Mapper 方法</li>
+  <li><strong>DataPermissionAdvice</strong>：在方法执行前，将注解对象存入 <code>DataPermissionHelper</code> 的 ThreadLocal</li>
+</ul>
+
+<p>为什么用 ThreadLocal 传递？因为 MyBatis 拦截器运行在同一个线程上，ThreadLocal 是最轻量的跨层通信方式，无需修改方法签名。</p>
+
+<h3>2.2 拦截器层：SQL 执行前的拦截</h3>
+<p><code>PlusDataPermissionInterceptor</code> 继承 <code>BaseMultiTableInnerInterceptor</code>，在 SQL 执行前拦截：</p>
+<ul>
+  <li><strong>beforeQuery</strong>：处理 <strong>SELECT</strong> 语句，用 <code>parserSingle</code> 解析</li>
+  <li><strong>beforePrepare</strong>：处理 <strong>UPDATE/DELETE</strong> 语句，用 <code>parserMulti</code> 解析</li>
+</ul>
+
+<p>拦截器先检查 <code>InterceptorIgnoreHelper</code>（是否主动关闭数据权限），再检查 ThreadLocal 中是否有有效注解，然后委托给处理器生成 WHERE 条件。</p>
+
+<h3>2.3 处理器层：SpEL + JSqlParser = SQL 注入</h3>
+<p><code>PlusDataPermissionHandler.getSqlSegment()</code> 是核心方法，做三件事：</p>
+<ol>
+  <li><strong>获取当前用户角色</strong> → 查角色的 <code>dataScope</code> 字段（1-6）</li>
+  <li><strong>匹配 DataScopeType</strong> → 取对应的 <code>sqlTemplate</code>（SpEL 模板）</li>
+  <li><strong>SpEL 解析</strong> → 用 <code>DataPermissionHelper</code> 中的变量替换 <code>#{#deptName}</code>、<code>#{@sdss.xxx}</code></li>
+  <li><strong>JSqlParser 注入</strong> → 将生成的 SQL 片段（如 <code>AND dept_id IN (1, 2, 3)</code>）注入原始 SQL 的 WHERE 子句</li>
+</ol>
+
+<h3>2.4 六种 DataScopeType 对比</h3>
+<table>
+  <tr><th>Code</th><th>类型</th><th>SQL 模板含义</th><th>谁能看到什么？</th></tr>
+  <tr><td>1</td><td>ALL</td><td>无 SQL 条件（空字符串）</td><td>超级管理员：全部数据</td></tr>
+  <tr><td>2</td><td>CUSTOM</td><td>自定义（调用 bean 方法）</td><td>通过 <code>@sdss</code> 调自定义逻辑</td></tr>
+  <tr><td>3</td><td>DEPT</td><td><code>dept_id = #{#deptName}</code></td><td>部门经理：只看本部门</td></tr>
+  <tr><td>4</td><td>DEPT_AND_CHILD</td><td><code>dept_id IN (...子部门...)</code></td><td>上级领导：本部门及下级</td></tr>
+  <tr><td>5</td><td>SELF</td><td><code>create_by = #{#userName}</code></td><td>普通员工：只看自己创建的</td></tr>
+  <tr><td>6</td><td>DEPT_AND_CHILD_OR_SELF</td><td><code>(dept 条件 OR self 条件)</code></td><td>混合权限：部门的 + 自己的</td></tr>
+</table>
+
+<h3>2.5 DataPermissionHelper：三层通信的桥梁</h3>
+<p>三个核心能力：</p>
+<ul>
+  <li><strong>ThreadLocal&lt;DataPermission&gt;</strong>：在切面→拦截器之间传递注解对象</li>
+  <li><strong>SaStorage</strong>：在切面→处理器之间传递 SpEL 变量和权限访问控制</li>
+  <li><strong>ignore(Runnable/Supplier)</strong>：在子查询中关闭数据权限，防止 SpEL 模板内的 SQL 又触发数据权限造成死循环</li>
+</ul>
+
+<p><code>DataPermissionIgnoreContext</code> 用 <code>ThreadLocal&lt;Deque&lt;Boolean&gt;&gt;</code> 实现状态栈——支持嵌套忽略：方法 A 忽略中调用方法 B 也忽略，B 退出后恢复 A 的状态。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么数据权限需要三层架构，而不是在拦截器里直接读取注解？</p>
+<p><strong>参考:</strong> 注解在方法上，但 MyBatis 拦截器拦截的是 SQL 执行，二者不在同一层。切面层负责「把注解信息从方法上提取出来」，拦截器层负责「在 SQL 执行前读取信息并注入条件」，处理器层负责「把注解信息翻译成 SQL 片段」。分层使每层职责单一：切面只管信息提取、拦截器只管时机控制、处理器只管 SQL 生成。</p>
+<p><strong>Q2:</strong> DataPermissionIgnoreContext 为什么用 Deque（双端队列）而不是简单的 boolean？</p>
+<p><strong>参考:</strong> 因为需要支持嵌套忽略。场景：方法 A 设置了"忽略数据权限"→调用 B →B 也需要"忽略数据权限"。如果只有 boolean，B 退出时会把 A 的忽略状态也关掉。用 Deque 栈：A 压入 true → B 压入 true → B 弹出恢复 → A 弹出恢复，每层状态独立。</p>
+<p><strong>Q3:</strong> 如果一个 Mapper 方法上没写 @DataPermission，数据权限还会生效吗？</p>
+<p><strong>参考:</strong> 不会。PlusDataPermissionInterceptor 在 beforeQuery/beforePrepare 中先检查 DataPermissionHelper 的 ThreadLocal 是否有注解对象——没有就直接跳过，不注入任何 WHERE 条件。这就是为什么数据权限是「显式标注才生效」的安全设计。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+@DataSource
+@DataSource(value = DataSourceType.SLAVE)
+List&lt;SysUser&gt; selectUserList(SysUser user);
+  → DataPermissionPointcut 匹配到此方法
+    → DataPermissionAdvice: ThreadLocal.set(注解对象)
+      → MyBatis 执行 SELECT
+        → PlusDataPermissionInterceptor.beforeQuery()
+          → DataPermissionHelper.getPermission() != null ✓
+          → PlusDataPermissionHandler.getSqlSegment()
+            → LoginHelper.getLoginUser() → 角色 dataScope = 4 (DEPT_AND_CHILD)
+            → DataScopeType.DEPT_AND_CHILD.sqlTemplate
+            → SpEL 解析: #{#deptName} → dept_id
+            → 查部门树: dept_id IN (1, 2, 3)
+          → JSqlParser 注入: WHERE ... AND dept_id IN (1, 2, 3)
+        → 执行最终 SQL
+    → DataPermissionAdvice: ThreadLocal.remove()
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>数据权限的设计遵循「关注点分离」——业务 Mapper 只需要标注 @DataPermission，SQL 改写完全透明。最巧妙的是 <code>ignore()</code> 方法：当 SpEL 模板中调用 <code>@sdss</code> 的方法内部又查数据库时，如果不关闭数据权限，就会形成「查角色→需要数据权限→查角色→需要数据权限...」的死循环。用一个 ThreadLocal 栈开关+后续拦截器检查的机制，优雅地解决了这个递归问题。</div>
+
+<div class="cite">📖 推荐一手资料：入口文件 <code>annotation/DataPermission.java</code> · <code>interceptor/PlusDataPermissionInterceptor.java</code> · <code>handler/PlusDataPermissionHandler.java</code> · <code>helper/DataPermissionHelper.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解查询构建器与多数据源。</div>
+<div class="nav"><a href="01-BaseMapperPlus与Entity基类.html">← 上一课</a><a href="03-查询构建器与多数据源.html">下一课 →</a></div>
+</body>
+</html>

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 04 · 自定义校验注解 — @Xss/@DictPattern/@EnumPattern</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 04 · 自定义校验注解</h1>
+<p class="a">配套课程：<code>lessons/0004.html</code> · @Xss、@DictPattern、@EnumPattern 的设计原理</p>
+
+<h2>一句话定位</h2>
+<div class="chain">三个自定义 Jakarta Bean Validation 注解，分别校验 <b>XSS 脚本</b>、<b>字典值合法性</b>、<b>枚举值合法性</b>。每个注解 = 注解声明 + Validator 实现 + 分组标记接口 三件套。</div>
+
+<h2>三注解速览</h2>
+<table>
+<tr><th>注解</th><th>Validator</th><th>校验内容</th><th>复杂度</th></tr>
+<tr><td><code>@Xss</code></td><td>XssValidator</td><td>不含 HTML 标签 (RE_HTML_MARK)</td><td>低（无 initialize）</td></tr>
+<tr><td><code>@DictPattern</code></td><td>DictPatternValidator</td><td>值在指定字典类型中存在</td><td>中（查 DictService）</td></tr>
+<tr><td><code>@EnumPattern</code></td><td>EnumPatternValidator</td><td>值在指定枚举字段中存在</td><td>高（反射+缓存+@Repeatable）</td></tr>
+</table>
+
+<h2>@Xss — 最简校验器</h2>
+<div class="chain">注解: @Constraint(validatedBy = {XssValidator.class})
+校验: ReUtil.contains(HtmlUtil.RE_HTML_MARK, value)
+      → 含 &lt;script&gt; 标签 → false → "不允许任何脚本运行"
+空值: value 为空 → return true (让 @NotBlank 处理)</div>
+
+<h2>@DictPattern — 字典值校验（依赖倒置）</h2>
+<div class="chain">注解参数: dictType="sys_user_sex", separator=","
+校验器: DictPatternValidator.isValid()
+  → SpringUtils.getBean(DictService.class)   ← 非 Spring Bean 拿 Bean
+  → dictService.getDictLabel(dictType, value, separator)
+  → 能查到 label → true; 查不到 → false
+
+关键设计: core 只定义 DictService 接口，实现由业务模块提供。</div>
+
+<h2>@EnumPattern — 反射+缓存（最复杂）</h2>
+<div class="chain">支持 @Repeatable 多规则组合
+
+initialize():
+  → enumClass.getEnumConstants() → 遍历枚举常量
+  → ReflectUtils.invokeGetter(e, fieldName) → 反射取字段值
+  → values.add(String.valueOf(fieldValue)) → 缓存到 HashSet
+
+isValid():
+  → values.contains(value) → O(1) 查找
+
+注解参数: type=DeviceType.class, fieldName="device"</div>
+
+<h2>分组标记接口</h2>
+<div class="chain">AddGroup / EditGroup / QueryGroup — 空标记接口 (marker interface)
+
+DTO 使用:
+  @NotBlank(groups = {AddGroup.class})           → 仅新增校验
+  @NotNull(groups = {AddGroup.class, EditGroup.class}) → 新增+编辑
+
+Controller 指定:
+  @Validated(AddGroup.class) @RequestBody UserDTO dto</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>空值放行约定</b>：三个 isValid() 对空值都 return true，让 @NotBlank 处理空值。</li>
+<li><b>SpringUtils.getBean() 桥接</b>：Validator 不是 Spring Bean，通过静态方法拿 Bean。</li>
+<li><b>@EnumPattern 的 O(1)</b>：initialize() 一次性反射提取→HashSet，isValid() 只需 contains()。</li>
+<li><b>扩展新注解</b>：必须包含 message(), groups(), payload() 三个标准属性。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：@Xss, @DictPattern, @EnumPattern, ValidatorUtils, Fail-Fast 校验模式</p>
+</body>
+</html>

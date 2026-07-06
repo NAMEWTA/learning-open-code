@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 二级缓存</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.76rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; white-space: pre; overflow-x:auto; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 二级缓存 Caffeine + Redis</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code> · 文件：<code>manager/PlusSpringCacheManager</code> · <code>manager/CaffeineCacheDecorator</code> · <code>config/CacheConfig</code></p>
+
+<h2>三件套关系</h2>
+<div class="chain">@EnableCaching (CacheConfig)
+ → PlusSpringCacheManager (自定义 CacheManager, 解析 cacheName#ttl#maxIdle#maxSize#local)
+ → CaffeineCacheDecorator (装饰 Redis Cache, 包一层本地 Caffeine)
+ → TransactionAwareCacheDecorator (事务提交后写)</div>
+
+<h2>缓存名 # 语法</h2>
+<div class="chain">"cacheName#ttl#maxIdle#maxSize#local"
+ Ex: "dict#1h#30m#200#1"
+   → 缓存名=dict, TTL=1小时, 最长空闲=30分钟, 最大200条, 启用本地缓存</div>
+
+<h2>Caffeine 本地缓存配置</h2>
+<ul>
+<li><code>expireAfterWrite(30s)</code> — 写后 30 秒自动过期</li>
+<li><code>maximumSize(1000)</code> — 最多 1000 条</li>
+<li><code>initialCapacity(100)</code></li>
+</ul>
+
+<h2>CaffeineCacheDecorator 读写逻辑</h2>
+<table>
+<tr><th>操作</th><th>逻辑</th></tr>
+<tr><td>读 get</td><td><code>caffeine.get(key, () -> cache.get(key))</code> — 先本地，无则回源 Redis 并自动缓存本地</td></tr>
+<tr><td>写 put</td><td>先 <code>caffeine.invalidate</code> 清本地 → 再 <code>cache.put</code> 写 Redis（防旧本地值残留）</td></tr>
+<tr><td>删 evict</td><td>先 <code>cache.evictIfPresent</code> 删 Redis → 成功则 <code>caffeine.invalidate</code></td></tr>
+<tr><td>清 clear</td><td>先清同命名空间下的本地 key → 再 <code>cache.clear</code></td></tr>
+</table>
+
+<h2>选 RMap 还是 RMapCache</h2>
+<ul>
+<li>无 TTL/SIZE → <b>RMap</b>（不过期）</li>
+<li>有 TTL/SIZE → <b>RMapCache</b>（带过期策略）</li>
+</ul>
+
+<h2>当前状态</h2>
+<ul>
+<li><code>CacheConfig.cacheManager()</code> 未传 caffeine → 默认未启用二级缓存</li>
+<li>想开启需传入：<code>new PlusSpringCacheManager(caffeine())</code></li>
+<li>适合：字典/配置/读多写少 + 能忍 30s 陈旧</li>
+<li>不适合：实时性要求高 / 频繁写 / 集群下需即时一致</li>
+</ul>
+
+<p class="a">→ 术语：二级缓存、CaffeineCacheDecorator（见 GLOSSARY.md）</p>
+</body>
+</html>

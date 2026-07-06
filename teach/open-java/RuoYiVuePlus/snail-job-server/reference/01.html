@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查：服务端架构与启动原理</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; margin-top: 2rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; border-bottom: 1px solid #eee; padding-bottom: 0.25rem; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.12em 0.35em; border-radius: 3px; font-size: 0.88em; }
+  pre { background: #282c34; color: #abb2bf; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.8em; line-height: 1.4; }
+  .tag { display: inline-block; background: #409EFF; color: #fff; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.7em; font-weight: 600; margin-right: 0.4em; }
+  .tag-green { background: #67C23A; }
+  .tag-orange { background: #E6A23C; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.85rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0.8rem; margin: 0.8rem 0; font-family: monospace; font-size: 0.78rem; line-height: 1.5; white-space: pre; overflow-x: auto; color: #333; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 0.8rem; border-top: 1px solid #eee; font-size: 0.85rem; }
+  .nav a { font-weight: 600; text-decoration: none; color: #409EFF; }
+</style>
+</head>
+<body>
+
+<h1>速查 #01：服务端架构与启动原理</h1>
+
+<h2>模块定位</h2>
+
+<table>
+  <tr><th>维度</th><th>说明</th></tr>
+  <tr><td>所属层</td><td><span class="tag">ruoyi-extend</span> 扩展层（独立部署的 Spring Boot 应用）</td></tr>
+  <tr><td>同级模块</td><td>ruoyi-monitor-admin、ruoyi-snailai-server</td></tr>
+  <tr><td>进程关系</td><td>与 ruoyi-admin 主应用<strong>不共享进程</strong></td></tr>
+  <tr><td>源码文件数</td><td>5 个 Java/配置源码（启动类 + 2 安全过滤器 + 3 yml）</td></tr>
+  <tr><td>设计哲学</td><td>"薄封装 + 重框架" — 其余全部由 snail-job-server-starter 自动配置提供</td></tr>
+</table>
+
+<h2>3 个核心依赖</h2>
+
+<table>
+  <tr><th>依赖</th><th>版本</th><th>作用</th></tr>
+  <tr><td><code>snail-job-server-starter</code></td><td>2.0.0</td><td>服务端核心引擎：Akka Actor 调度、Netty 通信、Dashboard API、持久化层</td></tr>
+  <tr><td><code>scala-library</code></td><td>2.13.9</td><td>Scala 运行时，支撑 Akka Actor 模型</td></tr>
+  <tr><td><code>spring-boot-admin-starter-client</code></td><td>-</td><td>注册到 Spring Boot Admin 监控中心</td></tr>
+</table>
+
+<p><span class="tag tag-orange">重要</span> pom.xml 排除了 starter 自带的 scala-library，显式声明 2.13.9，统一管理版本避免传递依赖冲突。</p>
+
+<h2>跨包启动引导（核心设计）</h2>
+
+<pre>package org.dromara.snailjob;  ← 对外声明的包
+
+@SpringBootApplication
+public class SnailJobServerApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(
+            com.aizuda.snailjob.server.SnailJobServerApplication.class,  ← 实际运行的类
+            args
+        );
+    }
+}</pre>
+
+<table>
+  <tr><th>角色</th><th>类</th><th>作用</th></tr>
+  <tr><td><span class="tag">引导器</span> 点火开关</td><td><code>org.dromara.snailjob.SnailJobServerApplication</code></td><td>JVM 入口，@SpringBootApplication 让 IDE 识别为 Spring Boot 应用</td></tr>
+  <tr><td><span class="tag tag-green">发动机</span> 真正上下文</td><td><code>com.aizuda.snailjob.server.SnailJobServerApplication</code></td><td>以框架包为基准进行自动配置扫描，加载全部内部 Bean</td></tr>
+</table>
+
+<p><strong>原因：</strong>SnailJob 框架的自动配置类、@ComponentScan、@EntityScan 都声明在 <code>com.aizuda.snailjob.server</code> 包下。若直接用 <code>org.dromara.snailjob</code> 下的类作为入口，框架自身 Bean 将<strong>扫描不到</strong>。</p>
+
+<h2>启动流程追踪</h2>
+
+<div class="arch-diagram">1. org.dromara.snailjob.SnailJobServerApplication.main()
+   │  (JVM 入口)
+   │
+2. SpringApplication.run(com.aizuda.snailjob.server.SnailJobServerApplication.class)
+   │  (以框架包为基准启动 Spring Boot)
+   │
+3. 自动配置扫描 com.aizuda.snailjob.server.*
+   ├── 加载 Akka Actor 系统（调度引擎核心）
+   ├── 启动 Netty Server（17888 端口，客户端通信）
+   ├── 初始化 MyBatis-Plus（连接 MySQL，管理调度元数据）
+   ├── 启动 Dashboard HTTP Server（8800 端口，管理界面）
+   └── 启动 HTTP 重试/定时/工作流调度器
+   │
+4. ApplicationReadyEvent → 服务端就绪，等待客户端注册</div>
+
+<h2>自我检测要点</h2>
+
+<ol>
+  <li>ruoyi-snailjob-server 属于哪一层？依赖哪三个核心 JAR？</li>
+  <li>为什么启动类包是 org.dromara.snailjob，但 run 传入 com.aizuda.snailjob.server 的类？</li>
+  <li>Sketch 出 main → ApplicationReadyEvent 的启动链路。</li>
+</ol>
+
+<div class="nav">
+  <span></span>
+  <a href="02.html">下一张速查：配置体系与通信模型 →</a>
+</div>
+
+</body>
+</html>

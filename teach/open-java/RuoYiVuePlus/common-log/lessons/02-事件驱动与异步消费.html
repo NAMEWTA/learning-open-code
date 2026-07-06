@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第2课 · 事件驱动与异步消费 —— 跨模块协作的艺术</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第2课 · 事件驱动与异步消费 —— 跨模块协作的艺术</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 ruoyi-common-log 最核心的设计模式 —— 事件驱动解耦。能够：(1) 说出 OperLogEvent 和 LoginInfoEvent 的字段构成与区别；(2) 画出从 @Log Controller 到 sys_oper_log 表的完整跨模块链路；(3) 解释为什么选择 Spring 事件而非直接写数据库；(4) 区分操作日志和系统日志的边界。</div>
+
+<h2>1. 设计核心：发布者与消费者彻底分离</h2>
+
+<p>在第1课中，我们追踪了 LogAspect 的完整流程，它的最后一步是：</p>
+
+<pre>SpringUtils.context().publishEvent(operLog);</pre>
+
+<p>这句话之后发生了什么？<strong>LogAspect 不知道，也不关心。</strong>它只负责把 OperLogEvent "扔出去"，至于谁来接收、怎么处理、存到哪里，完全由 Spring 的事件机制来决定。这就是事件驱动架构的核心 —— 发布者与消费者之间零耦合。</p>
+
+<div class="insight"><strong>💡 模块边界感受：</strong>common-log 模块的代码中，你不会找到任何 <code>import org.dromara.system.xxx</code> 的引用。它完全不依赖 ruoyi-system 模块。但最终日志数据却准确地写入了 system 模块的 <code>sys_oper_log</code> 表。这种"我不认识你，但你能接到我的消息"的设计，是模块化架构中最高级的解耦方式之一。</div>
+
+<p>整个事件驱动体系包含三个角色：</p>
+
+<table>
+  <tr><th>角色</th><th>所在模块</th><th>具体类</th><th>职责</th></tr>
+  <tr><td>事件定义</td><td>common-log</td><td>OperLogEvent、LoginInfoEvent</td><td>定义事件的数据结构（POJO）</td></tr>
+  <tr><td>事件发布</td><td>common-log</td><td>LogAspect（操作日志）<br>SysLoginService / SysRegisterService（登录日志）</td><td>在合适的时机构建事件并发布</td></tr>
+  <tr><td>事件消费</td><td>ruoyi-system</td><td>SysOperLogServiceImpl<br>SysLoginInfoServiceImpl</td><td>通过 @EventListener 接收事件，异步写入数据库</td></tr>
+</table>
+
+<p>注意事件定义和事件发布都在 common-log 模块，但事件消费在 ruoyi-system 模块。这种"定义归我，消费归你"的模式，是跨模块事件驱动架构的标准实践。</p>
+
+<h2>2. OperLogEvent：操作日志的 23 字段载体</h2>
+
+<p><code>event/OperLogEvent.java</code> 是一个纯数据对象（使用 Lombok <code>@Data</code>），实现了 <code>Serializable</code> 接口。它承载了操作日志所需的全部信息，共 23 个字段：</p>
+
+<table>
+  <tr><th>字段名</th><th>类型</th><th>来源</th><th>说明</th></tr>
+  <tr><td><code>operId</code></td><td>Long</td><td>数据库自增</td><td>日志主键，由数据库自动生成，发布时为空</td></tr>
+  <tr><td><code>title</code></td><td>String</td><td>@Log 注解</td><td>操作模块名称，如 "用户管理"</td></tr>
+  <tr><td><code>businessType</code></td><td>Integer</td><td>@Log 注解</td><td>业务类型（ordinal 值），0-9 对应 10 种类型</td></tr>
+  <tr><td><code>businessTypes</code></td><td>Integer[]</td><td>查询参数</td><td>业务类型数组，用于后台多选筛选，<strong>不作为日志写入字段</strong></td></tr>
+  <tr><td><code>method</code></td><td>String</td><td>切面反射</td><td>方法全限定名，如 <code>com.xxx.controller.UserController.add()</code></td></tr>
+  <tr><td><code>requestMethod</code></td><td>String</td><td>HttpServletRequest</td><td>HTTP 请求方式，如 GET / POST / PUT / DELETE</td></tr>
+  <tr><td><code>operatorType</code></td><td>Integer</td><td>@Log 注解</td><td>操作人类别（ordinal 值），0=OTHER, 1=MANAGE, 2=MOBILE</td></tr>
+  <tr><td><code>operName</code></td><td>String</td><td>LoginHelper</td><td>操作人员登录名</td></tr>
+  <tr><td><code>userId</code></td><td>Long</td><td>LoginHelper</td><td>操作用户 ID</td></tr>
+  <tr><td><code>deptId</code></td><td>Long</td><td>LoginHelper</td><td>操作部门 ID</td></tr>
+  <tr><td><code>deptName</code></td><td>String</td><td>LoginHelper</td><td>部门名称</td></tr>
+  <tr><td><code>clientKey</code></td><td>String</td><td>请求头 / LoginUser</td><td>客户端标识（如 PC、APP），优先从请求头获取</td></tr>
+  <tr><td><code>deviceType</code></td><td>String</td><td>LoginHelper</td><td>设备类型</td></tr>
+  <tr><td><code>browser</code></td><td>String</td><td>LoginHelper</td><td>浏览器类型</td></tr>
+  <tr><td><code>os</code></td><td>String</td><td>LoginHelper</td><td>操作系统</td></tr>
+  <tr><td><code>operUrl</code></td><td>String</td><td>HttpServletRequest</td><td>请求 URL，截断到 255 字符</td></tr>
+  <tr><td><code>operIp</code></td><td>String</td><td>ServletUtils</td><td>操作 IP 地址</td></tr>
+  <tr><td><code>operLocation</code></td><td>String</td><td>消费者填充</td><td>操作地点（IP 归属地），<strong>由消费者端查询填充</strong></td></tr>
+  <tr><td><code>operParam</code></td><td>String</td><td>方法参数</td><td>请求参数 JSON，截断到 3800 字符</td></tr>
+  <tr><td><code>jsonResult</code></td><td>String</td><td>方法返回值</td><td>响应结果 JSON，截断到 3800 字符</td></tr>
+  <tr><td><code>status</code></td><td>Integer</td><td>异常判定</td><td>操作状态，0=成功, 1=失败</td></tr>
+  <tr><td><code>errorMsg</code></td><td>String</td><td>Exception</td><td>错误消息，截断到 3800 字符</td></tr>
+  <tr><td><code>operTime</code></td><td>LocalDateTime</td><td>消费者填充</td><td>操作时间，<strong>由消费者端在 insert 时设置</strong></td></tr>
+  <tr><td><code>costTime</code></td><td>Long</td><td>StopWatch</td><td>方法执行耗时（毫秒）</td></tr>
+</table>
+
+<p>一个关键的观察：<code>operLocation</code>（IP 归属地）和 <code>operTime</code>（操作时间）两个字段在发布事件时是<strong>空值</strong>。它们由消费者 <code>SysOperLogServiceImpl.recordOper()</code> 在处理事件时填充：</p>
+
+<pre>// 消费者端：
+operLog.setOperLocation(AddressUtils.getRealAddressByIP(operLog.getOperIp()));
+// operTime 在 insertOperlog() 中设置：
+operLog.setOperTime(LocalDateTime.now());</pre>
+
+<p>这种"发布者只提供原始数据，消费者负责增强"的分工，体现了单一职责原则。发布者（LogAspect）不需要知道 IP 归属地查询服务的存在，消费者（SysOperLogServiceImpl）在写入前做最后的字段补全。</p>
+
+<h2>3. LoginInfoEvent：登录日志的精简载体</h2>
+
+<p>与 OperLogEvent 的 23 个字段相比，<code>event/LoginInfoEvent.java</code> 极其精简，只有 5 个字段：</p>
+
+<table>
+  <tr><th>字段名</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>username</code></td><td>String</td><td>登录用户名</td></tr>
+  <tr><td><code>status</code></td><td>String</td><td>登录状态 —— "0" 表示成功，"1" 表示失败（注意是字符串而非整数）</td></tr>
+  <tr><td><code>message</code></td><td>String</td><td>提示消息，如 "登录成功"、"密码错误"</td></tr>
+  <tr><td><code>request</code></td><td>HttpServletRequest</td><td>HTTP 请求对象，用于提取 IP、User-Agent 等信息</td></tr>
+  <tr><td><code>args</code></td><td>Object[]</td><td>其他参数，用于日志格式化输出</td></tr>
+</table>
+
+<p>注意两个关键差异：</p>
+
+<blockquote>
+  <p><strong>差异 1 —— status 的类型：</strong>OperLogEvent 的 status 是 <code>Integer</code>（0/1），而 LoginInfoEvent 的 status 是 <code>String</code>（"0"/"1"）。这是因为登录事件的状态不仅包含 "0" 和 "1"，在消费者端还会与 <code>Constants.LOGIN_SUCCESS</code>、<code>Constants.LOGOUT</code>、<code>Constants.REGISTER</code> 等常量做比对，使用字符串类型更灵活。</p>
+  <p><strong>差异 2 —— 携带原始 request：</strong>LoginInfoEvent 直接将 <code>HttpServletRequest</code> 作为字段携带。这在 OperLogEvent 中是不存在的 —— OperLogEvent 在发布前就把 IP、URL 等从 request 中提取好了。为什么 LoginInfoEvent 不一样？因为登录日志需要从 request 中提取 User-Agent 来解析浏览器和操作系统信息，而这个解析逻辑在消费者端（SysLoginInfoServiceImpl）执行，所以必须把原始 request 传过去。</p>
+</blockquote>
+
+<h3>3.1 LoginInfoEvent 的发布源</h3>
+
+<p>OperLogEvent 只有一个发布源（LogAspect），但 LoginInfoEvent 有多个发布源：</p>
+
+<table>
+  <tr><th>发布者</th><th>所在模块</th><th>触发场景</th><th>status 取值</th></tr>
+  <tr><td>SysLoginService</td><td>ruoyi-admin（或 admin 模块）</td><td>用户登录成功 / 失败</td><td>"0"（成功）/ "1"（失败）</td></tr>
+  <tr><td>SysRegisterService</td><td>ruoyi-admin（或 admin 模块）</td><td>用户注册</td><td>"0"（注册成功视为成功）</td></tr>
+</table>
+
+<p>发布代码大致如下（以 SysLoginService 为例）：</p>
+
+<pre>// 登录成功时
+LoginInfoEvent loginInfo = new LoginInfoEvent();
+loginInfo.setUsername(username);
+loginInfo.setStatus(Constants.LOGIN_SUCCESS);   // 实际上是 "0"
+loginInfo.setMessage("登录成功");
+loginInfo.setRequest(ServletUtils.getRequest());
+SpringUtils.context().publishEvent(loginInfo);
+
+// 登录失败时
+loginInfo.setStatus(Constants.LOGIN_FAIL);       // 实际上是 "1"
+loginInfo.setMessage("用户不存在/密码错误");</pre>
+
+<h2>4. 跨模块全链路追踪：从 Controller 到数据库</h2>
+
+<p>这是本课最重要的部分 —— 追踪一条操作日志从诞生到落库的完整生命周期。</p>
+
+<h3>4.1 操作日志链路（OperLogEvent）</h3>
+
+<pre>
+┌──────────────────────────────────────────────────────────────────┐
+│ 【阶段 1：声明】                                                  │
+│ Controller 方法上标注 @Log(title="用户管理", businessType=INSERT)     │
+│ 位置：ruoyi-admin 或 ruoyi-system 模块的 Controller 层              │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 2：拦截】                                                  │
+│ LogAspect.@Around("@annotation(controllerLog)")                  │
+│ 位置：ruoyi-common-log / aspect/LogAspect.java                   │
+│ doAround() -> joinPoint.proceed() -> handleLog()                  │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 3：构建事件】                                               │
+│ handleLog() 创建 OperLogEvent，填充 20+ 字段：                     │
+│   · 从 LoginHelper 获取用户信息（operName, userId, deptId...）    │
+│   · 从 ServletUtils 获取 IP、URL                                  │
+│   · 从注解获取 title, businessType, operatorType                 │
+│   · 从方法参数获取请求/响应数据                                     │
+│   · 从 StopWatch 获取耗时                                         │
+│   · 异常时设置 status=FAIL, errorMsg=异常消息                    │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 4：发布事件】                                               │
+│ SpringUtils.context().publishEvent(operLog);                     │
+│ ↓                                                                │
+│ Spring ApplicationEventMulticaster 将事件广播给所有匹配的 Listener │
+│ ↓                                                                │
+│ 【模块边界：common-log ────────────→ ruoyi-system】               │
+│ ↓                                                                │
+│ 【阶段 5：异步消费】                                               │
+│ SysOperLogServiceImpl.recordOper(OperLogEvent operLogEvent)      │
+│ 位置：ruoyi-system/.../service/impl/SysOperLogServiceImpl.java   │
+│ 注解：@Async + @EventListener                                     │
+│   · MapstructUtils.convert() 将 OperLogEvent 转为 SysOperLogBo   │
+│   · AddressUtils.getRealAddressByIP() 查询 IP 归属地             │
+│   · insertOperlog() 转为 SysOperLog 实体                          │
+│   · 设置 operTime = LocalDateTime.now()                         │
+│   · operLogMapper.insert(operLog)                                │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 6：持久化】                                                 │
+│ MyBatis-Plus -> sys_oper_log 表                                  │
+│ INSERT INTO sys_oper_log (title, business_type, oper_name, ...)   │
+│ VALUES ('用户管理', 1, 'admin', ...)                             │
+└──────────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>关键点：<strong>步骤 4 到步骤 5 之间，Spring 的事件广播器完成了模块边界的跨越。</strong>common-log 模块只知道自己发布了一个 OperLogEvent，完全不知道这个事件将被 ruoyi-system 的哪个方法消费。这种"发布-订阅"模式是模块解耦的经典实践。</p>
+
+<h3>4.2 登录日志链路（LoginInfoEvent）</h3>
+
+<p>登录日志的链路与操作日志类似，但发布源在 admin 模块：</p>
+
+<pre>
+┌──────────────────────────────────────────────────────────────────┐
+│ 【阶段 1：登录/注册】                                             │
+│ SysLoginService.login() 或 SysRegisterService.register()          │
+│ 位置：ruoyi-admin 或 admin 模块                                    │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 2：构建并发布 LoginInfoEvent】                              │
+│ 填充 username, status("0"/"1"), message, request, args            │
+│ SpringUtils.context().publishEvent(loginInfo);                   │
+├──────────────────────────────────────────────────────────────────┤
+│ 【模块边界：admin ────────────→ ruoyi-system】                    │
+│ ↓                                                                │
+│ 【阶段 3：异步消费】                                               │
+│ SysLoginInfoServiceImpl.recordLoginInfo(LoginInfoEvent event)     │
+│ 位置：ruoyi-system/.../service/impl/SysLoginInfoServiceImpl.java │
+│ 注解：@Async + @EventListener                                     │
+│   · 从 request 提取 IP、User-Agent                                │
+│   · UserAgentUtil.parse() 解析浏览器和操作系统                     │
+│   · AddressUtils 查询 IP 归属地                                   │
+│   · 构建 SysLoginInfoBo，设置所有字段                             │
+│   · insertLoginInfo() 写入 sys_login_info 表                     │
+├──────────────────────────────────────────────────────────────────┤
+│ 【阶段 4：slf4j 日志输出】                                         │
+│ 在 recordLoginInfo() 中，还会拼接 IP + 地址 + 用户名 + 状态        │
+│ 并通过 log.info(s, args) 输出到 slf4j 日志文件                    │
+│ 格式：[192.168.1.1][上海市][admin][0][登录成功]                    │
+└──────────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>注意登录日志比操作日志多做了一件事：<strong>在写入数据库的同时，也会通过 slf4j 输出到日志文件</strong>。这是为了满足运维需求 —— 登录行为需要在系统日志文件中也有记录，方便实时监控和告警。</p>
+
+<h2>5. 为什么选择事件驱动？三个层面的理由</h2>
+
+<p>如果不用事件驱动，最"直接"的做法是：在 LogAspect.handleLog() 中直接注入 SysOperLogService，调用其 insert 方法写入数据库。但 RuoYi-Vue-Plus 没有这么做，原因有三个层面：</p>
+
+<h3>5.1 架构层面：模块独立性</h3>
+
+<div class="insight">
+  <p><strong>如果直接写数据库：</strong>common-log 模块必须依赖 ruoyi-system 模块（或至少依赖其 Service 接口），这意味着 common-log 不再是"通用"模块 —— 它和 system 形成了强耦合。任何想复用 common-log 的项目都必须同时引入 system 模块，或者自己实现 Service 接口。</p>
+  <p><strong>使用事件驱动：</strong>common-log 模块不 import 任何 system 的类。它只发布 Spring 标准事件，任何一个模块都可以通过 @EventListener 来消费。如果你想把日志写到 MongoDB 而不是 MySQL，只需在任意模块中新增一个 Listener，无需改动 common-log 的任何代码。</p>
+</div>
+
+<h3>5.2 性能层面：异步非阻塞</h3>
+
+<p><code>SysOperLogServiceImpl.recordOper()</code> 和 <code>SysLoginInfoServiceImpl.recordLoginInfo()</code> 都标注了 <code>@Async</code>：</p>
+
+<pre>@Async
+@EventListener
+public void recordOper(OperLogEvent operLogEvent) { ... }</pre>
+
+<p><code>@Async</code> 让事件消费在独立的线程池中执行，<strong>不阻塞主业务线程</strong>。这意味着：即使用户操作日志的写入需要 200ms（包括 IP 归属地查询的网络延迟），Controller 的响应时间完全不受影响。用户不会因为"日志写得太慢"而感觉到页面卡顿。</p>
+
+<blockquote>注意：Spring 事件默认是同步的。如果不加 @Async，publishEvent() 会阻塞直到所有 Listener 执行完毕。加上 @Async 后，Listener 在线程池中异步执行，publishEvent() 立即返回。</blockquote>
+
+<h3>5.3 扩展层面：零侵入增加新消费者</h3>
+
+<p>假设未来需求变更："当检测到 DELETE 操作时，额外发送一条钉钉通知"。在事件驱动架构下，你只需要在任何模块中新增一个 Listener：</p>
+
+<pre>@Async
+@EventListener
+public void notifyOnDelete(OperLogEvent event) {
+    if (BusinessType.DELETE.ordinal() == event.getBusinessType()) {
+        dingTalkService.sendAlert("用户 " + event.getOperName()
+            + " 删除了 " + event.getTitle());
+    }
+}</pre>
+
+<p>不需要修改 LogAspect，不需要修改 SysOperLogServiceImpl，不需要修改 @Log 注解。新增消费者对现有代码<strong>零侵入</strong>。这就是发布-订阅模式的核心优势。</p>
+
+<h2>6. 操作日志 vs 系统日志：两条平行线</h2>
+
+<p>理解 ruoyi-common-log 的设计，还需要区分两种"日志"的不同用途：</p>
+
+<table>
+  <tr><th>维度</th><th>操作日志（OperLog）</th><th>系统日志（System Log）</th></tr>
+  <tr><td><strong>目的</strong></td><td>业务审计 —— 谁在什么时候做了什么操作</td><td>开发运维 —— 程序运行状态、异常堆栈、性能指标</td></tr>
+  <tr><td><strong>受众</strong></td><td>审计人员、管理员、部门主管</td><td>开发人员、运维人员</td></tr>
+  <tr><td><strong>存储</strong></td><td>数据库（sys_oper_log 表），可查询、筛选、导出</td><td>文件系统（slf4j 输出到 app.log），可被 ELK 采集</td></tr>
+  <tr><td><strong>触发</strong></td><td>用户执行了带 @Log 注解的操作</td><td>代码中的 log.info() / log.error() 语句</td></tr>
+  <tr><td><strong>生命周期</strong></td><td>持久化存储，可定期归档或清空</td><td>按文件滚动策略归档，超过保留期自动删除</td></tr>
+  <tr><td><strong>示例</strong></td><td>"admin 在 2024-01-15 14:30 新增了用户张三"</td><td>"UserController.add 方法耗时 45ms"<br>"数据库连接池使用率 80%"</td></tr>
+</table>
+
+<p>在 LogAspect.handleLog 的 catch 块中，当事件发布本身失败时，代码降级为 slf4j 输出：</p>
+
+<pre>} catch (Exception exp) {
+    // 记录本地异常日志
+    log.error("记录操作日志异常", exp);
+}</pre>
+
+<p>这是"操作日志的失败记录为系统日志"的降级策略 —— 即使数据库写入失败，运维人员仍然能在系统日志文件中看到异常信息。两种日志机制形成互补，确保任何情况下都有迹可循。</p>
+
+<h2>7. MapstructUtils 的桥梁角色</h2>
+
+<p>在消费者端，有一个容易被忽略的细节：事件对象不能直接插入数据库。OperLogEvent 和 SysOperLog 是两个不同的类，前者是 common-log 模块的事件 POJO，后者是 ruoyi-system 模块的 MyBatis-Plus 实体。中间的转换由 MapstructUtils 完成：</p>
+
+<pre>// SysOperLogServiceImpl.recordOper():
+SysOperLogBo operLog = MapstructUtils.convert(operLogEvent, SysOperLogBo.class);
+// ...补充 operLocation 等字段...
+insertOperlog(operLog);
+
+// insertOperlog():
+SysOperLog operLog = MapstructUtils.convert(bo, SysOperLog.class);
+operLog.setOperTime(LocalDateTime.now());
+operLogMapper.insert(operLog);</pre>
+
+<p>这里做了<strong>两次转换</strong>：OperLogEvent -> SysOperLogBo（用于业务处理）-> SysOperLog（用于数据库插入）。MapStruct 在编译期生成转换代码，性能接近手写 getter/setter，但比手写代码更安全（字段名变更时编译期报错）。</p>
+
+<h2>8. 完整架构图</h2>
+
+<p>将第1课和第2课的内容合并，得到 ruyi-common-log 的完整心智模型：</p>
+
+<pre>
+                            ┌──────────────────────┐
+                            │   @Log 注解           │
+                            │   Controller 方法上    │
+                            └──────────┬───────────┘
+                                       │ 用户请求触发
+                                       ▼
+                            ┌──────────────────────┐
+                            │   LogAspect           │  ← ruoyi-common-log
+                            │   @Around 拦截         │
+                            │   · 提取 Request 信息  │
+                            │   · 提取 LoginUser     │
+                            │   · 计算耗时           │
+                            │   · 序列化参数/响应     │
+                            └──────────┬───────────┘
+                                       │ publishEvent()
+                                       ▼
+                       ┌───────────────────────────┐
+                       │    Spring                  │
+                       │    ApplicationEvent-       │
+                       │    Multicaster             │
+                       └──────────┬────────────────┘
+                                  │ 广播事件
+                  ┌───────────────┼───────────────┐
+                  │               │               │
+                  ▼               ▼               ▼
+          ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+          │ 消费者 A      │ │ 消费者 B      │ │ 未来消费者    │
+          │ (ruoyi-      │ │ (其他模块)    │ │ (新需求)      │
+          │  system)      │ │              │ │              │
+          │ @Async       │ │ @EventListener│ │ @EventListener│
+          │ @EventListener│ │              │ │              │
+          └──────┬───────┘ └──────────────┘ └──────────────┘
+                 │
+                 ▼
+          ┌──────────────┐
+          │ sys_oper_log  │
+          │ (MySQL)       │
+          └──────────────┘
+
+  发布者 (common-log)   →   事件 (OperLogEvent)  →   消费者 (ruoyi-system)  →   数据库
+  不依赖消费者              纯数据传输对象                不依赖发布者
+</pre>
+
+<p>这张图的核心信息：<strong>common-log 和 ruoyi-system 之间唯一的耦合点是事件类本身（OperLogEvent / LoginInfoEvent）</strong>。两个模块都需要在 classpath 上有 common-log 的 jar 包（因为事件类定义在其中），但它们之间没有编译期依赖关系。这是一个教科书级别的模块解耦案例。</p>
+
+<div class="quiz">
+  <details>
+    <summary>📝 课后自测（4 题）</summary>
+    <p><strong>Q1：</strong>OperLogEvent 有 23 个字段，但 operLocation 和 operTime 在发布时为 null。谁在什么时候填充它们？为什么不让发布者填充？</p>
+    <p style="color:#888;font-size:0.9em;">提示：考虑单一职责原则 —— 发布者不应该知道 IP 归属地查询服务。</p>
+    <p><strong>Q2：</strong>如果去掉 @Async 注解，用户操作日志写入会有什么变化？对用户体验有什么影响？</p>
+    <p style="color:#888;font-size:0.9em;">提示：Spring 事件默认是同步的。</p>
+    <p><strong>Q3：</strong>假设你需要在操作日志写入数据库的同时，把 DELETE 操作同步到 Elasticsearch 供审计检索。你应该修改哪些文件？</p>
+    <p style="color:#888;font-size:0.9em;">提示：遵循"开闭原则" —— 对扩展开放，对修改关闭。</p>
+    <p><strong>Q4：</strong>LoginInfoEvent 的 status 是 String 类型，而 OperLogEvent 的 status 是 Integer 类型。为什么设计不一致？你认同这个设计吗？</p>
+    <p style="color:#888;font-size:0.9em;">提示：看消费者端 status 与哪些常量做比对。</p>
+  </details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+  · 操作事件定义：<code>ruoyi-common-log/.../event/OperLogEvent.java</code><br>
+  · 登录事件定义：<code>ruoyi-common-log/.../event/LoginInfoEvent.java</code><br>
+  · 操作日志消费者：<code>ruoyi-system/.../service/impl/SysOperLogServiceImpl.java</code>（注意 @Async + @EventListener）<br>
+  · 登录日志消费者：<code>ruoyi-system/.../service/impl/SysLoginInfoServiceImpl.java</code><br>
+  · Spring 事件文档：<a href="https://docs.spring.io/spring-framework/reference/core/context/applicationcontext.html#context-functionality-events" target="_blank">Spring Events Reference</a>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如："common-log 发布事件时，如果没有任何消费者监听会怎样？事件会丢失吗？"</div>
+<div class="nav"><a href="01-@Log注解与AOP切面.html">← 上一课：@Log注解与AOP切面</a><a href="../">模块首页 →</a></div>
+</body>
+</html>

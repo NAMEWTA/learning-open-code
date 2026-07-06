@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 限流：@RateLimiter 链路与令牌桶</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 限流：<code>@RateLimiter</code> 链路与令牌桶 <span class="tag">切面区</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #3）</b>：学完你能完整讲清一次 <code>@RateLimiter</code> 从注解到 Redis 令牌桶的链路，说清 <strong>SpEL 动态 key</strong> 怎么拼、<strong>DEFAULT / IP / CLUSTER</strong> 三种 <code>LimitType</code> 的差异，以及令牌不足时为什么返回 <code>-1</code> 就抛异常。
+</div>
+
+<p>限流的目的：<strong>保护系统不被请求刷爆</strong>。RuoYi 用一个注解 + 一个切面 + Redisson 令牌桶实现。我们追一条完整的线。</p>
+
+<h2>一、注解：声明限流规则</h2>
+<span class="step where">annotation/RateLimiter.java</span>
+<pre><code>@RateLimiter(
+    key = "#user.userId",          // 限流维度（SpEL，可选）
+    time = 60,                     // 时间窗口（秒），默认 60
+    count = 100,                   // 窗口内允许次数，默认 100
+    limitType = LimitType.IP,      // 限流类型，默认 DEFAULT
+    timeout = 86400,               // 限流策略存活，默认 1 天
+    message = "{rate.limiter.message}"  // 提示，支持国际化
+)
+public R&lt;Void&gt; submit(@RequestBody User user) { ... }</code></pre>
+
+<h2>二、五步链路</h2>
+
+<div class="flow">@RateLimiter 注解的方法被调用
+   │
+   ▼
+RateLimiterAspect.doBefore()     ← @Before 在方法执行前拦截
+   │  1. 取出 time / count / timeout
+   │  2. getCombineKey() 拼出完整限流 key
+   │  3. 选 RateType（DEFAULT/IP→OVERALL, CLUSTER→PER_CLIENT）
+   ▼
+RedisUtils.rateLimiter(key, rateType, count, time, timeout)
+   │  4. CLIENT.getRateLimiter(key) 拿 RRateLimiter
+   │     trySetRate(...) 设置速率
+   │     tryAcquire() 尝试扣一个令牌
+   ▼
+   ├─ 成功 → 返回 availablePermits()（剩余令牌数 ≥ 0）
+   └─ 失败 → 返回 -1
+   │
+   ▼
+number == -1 ?
+   ├─ 是 → 翻译 message → throw ServiceException(限流提示)
+   └─ 否 → 放行，记日志"剩余令牌 => N"</div>
+
+<h2>三、key 是怎么拼出来的（getCombineKey）</h2>
+<span class="step where">aspectj/RateLimiterAspect.java:95</span>
+
+<p>这是最值得细看的方法。key 由三段拼成：<strong>固定前缀 + URI + (维度) + 业务 key</strong>。</p>
+
+<div class="step"><span class="num">1</span><b>解析 SpEL 业务 key</b><br>
+如果注解的 <code>key</code> 含 <code>#</code>，说明是表达式（如 <code>#user.userId</code>）。切面用 <code>MethodBasedEvaluationContext</code> 把方法参数喂给 SpEL 解析器，求出真实值。还支持 <code>#{...}</code> 模板格式和 <code>@bean</code> 引用（设了 <code>BeanFactoryResolver</code>）。</div>
+
+<div class="step"><span class="num">2</span><b>拼前缀和 URI</b><br>
+<code>GlobalConstants.RATE_LIMIT_KEY + requestURI + ":"</code>。所以不同接口天然隔离。</div>
+
+<div class="step"><span class="num">3</span><b>按 LimitType 加维度</b><br>
+<code>IP</code> → 追加 <code>ServletUtils.getClientIP()</code>；<code>CLUSTER</code> → 追加 <code>RedisUtils.getClient().getId()</code>（客户端实例 id）；<code>DEFAULT</code> → 不加。</div>
+
+<table>
+<tr><th>LimitType</th><th>key 含什么</th><th>效果</th><th>RateType</th></tr>
+<tr><td>DEFAULT</td><td>URI + 业务key</td><td>全局限流：所有人共享一个桶</td><td>OVERALL</td></tr>
+<tr><td>IP</td><td>URI + IP + 业务key</td><td>按来源 IP 各自限流</td><td>OVERALL</td></tr>
+<tr><td>CLUSTER</td><td>URI + 实例id + 业务key</td><td>按后端实例各自限流</td><td>PER_CLIENT</td></tr>
+</table>
+
+<div class="why"><b>DEFAULT vs CLUSTER 的微妙差异</b>：DEFAULT/OVERALL 是「整个集群共用一个全局令牌桶」（无论几台后端，总量受限）。CLUSTER/PER_CLIENT 是「每个后端实例一个桶」（部署 3 台就是 3 倍总量）。前者控总量、后者控单机——别记反。</div>
+
+<h2>四、令牌桶：为什么是 Redisson 来做</h2>
+
+<pre><code>// RedisUtils.rateLimiter
+RRateLimiter rateLimiter = CLIENT.getRateLimiter(key);
+rateLimiter.trySetRate(rateType, rate, Duration.ofSeconds(rateInterval), Duration.ofSeconds(timeout));
+if (rateLimiter.tryAcquire()) {
+    return rateLimiter.availablePermits();   // 剩余令牌
+} else {
+    return -1L;                              // 没令牌了
+}</code></pre>
+
+<div class="why"><b>为什么不自己用 incr 计数？</b>「读计数 → 判断 → 加一」三步在并发下不原子，会超发。Redisson 的 <code>RRateLimiter</code> 用 <strong>Lua 脚本在 Redis 端原子完成</strong>取令牌，天然支持分布式多实例。<code>trySetRate</code> 是幂等的——只在桶不存在时设速率；<code>timeout</code> 让策略过期后能被重置（清掉旧策略数据）。</div>
+
+<h2>五、国际化消息处理</h2>
+<p>注解默认 <code>message = "{rate.limiter.message}"</code>。切面发现消息被 <code>{}</code> 包裹，就剥掉花括号、用 <code>MessageUtils.message()</code> 按当前语言翻译。所以你看到的是「访问过于频繁，请稍候再试」而非一串 code。</p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>limitType = IP</code> 和 <code>limitType = DEFAULT</code> 的区别是？</p>
+<span class="opt">A. IP 限流更快，DEFAULT 限流更慢</span>
+<span class="opt">B. IP 在 key 里加来源 IP，每个 IP 各自一个桶；DEFAULT 所有请求共享一个全局桶</span>
+<span class="opt">C. IP 用 Redis，DEFAULT 用本地内存</span>
+<span class="opt">D. 没有区别，只是名字不同</span>
+<details><summary>看答案</summary><b>B</b>。<code>getCombineKey</code> 在 IP 类型时追加 <code>ServletUtils.getClientIP()</code>，使每个 IP 拥有独立令牌桶；DEFAULT 不加维度，全局共享。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 令牌桶为什么用 Redisson 的 RRateLimiter 而不是自己 incr 计数？</p>
+<span class="opt">A. incr 不支持过期时间</span>
+<span class="opt">B. RRateLimiter 用 Lua 在 Redis 端原子取令牌，并发下不会超发，且天然支持分布式</span>
+<span class="opt">C. incr 只能存整数，存不下令牌</span>
+<span class="opt">D. RRateLimiter 不需要连接 Redis，速度更快</span>
+<details><summary>看答案</summary><b>B</b>。"读-判断-写"三步非原子会超发；RRateLimiter 把扣令牌做成 Redis 端的原子 Lua 操作，多实例共享一致。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 切面里 <code>RedisUtils.rateLimiter(...)</code> 返回 <code>-1</code> 意味着什么？</p>
+<span class="opt">A. Redis 连接失败</span>
+<span class="opt">B. 令牌已耗尽（tryAcquire 失败），切面将抛出限流 ServiceException</span>
+<span class="opt">C. 限流配置错误，key 为空</span>
+<span class="opt">D. 还剩 1 个令牌，可以放行</span>
+<details><summary>看答案</summary><b>B</b>。<code>tryAcquire()</code> 失败返回 <code>-1L</code>，切面据此抛出翻译后的限流提示；成功则返回 ≥0 的剩余令牌数。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/6.-distributed-objects#612-ratelimiter" target="_blank">Redisson Wiki · RateLimiter</a>——本课 <code>RRateLimiter</code> 的 <code>trySetRate</code> / <code>tryAcquire</code> / <code>availablePermits</code> 在这里有官方语义说明。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「<code>#{#user.userId}</code> 和 <code>#user.userId</code> 写法有什么不同？」「timeout 设成 0 会怎样？」下一课讲<strong>同区的另一个注解 @RepeatSubmit</strong>，看防重提交和限流在设计上有何不同。</div>
+
+<div class="nav">课程 0003 / 使命：全面读懂 ruoyi-common-redis · 上一课：config 地基 · 下一课：@RepeatSubmit 防重提交</div>
+
+</body>
+</html>

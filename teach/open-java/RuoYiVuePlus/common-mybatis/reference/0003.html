@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 - 数据权限层一：注解、切面、拦截器</title>
+<style>
+body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+th { background: #f4f6f8; }
+code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+.chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+.a { color: #888; font-size: 0.8rem; }
+ul { font-size: 0.85rem; }
+@media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>速查：数据权限层一 — 注解、切面、拦截器</h1>
+<p class="a">对应课程 0003 · 纯干货速查，不含解释性文字</p>
+
+<h2>三层架构总览</h2>
+<table>
+<tr><th>层</th><th>类</th><th>角色</th><th>关键方法</th></tr>
+<tr>
+<td>注解层</td>
+<td><code>@DataPermission</code> / <code>@DataColumn</code></td>
+<td>声明"谁需要数据权限"</td>
+<td><code>value()</code> / <code>joinStr()</code></td>
+</tr>
+<tr>
+<td>切面层</td>
+<td><code>DataPermissionPointcut</code> + <code>DataPermissionAdvice</code></td>
+<td>匹配方法 → 建立上下文</td>
+<td><code>matches()</code> / <code>invoke()</code></td>
+</tr>
+<tr>
+<td>拦截器层</td>
+<td><code>PlusDataPermissionInterceptor</code></td>
+<td>拦截 SQL → 注入 WHERE</td>
+<td><code>beforeQuery()</code> / <code>beforePrepare()</code></td>
+</tr>
+<tr>
+<td>处理器层</td>
+<td><code>PlusDataPermissionHandler</code></td>
+<td>生成权限 SQL 条件</td>
+<td><code>getSqlSegment()</code> / <code>buildDataFilter()</code></td>
+</tr>
+</table>
+
+<h2>@DataPermission 快速参考</h2>
+<table>
+<tr><th>属性</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>value()</code></td><td><code>DataColumn[]</code></td><td><code>{}</code></td><td>数据列映射数组</td></tr>
+<tr><td><code>joinStr()</code></td><td><code>String</code></td><td><code>""</code></td><td>连接符，空=SELECT用OR/其他用AND</td></tr>
+<tr><td><code>@Target</code></td><td>—</td><td><code>{METHOD, TYPE}</code></td><td>可用于方法和类</td></tr>
+</table>
+
+<h2>@DataColumn 快速参考</h2>
+<table>
+<tr><th>属性</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>key()</code></td><td><code>String</code></td><td><code>"deptName"</code></td><td>SpEL 占位符键</td></tr>
+<tr><td><code>value()</code></td><td><code>String</code></td><td><code>"dept_id"</code></td><td>真实数据库列名</td></tr>
+</table>
+
+<h2>Pointcut + Advice 执行流</h2>
+<div class="chain">
+DataPermissionPointcut.matches(Method, Class)
+  ├─ 1. method.getAnnotation(DataPermission.class) != null ?
+  │      → YES: return true
+  │      → NO:  go step 2
+  ├─ 2. targetClass.getAnnotation(DataPermission.class) != null ?
+  │      → YES: return true
+  │      → NO:  go step 3
+  └─ 3. targetClass 是 JDK Proxy ($Proxy 开头)?
+         → YES: 遍历接口方法找 @DataPermission
+         → NO:  return false
+
+DataPermissionAdvice.invoke(MethodInvocation)
+  ├─ findAnnotation(invocation) → DataPermission
+  │   优先: 方法注解 → 类注解 → Proxy接口注解
+  ├─ DataPermissionHelper.setPermission(注解, args)
+  │   ├─ THREAD_LOCAL.set(dataPermission)       // ThreadLocal
+  │   └─ SaStorage: {user, params, ...}         // Sa-Token 上下文
+  ├─ invocation.proceed()   // 执行目标方法 → 触发拦截器
+  └─ finally: DataPermissionHelper.removePermission()
+</div>
+
+<h2>Interceptor 方法执行表</h2>
+<table>
+<tr><th>方法</th><th>SQL 类型</th><th>关键步骤</th></tr>
+<tr>
+<td><code>beforeQuery()</code></td>
+<td>SELECT</td>
+<td>① InterceptorIgnoreHelper 检查<br>② handler.invalid() 有效性检查<br>③ JSqlParser parserSingle() 解析</td>
+</tr>
+<tr>
+<td><code>beforePrepare()</code></td>
+<td>UPDATE / DELETE</td>
+<td>① 同上检查忽略和有效性<br>② JSqlParser parserMulti() 解析<br>③ 角色条件用 AND 拼接</td>
+</tr>
+<tr>
+<td><code>processSelect()</code></td>
+<td>SELECT</td>
+<td>遍历 FROM 表 → handler.getSqlSegment() → 注入 WHERE</td>
+</tr>
+<tr>
+<td><code>processUpdate()</code></td>
+<td>UPDATE</td>
+<td>handler.getSqlSegment() → AND 到原 WHERE</td>
+</tr>
+<tr>
+<td><code>processDelete()</code></td>
+<td>DELETE</td>
+<td>同上</td>
+</tr>
+</table>
+
+<h2>ThreadLocal 生命周期</h2>
+<table>
+<tr><th>阶段</th><th>操作</th><th>持有者</th></tr>
+<tr><td>设置</td><td><code>DataPermissionHelper.setPermission()</code></td><td>DataPermissionAdvice</td></tr>
+<tr><td>读取</td><td><code>DataPermissionHelper.getPermission()</code></td><td>PlusDataPermissionHandler</td></tr>
+<tr><td>清理</td><td><code>DataPermissionHelper.removePermission()</code></td><td>DataPermissionAdvice (finally)</td></tr>
+</table>
+
+<h2>防递归 ignore 机制</h2>
+<div class="chain">
+DataPermissionHelper.ignore(Runnable)
+  └─ DataPermissionIgnoreContext.ignore(Runnable)
+       ├─ enable():  ThreadLocal&lt;Deque&lt;Boolean&gt;&gt;.push(当前状态)
+       │             InterceptorIgnoreHelper.ignore() → true
+       ├─ runnable.run()    // SpEL 辅助查询（sdss.getDeptAndChild 等）
+       └─ disable(): Deque.pop() → 恢复之前的状态
+</div>
+
+<h2>配置注册</h2>
+<table>
+<tr><th>配置类</th><th>注册内容</th><th>位置</th></tr>
+<tr><td><code>MybatisPlusConfig</code></td><td><code>PlusDataPermissionInterceptor</code></td><td>MybatisPlusInterceptor.addInnerInterceptor()</td></tr>
+<tr><td><code>MybatisPlusConfig</code></td><td><code>DataPermissionPointcutAdvisor</code></td><td>@Bean 注册到 Spring 容器</td></tr>
+</table>
+
+</body>
+</html>

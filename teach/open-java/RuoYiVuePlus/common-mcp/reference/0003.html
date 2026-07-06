@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · Result 模型与完整调用链</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · Result 模型与完整调用链</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code></p>
+
+<h2>McpToolCallResult vs McpResourceReadResult</h2>
+<table>
+<tr><th></th><th>McpToolCallResult</th><th>McpResourceReadResult</th></tr>
+<tr><td>字段数</td><td>4</td><td>2</td></tr>
+<tr><td>serverName</td><td>✅ String</td><td>✅ String</td></tr>
+<tr><td>error 标记</td><td>✅ boolean</td><td>❌ 无</td></tr>
+<tr><td>文本内容</td><td><code>List&lt;McpSchema.Content&gt;</code></td><td><code>List&lt;McpSchema.ResourceContents&gt;</code></td></tr>
+<tr><td>结构化数据</td><td>✅ <code>Object structuredContent</code></td><td>❌ 无</td></tr>
+<tr><td>工厂方法入参</td><td><code>McpSchema.CallToolResult</code></td><td><code>McpSchema.ReadResourceResult</code></td></tr>
+</table>
+
+<h2>工具调用完整链路</h2>
+<div class="chain">
+1. 业务代码:
+   mcpClientTemplate.callTool("weather-server", "get_forecast", Map.of("city","北京"))
+
+2. McpClientTemplate:
+   findClient("weather-server") → Optional&lt;McpSyncClient&gt;
+   .map(client → client.callTool(new CallToolRequest(name, args)))
+
+3. Spring AI MCP (SDK 层):
+   CallToolRequest → JSON-RPC 消息 → SSE/stdio → MCP Server
+   MCP Server → JSON-RPC 响应 → CallToolResult
+
+4. McpClientTemplate:
+   McpToolCallResult.of("weather-server", callResult)
+   → Record{"weather-server", isError?, content[], structuredContent}
+
+5. 业务代码:
+   if (result.error()) { 读取 content 中的错误文本 }
+   else { 读取 content(文本) 或 structuredContent(结构化数据) }
+</div>
+
+<h2>解析 ToolCallResult 的防御性代码模式</h2>
+<pre><code>// 1. 先查 Optional 是否存在
+if (resultOpt.isEmpty()) { /* Server 名称写错 */ }
+
+// 2. 再查 error 标记
+McpToolCallResult result = resultOpt.get();
+if (result.error()) { /* 工具执行失败 */ }
+
+// 3. 解析文本内容
+String text = result.content().stream()
+    .filter(c -> "text".equals(c.type()))
+    .map(c -> c.text())
+    .collect(Collectors.joining("\n"));
+
+// 4. 解析结构化内容（可选）
+if (result.structuredContent() instanceof Map<?,?> map) {
+    // 强转后用
+}</code></pre>
+
+<h2>解析 ResourceReadResult 的防御性代码模式</h2>
+<pre><code>// 1. 先查 Optional 是否存在
+if (resultOpt.isEmpty()) { /* Server 名称写错 */ }
+
+// 2. 遍历 contents 列表
+McpResourceReadResult result = resultOpt.get();
+for (ResourceContents rc : result.contents()) {
+    if (rc instanceof TextResourceContents textRc) {
+        System.out.println(textRc.uri() + ": " + textRc.text());
+    } else if (rc instanceof BlobResourceContents blobRc) {
+        byte[] data = Base64.getDecoder().decode(blobRc.blob());
+        // 处理二进制数据
+    }
+}</code></pre>
+
+<h2>典型使用模式速查</h2>
+<table>
+<tr><th>需求</th><th>调用方式</th></tr>
+<tr><td>查看所有 Server 的工具</td><td><code>listTools()</code> → Map&lt;Server名, 工具列表&gt;</td></tr>
+<tr><td>调用已知 Server 的工具</td><td><code>callTool("server", "tool", args)</code> → Optional</td></tr>
+<tr><td>向所有 Server 发起同一操作</td><td><code>callTool("tool", args)</code> → Map（广播）</td></tr>
+<tr><td>读取已知 Server 的资源</td><td><code>readResource("server", "uri")</code> → Optional</td></tr>
+<tr><td>检查某个 Server 是否已连接</td><td><code>findClient("server").isPresent()</code></td></tr>
+</table>
+
+<h2>注意：Boolean.TRUE.equals(isError)</h2>
+<div class="chain">McpToolCallResult 的 error 字段来自 CallToolResult.isError()，
+返回 Boolean 包装类型（可能为 null）。
+源码用 Boolean.TRUE.equals(result.isError()) 防止 NPE。
+→ 如果 isError 为 null → 视为 false（调用未出错）。</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>content</b> 是文本片段列表（展示用），<b>structuredContent</b> 是结构化 JSON 对象（程序化处理用）。</li>
+<li>解析 ResourceContents 必须用 <code>instanceof</code> 判断 TextResourceContents / BlobResourceContents。</li>
+<li>完整调用链 5 层：业务代码 → Template → SDK → 传输层 → MCP Server。</li>
+<li>防御性编程三步：检查 Optional → 检查 error → 解析 content。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：McpToolCallResult、McpResourceReadResult、CallToolRequest、CallToolResult、ReadResourceRequest、ReadResourceResult、Tool 与 Resource</p>
+</body>
+</html>

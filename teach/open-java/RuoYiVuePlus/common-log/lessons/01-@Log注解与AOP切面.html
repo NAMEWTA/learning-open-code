@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第1课 · @Log注解与AOP切面 —— 零侵入的声明式日志</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第1课 · @Log注解与AOP切面 —— 零侵入的声明式日志</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>搞懂 ruoyi-common-log 模块的"注解层 + 切面层"设计。能够：(1) 解释 @Log 注解的 6 个属性及其作用；(2) 口述 LogAspect 从拦截到发布事件的完整流程；(3) 理解 setRequestValue 对 GET 和 POST/PUT/DELETE 的两分支处理策略。</div>
+
+<h2>1. 模块鸟瞰：7 个文件，三层结构</h2>
+
+<p>打开 <code>ruoyi-common-log</code> 模块源码，你会发现它只有 7 个 Java 文件，结构极其克制：</p>
+
+<table>
+  <tr><th>文件</th><th>层级</th><th>包路径</th><th>职责</th></tr>
+  <tr>
+    <td><code>Log.java</code></td>
+    <td>注解层</td>
+    <td><code>annotation/</code></td>
+    <td>声明式标记 —— 加在 Controller 方法上即生效</td>
+  </tr>
+  <tr>
+    <td><code>BusinessType.java</code></td>
+    <td>枚举层</td>
+    <td><code>enums/</code></td>
+    <td>定义 10 种业务操作类型</td>
+  </tr>
+  <tr>
+    <td><code>BusinessStatus.java</code></td>
+    <td>枚举层</td>
+    <td><code>enums/</code></td>
+    <td>定义操作结果（成功 / 失败）</td>
+  </tr>
+  <tr>
+    <td><code>OperatorType.java</code></td>
+    <td>枚举层</td>
+    <td><code>enums/</code></td>
+    <td>定义 3 种操作人类别</td>
+  </tr>
+  <tr>
+    <td><code>LogAspect.java</code></td>
+    <td>切面层</td>
+    <td><code>aspect/</code></td>
+    <td>AOP 引擎 —— 拦截、提取、构建事件、发布</td>
+  </tr>
+  <tr>
+    <td><code>OperLogEvent.java</code></td>
+    <td>事件层</td>
+    <td><code>event/</code></td>
+    <td>操作日志事件载体（23 个字段）</td>
+  </tr>
+  <tr>
+    <td><code>LoginInfoEvent.java</code></td>
+    <td>事件层</td>
+    <td><code>event/</code></td>
+    <td>登录日志事件载体（5 个字段）</td>
+  </tr>
+</table>
+
+<p>这 7 个文件形成了 <strong>注解声明 -> AOP拦截 -> 事件发布</strong> 的三层流水线。核心设计思想是<strong>零侵入</strong>：开发者只需在 Controller 方法上加一个 <code>@Log</code> 注解，所有日志采集、组装、发布工作由 AOP 自动完成。</p>
+
+<div class="insight"><strong>💡 设计洞察：</strong>common-log 模块不写数据库！它只负责"采集 + 发布事件"。谁写数据库？ruoyi-system 模块通过 <code>@EventListener</code> 接收事件后写入 <code>sys_oper_log</code> 表。这就是模块边界的精妙之处 —— 通用组件不依赖业务模块，通过 Spring 事件机制实现解耦。我们将在第2课详细剖析这条跨模块链路。</div>
+
+<h2>2. @Log 注解：声明即所得</h2>
+
+<p><code>@Log</code> 注解定义在 <code>annotation/Log.java</code>，它本身极其简单 —— 只是一个带有 6 个属性的标记注解：</p>
+
+<pre>@Target({ElementType.PARAMETER, ElementType.METHOD})
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+public @interface Log {
+    String title() default "";
+    BusinessType businessType() default BusinessType.OTHER;
+    OperatorType operatorType() default OperatorType.MANAGE;
+    boolean isSaveRequestData() default true;
+    boolean isSaveResponseData() default true;
+    String[] excludeParamNames() default {};
+}</pre>
+
+<p>注意 <code>@Target</code> 允许打在 <strong>方法和参数</strong> 上 —— 这意味着不仅可以在 Controller 方法上使用，还可以在方法参数级别做更细粒度的控制（不过实践中几乎只在方法上使用）。<code>@Retention(RUNTIME)</code> 确保注解在运行时可通过反射读取，这是 AOP 拦截的前提。</p>
+
+<h3>2.1 六个属性逐一拆解</h3>
+
+<table>
+  <tr><th>属性</th><th>类型</th><th>默认值</th><th>作用</th></tr>
+  <tr>
+    <td><code>title</code></td>
+    <td>String</td>
+    <td>""</td>
+    <td>模块名称，如 "用户管理"、"角色管理"。写入数据库的 <code>title</code> 字段，方便后台按模块筛选日志。</td>
+  </tr>
+  <tr>
+    <td><code>businessType</code></td>
+    <td>BusinessType</td>
+    <td>OTHER</td>
+    <td>业务操作类型，如新增、修改、删除等。通过 <code>ordinal()</code> 转为整数存入数据库。</td>
+  </tr>
+  <tr>
+    <td><code>operatorType</code></td>
+    <td>OperatorType</td>
+    <td>MANAGE</td>
+    <td>操作人类别 —— 后台用户、手机端用户、其他。用于区分操作来源渠道。</td>
+  </tr>
+  <tr>
+    <td><code>isSaveRequestData</code></td>
+    <td>boolean</td>
+    <td>true</td>
+    <td>是否保存请求参数。关闭后 <code>oper_param</code> 字段为空，适用于参数包含大文本或敏感数据的场景。</td>
+  </tr>
+  <tr>
+    <td><code>isSaveResponseData</code></td>
+    <td>boolean</td>
+    <td>true</td>
+    <td>是否保存响应结果。关闭后 <code>json_result</code> 字段为空，适用于返回数据量巨大的接口。</td>
+  </tr>
+  <tr>
+    <td><code>excludeParamNames</code></td>
+    <td>String[]</td>
+    <td>{}</td>
+    <td>排除指定的请求参数名。例如 <code>{"password", "oldPassword", "newPassword"}</code>，这些参数不会写入日志，防止敏感信息泄露。</td>
+  </tr>
+</table>
+
+<h3>2.2 实际使用示例</h3>
+
+<p>在一个典型的 Controller 中，你会看到这样的用法：</p>
+
+<pre>@Log(title = "用户管理", businessType = BusinessType.INSERT)
+@PostMapping
+public R&lt;Void&gt; add(@Validated @RequestBody SysUserBo bo) {
+    userService.insertByBo(bo);
+    return R.ok();
+}
+
+@Log(title = "用户管理", businessType = BusinessType.EXPORT,
+     isSaveResponseData = false)
+@PostMapping("/export")
+public void export(@RequestBody SysUserBo bo, HttpServletResponse response) {
+    userService.export(bo, response);
+}
+
+@Log(title = "个人信息", businessType = BusinessType.UPDATE,
+     excludeParamNames = {"password", "oldPassword"})
+@PutMapping("/profile")
+public R&lt;Void&gt; updateProfile(@RequestBody SysUserBo bo) {
+    userService.updateUserProfile(bo);
+    return R.ok();
+}</pre>
+
+<p>三个例子体现了不同场景的灵活配置：(1) 新增用户 —— 默认全量记录；(2) 导出操作 —— 不需要记录响应数据（因为响应是文件流）；(3) 修改密码 —— 排除密码字段，防止敏感信息入库。</p>
+
+<h2>3. 三个枚举：给日志打上分类标签</h2>
+
+<h3>3.1 BusinessType —— 10 种业务操作类型</h3>
+
+<p><code>enums/BusinessType.java</code> 定义了 10 种操作类型，覆盖了后台管理的常见场景：</p>
+
+<table>
+  <tr><th>枚举值</th><th>含义</th><th>典型场景</th></tr>
+  <tr><td>OTHER</td><td>其它</td><td>不属于以下分类的通用操作</td></tr>
+  <tr><td>INSERT</td><td>新增</td><td>添加用户、角色、菜单、部门等</td></tr>
+  <tr><td>UPDATE</td><td>修改</td><td>编辑用户信息、修改角色权限等</td></tr>
+  <tr><td>DELETE</td><td>删除</td><td>删除用户、角色、部门等</td></tr>
+  <tr><td>GRANT</td><td>授权</td><td>用户分配角色、角色分配菜单权限</td></tr>
+  <tr><td>EXPORT</td><td>导出</td><td>导出 Excel、导出 PDF 等</td></tr>
+  <tr><td>IMPORT</td><td>导入</td><td>导入 Excel 数据、批量导入用户</td></tr>
+  <tr><td>FORCE</td><td>强退</td><td>管理员强制踢出在线用户</td></tr>
+  <tr><td>GENCODE</td><td>生成代码</td><td>代码生成器生成模板代码</td></tr>
+  <tr><td>CLEAN</td><td>清空数据</td><td>清空操作日志、清空登录日志等</td></tr>
+</table>
+
+<blockquote>存储方式：所有枚举值通过 <code>ordinal()</code> 方法转为整数写入数据库 —— OTHER=0, INSERT=1, UPDATE=2, DELETE=3, GRANT=4, EXPORT=5, IMPORT=6, FORCE=7, GENCODE=8, CLEAN=9。使用 ordinal() 的好处是简单直接，但要注意枚举值顺序不能随意调整，否则历史数据含义会错乱。</blockquote>
+
+<h3>3.2 BusinessStatus —— 操作结果的二元判定</h3>
+
+<p><code>enums/BusinessStatus.java</code> 只有两个值，极其简单：</p>
+
+<table>
+  <tr><th>枚举值</th><th>ordinal()</th><th>含义</th></tr>
+  <tr><td>SUCCESS</td><td>0</td><td>操作成功</td></tr>
+  <tr><td>FAIL</td><td>1</td><td>操作失败</td></tr>
+</table>
+
+<p>状态判定逻辑在 <code>LogAspect.handleLog()</code> 中：正常执行完成设为 SUCCESS，捕获到异常后翻转为 FAIL。注意这里的 <strong>SUCCESS 不代表业务成功</strong>，它只表示方法没有抛出异常 —— 即使 Controller 返回了业务错误码（如 "用户名已存在"），只要没有抛异常，status 就是 SUCCESS。</p>
+
+<h3>3.3 OperatorType —— 操作人的渠道标识</h3>
+
+<p><code>enums/OperatorType.java</code> 定义了 3 种操作人类别：</p>
+
+<table>
+  <tr><th>枚举值</th><th>ordinal()</th><th>含义</th><th>适用场景</th></tr>
+  <tr><td>OTHER</td><td>0</td><td>其它</td><td>系统自动操作、定时任务、第三方回调</td></tr>
+  <tr><td>MANAGE</td><td>1</td><td>后台用户</td><td>管理后台 Web 端操作（默认值）</td></tr>
+  <tr><td>MOBILE</td><td>2</td><td>手机端用户</td><td>移动端 App / 小程序操作</td></tr>
+</table>
+
+<p>默认值是 <code>MANAGE</code>，因为这正是 RuoYi-Vue-Plus 最主流的使用场景 —— 管理后台操作。</p>
+
+<h2>4. LogAspect：AOP 核心引擎深度拆解</h2>
+
+<p><code>aspect/LogAspect.java</code> 是整个模块的心脏。它只有 275 行代码，但包含了完整的日志拦截、上下文提取、事件构建和发布逻辑。我们先看它的类声明：</p>
+
+<pre>@Slf4j
+@Aspect
+@AutoConfiguration
+public class LogAspect { ... }</pre>
+
+<p>三个注解各司其职：</p>
+<ul>
+  <li><code>@Aspect</code> —— 声明这是一个 Spring AOP 切面类，配合 <code>@Around</code> 实现环绕通知</li>
+  <li><code>@AutoConfiguration</code> —— Spring Boot 3.x 的自动配置注解（替代旧版 <code>@Configuration</code> 在 <code>spring.factories</code> 中的注册方式）。注意 newer versions 使用 <code>org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件注册，而不是旧的 <code>META-INF/spring.factories</code></li>
+  <li><code>@Slf4j</code> —— Lombok 日志门面，用于异常情况下的本地日志输出（当事件发布失败时的降级方案）</li>
+</ul>
+
+<h3>4.1 切入点：@Around("@annotation(controllerLog)")</h3>
+
+<p>切面只有一个切入点表达式：</p>
+
+<pre>@Around(value = "@annotation(controllerLog)")
+public Object doAround(ProceedingJoinPoint joinPoint, Log controllerLog) throws Throwable {
+    StopWatch stopWatch = new StopWatch();
+    stopWatch.start();
+    try {
+        Object jsonResult = joinPoint.proceed();
+        handleLog(joinPoint, controllerLog, null, jsonResult, stopWatch);
+        return jsonResult;
+    } catch (Exception e) {
+        handleLog(joinPoint, controllerLog, e, null, stopWatch);
+        throw e;
+    }
+}</pre>
+
+<p>这个切入点匹配 <strong>所有标注了 @Log 注解的方法</strong>。Spring AOP 会自动将注解实例注入到 <code>controllerLog</code> 参数中，你可以在切面中直接读取注解的 title、businessType 等属性值。注意 <code>@annotation(controllerLog)</code> 中的 <code>controllerLog</code> 必须与方法参数名一致。</p>
+
+<p>执行流程可以总结为四个阶段：</p>
+
+<div class="step-flow">
+<p><strong>阶段一：计时启动</strong> —— <code>new StopWatch()</code> + <code>start()</code>，使用 Apache commons-lang3 的 StopWatch 记录方法执行耗时。</p>
+<p><strong>阶段二：执行目标方法</strong> —— <code>joinPoint.proceed()</code> 调用原始 Controller 方法，返回结果保存在 <code>jsonResult</code> 中。</p>
+<p><strong>阶段三：构建并发布日志</strong> —— <code>handleLog()</code> 提取请求上下文、用户信息、方法签名、耗时等，组装成 <code>OperLogEvent</code> 并发布。</p>
+<p><strong>阶段四：异常处理</strong> —— 如果目标方法抛出异常，最终还是会 <code>throw e</code> 把异常继续向上抛出（不吞异常），但在此之前会记录失败日志（status=FAIL + 异常消息）。</p>
+</div>
+
+<h3>4.2 handleLog：日志构建的 12 步流水线</h3>
+
+<p><code>handleLog()</code> 方法承担了最核心的日志组装工作。让我们逐步拆解它的内部逻辑：</p>
+
+<pre>protected void handleLog(final JoinPoint joinPoint, Log controllerLog,
+                          final Exception e, Object jsonResult, StopWatch stopWatch) {
+    try {
+        // 1. 创建事件对象，初始状态为成功
+        OperLogEvent operLog = new OperLogEvent();
+        operLog.setStatus(BusinessStatus.SUCCESS.ordinal());
+
+        // 2. 获取当前 HTTP 请求
+        HttpServletRequest request = ServletUtils.getRequest();
+
+        // 3. 提取 IP 和 URL（URL 截断到 255 字符）
+        String ip = ServletUtils.getClientIP();
+        operLog.setOperIp(ip);
+        operLog.setOperUrl(limit(request.getRequestURI(), MAX_URL_LENGTH));
+
+        // 4. 提取客户端标识（如 PC、APP），截断到 32 字符
+        operLog.setClientKey(limit(
+            request.getHeader(LoginHelper.CLIENT_KEY), MAX_CLIENT_KEY_LENGTH));
+
+        // 5. 获取当前登录用户信息
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        if (ObjectUtil.isNotNull(loginUser)) {
+            operLog.setOperName(loginUser.getUsername());
+            operLog.setUserId(loginUser.getUserId());
+            operLog.setDeptId(loginUser.getDeptId());
+            operLog.setDeptName(loginUser.getDeptName());
+            operLog.setDeviceType(loginUser.getDeviceType());
+            operLog.setBrowser(loginUser.getBrowser());
+            operLog.setOs(loginUser.getOs());
+        }
+
+        // 6. 如果发生异常，翻转为失败状态并记录错误消息
+        if (e != null) {
+            operLog.setStatus(BusinessStatus.FAIL.ordinal());
+            operLog.setErrorMsg(limit(e.getMessage(), MAX_CONTENT_LENGTH));
+        }
+
+        // 7. 设置方法全限定名：com.xxx.controller.UserController.add()
+        String className = joinPoint.getTarget().getClass().getName();
+        String methodName = joinPoint.getSignature().getName();
+        operLog.setMethod(className + "." + methodName + "()");
+
+        // 8. 设置 HTTP 请求方式（GET/POST/PUT/DELETE）
+        operLog.setRequestMethod(request.getMethod());
+
+        // 9. 从注解上提取 title、businessType、operatorType，处理请求/响应数据
+        getControllerMethodDescription(joinPoint, controllerLog, operLog, jsonResult);
+
+        // 10. 停止计时，记录耗时（毫秒）
+        stopWatch.stop();
+        operLog.setCostTime(stopWatch.getDuration().toMillis());
+
+        // 11. 发布事件 —— 这是最关键的一步
+        SpringUtils.context().publishEvent(operLog);
+
+    } catch (Exception exp) {
+        // 12. 如果日志记录本身失败，降级为 slf4j 本地日志输出
+        log.error("记录操作日志异常", exp);
+    }
+}</pre>
+
+<p>几个值得关注的设计细节：</p>
+
+<blockquote>
+  <p><strong>长度截断策略：</strong>代码中定义了三个常量 —— URL 最大 255 字符、客户端标识最大 32 字符、日志内容最大 3800 字符。使用 <code>StringUtils.substring(value, 0, maxLength)</code> 做安全截断，防止超长数据撑爆数据库字段。</p>
+  <p><strong>整体 try-catch 保护：</strong>整个 handleLog 方法包裹在一个 try-catch 中，如果日志记录过程出现任何异常（如序列化失败、发布事件失败），不会影响原始业务请求 —— 异常被 <code>log.error("记录操作日志异常", exp)</code> 吃掉，业务方法正常返回。</p>
+  <p><strong>用户信息容错：</strong>通过 <code>ObjectUtil.isNotNull(loginUser)</code> 做空判断。定时任务、未登录的公开接口等场景下，LoginHelper.getLoginUser() 可能返回 null，此时跳过用户相关字段的设置，不会 NPE。</p>
+</blockquote>
+
+<h3>4.3 getControllerMethodDescription：注解属性 -> 事件字段</h3>
+
+<p>这个方法负责将注解上的配置映射到事件对象：</p>
+
+<pre>public void getControllerMethodDescription(JoinPoint joinPoint, Log log,
+        OperLogEvent operLog, Object jsonResult) throws Exception {
+    // 注解属性 -> 事件字段（通过 ordinal() 转整数）
+    operLog.setBusinessType(log.businessType().ordinal());
+    operLog.setTitle(log.title());
+    operLog.setOperatorType(log.operatorType().ordinal());
+
+    // 按需保存请求参数
+    if (log.isSaveRequestData()) {
+        setRequestValue(joinPoint, operLog, log.excludeParamNames());
+    }
+
+    // 按需保存响应结果
+    if (log.isSaveResponseData() && ObjectUtil.isNotNull(jsonResult)) {
+        operLog.setJsonResult(
+            limit(JsonUtils.toJsonString(jsonResult), MAX_CONTENT_LENGTH));
+    }
+}</pre>
+
+<p>响应结果的序列化使用了 <code>JsonUtils.toJsonString(jsonResult)</code>，然后截断到 3800 字符。这意味着如果 Controller 返回了大量数据（比如分页查询结果），日志中只会保留前 3800 个字符。</p>
+
+<h3>4.4 setRequestValue：GET vs POST 的分支哲学</h3>
+
+<p>这是整个切面中最精妙的一段逻辑 —— 对请求参数的提取因 HTTP 方法不同而采用不同策略：</p>
+
+<pre>private void setRequestValue(JoinPoint joinPoint, OperLogEvent operLog,
+        String[] excludeParamNames) throws Exception {
+    Map&lt;String, String&gt; paramsMap = ServletUtils.getParamMap(ServletUtils.getRequest());
+    String requestMethod = operLog.getRequestMethod();
+
+    if (MapUtil.isEmpty(paramsMap)
+        && StringUtils.equalsAny(requestMethod,
+            HttpMethod.PUT.name(), HttpMethod.POST.name(), HttpMethod.DELETE.name())) {
+        // 分支 A: POST/PUT/DELETE —— 从方法参数对象中序列化
+        String params = argsArrayToString(joinPoint.getArgs(), excludeParamNames);
+        operLog.setOperParam(limit(params, MAX_CONTENT_LENGTH));
+    } else {
+        // 分支 B: GET —— 从 query string 中提取并过滤
+        MapUtil.removeAny(paramsMap, SystemConstants.EXCLUDE_PROPERTIES);
+        MapUtil.removeAny(paramsMap, excludeParamNames);
+        operLog.setOperParam(limit(JsonUtils.toJsonString(paramsMap), MAX_CONTENT_LENGTH));
+    }
+}</pre>
+
+<p><strong>为什么要有两个分支？</strong> 这背后是对两种 HTTP 请求体传递方式的理解：</p>
+
+<ul>
+  <li><strong>GET 请求：</strong>参数在 URL query string 上（如 <code>?pageNum=1&pageSize=10</code>），<code>ServletUtils.getParamMap()</code> 可以直接从 request 中提取所有参数，无需解析方法参数对象。</li>
+  <li><strong>POST/PUT/DELETE 请求：</strong>参数在请求体中（通常是 JSON body），<code>ServletUtils.getParamMap()</code> 可能无法正确提取（因为 body 是 InputStream 流，只能读一次）。此时框架转而从 <code>joinPoint.getArgs()</code> 获取方法实参对象数组，使用 <code>JsonUtils.toJsonStringExcludeFields()</code> 序列化并排除敏感字段。</li>
+</ul>
+
+<p><code>argsArrayToString</code> 方法进一步做了精细的过滤：它会跳过 <code>MultipartFile</code>、<code>HttpServletRequest</code>、<code>HttpServletResponse</code>、<code>BindingResult</code> 等框架级参数 —— 这些对象不应该被序列化到日志中。</p>
+
+<pre>private boolean isFilterValue(Object value) {
+    return value instanceof MultipartFile
+        || value instanceof HttpServletRequest
+        || value instanceof HttpServletResponse
+        || value instanceof BindingResult;
+}</pre>
+
+<p>这是典型的"只记录业务数据，过滤框架对象"的防御式设计。</p>
+
+<h2>5. 自动配置注册</h2>
+
+<p><code>LogAspect</code> 使用了 Spring Boot 3.x 的 <code>@AutoConfiguration</code> 注解，配合 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件实现自动装配。与旧版 <code>spring.factories</code> 不同，新机制按行列出全限定类名：</p>
+
+<pre># 文件：META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+org.dromara.common.log.aspect.LogAspect</pre>
+
+<p>这意味着：只要 <code>ruoyi-common-log</code> 在 classpath 上，<code>LogAspect</code> 就会自动注册为 Spring Bean 并生效，无需任何显式 <code>@Import</code> 或 <code>@ComponentScan</code>。这是 Spring Boot 自动装配的标准做法。</p>
+
+<h2>6. 完整链路回顾</h2>
+
+<p>让我们把整条链路串起来，形成一张心智地图：</p>
+
+<pre>
+┌─────────────────────────────────────────────────────────┐
+│ 1. 开发者在 Controller 方法上加 @Log 注解                  │
+│    @Log(title = "用户管理", businessType = BusinessType.INSERT)
+│    public R&lt;Void&gt; add(@RequestBody SysUserBo bo) { ... }
+├─────────────────────────────────────────────────────────┤
+│ 2. LogAspect.@Around("@annotation(controllerLog)")       │
+│    拦截所有标注了 @Log 的方法调用                           │
+├─────────────────────────────────────────────────────────┤
+│ 3. doAround() 启动 StopWatch 计时                         │
+│    -> joinPoint.proceed() 执行目标方法                    │
+│    -> handleLog() 构建 OperLogEvent                      │
+├─────────────────────────────────────────────────────────┤
+│ 4. handleLog() 提取 12 项信息：                           │
+│    IP、URL、ClientKey、操作人、部门、设备、浏览器、OS      │
+│    方法签名、请求方式、注解属性、请求参数、响应数据、耗时    │
+│    异常时翻转为 FAIL + 记录错误消息                        │
+├─────────────────────────────────────────────────────────┤
+│ 5. SpringUtils.context().publishEvent(operLog)           │
+│    通过 Spring 事件机制发布 OperLogEvent                  │
+│    （common-log 模块的工作到此结束）                       │
+├─────────────────────────────────────────────────────────┤
+│ 6. ruoyi-system: SysOperLogServiceImpl.recordOper()      │
+│    @EventListener + @Async 异步消费事件                   │
+│    -> MapstructUtils.convert() 转换为 SysOperLog         │
+│    -> AddressUtils 查询 IP 归属地                         │
+│    -> 插入 sys_oper_log 表                               │
+└─────────────────────────────────────────────────────────┘
+</pre>
+
+<p>前 5 步都在 common-log 模块内部完成，第 6 步跨越了模块边界进入 ruoyi-system。这种设计让 common-log 完全不需要依赖 system 模块，通过 Spring 事件机制实现了优雅的模块解耦。</p>
+
+<div class="quiz">
+  <details>
+    <summary>📝 课后自测（3 题）</summary>
+    <p><strong>Q1：</strong>@Log 注解的 <code>isSaveRequestData</code> 和 <code>isSaveResponseData</code> 默认值都是 true。在什么场景下你应该将它们设为 false？</p>
+    <p style="color:#888;font-size:0.9em;">提示：想想导出接口和上传大文件的场景。</p>
+    <p><strong>Q2：</strong>setRequestValue 方法中，为什么 GET 请求和 POST/PUT/DELETE 请求的参数提取方式不同？如果反过来用会有什么问题？</p>
+    <p style="color:#888;font-size:0.9em;">提示：GET 参数在 URL 上，POST 参数在 body 里。</p>
+    <p><strong>Q3：</strong>handleLog 方法的整个 try-catch 保证了什么？如果去掉这个 try-catch，什么场景下会导致问题？</p>
+    <p style="color:#888;font-size:0.9em;">提示：考虑事件发布失败、序列化失败的情况。</p>
+  </details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+  · 源码入口：<code>ruoyi-common-log/src/main/java/org/dromara/common/log/annotation/Log.java</code><br>
+  · 切面核心：<code>ruoyi-common-log/src/main/java/org/dromara/common/log/aspect/LogAspect.java</code><br>
+  · 枚举定义：<code>enums/BusinessType.java</code>、<code>enums/BusinessStatus.java</code>、<code>enums/OperatorType.java</code><br>
+  · Spring AOP 文档：<a href="https://docs.spring.io/spring-framework/reference/core/aop.html" target="_blank">Spring AOP Reference</a>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如："BusinessStatus 的 SUCCESS 是不是只要方法没抛异常就是 SUCCESS？那业务逻辑返回了错误码怎么办？"</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-事件驱动与异步消费.html">下一课：事件驱动与异步消费 →</a></div>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>二级缓存与工具类</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>03 - 二级缓存与工具类</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 PlusSpringCacheManager 的二级缓存设计（Caffeine 本地 + Redis 分布式），掌握 cacheName#ttl#maxIdle#maxSize#local 参数化配置的含义，能区分 RedisUtils、CacheUtils、QueueUtils、SequenceUtils 四个工具类的使用场景。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>前面两课讲了 Redisson 基础封装和注解切面。本课聚焦模块的缓存加速能力（二级缓存）和四个工具类——这是日常开发中最常用的部分。理解它们，你就能在代码中正确选用 Redis 的各种能力。</p>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 二级缓存架构</h3>
+<p>为什么需要两级？单级 Redis 缓存每次读取都要网络往返（~1ms），高频访问时 QPS 瓶颈明显。二级缓存在 JVM 内部加一层 Caffeine（纳秒级），大部分请求命中本地，大幅降低 Redis 压力。</p>
+
+<pre>
+读数据流程:
+请求 → Caffeine (L1, 本地内存, ~200ns)
+  ├─ 命中 → 直接返回（99% 的情况）
+  └─ 未命中 → Redis (L2, 网络, ~1ms)
+                ├─ 命中 → 写回 Caffeine → 返回
+                └─ 未命中 → 查数据库 → 写 Redis → 写 Caffeine → 返回
+
+写数据流程:
+请求 → 先 invalidate Caffeine → 写 Redis → 返回
+      （先清本地再写远程，保证一致性）
+</pre>
+
+<h3>2.2 PlusSpringCacheManager：自定义 CacheManager</h3>
+<p>继承自 Redisson 的 <code>RedissonSpringCacheManager</code>，增加了两个关键能力：</p>
+
+<p><strong>1. cacheName 参数化配置：</strong></p>
+<pre>
+// 传统 Spring Cache 写法（需要写配置类）
+@Cacheable(value = "user", key = "#userId")
+
+// PlusSpringCacheManager 支持的写法（在缓存名中声明策略）
+@Cacheable(value = "user#3600#1800#1000#local", key = "#userId")
+//                    ↑名称↑ttl↑maxIdle↑maxSize↑local
+</pre>
+
+<p>格式：<code>cacheName#ttl#maxIdle#maxSize#local</code></p>
+<table>
+  <tr><th>参数</th><th>含义</th><th>示例</th></tr>
+  <tr><td>ttl</td><td>存活时间（秒）</td><td>3600 → 1 小时后过期</td></tr>
+  <tr><td>maxIdle</td><td>最大空闲时间（秒）</td><td>1800 → 30 分钟无访问则过期</td></tr>
+  <tr><td>maxSize</td><td>最大条目数</td><td>1000 → 本地缓存最多存 1000 条</td></tr>
+  <tr><td>local</td><td>是否启用本地缓存</td><td>有 "local" → 启用 Caffeine</td></tr>
+</table>
+
+<blockquote><strong>为什么把策略参数放在缓存名里？</strong>这是 Spring Cache 注解限制下的务实方案——@Cacheable 注解不支持直接传 TTL/Size 等缓存策略参数。Redisson 官方需要额外配置文件或编程式注册。把参数编码在缓存名中，不改 Spring Cache 注解定义、不写额外配置，一行注解搞定。</blockquote>
+
+<h3>2.3 CaffeineCacheDecorator：本地缓存装饰器</h3>
+<p>实现 Spring <code>Cache</code> 接口，包装 Caffeine 作为一级缓存：</p>
+<pre>
+// 读操作：先本地后回源
+get(key, Callable&lt;Object&gt; valueLoader):
+    return caffeine.get(key, loader)
+    // ↑ Caffeine 的 get 方法自动处理:
+    //   命中 → 直接返回
+    //   未命中 → 调 valueLoader（查 Redis） → 写入本地 → 返回
+
+// 写操作：先清本地再写远程
+put(key, value):
+    caffeine.invalidate(key)     // ← 清除本地（防脏数据）
+    delegate.put(key, value)     // ← 写 Redis
+</pre>
+
+<p><strong>为什么 put 时要先 invalidate？</strong>因为集群环境下其他节点可能已经更新了 Redis。不清直接写，本地缓存的旧值会在其他节点的 get(key, loader) 中污染新请求——因为 loader 只查 Redis，但其他节点已经 update 过 Redis 了，不清会导致本地缓存中残留旧值。</p>
+
+<h3>2.4 四个工具类定位</h3>
+<table>
+  <tr><th>工具类</th><th>底层对象</th><th>主要用途</th><th>典型场景</th></tr>
+  <tr><td><code>RedisUtils</code></td><td>RBucket / RMap / RAtomicLong / RTopic / RRateLimiter</td><td>通用 Redis 读写、限流、发布订阅</td><td>存用户 token、缓存配置、分布式计数</td></tr>
+  <tr><td><code>CacheUtils</code></td><td>Spring Cache 体系（通过 PlusSpringCacheManager）</td><td>操作具名缓存空间</td><td>字典数据缓存、菜单缓存、租户缓存</td></tr>
+  <tr><td><code>QueueUtils</code></td><td>RBlockingQueue（基于 Redis List）</td><td>分布式阻塞队列</td><td>轻量任务排队、延时处理</td></tr>
+  <tr><td><code>SequenceUtils</code></td><td>RIdGenerator（分布式发号器）</td><td>生成业务单号</td><td>订单号、流水号（如 P20260630000001）</td></tr>
+</table>
+
+<h3>2.5 SequenceUtils：分布式发号器</h3>
+<p>基于 Redisson 的 <code>RIdGenerator</code>，用 Lua 原子递增生成唯一 ID：</p>
+<pre>
+// 获取今天的订单号
+String orderNo = SequenceUtils.nextId("P");  // → "P20260630000001"
+
+内部原理:
+1. key = "P" + "20260630"           // 按时间分片（每天一个新 key）
+2. RIdGenerator.incrementAndGet()   // Lua 原子递增
+3. 老 key 自动过期（避免堆积百万个日 key）
+4. 支持配置初始值、步长、过期时间
+</pre>
+
+<p><strong>为什么按时间分片？</strong>如果所有流水号共用一个 key，这个 key 会变得非常热（所有请求竞争同一个 Lua 锁）。按天分片后，今天的并发全部集中在今天的 key 上——但这已经比全局 key 好得多。如果并发极高，还可以按小时或分钟分片。</p>
+
+<h3>2.6 事务感知缓存与异常兜底</h3>
+<p><strong>TransactionAwareCacheDecorator：</strong>当 <code>transactionAware=true</code> 时，PlusSpringCacheManager 自动包一层 Spring 的 <code>TransactionAwareCacheDecorator</code>——缓存写入在事务提交后才执行。事务回滚则缓存不写。</p>
+
+<p><strong>RedisExceptionHandler：</strong>兜底 Lock4j 分布式锁框架的 <code>LockFailureException</code>——将锁竞争失败从「系统异常 500」降级为「业务处理中，请稍后再试」。锁由 Lock4j 管理，异常由 redis 模块兜。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> CacheUtils 和 RedisUtils 都在操作 Redis，什么时候用哪个？</p>
+<p><strong>参考:</strong> CacheUtils 操作的是 Spring Cache 体系——有命名空间隔离、支持二级缓存、支持 @Cacheable 注解声明。RedisUtils 是原生 Redis 操作——可以精确控制数据结构和过期策略。选择标准：如果你的数据是「读多写少」的缓存（如字典、菜单），用 CacheUtils + @Cacheable 享受二级缓存加速；如果数据需要精确控制（如验证码 60 秒过期、分布式计数器），用 RedisUtils。</p>
+<p><strong>Q2:</strong> 二级缓存中「先清本地再写 Redis」为什么不反过来（先写 Redis 再清本地）？</p>
+<p><strong>参考:</strong> 如果先写 Redis → Redis 写入成功 → 清本地——这中间有一个时间窗口，其他节点的请求可能读到 Redis 的新值并缓存到他们的本地（正常），但本节点的本地可能还没清。反过来（先清本地再写 Redis）保证了本地一定读不到旧值。极端情况下本节点读本地 miss → 读 Redis（可能还在写）→ 读到旧值，但这是短暂窗口，且不会长期残留。</p>
+<p><strong>Q3:</strong> QueueUtils 的 RBlockingQueue 为什么不适合做重量级任务队列？</p>
+<p><strong>参考:</strong> RBlockingQueue 基于 Redis List（LPUSH + BRPOP），消息不持久化且无 ACK 机制——消费者崩了消息丢失、消费失败无法重试、没有死信队列。重量级任务队列需要 RabbitMQ/Kafka 这样的专业 MQ：消息持久化到磁盘、ACK 确认机制、重试策略、死信队列、延迟消息等。QueueUtils 只适合「丢了也能接受的轻量临时任务」。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 场景：查询用户信息（带二级缓存）
+@Cacheable(value = "user", key = "#userId")
+public User getUser(Long userId) {
+
+第一次调用 (userId=1):
+1. PlusSpringCacheManager.getCache("user")
+2. CaffeineCacheDecorator.get(1, loader)
+   → caffeine.getIfPresent(1) → null（首次，未缓存）
+   → loader.call()
+     → RedisUtils.getObject("user:1") → null（首次，Redis 也无）
+     → 查数据库 → User{id=1, name="张三"}
+     → RedisUtils.setObject("user:1", user, 3600s)
+     → 写入 Caffeine
+   → 返回 User
+
+第二次调用 (userId=1):
+1. CaffeineCacheDecorator.get(1, loader)
+   → caffeine.getIfPresent(1) → User{id=1, name="张三"} ✓
+   → 直接返回（全程无 Redis/DB 调用，~200ns）
+
+更新用户 (userId=1):
+1. @CachePut(value = "user", key = "#user.id")
+2. CaffeineCacheDecorator.put(1, user)
+   → caffeine.invalidate(1)     // 清除本地旧值
+   → RedisUtils.setObject("user:1", user, 3600s)  // 写 Redis
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>PlusSpringCacheManager 的 cacheName 参数化配置是一种「在不完美的世界中做务实选择」的设计。理想情况下，TTL/Size 等参数应该有独立的配置方式，但 Spring Cache 注解不支持。在缓存名中编码参数虽然看起来 hack，但它解决了实际问题且对代码侵入性最低。CaffeineCacheDecorator 的 get(key, loader) 模式更是巧妙——用 Caffeine 内置的「缓存未命中自动回源」机制，一行代码就实现了「先本地后 Redis」的降级逻辑，无需手写 if-else 判断。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/ben-manes/caffeine/wiki">Caffeine 缓存文档</a> · 入口文件：<code>cache/PlusSpringCacheManager.java</code> · <code>cache/CaffeineCacheDecorator.java</code> · <code>utils/SequenceUtils.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。redis 模块课程到此结束。</div>
+<div class="nav"><a href="02-限流与防重提交.html">← 上一课</a><a href="../">模块首页 →</a></div>
+</body>
+</html>

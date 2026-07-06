@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 · JSON 增强框架三阶段</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 0.8rem 1rem; white-space: pre; overflow-x: auto; line-height: 1.5; margin: 0.8rem 0; }
+</style>
+</head>
+<body>
+<h1>第 2 课 · JSON 增强框架三阶段</h1>
+<div class="mission"><strong>本节目标：</strong>学完能完整复述 JSON 增强框架的三阶段生命周期（collect 收集 → prepare 预处理 → process 渲染），以及四个核心组件（JsonEnhancementContext 数据总线、JsonFieldContext 字段上下文、JsonFieldProcessor 扩展接口、JsonValueEnhancer 执行引擎）各自的职责与协作方式。理解为什么三阶段分离是消除 N+1 查询的关键设计。</div>
+
+<h2>一、这个框架解决什么问题？</h2>
+
+<p>假设一个典型的 REST API 场景：后端查询了 <code>SysUser</code> 列表返回给前端。但用户表里存的是 <code>dept_id</code>（部门 ID），前端需要显示的是<strong>部门名称</strong>。你可以在 SQL 里 JOIN 查询部门表，也可以查出用户后循环补上部门名称。</p>
+
+<p>第二种做法就是<strong>响应增强</strong>——在序列化成 JSON 之前，把某些字段的值替换成业务需要的最终形式。常见场景包括：</p>
+<ul>
+  <li><strong>字段翻译：</strong>把 user_id 替换成用户名、把 dept_id 替换成部门名</li>
+  <li><strong>字段脱敏：</strong>把手机号 13812345678 替换成 138****5678</li>
+  <li><strong>字典转换：</strong>把 sex=0 替换成 sexName="男"</li>
+  <li><strong>字典拼接：</strong>把多个字段组装成一个新字段</li>
+</ul>
+
+<p>但这里有一个性能陷阱：如果业务代码在循环里逐个字段查数据库，100 个用户就会产生 100 次 SQL 查询——典型的 N+1 问题。</p>
+
+<p><strong>JSON 增强框架的核心设计目标就是：让扩展开发者在做字段增强时，自然地采用「先收集、再批量查询、最后渲染」的模式，从架构上消除 N+1 查询。</strong></p>
+
+<h2>二、三阶段生命周期全景</h2>
+
+<p>框架将一次 HTTP 响应的增强过程拆成三个互不重叠的阶段：</p>
+
+<div class="flow">HTTP 响应对象
+    │
+    ▼
+┌─ collect（收集阶段）─── 递归扫描对象树 ─────────────────────┐
+│  每个字段被每个 Processor 检查一次                           │
+│  Processor.collect() 把需要处理的 key 存入 Context            │
+│  例：发现 userId=1001, userId=1002, userId=1003              │
+│      存入 context.setAttribute("userIds", [1001,1002,1003]) │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─ prepare（预处理阶段）── 所有 Processor 各执行一次 ──────────┐
+│  Processor.prepare() 基于 collect 收集的数据执行批量 IO       │
+│  例：select * from sys_user where id in (1001,1002,1003)     │
+│      结果存入 context.setAttribute("userMap", {1001: "张三"})│
+│  一次 SQL 查出全部，消除 N+1                                 │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─ process（处理阶段）── 递归渲染 JSON 树 ─────────────────────┐
+│  每个字段被检查，从 Context 取 prepare 写入的结果              │
+│  Processor.process() 返回替换后的值                          │
+│  例：userId=1001 → 去 userMap 查 → 返回 "张三"               │
+└─────────────────────────────────────────────────────────────┘
+    │
+    ▼
+增强后的 JSON 响应</div>
+
+<p>这三个阶段的分离是框架的<strong>灵魂</strong>。如果 collect 和 process 合并（一边扫描一边处理），就回到了 N+1 模式。把它们拆开，中间插入一个批量的 prepare，才真正做到了性能优化。</p>
+
+<h2>三、四个核心组件逐一看</h2>
+
+<h3>3.1 JsonEnhancementContext —— 单次响应的数据总线</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/enhance/JsonEnhancementContext.java</code></p>
+
+<p>类比：如果把一次响应增强比作一个 HTTP 请求的处理过程，JsonEnhancementContext 就是<strong>这个请求级别的「黑板」</strong>——collect 阶段往上面写需要处理的 key，prepare 阶段读取 key 做批量查询并回写结果，process 阶段读取结果做字段替换。</p>
+
+<p>它持有三个核心成员：</p>
+
+<pre><code>public class JsonEnhancementContext {
+    private final JsonMapper jsonMapper;                        // 用于后续的 JSON 操作
+    private final Map&lt;String, Object&gt; attributes = new LinkedHashMap&lt;&gt;(); // 共享数据表
+    private boolean processingRequired;                         // 是否需要处理的标记
+}</code></pre>
+
+<p><strong>attributes 为什么用 LinkedHashMap？</strong>保持插入顺序——虽然三阶段之间不依赖 Map 的顺序，但在同一阶段的多次 setAttribute 调用中保持有序对调试友好。</p>
+
+<p><strong>processingRequired 标记</strong>是一个聪明的性能优化。如果遍历完整个对象树发现没有任何字段需要增强（没有 Processor 的 supports() 返回 true），就直接跳过 prepare 和 process 阶段，原样返回对象。避免了对无增强需求的响应做无意义的 JSON 序列化/反序列化。</p>
+
+<p>Context 提供了 6 个属性操作方法和 1 个标记方法：</p>
+
+<table>
+<tr><th>方法</th><th>用途</th><th>使用阶段</th></tr>
+<tr><td><code>setAttribute(key, value)</code></td><td>写入共享数据</td><td>collect、prepare</td></tr>
+<tr><td><code>getAttribute(key)</code></td><td>读取共享数据</td><td>prepare、process</td></tr>
+<tr><td><code>getOrCreateAttribute(key, supplier)</code></td><td>懒初始化读取（不存在时创建）</td><td>prepare</td></tr>
+<tr><td><code>containsAttribute(key)</code></td><td>判断 key 是否存在</td><td>prepare</td></tr>
+<tr><td><code>removeAttribute(key)</code></td><td>移除属性</td><td>prepare</td></tr>
+<tr><td><code>markProcessingRequired()</code></td><td>标记需要处理</td><td>collect</td></tr>
+</table>
+
+<div class="insight"><strong>设计洞察：为什么 attribute key 建议用 Processor 全限定类名做前缀？</strong>因为多个 Processor 共享同一个 Context。如果两个 Processor 都用 <code>"userMap"</code> 做 key，后写的会覆盖先写的。用 <code>"com.example.UserTranslateProcessor.userMap"</code> 做 key 可以天然隔离命名空间。</div>
+
+<h3>3.2 JsonFieldContext —— 字段的元数据快照</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/enhance/JsonFieldContext.java</code></p>
+
+<p>这是一个 Java Record，封装了 Processor 在判断「这个字段归不归我管」和「怎么处理它」时所需要的全部信息：</p>
+
+<pre><code>public record JsonFieldContext(
+    Object owner,           // 字段所属的对象实例（如 SysUser 对象本身）
+    String propertyName,    // 属性名（如 "deptId"）
+    AnnotatedMember member, // Jackson 的元数据包装（可从中读取注解、类型等信息）
+    Object value            // 当前值（如 103）
+) {
+    public &lt;A extends Annotation&gt; A getAnnotation(Class&lt;A&gt; annotationType) {
+        return member == null ? null : member.getAnnotation(annotationType);
+    }
+}</code></pre>
+
+<p>每个字段的信息来源：</p>
+<ul>
+  <li><strong>owner：</strong>通过反射从对象实例获取，Processor 可以调用 owner 上的方法</li>
+  <li><strong>propertyName：</strong>来自 Jackson 的 <code>BeanPropertyDefinition.getName()</code>，会处理 <code>@JsonProperty</code> 等注解的重命名</li>
+  <li><strong>member：</strong>Jackson 的 <code>AnnotatedMember</code>——它封装了 getter 方法或 filed 本身，能读取 Java 注解</li>
+  <li><strong>value：</strong>通过 <code>member.getValue(owner)</code> 反射获取的当前值</li>
+</ul>
+
+<p><strong>getAnnotation() 方法是 Processor 判定逻辑的核心入口。</strong>例如一个翻译处理器判断某个字段是否需要翻译，就是检查字段上有没有 <code>@Translate</code> 注解：</p>
+
+<pre><code>// Processor 的 supports() 实现
+public boolean supports(JsonFieldContext fieldContext) {
+    return fieldContext.getAnnotation(Translate.class) != null;
+}</code></pre>
+
+<h3>3.3 JsonFieldProcessor —— 扩展点接口</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/enhance/JsonFieldProcessor.java</code></p>
+
+<p>这是框架最核心的抽象——所有自定义增强逻辑都通过实现这个接口来接入。它定义了 4 个方法，全部是 <code>default</code> 实现：</p>
+
+<pre><code>public interface JsonFieldProcessor {
+
+    // 判断：这个字段归不归我管？
+    default boolean supports(JsonFieldContext fieldContext) {
+        return true;  // 默认全管，实现者通常按注解过滤
+    }
+
+    // 收集：记录需要增强的 key
+    default void collect(JsonFieldContext fieldContext, JsonEnhancementContext context) {
+    }
+
+    // 预处理：批量 IO，结果写入 context
+    default void prepare(JsonEnhancementContext context) {
+    }
+
+    // 处理：返回替换后的值（返回原 value 表示不修改）
+    default Object process(JsonFieldContext fieldContext, Object value, JsonEnhancementContext context) {
+        return value;
+    }
+}</code></pre>
+
+<p><strong>全部 default 实现的意义：</strong>实现者只需覆盖自己关心的阶段。比如一个只做「把枚举值转成中文名」的 Processor，可能只需要覆盖 <code>process()</code>（有值就直接转换，不需要 collect 和 prepare）。而一个「把部门 ID 翻译成部门名称」的 Processor 需要覆盖全部三个阶段。</p>
+
+<p>每个阶段的调用时机和调用次数：</p>
+
+<table>
+<tr><th>阶段</th><th>调用时机</th><th>调用次数</th><th>说明</th></tr>
+<tr><td><code>supports()</code></td><td>每个字段每次扫描时</td><td>N（字段数） 次</td><td>collect 和 process 阶段都会调用</td></tr>
+<tr><td><code>collect()</code></td><td>对象树递归扫描时，每个符合 supports 的字段</td><td>M（需处理的字段数）次</td><td>将 key 存入 context</td></tr>
+<tr><td><code>prepare()</code></td><td>所有 collect 完成后</td><td>1 次</td><td>批量 IO，是整个框架的性能核心</td></tr>
+<tr><td><code>process()</code></td><td>渲染 JSON 树时，每个符合 supports 的字段</td><td>M 次</td><td>从 context 取结果，O(1) 替换</td></tr>
+</table>
+
+<h3>3.4 JsonValueEnhancer —— 增强引擎</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/enhance/JsonValueEnhancer.java</code></p>
+
+<p>这是驱动整个增强流程的执行引擎，也是字段最长的类（约 380 行）。核心方法 <code>enhance(Object body)</code> 是一个典型的<strong>模板方法模式</strong>：</p>
+
+<pre><code>public Object enhance(Object body) {
+    if (body == null || body instanceof JsonNode || processors.isEmpty()) {
+        return body;  // 短路：空值、已是 JSON 节点、无处理器 → 直接返回
+    }
+
+    // Phase 1: 创建上下文 + 收集
+    JsonEnhancementContext context = new JsonEnhancementContext(jsonMapper);
+    collectValue(body, context, new IdentityHashMap&lt;&gt;());
+
+    // Phase 1.5: 检查是否需要处理（无字段需要增强则短路）
+    if (!context.isProcessingRequired()) {
+        return body;
+    }
+
+    // Phase 2: 批量预处理
+    processors.forEach(processor -> processor.prepare(context));
+
+    // Phase 3: 渲染增强后的 JSON 树
+    return renderValue(body, context, new IdentityHashMap&lt;&gt;());
+}</code></pre>
+
+<h4>递归扫描：collectValue</h4>
+
+<p><code>collectValue</code> 方法递归遍历整个对象树，同时使用 <code>IdentityHashMap</code> 做<strong>循环引用保护</strong>：</p>
+
+<pre><code>private void collectValue(Object value, JsonEnhancementContext context, IdentityHashMap&lt;Object, Boolean&gt; visited) {
+    // 1. null → 返回
+    // 2. Map → 遍历 values
+    // 3. Iterable（List/Set）→ 遍历元素
+    // 4. 数组 → 遍历元素
+    // 5. 简单值（String/Number/Boolean/Date/Temporal/Enum/UUID/Class）→ 短路
+    // 6. 已访问（visited.contains）→ 短路（循环引用保护）
+    // 7. 标记为已访问 → 遍历属性 → 每个字段调用 Processor.collect()
+    // 8. 移除访问标记（退出时清理）
+}</code></pre>
+
+<p>值得注意的细节：</p>
+<ul>
+  <li><strong>简单值短路：</strong><code>isSimpleValue()</code> 方法检查类型是否为基本类型、String、Number、Boolean、Character、Date、Temporal、Enum、UUID、Class。这些类型不会有子字段需要增强，直接跳过。</li>
+  <li><strong>IdentityHashMap vs HashMap：</strong>用 <code>==</code> 而非 <code>.equals()</code> 判断对象是否相同。防止两个内容相同但不同的对象被误判为循环引用。</li>
+  <li><strong>进入时标记、退出时清理：</strong>在 try-finally 中操作 visited map，确保退出递归栈帧时恢复状态。</li>
+</ul>
+
+<h4>属性元数据缓存：getProperties</h4>
+
+<p>引擎维护了一个 <code>ConcurrentHashMap&lt;Class&lt;?&gt;, List&lt;PropertyMetadata&gt;&gt;</code> 缓存——同一个类型的属性元数据只解析一次：</p>
+
+<pre><code>private List&lt;PropertyMetadata&gt; getProperties(Class&lt;?&gt; type) {
+    return propertyCache.computeIfAbsent(type, this::resolveProperties);
+}</code></pre>
+
+<p><code>resolveProperties()</code> 通过 Jackson 的 <code>ClassIntrospector</code> 获取类型的可序列化属性列表（field 或 getter），并调用 <code>member.fixAccess(true)</code> 强制打开访问权限。这一步生成的 <code>PropertyMetadata</code> 是一个内部 Record，持有属性名和 <code>AnnotatedMember</code> 引用。</p>
+
+<p><strong>为什么不用 Java 反射而用 Jackson 的 ClassIntrospector？</strong>因为 Jackson 的 <code>BeanPropertyDefinition</code> 已经处理了 <code>@JsonProperty</code> 重命名、<code>@JsonIgnore</code> 忽略、getter 命名约定等规则。直接复用它比重新实现一套要稳定得多。</p>
+
+<h4>渲染增强：renderValue + renderPojo</h4>
+
+<p>渲染阶段和收集阶段走的是同一套递归遍历逻辑，区别在于——除了遍历结构相同之外，渲染阶段会对每个字段调用 <code>processor.process()</code> 来获取替换值：</p>
+
+<pre><code>private ObjectNode renderPojo(Object value, JsonEnhancementContext context, IdentityHashMap&lt;Object, Boolean&gt; visited) {
+    ObjectNode objectNode = jsonMapper.createObjectNode();
+    for (PropertyMetadata metadata : getProperties(value.getClass())) {
+        Object originalValue = metadata.getValue(value);
+        JsonFieldContext fieldContext = new JsonFieldContext(value, metadata.propertyName(), metadata.member(), originalValue);
+        Object processedValue = originalValue;
+        boolean changed = false;
+        for (JsonFieldProcessor processor : processors) {
+            if (!processor.supports(fieldContext)) continue;
+            Object nextValue = processor.process(fieldContext, processedValue, context);
+            changed = changed || !Objects.equals(processedValue, nextValue);
+            processedValue = nextValue;
+        }
+        JsonNode childNode = changed
+            ? enhanceTranslatedValue(processedValue, context, visited)
+            : renderValue(processedValue, context, visited);
+        objectNode.set(metadata.propertyName(), childNode);
+    }
+    return objectNode;
+}</code></pre>
+
+<p><strong>二次增强（enhanceTranslatedValue）：</strong>如果 Processor 返回的值是一个复杂对象（非简单值），引擎会对这个新值重新执行一遍完整的增强流程（collect → prepare → process）。这允许一个增强的返回结果是另一个增强的输入。</p>
+
+<p>例如：用户对象原本有 deptId=103 → 翻译成 DeptUser 对象（含 deptName="研发部" 和 leaderId=1001）→ 二次增强再把 leaderId 翻译成 "张三"。两次增强串联完成。</p>
+
+<div class="insight"><strong>设计洞察：changed 标记 + 二次增强的组合设计解决了增强值本身需要继续增强的场景，但不会对未变化的值做额外开销。这是一个精密的性能优化——用 <code>Objects.equals</code> 做引用级比较，省去了不必要的 JSON 树重建。</strong></div>
+
+<h4>转换器过滤：supports(converterType)</h4>
+
+<p>不是所有的 HTTP 响应都需要增强。引擎通过 <code>supports()</code> 方法排除了三类消息转换器：</p>
+
+<pre><code>public boolean supports(Class&lt;?&gt; converterType) {
+    return !processors.isEmpty()
+        && !ByteArrayHttpMessageConverter.class.isAssignableFrom(converterType)   // 文件下载
+        && !StringHttpMessageConverter.class.isAssignableFrom(converterType)        // 纯文本
+        && !ResourceHttpMessageConverter.class.isAssignableFrom(converterType);     // 静态资源
+}</code></pre>
+
+<p>文件下载返回字节流、纯文本返回 String、静态资源返回 Resource——它们都不需要通过 JSON 增强框架处理。强行处理反而会破坏响应体格式。</p>
+
+<h2>四、Processor 列表的排序机制</h2>
+
+<p>在构造器中，引擎对 Processor 列表做了排序：</p>
+
+<pre><code>public JsonValueEnhancer(JsonMapper jsonMapper, List&lt;JsonFieldProcessor&gt; processors) {
+    this.jsonMapper = jsonMapper;
+    List&lt;JsonFieldProcessor&gt; sortedProcessors = new ArrayList&lt;&gt;(processors);
+    AnnotationAwareOrderComparator.sort(sortedProcessors);
+    this.processors = Collections.unmodifiableList(sortedProcessors);
+}</code></pre>
+
+<p><code>AnnotationAwareOrderComparator</code> 是 Spring 提供的排序器，会读取 <code>@Order</code> 注解或 <code>Ordered</code> 接口来决定执行顺序。排序后转为不可修改列表，确保处理链的执行顺序在运行时是确定的。</p>
+
+<p>这对二次增强场景尤为重要：如果 Processor A 先执行，把 deptId 翻译成 DeptUser 对象；Processor B 再执行，对 DeptUser 中的 leaderId 做翻译。顺序错了就会失败。</p>
+
+<h2>五、完整数据流实例</h2>
+
+<p>假设有一个返回 <code>List&lt;SysUser&gt;</code> 的接口，用户对象如下：</p>
+
+<pre><code>SysUser { userId: 1, userName: "张三", deptId: 103, phone: "13812345678" }</code></pre>
+
+<p>配置了两个 Processor：DeptTranslateProcessor（把 deptId 翻译成部门名）、PhoneDesensitizeProcessor（把手机号脱敏）。</p>
+
+<p><strong>Collect 阶段：</strong></p>
+<ol>
+  <li>递归扫描 SysUser 对象，遍历到 deptId 字段</li>
+  <li>DeptTranslateProcessor.supports() 返回 true（字段上有 @Translate 注解），collect() 把 deptId=103 记录到 context 的待查询列表</li>
+  <li>遍历到 phone 字段，PhoneDesensitizeProcessor.supports() 返回 true（字段上有 @Desensitize 注解）——但脱敏不需要 collect，直接跳过</li>
+  <li>context.setAttribute("deptIds", [103])</li>
+  <li>context.markProcessingRequired() → true</li>
+</ol>
+
+<p><strong>Prepare 阶段：</strong></p>
+<ol>
+  <li>DeptTranslateProcessor.prepare()：select * from sys_dept where dept_id in (103)，结果 {"103":"研发部"} 写入 context.setAttribute("deptMap", ...)</li>
+  <li>PhoneDesensitizeProcessor.prepare()：不需要准备，空方法直接返回</li>
+</ol>
+
+<p><strong>Process 阶段：</strong></p>
+<ol>
+  <li>遍历到 deptId，DeptTranslateProcessor.process() 从 context 取 deptMap，找到 "研发部"，返回新值；</li>
+  <li>遍历到 phone，PhoneDesensitizeProcessor.process() 直接做字符串替换，返回 "138****5678"</li>
+  <li>最终输出 JSON：<code>{"userId":1, "userName":"张三", "deptId":"研发部", "phone":"138****5678"}</code></li>
+</ol>
+
+<h2>检验环节</h2>
+
+<div class="quiz">
+<p><strong>Q1. 为什么增强框架要拆成 collect / prepare / process 三个阶段，而不是直接在扫描时调用 process？</strong></p>
+<details><summary>看答案</summary>
+<p>如果在扫描时直接调用 process，每遇到一个需要翻译的字段都会触发一次数据库查询（N+1 问题）。拆成三个阶段后，collect 只收集 key，prepare 一次性批量查询，process 只需 O(1) 从 context 取结果。三阶段的核心价值就是<strong>为批量预处理留出空间</strong>。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q2. JsonEnhancementContext 的 attributes 用 LinkedHashMap 而非 HashMap 的原因是什么？</strong></p>
+<details><summary>看答案</summary>
+<p>保持插入顺序——虽然三阶段之间的数据传递不依赖 Map 顺序（通过 key 精确查找），但在调式和日志输出时有序 Map 可读性更好。功能上 HashMap 也能工作。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q3. JsonValueEnhancer 为什么排除了 ByteArrayHttpMessageConverter 等三种转换器？</strong></p>
+<details><summary>看答案</summary>
+<p>这三种转换器处理的响应类型不是 JSON：ByteArray 处理文件下载（字节流）、String 处理纯文本、Resource 处理静态资源。对它们做 JSON 增强没有意义，反而可能破坏响应内容。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q4. collectValue 方法中用 IdentityHashMap 而非 HashMap 做 visited 追踪，为什么？</strong></p>
+<details><summary>看答案</summary>
+<p>IdentityHashMap 用 <code>==</code>（引用比较）而非 <code>.equals()</code>（值比较）。如果两个不同对象恰好 equals 为 true（比如两个内容相同的 User 对象），HashMap 会误判为循环引用并跳过第二个。IdentityHashMap 避免了这个误判。</p>
+</details>
+</div>
+
+<div class="cite">推荐一手资料：源码 <code>org/dromara/common/json/enhance/JsonValueEnhancer.java</code>（约 380 行，建议逐方法跟读）；<code>enhance/JsonFieldProcessor.java</code>（接口定义，Javadoc 中有完整的三阶段说明）；<code>enhance/JsonEnhancementContext.java</code>；<code>enhance/JsonFieldContext.java</code>。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。例如：「process 返回的值如果是另一个需要增强的对象，引擎怎么处理？」「如果我希望某个 Processor 在另一个之前执行，怎么控制顺序？」「PropertyMetadata 缓存会不会在运行时因为类被重新加载而脏掉？」</div>
+
+<div class="nav"><a href="01-Jackson配置与序列化器.html">上一课：Jackson 配置与序列化器</a><a href="03-JsonUtils工具类与校验.html">下一课：JsonUtils 工具类与校验</a></div>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · 配置体系</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · 配置体系：OssProperties &#8594; OssClientConfig 转换链</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-oss 对象存储模块</p>
+
+<h2>一句话定位</h2>
+<div class="chain">将<strong>数据库 JSON 字符串</strong>（前端可编辑的弱类型字段）通过 <code>OssProperties</code> &#8594; <code>OssClientConfig.formPropertiesBuilder()</code> 转换为<strong>不可变、强类型、Optional 包装的内部配置对象</strong>，供 <code>DefaultOssClientImpl</code> 安全使用。</div>
+
+<h2>配置转换全链路</h2>
+<div class="chain">
+数据库 sys_oss_config
+  &#9474;
+  &#9474; JSON 字段：endpoint, domainUrl, prefix, accessKey, secretKey, bucketName, region, isHttps("Y"/"N"), accessPolicy("0"/"1"/"2")
+  v
+Redis（key: <b>global:sys_oss:default_config</b>）
+  &#9474;
+  v
+CacheUtils.get(DEFAULT_CONFIG_KEY) &#8594; JSON 字符串
+  &#9474;
+  v
+JsonUtils.parseObject(jsonStr, <b>OssProperties</b>.class) &#8594; @Data POJO (9 个字段)
+  &#9474;
+  v
+<b>OssClientConfig.formProperties(ossProperties)</b>
+  &#9474;  &#9500; .useHttps(&#8203;SystemConstants.YES.equals(isHttps))         —— "Y"&#8594;true
+  &#9474;  &#9500; .usePathStyleAccess(<b>resolvePathStyleAccess</b>(properties))   —— 自动推断
+  &#9474;  &#9500; .region(<b>parseRegion</b>(regionString))                         —— String&#8594;Region
+  &#9474;  &#9500; .accessControlPolicyConfig(<b>resolveAccessControlPolicy</b>(str)) —— String&#8594;record
+  &#9474;  &#9500; 其余字段直传(endpoint/domain/accessKey/secretKey/bucket/prefix)
+  v
+<b>OssClientConfig</b> (11 final 字段，@Builder 构建，不可变)
+  &#9474;
+  v
+<s>DefaultOssClientImpl</s> 构造函数</div>
+
+<h2>OssProperties 字段速查</h2>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th><th>示例</th></tr>
+<tr><td><code>endpoint</code></td><td>String</td><td>访问站点</td><td><code>https://oss-cn-hangzhou.aliyuncs.com</code></td></tr>
+<tr><td><code>domainUrl</code></td><td>String</td><td>自定义域名（可选，优先于 endpoint）</td><td><code>https://cdn.example.com</code> 或 ""</td></tr>
+<tr><td><code>prefix</code></td><td>String</td><td>对象 key 前缀</td><td><code>ruoyi</code></td></tr>
+<tr><td><code>accessKey</code></td><td>String</td><td>AccessKey</td><td><code>LTAI5t...</code></td></tr>
+<tr><td><code>secretKey</code></td><td>String</td><td>SecretKey</td><td><code>xxx...</code></td></tr>
+<tr><td><code>bucketName</code></td><td>String</td><td>存储桶名</td><td><code>my-bucket</code></td></tr>
+<tr><td><code>region</code></td><td>String</td><td>存储区域</td><td><code>cn-hangzhou</code></td></tr>
+<tr><td><code>isHttps</code></td><td>String</td><td>是否 HTTPS（"Y"/"N"）</td><td><code>Y</code></td></tr>
+<tr><td><code>accessPolicy</code></td><td>String</td><td>桶权限（"0"私有/"1"公共读写/"2"公共读）</td><td><code>2</code></td></tr>
+</table>
+
+<h2>OssClientConfig 转换方法速查</h2>
+<table>
+<tr><th>方法</th><th>签名</th><th>职责</th></tr>
+<tr>
+  <td><code>formProperties</code></td>
+  <td><code>static OssClientConfig formProperties(OssProperties)</code></td>
+  <td>静态工厂：一步完成转换</td>
+</tr>
+<tr>
+  <td><code>formPropertiesBuilder</code></td>
+  <td><code>static OssClientConfigBuilder formPropertiesBuilder(OssProperties)</code></td>
+  <td>核心映射：9 个字段逐一映射 + 3 处类型转换</td>
+</tr>
+<tr>
+  <td><code>resolvePathStyleAccess</code></td>
+  <td><code>static boolean resolvePathStyleAccess(OssProperties)</code></td>
+  <td>推断 URL 风格：endpoint 含云厂商关键词 &#8594; site-style(false)；否则 &#8594; path-style(true)</td>
+</tr>
+<tr>
+  <td><code>resolveAccessControlPolicy</code></td>
+  <td><code>static AccessControlPolicyConfig resolveAccessControlPolicy(String)</code></td>
+  <td>解析 ACL 策略：空白 &#8594; DEFAULT(禁用)；非空 &#8594; enabled=true + formType 解析</td>
+</tr>
+<tr>
+  <td><code>parseRegion</code></td>
+  <td><code>static Region parseRegion(String)</code></td>
+  <td>Region 解析：空 &#8594; US_EAST_1；否则 Region.of()</td>
+</tr>
+<tr>
+  <td><code>copy</code></td>
+  <td><code>OssClientConfig copy()</code></td>
+  <td>防御性拷贝：返回完全相同的新对象</td>
+</tr>
+<tr>
+  <td><code>toBuilder</code></td>
+  <td><code>OssClientConfigBuilder toBuilder()</code></td>
+  <td>转为 Builder：允许基于当前配置局部修改</td>
+</tr>
+</table>
+
+<h2>URL 构建方法速查</h2>
+<table>
+<tr><th>方法</th><th>返回</th><th>逻辑</th></tr>
+<tr><td><code>getEndpointUrl()</code></td><td>带协议的 endpoint URL</td><td><code>http(s):// + endpoint</code></td></tr>
+<tr><td><code>getDomainUrl()</code></td><td>优先自定义域名的 URL</td><td>domain 非空 &#8594; <code>http(s)://domain</code>；否则 &#8594; <code>getEndpointUrl()</code></td></tr>
+<tr><td><code>getBucketUrl()</code></td><td>桶完整 URL</td><td>从 bucket() 取桶名 &#8594; 据 usePathStyleAccess 决定风格</td></tr>
+<tr><td><code>getBucketUrl(bucket)</code></td><td>指定桶的完整 URL</td><td>path-style: <code>host/bucket</code>；site-style: <code>bucket.host</code></td></tr>
+<tr><td><code>getAccessBaseUrl()</code></td><td>基础 URL（无协议）</td><td>domain 非空 &#8594; domain；否则 &#8594; endpoint</td></tr>
+</table>
+
+<h2>resolvePathStyleAccess 判断逻辑</h2>
+<table>
+<tr><th>endpoint 包含</th><th>返回值</th><th>URL 风格</th><th>示例厂商</th></tr>
+<tr><td><code>"aliyun"</code></td><td><code>false</code> (site-style)</td><td><code>bucket.endpoint</code></td><td>阿里云 OSS</td></tr>
+<tr><td><code>"qcloud"</code></td><td><code>false</code> (site-style)</td><td><code>bucket.endpoint</code></td><td>腾讯云 COS</td></tr>
+<tr><td><code>"qiniu"</code></td><td><code>false</code> (site-style)</td><td><code>bucket.endpoint</code></td><td>七牛云 Kodo</td></tr>
+<tr><td><code>"obs"</code></td><td><code>false</code> (site-style)</td><td><code>bucket.endpoint</code></td><td>华为云 OBS</td></tr>
+<tr><td>不含以上任意一个</td><td><code>true</code> (path-style)</td><td><code>endpoint/bucket</code></td><td>MinIO 等自建 S3</td></tr>
+</table>
+
+<h2>AccessPolicy 枚举映射</h2>
+<table>
+<tr><th>枚举值</th><th>type 数字</th><th>桶 ACL</th><th>对象 ACL</th><th>对应配置字符串</th></tr>
+<tr><td><code>PRIVATE</code></td><td>0</td><td><code>BucketCannedACL.PRIVATE</code></td><td><code>ObjectCannedACL.PRIVATE</code></td><td><code>"0"</code></td></tr>
+<tr><td><code>PUBLIC_READ_WRITE</code></td><td>1</td><td><code>BucketCannedACL.PUBLIC_READ_WRITE</code></td><td><code>ObjectCannedACL.PUBLIC_READ_WRITE</code></td><td><code>"1"</code></td></tr>
+<tr><td><code>PUBLIC_READ</code></td><td>2</td><td><code>BucketCannedACL.PUBLIC_READ</code></td><td><code>ObjectCannedACL.PUBLIC_READ</code></td><td><code>"2"</code></td></tr>
+</table>
+
+<h2>AccessControlPolicyConfig record</h2>
+<table>
+<tr><th>字段</th><th>类型</th><th>默认值(DEFAULT)</th><th>说明</th></tr>
+<tr><td><code>enabled</code></td><td>boolean</td><td><code>false</code></td><td>是否启用 ACL（多数厂商不支持，默认关闭）</td></tr>
+<tr><td><code>accessPolicy</code></td><td>AccessPolicy</td><td><code>PUBLIC_READ_WRITE</code></td><td>访问策略，@NonNull 保证非空</td></tr>
+</table>
+
+<h2>Config&lt;T,B&gt; 接口实现类</h2>
+<table>
+<tr><th>实现类</th><th>用途</th></tr>
+<tr><td><code>OssClientConfig</code></td><td>客户端主配置（11 字段）</td></tr>
+<tr><td><code>AccessControlPolicyConfig</code></td><td>ACL 访问策略配置（Java record）</td></tr>
+<tr><td><code>OssAsyncExecutorConfig</code></td><td>异步执行器配置（虚拟线程 / 线程池）</td></tr>
+</table>
+
+<h2>OssConstant 常量</h2>
+<table>
+<tr><th>常量</th><th>值</th><th>用途</th></tr>
+<tr><td><code>DEFAULT_CONFIG_KEY</code></td><td><code>global:sys_oss:default_config</code></td><td>Redis 中默认配置的 key</td></tr>
+<tr><td><code>CLOUD_SERVICE</code></td><td><code>["aliyun","qcloud","qiniu","obs"]</code></td><td>resolvePathStyleAccess 的匹配依据</td></tr>
+<tr><td><code>SYSTEM_DATA_IDS</code></td><td><code>[1761900000000000001L, ...4L]</code></td><td>系统预设配置记录 ID（不可删除）</td></tr>
+</table>
+
+<h2>关键设计意图</h2>
+<ul>
+  <li><b>两层配置分离</b>：<code>OssProperties</code>（外部 JSON 对等物，弱类型）&#8594; <code>OssClientConfig</code>（内部强类型，不可变）——解耦存储格式与运行时代码。</li>
+  <li><b>Optional 包装</b>：所有可能为 null 的字段用 <code>Optional.ofNullable()</code> 包裹，调用方链式处理空值，避免 NPE。</li>
+  <li><b>@EqualsAndHashCode</b>：用于配置变更检测——<code>OssFactory</code> 比较新旧 config，决定复用还是重建客户端。</li>
+  <li><b>防御性拷贝</b>：<code>copy()</code> 方法保证客户端持有配置快照，外部修改不影响运行中的实例。</li>
+  <li><b>向后兼容</b>：<code>resolvePathStyleAccess</code> 通过 endpoint 字符串推断 URL 风格，是旧版配置缺少 <code>pathStyle</code> 字段的妥协方案。</li>
+  <li><b>fail-fast</b>：<code>AccessPolicy.formType()</code> 找不到匹配直接抛 <code>S3StorageException</code>，不在运行时默默使用错误策略。</li>
+</ul>
+
+<p class="a">&#8594; 相关术语见 <code>GLOSSARY.md</code>：OSS、S3、AccessKey、Bucket、Region、ACL、site-style、path-style、防御性拷贝、Builder 模式、@EqualsAndHashCode。</p>
+</body>
+</html>

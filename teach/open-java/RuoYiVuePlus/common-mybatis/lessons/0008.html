@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0008 - 实战整合：场景剖析与扩展指南</title>
+<style>
+body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+p, li { font-size: 0.97rem; }
+code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; }
+.mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+.mission b { color: #1d6fd6; }
+blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+.flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+.region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+.region h3 { margin-top: 0.9rem; }
+.where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+.side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+.why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+.why b { color: #1f9d4d; }
+details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+details[open] summary { margin-bottom: 0.6rem; }
+.quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+.quiz p { font-weight: 600; margin: 0.6rem 0; }
+.opt { display: block; padding: 0.35rem 0; color: #333; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: #f4f6f8; }
+.cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+.cite a, .reminder a { color: #1d6fd6; }
+.reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+.nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+.tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>0008 &#8212; 实战整合：场景剖析与扩展指南 <span class="tag">ruoyi-common-mybatis</span></h1>
+
+<div class="mission">
+  <b>学习目标：</b>将前 7 节课的知识应用于实际业务场景 —— 数据权限调试、自定义扩展、多数据源实战、常见故障排查以及最佳实践总结。
+</div>
+
+<h2>场景1：数据权限三种角色的完整链路追踪</h2>
+
+<p>以 <b>"超级管理员看全部，部门经理看本部门及下级，普通员工只看自己"</b> 为场景，追踪三种角色类型的数据权限 SQL 生成过程。</p>
+
+<div class="region">
+  <h3>前置条件</h3>
+  <p class="where">enums/DataScopeType.java</p>
+  <table>
+    <tr><th>角色</th><th>dataScope 值</th><th>DataScopeType</th><th>SpEL 模板</th></tr>
+    <tr><td>超级管理员</td><td><code>"1"</code></td><td><code>ALL</code></td><td>空字符串（不追加条件）</td></tr>
+    <tr><td>部门经理</td><td><code>"4"</code></td><td><code>DEPT_AND_CHILD</code></td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )</code></td></tr>
+    <tr><td>普通员工</td><td><code>"5"</code></td><td><code>SELF</code></td><td><code>#{#userName} = #{#user.userId}</code></td></tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>完整执行链路</h3>
+  <p class="where">DataPermissionPointcutAdvisor → DataPermissionAdvice → PlusDataPermissionInterceptor → PlusDataPermissionHandler</p>
+
+  <div class="flow">
+【阶段1：AOP拦截 — DataPermissionAdvice】
+  DataPermissionPointcut 匹配到 @DataPermission 注解的方法
+      → DataPermissionAdvice.invoke() 被触发
+          → 获取 @DataPermission 注解（方法级优先，否则类级）
+          → DataPermissionHelper.setPermission(dataPermission) 存入 ThreadLocal
+          → 执行 invocation.proceed()
+          → finally: DataPermissionHelper.removePermission() 清理
+
+【阶段2：MyBatis 拦截 — PlusDataPermissionInterceptor】
+  Executor 执行 SQL 前触发 beforeQuery()
+      → InterceptorIgnoreHelper.willIgnoreDataPermission() 检查是否被忽略
+      → dataPermissionHandler.invalid() 检查 ThreadLocal 中有无 @DataPermission
+      → parserSingle(sql, msId) 解析并改写 SQL
+
+【阶段3：SQL 改写 — PlusDataPermissionHandler.getSqlSegment()】
+  a. currentUser() 获取当前登录用户
+  b. LoginHelper.isSuperAdmin() → 超级管理员直接返回原 where（不追加权限条件）
+  c. 非超级管理员则调用 buildDataFilter()
+
+【阶段4：数据过滤 SQL 构建 — buildDataFilter()】
+  1. 确定连接词：SELECT 用 " OR "，UPDATE/DELETE 用 " AND "
+  2. 构建 SpEL 上下文（NullSafeStandardEvaluationContext，null 返回 "-1"）
+  3. currentAccess() 解析当前请求的 @SaCheckPermission/@SaCheckRole
+  4. scopeRoles() 筛选当前用户角色（优先用 dataScopeRoleMap 匹配）
+  5. 遍历角色，根据 dataScope 值匹配 DataScopeType：
+
+     超级管理员 (ALL, code="1"):
+       → buildDataFilter 直接 return ""（不加任何条件）
+       → 最终 SQL: SELECT * FROM sys_user WHERE ... (原条件不变)
+
+     部门经理 (DEPT_AND_CHILD, code="4"):
+       → SpEL 解析 "#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )"
+       → deptName = dataColumn.value() 映射的字段名，如 "dept_id"
+       → @sdss 是 Spring Bean，调用 getDeptAndChild(deptId) 返回部门ID列表
+       → 最终 SQL: SELECT * FROM sys_user WHERE ... AND (dept_id IN (101, 102, 103))
+
+     普通员工 (SELF, code="5"):
+       → SpEL 解析 "#{#userName} = #{#user.userId}"
+       → userName = dataColumn.value() 映射的字段名，如 "user_id"
+       → user.userId = 当前登录用户ID
+       → 最终 SQL: SELECT * FROM sys_user WHERE ... AND (user_id = 1001)
+
+  6. 多角色时用 joinStr 连接各角色的条件
+</div>
+</div>
+
+<div class="why">
+  <b>关键设计：</b><code>LoginHelper.isSuperAdmin()</code> 检查在 <code>getSqlSegment()</code> 中首先执行。超管直接返回原 where 条件，跳过了所有 SpEL 解析和 SQL 拼接。这避免了不必要的性能开销，也是最顶层的数据权限豁免机制。
+</div>
+
+<div class="side">
+  <b>SELECT vs UPDATE/DELETE 的连接词差异：</b>DataScopeType 的 sqlTemplate 使用 <code>OR</code> 连接不同角色的数据范围（因为用户可能有多个角色，任一角色有权限即可），而 UPDATE/DELETE 使用 <code>AND</code>（所有角色的条件必须同时满足）。这个区别在 <code>buildDataFilter()</code> 中通过 <code>isSelect</code> 参数控制。
+</div>
+
+<h2>场景2：自定义数据权限扩展</h2>
+
+<p>假设业务需要一个新的数据范围类型 —— <b>"仅查看本部门和指定关联部门"</b>。</p>
+
+<div class="region">
+  <h3>扩展步骤</h3>
+  <table>
+    <tr><th>步骤</th><th>操作</th><th>说明</th></tr>
+    <tr>
+      <td>1</td>
+      <td>在 <code>DataScopeType</code> 枚举中添加新值</td>
+      <td>
+        <pre><code>DEPT_AND_LINKED("7",
+  " #{#deptName} IN ( #{@sdss.getDeptAndLinked( #user.deptId )} )",
+  " 1 = 0 ")</code></pre>
+        code 为 "7"，不与现有值冲突。elseSql 为 "1 = 0" 表示当 SpEL 变量缺失时阻断查询。
+      </td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>在 <code>ISysDataScopeService</code> 接口中添加方法</td>
+      <td>
+        <pre><code>// 返回当前部门及关联部门ID集合
+Set&lt;Long&gt; getDeptAndLinked(Long deptId);</code></pre>
+      </td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>在 <code>SysDataScopeServiceImpl</code> 中实现</td>
+      <td>查询 dept_id 关联表，返回部门ID集合。SpEL 表达式 <code>#{@sdss.getDeptAndLinked(...)}</code> 会通过 Spring 容器调用该 Bean 方法。</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>在角色管理中配置 dataScope=7</td>
+      <td>前端角色配置页面选择新的数据范围类型，数据库 sys_role 表 data_scope 字段设为 "7"。</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>在 Mapper 方法上使用 @DataPermission 注解</td>
+      <td>确保 <code>DataColumn</code> 的 key/value 映射与 SpEL 模板中的 <code>#deptName</code> 变量对应：
+        <pre><code>@DataPermission({
+    @DataColumn(key = "deptName", value = "dept_id")
+})</code></pre>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div class="why">
+  <b>扩展原理：</b><code>buildDataFilter()</code> 通过 <code>DataScopeType.findCode(role.getDataScope())</code> 动态匹配枚举。新增枚举值后，框架自动识别 code="7"，取出对应的 sqlTemplate 交由 SpEL 解析器处理。<b>无需修改框架代码</b>，只需扩展枚举和对应的 Service 方法。
+</div>
+
+<div class="side">
+  <b>SpEL 上下文变量说明：</b><br>
+  <code>#deptName</code> / <code>#userName</code> — 来自 @DataColumn 的 key 数组，值为对应的 value 数组（字段名）<br>
+  <code>#user</code> — 当前登录用户对象（LoginUser），通过 <code>LoginHelper.getLoginUser()</code> 或上下文变量获取<br>
+  <code>#roleId</code> — 当前角色的 roleId<br>
+  <code>@sdss</code> — Spring Bean 引用（ISysDataScopeService），通过 <code>BeanFactoryResolver</code> 解析
+</div>
+
+<h2>场景3：添加新的数据源</h2>
+
+<div class="region">
+  <h3>数据源配置方式</h3>
+  <p class="where">ruoyi-admin/src/main/resources/application-dev.yml</p>
+  <p>dynamic-datasource 使用 <code>spring.datasource.dynamic</code> 前缀配置多数据源。在 YAML 中添加新数据源：</p>
+  <pre><code>spring:
+  datasource:
+    dynamic:
+      primary: master          # 默认数据源
+      strict: true             # 严格模式：未匹配数据源时抛异常
+      datasource:
+        master:                # 主库
+          driverClassName: com.mysql.cj.jdbc.Driver
+          url: jdbc:mysql://localhost:3306/ry-vue?...
+          username: root
+          password: root
+        oracle_db:             # 新增 Oracle 数据源
+          driverClassName: oracle.jdbc.OracleDriver
+          url: jdbc:oracle:thin:@//192.168.1.100:1521/ORCL
+          username: ry_vue
+          password: ry_vue
+      hikari:                  # HikariCP 连接池全局配置
+        maxPoolSize: 20
+        minIdle: 10</code></pre>
+</div>
+
+<div class="region">
+  <h3>使用数据源</h3>
+  <p>在 Service 或 Mapper 方法上使用 <code>@DS</code> 注解切换数据源：</p>
+  <pre><code>@DS("oracle_db")
+public List&lt;UserVO&gt; selectOracleUserList() {
+    return baseMapper.selectVoList(...);
+}</code></pre>
+</div>
+
+<div class="region">
+  <h3>DataBaseHelper 自动适配</h3>
+  <p>首次访问 oracle_db 数据源时：</p>
+  <div class="flow">
+1. DS.determineDataSource() → 根据 @DS("oracle_db") 切换到 Oracle 数据源
+2. getDataBaseType() → 获取 Oracle Connection
+3. DatabaseMetaData.getDatabaseProductName() → "Oracle"
+4. DataBaseType.find("Oracle") → DataBaseType.ORACLE
+5. DB_TYPE_CACHE.put("oracle_db", ORACLE)
+6. findInSet() 调用时 → getDataBaseType() 返回 ORACLE → 生成 instr() SQL
+</div>
+  <p><b>零代码改动：</b>只要配置了数据源，<code>DataBaseHelper</code> 会自动检测数据库类型，<code>findInSet()</code> 等跨数据库方法会自动生成对应方言 SQL。</p>
+</div>
+
+<h2>场景4：常见故障排查</h2>
+
+<div class="region">
+  <h3>故障1：数据权限不生效</h3>
+  <table>
+    <tr><th>可能原因</th><th>排查方法</th><th>解决方案</th></tr>
+    <tr>
+      <td>忘记添加 <code>@DataPermission</code> 注解</td>
+      <td>检查 Mapper 方法或类上是否有 <code>@DataPermission</code></td>
+      <td>在需要数据权限的方法上添加注解和 <code>@DataColumn</code> 配置</td>
+    </tr>
+    <tr>
+      <td>当前用户是超级管理员</td>
+      <td>检查 <code>LoginHelper.isSuperAdmin()</code> 返回值</td>
+      <td>超管故意绕过数据权限，这是预期行为。如需测试，使用非超管账号</td>
+    </tr>
+    <tr>
+      <td><code>InterceptorIgnoreHelper</code> 屏蔽了拦截器</td>
+      <td>检查是否调用了 <code>InterceptorIgnoreHelper.handle()</code></td>
+      <td>检查代码中是否有 <code>DataPermissionIgnoreContext.enable()</code> 调用未配对 disable</td>
+    </tr>
+    <tr>
+      <td>角色 dataScope 值未配置或为 "1"(ALL)</td>
+      <td>检查数据库 sys_role 表 data_scope 字段</td>
+      <td>将角色的 dataScope 设为对应的数值（4/5 等）</td>
+    </tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>故障2：SQL 日志显示了 ? 占位符但无参数值</h3>
+  <table>
+    <tr><th>可能原因</th><th>排查方法</th><th>解决方案</th></tr>
+    <tr>
+      <td><code>mybatis-plus.sql-log.enabled</code> 未开启</td>
+      <td>检查 YAML 配置文件</td>
+      <td>添加配置：<code>mybatis-plus.sql-log.enabled=true</code></td>
+    </tr>
+    <tr>
+      <td>看到的日志是 MyBatis 原生日志，不是 SqlLogInterceptor 输出</td>
+      <td>SqlLogInterceptor 输出包含 "Consume Time" 和 "Mapper ID"</td>
+      <td>确认 common-mybatis.yml 中 logImpl 为 NoLoggingImpl，避免日志重复</td>
+    </tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>故障3：数据库唯一键冲突</h3>
+  <table>
+    <tr><th>现象</th><th>原因</th><th>排查方法</th></tr>
+    <tr>
+      <td>HTTP 409 "数据库中已存在该记录"</td>
+      <td><code>DuplicateKeyException</code> 被 <code>MybatisExceptionHandler</code> 捕获</td>
+      <td>查看日志中具体的请求地址和异常消息，确认是哪个唯一键冲突</td>
+    </tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>故障4：SpEL 变量为 null 导致查询返回 "1 = 0" 无结果</h3>
+  <table>
+    <tr><th>可能原因</th><th>解决方案</th></tr>
+    <tr>
+      <td>未调用 <code>DataPermissionHelper.setVariable()</code> 设置必要的上下文变量</td>
+      <td>在调用 Mapper 前确保 SpEL 所需的变量（如 user）已设置。默认由 <code>currentUser()</code> 自动设置</td>
+    </tr>
+    <tr>
+      <td><code>@DataColumn</code> 的 key/value 与 sqlTemplate 中的变量名不匹配</td>
+      <td>检查 @DataColumn 的 key 名称是否与 DataScopeType 中 <code>#deptName</code> / <code>#userName</code> 一致</td>
+    </tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>故障5："未找到数据源" 错误</h3>
+  <table>
+    <tr><th>现象</th><th>原因</th><th>解决方案</th></tr>
+    <tr>
+      <td>HTTP 500 "未找到数据源，请联系管理员确认"</td>
+      <td><code>MyBatisSystemException</code> 根因为 <code>CannotFindDataSourceException</code></td>
+      <td>检查 YAML 中数据源配置是否存在、@DS 注解值是否与配置的 key 一致</td>
+    </tr>
+  </table>
+</div>
+
+<h2>场景5：最佳实践总结</h2>
+
+<div class="region">
+  <h3>三种查询构建器选择指南</h3>
+  <table>
+    <tr><th>场景</th><th>推荐构建器</th><th>入口方法</th></tr>
+    <tr>
+      <td>单表 CRUD（含聚合、子查询）</td>
+      <td><code>LambdaQueryBuilder</code></td>
+      <td><code>QueryBuilder.lambda(Entity.class)</code></td>
+    </tr>
+    <tr>
+      <td>多表 JOIN 查询</td>
+      <td><code>LambdaJoinQueryBuilder</code></td>
+      <td><code>QueryBuilder.lambdaJoin(Entity.class)</code></td>
+    </tr>
+    <tr>
+      <td>Mapper 层链式 CRUD（直接执行）</td>
+      <td><code>LambdaCrudChainWrapper</code></td>
+      <td><code>baseMapper.lambda()</code></td>
+    </tr>
+  </table>
+</div>
+
+<div class="region">
+  <h3>@DataPermission 放置位置决策</h3>
+  <table>
+    <tr><th>放置位置</th><th>适用场景</th><th>优先级</th></tr>
+    <tr>
+      <td>方法级别</td>
+      <td>同一 Mapper 中不同方法需要不同的数据权限配置</td>
+      <td><b>高于</b>类级别</td>
+    </tr>
+    <tr>
+      <td>类级别</td>
+      <td>整个 Mapper 的所有方法使用相同的数据权限规则</td>
+      <td>方法无注解时生效</td>
+    </tr>
+  </table>
+  <p>查找逻辑在 <code>DataPermissionAdvice.getDataPermissionAnnotation()</code> 中：先查方法注解，若为 null 则查类注解（包括 JDK 动态代理的接口注解）。</p>
+</div>
+
+<div class="region">
+  <h3>Mapper 代码组织建议</h3>
+  <ul>
+    <li>Mapper 接口继承 <code>BaseMapperPlus&lt;T, V&gt;</code>，享受泛型 VO 支持和链式 CRUD</li>
+    <li>使用 <code>LambdaQueryBuilder</code> / <code>LambdaJoinQueryBuilder</code> 替代传统 XML 编写动态 SQL，类型安全且可读性强</li>
+    <li>需要数据权限的方法必须标注 <code>@DataPermission</code>，不需要的不标注（默认无权限过滤）</li>
+    <li>在异步任务、定时任务等非 HTTP 请求场景中注意 <code>DataPermissionHelper</code> 的上下文可能为空（无 HttpServletRequest）</li>
+    <li>敏感操作（删除、导出）使用 <code>@DataPermission</code> 同时配合 <code>@SaCheckPermission</code> 做双重控制</li>
+  </ul>
+</div>
+
+<div class="reminder">
+  <b>本节核心要点回顾：</b><br>
+  1. 数据权限链路：AOP 注解捕获 → MyBatis 拦截器 SQL 改写 → DataScopeType 枚举匹配 → SpEL 模板解析<br>
+  2. 扩展 DataScopeType 只需修改枚举 + 添加 Service 方法，无需改动框架代码<br>
+  3. 多数据源配置后 DataBaseHelper 自动检测类型，findInSet 自动适配方言<br>
+  4. 常见故障：忘记 @DataPermission、超管豁免、InterceptorIgnoreHelper 屏蔽、变量 null 导致 1=0
+</div>
+
+<h2>自测题</h2>
+
+<div class="quiz">
+  <p>Q1: 在数据权限链路中，超级管理员的数据过滤是在哪个方法中被跳过的？</p>
+  <span class="opt">A. DataPermissionAdvice.invoke()</span>
+  <span class="opt">B. PlusDataPermissionInterceptor.beforeQuery()</span>
+  <span class="opt">C. PlusDataPermissionHandler.getSqlSegment()</span>
+  <span class="opt">D. buildDataFilter()</span>
+  <details><summary>查看答案</summary><b>答案：C。</b> <code>getSqlSegment()</code> 方法首先调用 <code>LoginHelper.isSuperAdmin()</code>，为 true 时直接返回原 where 条件。</details>
+</div>
+
+<div class="quiz">
+  <p>Q2: 当 DataScopeType 的 sqlTemplate 中引用的 SpEL 变量（如 #deptName）未在 @DataColumn 中声明时，会导致什么？</p>
+  <span class="opt">A. 抛出 ServiceException</span>
+  <span class="opt">B. 数据权限静默失效</span>
+  <span class="opt">C. 生成 "1 = 0" 导致查询无结果</span>
+  <span class="opt">D. 整个请求返回 500 错误</span>
+  <details><summary>查看答案</summary><b>答案：B。</b> 当 sqlTemplate 中的变量 key 不在 @DataColumn 声明的 key 集合中时，<code>isSuccess</code> 保持 false，进入 elseSql 处理。但若 elseSql 也为空，则 conditions 为空，最终返回空字符串（无权限过滤）。对于 CUSTOM 类型的模板，可能走到 elseSql="1=0"。</details>
+</div>
+
+<div class="quiz">
+  <p>Q3: 添加新数据源后，DataBaseHelper.findInSet() 是否需要修改代码才能适配新数据源？</p>
+  <span class="opt">A. 需要，必须在 switch 中添加新的 case</span>
+  <span class="opt">B. 不需要，自动使用 default 分支（MySQL 语法）</span>
+  <span class="opt">C. 不需要，动态数据源框架会自动转换 SQL 方言</span>
+  <span class="opt">D. 取决于新数据源的数据库类型，如果是已知类型（如 Oracle）则自动适配，全新数据库类型需要添加 case</span>
+  <details><summary>查看答案</summary><b>答案：D。</b> <code>DataBaseType</code> 仅识别 4 种数据库（find 默认返回 MY_SQL），findInSet 的 switch 覆盖了这 4 种。若新数据源是已知的 4 种之一，自动适配；若是全新数据库类型，需在枚举中添加新值和对应的 switch case。</details>
+</div>
+
+<div class="quiz">
+  <p>Q4: 某用户查询列表时总是返回空，但数据库确实有数据，最可能的原因是什么？</p>
+  <span class="opt">A. 数据库连接池耗尽</span>
+  <span class="opt">B. @DataPermission 配置了 DataScopeType 但 SpEL 变量缺失导致生成 "1 = 0"</span>
+  <span class="opt">C. MybatisExceptionHandler 捕获了异常返回了空列表</span>
+  <span class="opt">D. SqlLogInterceptor 阻止了查询执行</span>
+  <details><summary>查看答案</summary><b>答案：B。</b> 当 SpEL 解析失败（变量为 null），NullSafeStandardEvaluationContext 返回默认值 "-1"，加上 elseSql="1=0"，最终 WHERE 条件为 "1=0"，查询无结果。</details>
+</div>
+
+<div class="cite">
+  <b>参考源文件：</b><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/enums/DataScopeType.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/handler/PlusDataPermissionHandler.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/interceptor/PlusDataPermissionInterceptor.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataPermissionHelper.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/aspect/DataPermissionAdvice.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataBaseHelper.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/query/QueryBuilder.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-admin/src/main/resources/application-dev.yml</code>
+</div>
+
+<div class="nav">&laquo; 上一课：0007 多数据源与 SQL 日志 | 课程结束 &raquo;</div>
+
+</body>
+</html>

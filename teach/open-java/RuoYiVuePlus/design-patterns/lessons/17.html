@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 17 课 · 前端加密策略 — RSA+AES 混合加密的完整设计</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 17 课 · 前端加密策略 — RSA+AES 混合加密的完整设计 <span class="tag">安全模式</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：掌握 RuoYi-Vue-Plus 前端 RSA+AES 混合加密的设计原理，能独立绘制请求加密/响应解密的完整数据流图，理解双层开关（全局 <code>VITE_APP_ENCRYPT</code> + 单请求 <code>isEncrypt</code>）的精妙之处，并能对比后端 ApiEncrypt Filter 的双通道设计。
+</div>
+
+<p>RuoYi-Vue-Plus 对登录、注册、密码重置等敏感 API 实施了<b>RSA + AES 混合加密</b>。本节从前端视角完整拆解密钥生成、请求加密、响应解密的全流程，并与后端 ApiEncrypt Filter 体系对照理解。</p>
+
+<h2>一、为什么是混合加密？</h2>
+
+<table>
+  <tr><th>加密方式</th><th>优点</th><th>缺点</th><th>适用场景</th></tr>
+  <tr><td>纯 RSA</td><td>非对称，公钥可公开分发</td><td><b>慢</b>（比 AES 慢 100-1000 倍），有明文长度限制（取决于密钥长度，2048 位密钥最多加密 245 字节）</td><td>密钥交换</td></tr>
+  <tr><td>纯 AES</td><td><b>快</b>（硬件加速），无长度限制</td><td>对称密钥需要双方共享，密钥本身如何安全传递？</td><td>数据加密</td></tr>
+  <tr><td>RSA + AES 混合</td><td>RSA 加密 AES 密钥（小数据），AES 加密 payload（大数据）</td><td>需要管理 RSA 密钥对 + 每次请求生成 AES 密钥</td><td><b>最优方案</b></td></tr>
+</table>
+
+<div class="side">
+💡 <b>一句话总结</b>：RSA 负责在客户端和服务端之间<a href="#"><b>安全地传递临时 AES 密钥</b></a>，AES 负责用这个临时密钥<a href="#"><b>快速加密实际的请求/响应数据</b></a>。两者各司其职，互补短板。
+</div>
+
+<h2>二、加密基础设施：三个工具文件</h2>
+
+<p>前端加密体系由三个文件构成：</p>
+
+<table>
+  <tr><th>文件</th><th>职责</th><th>核心导出</th></tr>
+  <tr><td><code>utils/crypto.ts</code></td><td>AES 密钥生成 + AES 加解密 + base64 编解码</td><td><code>generateAesKey</code>, <code>encryptWithAes</code>, <code>decryptWithAes</code></td></tr>
+  <tr><td><code>utils/jsencrypt.ts</code></td><td>RSA 加解密封装（基于 jsencrypt 库）</td><td><code>encrypt</code>, <code>decrypt</code></td></tr>
+  <tr><td><code>utils/request.ts</code></td><td>Axios 拦截器中调用以上两个模块，组装完整加密流程</td><td>请求/响应拦截器</td></tr>
+</table>
+
+<h2>三、密钥生成：密码学安全的随机数</h2>
+
+<p>打开 <code>plus-ui-vue/src/utils/crypto.ts</code>：</p>
+
+<pre><code>const generateRandomString = (): string =&gt; {
+  const array = new Uint8Array(32);           // 32 字节 = 256 位
+  crypto.getRandomValues(array);              // ★ 密码学安全的随机数
+  return Array.from(array, b =&gt; b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 32);                            // 取前 32 个十六进制字符
+};
+
+export const generateAesKey = (): CryptoJS.lib.WordArray =&gt; {
+  return CryptoJS.enc.Utf8.parse(generateRandomString());
+};</code></pre>
+
+<div class="step">
+<span class="num">1</span> <b>crypto.getRandomValues()</b>：浏览器原生 API，从操作系统熵源获取随机数。比 <code>Math.random()</code> 安全得多——后者是伪随机，种子可预测。 <span class="where">crypto.ts:11</span>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>32 字节 → 32 个十六进制字符</b>：每个字节转为 2 位十六进制（0x00 → "00"，0xFF → "ff"），然后截取前 32 个字符作为最终的 256 位 AES 密钥。 <span class="where">crypto.ts:12-14</span>
+</div>
+
+<div class="step">
+<span class="num">3</span> <b>WordArray</b>：CryptoJS 的内部数据格式。CryptoJS.enc.Utf8.parse() 将字符串转为 CryptoJS 可处理的 WordArray 对象。后续的 AES 加密操作要求输入是 WordArray 类型。 <span class="where">crypto.ts:22</span>
+</div>
+
+<h2>四、RSA 工具：密钥来自环境变量</h2>
+
+<p>打开 <code>plus-ui-vue/src/utils/jsencrypt.ts</code>：</p>
+
+<pre><code>import { JSEncrypt } from 'jsencrypt';
+
+const publicKey = import.meta.env.VITE_APP_RSA_PUBLIC_KEY;
+const privateKey = import.meta.env.VITE_APP_RSA_PRIVATE_KEY;
+
+// 加密（用公钥）
+export const encrypt = (txt: string) =&gt; {
+  const encryptor = new JSEncrypt();
+  encryptor.setPublicKey(publicKey);
+  return encryptor.encrypt(txt);
+};
+
+// 解密（用私钥）
+export const decrypt = (txt: string) =&gt; {
+  const encryptor = new JSEncrypt();
+  encryptor.setPrivateKey(privateKey);
+  return encryptor.decrypt(txt);
+};</code></pre>
+
+<div class="warn">
+⚠️ <b>安全提示</b>：源码注释中明确写了"前端不建议存放私钥 不建议解密数据 因为都是透明的意义不大"。RSA 私钥出现在前端代码中仅用于<b>响应解密</b>（解密服务端用 RSA 公钥加密的临时 AES 密钥）。在生产环境中，前端代码是公开的，私钥会暴露。RuoYi-Vue-Plus 这么做是在「便利性」和「绝对安全」之间的工程权衡——它提供了传输层加密，比明文传输安全得多，但不是端到端加密。如果需要更强的安全性，应考虑使用 HTTPS 双向认证 + 硬件安全模块（HSM）。
+</div>
+
+<h2>五、请求加密完整流程</h2>
+
+<p>当 <code>VITE_APP_ENCRYPT = 'true'</code> 且请求头 <code>isEncrypt = 'true'</code> 时，请求拦截器触发加密：</p>
+
+<div class="diagram">┌────────────────── 请求加密流程 ──────────────────┐
+│                                                    │
+│  Step 1  客户端生成 32 字节随机 AES 密钥             │
+│          generateAesKey()                          │
+│          ────────────────                           │
+│  Step 2  RSA 公钥加密 AES 密钥 → 放入请求头          │
+│          encrypt(encryptBase64(aesKey))             │
+│          → headers['encrypt-key'] = encryptedKey   │
+│          ────────────────                           │
+│  Step 3  AES-256-ECB + PKCS7 加密请求体              │
+│          encryptWithAes(JSON.stringify(data), aesKey)│
+│          → config.data = ciphertext                 │
+│          ────────────────                           │
+│  Step 4  发送请求到服务端                            │
+│          POST /api/login                            │
+│          Headers: encrypt-key: [RSA加密的AES密钥]    │
+│          Body: [AES加密的密文]                       │
+│                                                    │
+└────────────────────────────────────────────────────┘</div>
+
+<p>对应代码（<code>plus-ui-vue/src/utils/request.ts</code> 第 155-166 行）：</p>
+
+<pre><code>if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+  if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+    const aesKey = generateAesKey();                              // Step 1
+    config.headers[encryptHeader] = encrypt(encryptBase64(aesKey)); // Step 2
+    config.data = typeof config.data === 'object'
+      ? encryptWithAes(JSON.stringify(config.data), aesKey)        // Step 3
+      : encryptWithAes(config.data, aesKey);
+  }
+}</code></pre>
+
+<h3>加密参数说明</h3>
+
+<table>
+  <tr><th>参数</th><th>选择</th><th>原因</th></tr>
+  <tr><td>算法</td><td>AES-256</td><td>256 位密钥提供足够的安全强度（128 位也够用，但 256 是行业标准）</td></tr>
+  <tr><td>模式</td><td>ECB</td><td>简单、无需 IV，适合短文本加密（JSON 请求体通常较短）</td></tr>
+  <tr><td>填充</td><td>PKCS7</td><td>Java 服务端（Cipher.getInstance）默认使用 PKCS5Padding，与 PKCS7 兼容</td></tr>
+</table>
+
+<div class="warn">
+⚠️ <b>ECB 模式的注意事项</b>：ECB 模式下，相同的明文块加密后产生相同的密文块，存在模式分析攻击风险。对于用户密码、银行卡号等短字段，影响有限；但对于大段重复文本（如图片 base64），不建议使用 ECB。本项目仅在登录/注册等短 JSON 场景使用加密，选择 ECB 简化了 IV（初始化向量）的传递复杂度——不需要额外传递 16 字节随机 IV。
+</div>
+
+<h2>六、响应解密完整流程</h2>
+
+<p>响应拦截器中解密（<code>plus-ui-vue/src/utils/request.ts</code> 第 180-196 行）：</p>
+
+<div class="diagram">┌────────────────── 响应解密流程 ──────────────────┐
+│                                                    │
+│  Step 1  从响应头读取 encrypt-key                   │
+│          res.headers['encrypt-key']                │
+│          ────────────────                           │
+│  Step 2  RSA 私钥解密 → 得到 base64 编码的 AES 密钥  │
+│          decrypt(keyStr) → base64Str                │
+│          ────────────────                           │
+│  Step 3  base64 解码 → 得到原始 AES 密钥（WordArray） │
+│          decryptBase64(base64Str.toString())        │
+│          → aesKey                                   │
+│          ────────────────                           │
+│  Step 4  AES 解密响应体 → JSON 字符串               │
+│          decryptWithAes(data, aesKey)               │
+│          ────────────────                           │
+│  Step 5  JSON.parse → 业务数据对象                   │
+│          res.data = JSON.parse(decryptData)         │
+│                                                    │
+└────────────────────────────────────────────────────┘</div>
+
+<pre><code>service.interceptors.response.use((res: any) =&gt; {
+  if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+    const keyStr = res.headers[encryptHeader];      // Step 1
+    if (keyStr != null && keyStr != '') {
+      const base64Str = decrypt(keyStr);            // Step 2：RSA 私钥解密
+      const aesKey = decryptBase64(                  // Step 3：base64→WordArray
+        base64Str.toString()
+      );
+      const decryptData = decryptWithAes(res.data, aesKey); // Step 4：AES 解密
+      res.data = JSON.parse(decryptData);            // Step 5：JSON 解析
+    }
+  }
+  // ... 状态码路由
+});</code></pre>
+
+<div class="side">
+💡 <b>为什么服务端也在响应中返回 encrypt-key？</b> 因为请求中的 AES 密钥是<b>一次性</b>的——每个请求生成一个新的 32 字节随机密钥。服务端解密请求后，需要将<b>同一个</b> AES 密钥通过响应头的 encrypt-key 回传给客户端，客户端才能解密响应。如果服务端也生成一个新的 AES 密钥，客户端就不知道用什么密钥解密了。这是一个完整的<b>对称密钥闭环</b>：客户端生成 → 服务端使用并回传 → 客户端使用同一个密钥解密。
+</div>
+
+<h2>七、双层开关设计：精准控制加密粒度</h2>
+
+<p>加密不是全量开启的——只有登录、注册、密码重置等敏感 API 才加密。控制机制是两层：</p>
+
+<pre><code>// 第一层：全局开关（.env 文件）
+VITE_APP_ENCRYPT = 'true'           // 控制整个应用的加密功能是否可用
+
+// 第二层：单请求开关（API 调用时设置 header）
+headers: { isEncrypt: 'true' }      // 控制当前请求是否加密
+
+// 拦截器中的判断逻辑
+if (import.meta.env.VITE_APP_ENCRYPT === 'true') {  // 全局开关
+  if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+    // 执行加密                                                // 单请求开关
+  }
+}</code></pre>
+
+<p>这种设计允许：</p>
+<ul>
+  <li><b>开发环境</b>：设置 <code>VITE_APP_ENCRYPT = 'false'</code>，所有请求明文传输，方便调试</li>
+  <li><b>生产环境，普通 API</b>：不设 <code>isEncrypt</code> 头，即使全局开关为 true 也不加密</li>
+  <li><b>生产环境，敏感 API</b>：同时满足两个条件，执行加密</li>
+</ul>
+
+<h2>八、前后端加密体系对照</h2>
+
+<p>后端也有一套完整的加密体系，前端的设计是对其的镜像实现：</p>
+
+<table>
+  <tr><th>层面</th><th>后端实现</th><th>前端实现</th><th>协同关系</th></tr>
+  <tr><td>RSA 加解密</td><td>SecurityUtils + RSA BouncyCastle</td><td>jsencrypt.ts (JSEncrypt 库)</td><td>公钥一致，互相解密</td></tr>
+  <tr><td>AES 加解密</td><td>AES BouncyCastle</td><td>crypto.ts (CryptoJS 库)</td><td>算法/模式/填充必须完全一致</td></tr>
+  <tr><td>请求加密拦截</td><td>ApiEncryptFilter (Servlet Filter)</td><td>request.ts 请求拦截器</td><td>前端加密 → Filter 解密</td></tr>
+  <tr><td>响应加密拦截</td><td>ApiEncryptResponseBodyWrapper</td><td>request.ts 响应拦截器</td><td>Filter 加密 → 前端解密</td></tr>
+  <tr><td>数据库字段加密</td><td>MybatisEncryptInterceptor</td><td>无（后端独有）</td><td>仅后端</td></tr>
+</table>
+
+<p>后端的 <code>ApiEncryptFilter</code> 是一个 Servlet Filter（包装了请求/响应的输入输出流），它读取 <code>encrypt-key</code> 头 → RSA 私钥解密获取 AES 密钥 → 读取请求体 → AES 解密 → 将解密后的请求体交给后续的 Controller。响应路径正好相反：Controller 返回数据 → Filter 用同一个 AES 密钥加密响应体 → 将加密后的 AES 密钥通过 <code>encrypt-key</code> 响应头返回。</p>
+
+<div class="side">
+💡 <b>双通道设计</b>：RuoYi-Vue-Plus 在加密方面有「两个独立的通道」——<b>API 传输加密</b>（ApiEncryptFilter，前后端配合）和<b>数据库存储加密</b>（MybatisEncryptInterceptor，后端独立）。前者保护数据在网络传输过程中不被窃听；后者保护敏感数据（如手机号、身份证号）存入数据库后即使数据库泄露也无法直接读取。两个通道互不干扰，可以独立开启或关闭。
+</div>
+
+<h2>九、完整时序图</h2>
+
+<div class="diagram">客户端 (Browser)                                      服务端 (Server)
+
+1. login({ username, password })
+   │
+2. generateAesKey() → aesKey
+   │
+3. RSA_encrypt(base64(aesKey)) → encrypt-key
+   │
+4. AES_encrypt(JSON, aesKey) → ciphertext
+   │
+5. POST /api/login ─────────────────────────────&gt;  6. ApiEncryptFilter 拦截
+   Headers: encrypt-key: &lt;RSA密文&gt;                     │
+   Body: &lt;AES密文&gt;                                    7. RSA_decrypt(encrypt-key) → aesKey
+                                                       │
+                                                      8. AES_decrypt(body, aesKey) → JSON
+                                                       │
+                                                      9. Controller 处理登录逻辑
+                                                       │
+                                                      10. 生成 JWT token
+                                                       │
+                                                      11. AES_encrypt(response, aesKey)
+                                                          RSA_encrypt(base64(aesKey))
+                                                       │
+12. &lt;──────────────────────────────────────────   Response
+    200 OK                                              Headers: encrypt-key: &lt;RSA密文&gt;
+    Headers: encrypt-key: &lt;RSA密文&gt;                     Body: &lt;AES密文&gt;
+    Body: &lt;AES密文&gt;
+    │
+13. RSA_decrypt(encrypt-key) → aesKey
+    │
+14. AES_decrypt(body, aesKey) → JSON
+    │
+15. JSON.parse() → { token, userInfo }</div>
+
+<h2>十、自测</h2>
+
+<div class="quiz">
+<p>1. 为什么使用 RSA + AES 混合加密而非纯 RSA？</p>
+<label class="opt"><input type="radio" name="q1"> A. 纯 RSA 加密速度慢且有明文长度限制，不适合加密较大的 JSON 请求体</label>
+<label class="opt"><input type="radio" name="q1"> B. RSA 已被证实不安全，AES 是唯一可用的加密算法</label>
+<label class="opt"><input type="radio" name="q1"> C. RSA 需要 HTTPS 配合使用</label>
+</div>
+
+<div class="quiz">
+<p>2. 响应解密时，服务端回传的 <code>encrypt-key</code> 头中的 AES 密钥来自哪里？</p>
+<label class="opt"><input type="radio" name="q2"> A. 服务端重新生成的新 AES 密钥</label>
+<label class="opt"><input type="radio" name="q2"> B. 客户端在请求中发送的同一个 AES 密钥，服务端用完后再通过响应头回传</label>
+<label class="opt"><input type="radio" name="q2"> C. 从数据库查询的固定密钥</label>
+</div>
+
+<div class="quiz">
+<p>3. 以下哪项不是 <code>VITE_APP_ENCRYPT</code> 和 <code>isEncrypt</code> 双层开关的合理使用场景？</p>
+<label class="opt"><input type="radio" name="q3"> A. 开发环境设置全局开关为 false，所有请求明文传输</label>
+<label class="opt"><input type="radio" name="q3"> B. 生产环境中，列表查询 API 不设 isEncrypt 头，不做加密</label>
+<label class="opt"><input type="radio" name="q3"> C. 生产环境中，所有 API 自动加密，无需任何开关配置</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. A</b> — RSA 非对称加密速度慢（比 AES 慢 100-1000 倍），且有明文长度限制（2048 位密钥最多加密 245 字节）。混合加密让 RSA 只加密 32 字节的 AES 密钥，AES 加密实际数据，取长补短。<br>
+<b>2. B</b> — AES 密钥由客户端在请求时生成，服务端通过 encrypt-key 请求头获取后用于解密请求体；响应时服务端使用同一个 AES 密钥加密响应体，并将这个密钥通过 encrypt-key 响应头回传给客户端用于解密。这是一个完整的对称密钥闭环。<br>
+<b>3. C</b> — 双层开关的精确意图就是选择性加密。加密有性能开销（每次请求生成密钥、RSA 运算），不是所有 API 都需要加密。只有登录、注册等敏感操作才开启 isEncrypt。</p>
+</details>
+
+<div class="nav">← <a href="16.html">第 16 课 · 动态路由工厂</a> | 下一课：<a href="18.html">第 18 课 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues" target="_blank">crypto.getRandomValues() — MDN</a> ·
+<a href="https://cryptojs.gitbook.io/docs/" target="_blank">CryptoJS 文档</a> ·
+<a href="https://github.com/travist/jsencrypt" target="_blank">JSEncrypt GitHub</a> ·
+查看源码：<code>plus-ui-vue/src/utils/crypto.ts</code> · <code>plus-ui-vue/src/utils/jsencrypt.ts</code> · <code>plus-ui-vue/src/utils/request.ts</code>
+</div>
+<div class="reminder">💡 有疑问？直接问我。相关课程：后端 <code>ApiEncryptFilter</code> + <code>MybatisEncryptInterceptor</code> 的加密体系（参见加密模块课程）。至此前端设计模式四节课程结束，你是否能画出完整的前端请求处理管道图？</div>
+
+</body>
+</html>

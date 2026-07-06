@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 第 3 课：字段类型自动推断</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.3rem; line-height: 1.3; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.9rem 1.1rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.08rem 0.45rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; margin: 0.6rem 0; }
+  th { background: #eef4ff; padding: 0.35rem 0.5rem; text-align: left; color: #1d6fd6; }
+  td { padding: 0.35rem 0.5rem; border-top: 1px solid #eee; vertical-align: top; }
+  .file { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.5rem 0.9rem; margin: 0.6rem 0; border-radius: 0 6px 6px 0; font-size: 0.85rem; }
+  .nav { margin-top: 2rem; font-size: 0.82rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 03 · 字段类型自动推断 <span class="tag">cheat sheet</span></h1>
+
+<h2>入口：initColumnField(column, table)</h2>
+<p>在表导入时对每个列调用，输入来自 AnyLine 元数据，输出 javaType / javaField / htmlType / queryType / is* 开关。</p>
+
+<h2>第一层：提取纯数据库类型</h2>
+<table>
+<tr><th>原始类型</th><th>getDbType()</th><th>getColumnLength()</th><th>getColumnScale()</th></tr>
+<tr><td class="file">varchar(255)</td><td>varchar</td><td>255</td><td>0</td></tr>
+<tr><td class="file">decimal(10,2)</td><td>decimal</td><td>10</td><td>2</td></tr>
+</table>
+
+<h2>第二层：数据库类型 → Java 类型</h2>
+
+<table>
+<tr><th>分类</th><th>数据库类型（部分）</th><th>默认 Java 类型</th><th>例外</th></tr>
+<tr>
+  <td>字符串</td>
+  <td>char, varchar, enum, nvarchar, varchar2 ...</td>
+  <td>String</td>
+  <td>tinyint(1) + 开关字段名 → Boolean</td>
+</tr>
+<tr>
+  <td>文本</td>
+  <td>tinytext, text, mediumtext, longtext, blob, clob, bytea ...</td>
+  <td>String</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>时间</td>
+  <td>datetime, date, timestamp, timestamptz ...</td>
+  <td>LocalDateTime</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>数值</td>
+  <td>见下方数值精度阶梯表</td>
+  <td>见下方</td>
+  <td>—</td>
+</tr>
+</table>
+
+<h3>数值类型精度阶梯（resolveNumberJavaType）</h3>
+<table>
+<tr><th>数据库类型</th><th>条件</th><th>Java 类型</th></tr>
+<tr><td class="file">decimal, numeric, money, smallmoney</td><td>scale > 0</td><td><strong>BigDecimal</strong></td></tr>
+<tr><td class="file">decimal, numeric, money, smallmoney</td><td>scale = 0, length <= 9</td><td>Integer</td></tr>
+<tr><td class="file">decimal, numeric, money, smallmoney</td><td>scale = 0, length > 9</td><td>Long</td></tr>
+<tr><td class="file">float, double, real, float4, float8, double precision</td><td>—</td><td><strong>Double</strong></td></tr>
+<tr><td class="file">bigint, int8, bigserial</td><td>—</td><td><strong>Long</strong></td></tr>
+<tr><td class="file">smallint, mediumint, int, int2, int4, integer, serial</td><td>—</td><td><strong>Integer</strong></td></tr>
+<tr><td class="file">number (Oracle)</td><td>scale > 0</td><td>BigDecimal</td></tr>
+<tr><td class="file">number (Oracle)</td><td>scale = 0, length <= 9</td><td>Integer</td></tr>
+<tr><td class="file">number (Oracle)</td><td>scale = 0, length > 9</td><td>Long</td></tr>
+</table>
+
+<div class="tip">
+<strong>isBooleanColumn() 优先于数值类型判断</strong>：tinyint(1) + 字段名匹配开关类 → javaType=Boolean, htmlType=switch。匹配规则：endsWith(status/flag/enabled/disabled/available/visible) 或 startsWith(is_/has_/enable_/disable_)。
+</div>
+
+<h2>第三层：字段名后缀 → HTML 控件（按优先级，覆盖关系）</h2>
+
+<table>
+<tr><th>优先级</th><th>匹配条件</th><th>htmlType</th></tr>
+<tr><td>1</td><td>列长度 >= 500 或 TEXT 类型</td><td><code>textarea</code></td></tr>
+<tr><td>2</td><td>isSwitchColumn() 或 javaType=Boolean</td><td><code>switch</code></td></tr>
+<tr><td>3</td><td>endsWith("status")</td><td><code>radio</code> / <code>switch</code>(Boolean)</td></tr>
+<tr><td>4</td><td>endsWith("type") 或 endsWith("sex")</td><td><code>select</code></td></tr>
+<tr><td>5</td><td>isSortColumn(): endsWith(sort/order_num/order/rank/seq/sequence)</td><td><code>inputNumber</code></td></tr>
+<tr><td>6</td><td>endsWith(image/avatar/logo/picture)</td><td><code>imageUpload</code></td></tr>
+<tr><td>7</td><td>endsWith(file/attachment)</td><td><code>fileUpload</code></td></tr>
+<tr><td>8</td><td>endsWith(remark/description/desc/note)</td><td><code>textarea</code></td></tr>
+<tr><td>9</td><td>endsWith(content/html/body)</td><td><code>editor</code></td></tr>
+</table>
+
+<h2>查询方式自动推断</h2>
+<table>
+<tr><th>条件</th><th>queryType</th></tr>
+<tr><td>endsWith(columnName, "name")</td><td><code>LIKE</code>（模糊查询）</td></tr>
+<tr><td>htmlType == "datetime" && isQuery()</td><td><code>BETWEEN</code>（日期范围）</td></tr>
+<tr><td>其他所有情况</td><td><code>EQ</code>（默认，精确匹配）</td></tr>
+</table>
+
+<h2>参与场景黑名单（默认全部参与，以下字段排除）</h2>
+
+<table>
+<tr><th>场景</th><th>排除字段</th><th>额外排除</th></tr>
+<tr><td>isInsert（新增）</td><td>create_dept, create_by, create_time, del_flag, update_by, update_time, version</td><td>+ 主键字段</td></tr>
+<tr><td>isEdit（编辑）</td><td>create_dept, create_by, create_time, del_flag, update_by, update_time, version</td><td>—</td></tr>
+<tr><td>isList（列表）</td><td>create_dept, create_by, create_time, del_flag, update_by, update_time, version</td><td>—</td></tr>
+<tr><td>isQuery（查询）</td><td>id, create_dept, create_by, create_time, del_flag, update_by, update_time, remark, version</td><td>—</td></tr>
+</table>
+
+<h2>GenTableColumn 辅助方法速查</h2>
+
+<table>
+<tr><th>方法</th><th>作用</th><th>模板用法</th></tr>
+<tr><td class="file">isPk()</td><td>是否主键</td><td><code>&lt;#if column.pk&gt;</code></td></tr>
+<tr><td class="file">isInsert()</td><td>是否参与新增</td><td>控制 BO/Domain/VO 字段可见性</td></tr>
+<tr><td class="file">isEdit()</td><td>是否参与编辑</td><td>同上</td></tr>
+<tr><td class="file">isList()</td><td>是否参与列表</td><td>控制 VO 和表格列</td></tr>
+<tr><td class="file">isQuery()</td><td>是否参与查询</td><td>控制 BO 查询条件</td></tr>
+<tr><td class="file">isSuperColumn()</td><td>是否基类公共字段</td><td>跳过 Domain 生成（已在 BaseEntity 中）</td></tr>
+<tr><td class="file">getTsType()</td><td>TypeScript 类型</td><td>输出 string | number | boolean</td></tr>
+<tr><td class="file">isDictColumn()</td><td>是否字典控件列</td><td>决定是否生成字典翻译代码</td></tr>
+<tr><td class="file">isUsableColumn()</td><td>是否页面白名单</td><td>parentId/orderNum/remark 即使 isSuperColumn 也在页面保留</td></tr>
+</table>
+
+<h2>典型推断案例</h2>
+
+<table>
+<tr><th>字段</th><th>DB类型</th><th>javaType</th><th>htmlType</th><th>推理链</th></tr>
+<tr><td class="file">user_status</td><td>varchar(1)</td><td>String</td><td>switch</td><td>varchar→String; endsWith("status")→switch</td></tr>
+<tr><td class="file">is_enabled</td><td>tinyint(1)</td><td>Boolean</td><td>switch</td><td>tinyint(1) + startsWith("is_")→Boolean→switch</td></tr>
+<tr><td class="file">user_name</td><td>varchar(64)</td><td>String</td><td>input</td><td>varchar→String→input; endsWith("name")→queryType=LIKE</td></tr>
+<tr><td class="file">avatar_image</td><td>varchar(255)</td><td>String</td><td>imageUpload</td><td>varchar→String; 第二层默认input; 第三层endsWith("image")→覆盖为imageUpload</td></tr>
+<tr><td class="file">order_num</td><td>int</td><td>Integer</td><td>inputNumber</td><td>int→Integer; isSortColumn→inputNumber</td></tr>
+<tr><td class="file">create_time</td><td>datetime</td><td>LocalDateTime</td><td>datetime</td><td>datetime→LocalDateTime→datetime; isInsert/Edit/List 被黑名单排除</td></tr>
+<tr><td class="file">price</td><td>decimal(10,2)</td><td>BigDecimal</td><td>input</td><td>decimal scale=2>0→BigDecimal; 不匹配任何第三层后缀→保持input</td></tr>
+</table>
+
+<div class="nav">速查 03 / 共 4 课 · 返回 <a href="../lessons/03.html">课程正文</a></div>
+
+</body>
+</html>

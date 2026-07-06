@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>03 · ruoyi-common-web：请求处理全链路</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>03 · ruoyi-common-web：请求处理全链路</h1>
+
+<p><strong>核心问题：</strong>一个 HTTP 请求从浏览器发出到 Controller 处理完毕，中间经历了什么？XSS 过滤、请求体缓存、跨域处理、日志拦截、统一响应包装——这些横切关注点如何组织？</p>
+
+<div class="info">
+<strong>模块定位：</strong>17 个 Java 文件，7 个包。提供 Web 层全链路基础设施，通过 Spring Boot 3.x <code>@AutoConfiguration</code> 自动装配，对 <code>ruoyi-admin</code> 零侵入——admin 模块无需任何 import 即可享受所有能力。
+</div>
+
+<h2>1. 请求处理全链路</h2>
+
+<pre>
+HTTP Request
+    │
+    ▼
+┌─────────────────────────┐  ORDER: HIGHEST_PRECEDENCE+1
+│  XssFilter              │  跳过 GET/DELETE + excludeUrls
+│  → XssHttpServletRequestWrapper │  清理 HTML 标签（防 XSS）
+└──────────┬──────────────┘
+           ▼
+┌─────────────────────────┐  ORDER: 默认
+│  RepeatableFilter       │  仅 JSON 请求
+│  → RepeatedlyRequestWrapper │  缓存 body 字节数组（支持多次读取）
+└──────────┬──────────────┘
+           ▼
+┌─────────────────────────┐
+│  CorsFilter (Spring)    │  处理 OPTIONS 预检，添加 Access-Control-* 头
+└──────────┬──────────────┘
+           ▼
+┌─────────────────────────────┐
+│  PlusWebInvokeTimeInterceptor │  preHandle: 记录参数(脱敏) + 启动计时器
+│                              │  afterCompletion: 计时 + 清理 ThreadLocal
+└──────────┬──────────────────┘
+           ▼
+┌──────────────────┐
+│  DispatcherServlet │  → Controller 处理
+└──────────┬───────┘
+           ▼
+  正常: ResponseEnhancementAdvice（翻译/脱敏后处理）
+  异常: GlobalExceptionHandler（16 个 @ExceptionHandler）
+           │
+           ▼
+  HTTP Response (JSON)
+</pre>
+
+<h2>2. 四大自动配置类</h2>
+
+<table>
+<tr><th>配置类</th><th>注册的 Bean</th><th>关键条件</th></tr>
+<tr><td><code>FilterConfig</code></td><td>XssFilter + RepeatableFilter</td><td>xss.enabled=true 时才注册 XssFilter</td></tr>
+<tr><td><code>CaptchaConfig</code></td><td>CaptchaProperties 属性绑定</td><td>无条件</td></tr>
+<tr><td><code>I18nConfig</code></td><td>I18nLocaleResolver</td><td>在 WebMvcAutoConfiguration 之前加载</td></tr>
+<tr><td><code>ResourcesConfig</code></td><td>CorsFilter + GlobalExceptionHandler + 拦截器 + 响应增强</td><td>实现 WebMvcConfigurer</td></tr>
+</table>
+
+<p>所有配置类通过 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 自动发现，无需任何 <code>@ComponentScan</code>。</p>
+
+<h2>3. XssFilter — 防跨站脚本注入</h2>
+<pre><code>// 跳过逻辑
+if (GET 或 DELETE 请求) → 直接放行
+if (请求路径匹配 excludeUrls) → 直接放行
+
+// 核心逻辑
+XssHttpServletRequestWrapper wrapper = new XssHttpServletRequestWrapper(request);
+// 内部使用 HtmlUtil.cleanHtmlTag(value).trim() 剥离 &lt;script&gt; 等标签
+// 覆盖 getParameter / getParameterValues / getParameterMap / getInputStream</code></pre>
+
+<p>前端 <code>request.ts</code> 中也有配套的请求体加密（AES+RSA 混合），双重保护。</p>
+
+<h2>4. RepeatableFilter — 请求体可重复读</h2>
+<p>Servlet 的 InputStream 默认只能读一次。但 <code>PlusWebInvokeTimeInterceptor</code> 需要记录请求参数日志，就需要再次读取。解决方案：</p>
+<pre><code>// 在构造时将请求体缓存到 byte[] body
+RepeatedlyRequestWrapper wrapper = new RepeatedlyRequestWrapper(request);
+// 每次 getInputStream() 返回新的 ByteArrayInputStream(body)
+// 同时设置 request/response 字符编码为 UTF-8</code></pre>
+
+<h2>5. PlusWebInvokeTimeInterceptor — 请求日志与计时</h2>
+<pre><code>// preHandle:
+[PLUS]开始请求 => URL[...],参数类型[json],参数:[{"username":"admin","password":"***"}]
+
+// afterCompletion:
+[PLUS]结束请求 => URL[...],耗时:[23]毫秒</code></pre>
+<p>自动脱敏 password/oldPassword/newPassword/confirmPassword 字段。JSON 参数截断至 4000 字符。</p>
+
+<h2>6. I18nLocaleResolver — 国际化</h2>
+<pre><code>// 从请求头 content-language 解析 Locale
+// 例如: content-language: zh_CN  →  Locale("zh", "CN")
+// 缺省回退到系统默认 Locale
+</code></pre>
+<p>前端 <code>request.ts</code> 请求拦截器自动设置 <code>Content-Language = getLanguage()</code>（来自 store/app.ts）。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>在浏览器 DevTools Network 面板观察一次 API 请求的完整 Header，找到 <code>Content-Language</code> 和 <code>Authorization</code></li>
+<li>在 application.yml 中设置 <code>xss.enabled: true</code>，发送一个带 <code>&lt;script&gt;</code> 标签的 POST 请求，查看日志中的清洗后参数</li>
+<li>在 IntelliJ 中打开 <code>ResourcesConfig</code>，观察它如何同时实现 WebMvcConfigurer 和注册 CorsFilter</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/web/webmvc.html">Spring Web MVC 官方文档</a> — 理解 Filter、Interceptor、ControllerAdvice 的区别和执行顺序</div>
+<div class="reminder"> 想知道 GlobalExceptionHandler 的 16 个异常分支是怎么设计的？下一课详细讲。也欢迎直接问我。</div>
+
+</body>
+</html>

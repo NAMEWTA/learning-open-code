@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>08 · ruoyi-common-encrypt：API加解密与数据库字段加密</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>08 · ruoyi-common-encrypt：API接口加解密与数据库字段加密</h1>
+
+<p><strong>核心问题：</strong>敏感数据（身份证号、银行卡、手机号）在传输和存储时如何加密？前端到后端的安全通道如何建立？</p>
+
+<div class="info">
+<strong>模块定位：</strong>25 个 Java 文件。实现两大加密场景：<strong>API 接口加解密</strong>（RSA+AES 混合，保护传输层）和<strong>数据库字段加解密</strong>（MyBatis 拦截器，保护持久层）。@EncryptField 注解支持的算法：BASE64、AES、RSA、SM2、SM4（5 种）；EncryptUtils 工具类额外支持 MD5、SHA256、SM3 哈希算法。
+</div>
+
+<h2>1. 两大加密场景对比</h2>
+
+<table>
+<tr><th>维度</th><th>API接口加解密</th><th>数据库字段加解密</th></tr>
+<tr><td>保护对象</td><td>HTTP 请求体/响应体</td><td>数据库表字段</td></tr>
+<tr><td>注解</td><td>@ApiEncrypt</td><td>@EncryptField</td></tr>
+<tr><td>实现方式</td><td>Servlet Filter + Request/Response Wrapper</td><td>MyBatis Interceptor (ParameterHandler + ResultSetHandler)</td></tr>
+<tr><td>配置前缀</td><td>api-decrypt</td><td>mybatis-encryptor</td></tr>
+<tr><td>开关</td><td>api-decrypt.enabled=true</td><td>mybatis-encryptor.enable=true</td></tr>
+</table>
+
+<h2>2. API 接口加解密流程</h2>
+
+<pre>
+前端请求加密:
+  1. 前端随机生成 AES 密钥（24字节）
+  2. 用 RSA 公钥加密 AES 密钥 → 放入 encrypt-key 请求头
+  3. 用 AES 密钥加密请求体 JSON → 替换 config.data
+  4. 发送请求
+
+后端解密 (CryptoFilter):
+  1. 从 Header 读取 encrypt-key → RSA 私钥解密 → 得到 AES 密钥
+  2. 读取请求体 → AES 解密 → 得到原始 JSON
+  3. 包装为 DecryptRequestBodyWrapper → 传递给 Controller
+
+后端响应加密:
+  1. EncryptResponseBodyWrapper 捕获 Controller 输出
+  2. 随机生成新的 AES 密钥 → 加密响应体
+  3. RSA 公钥加密该 AES 密钥 → 写入 encrypt-key 响应头
+  4. 前端从响应头取 AES 密钥 → 解密响应体
+</pre>
+
+<p><strong>前端对应代码</strong>（plus-ui-vue/src/utils/request.ts 请求拦截器）：</p>
+<pre><code>// 当 VITE_APP_ENCRYPT === 'true' 且请求 isEncrypt === 'true' 时
+const aesKey = generateAesKey();  // 随机 24 字节
+config.headers['encrypt-key'] = rsaEncrypt(aesKey, publicKey);
+config.data = aesEncrypt(JSON.stringify(config.data), aesKey);</code></pre>
+
+<h2>3. 数据库字段加解密</h2>
+
+<pre><code>// 在实体类字段上标注
+public class SysOss {
+    @EncryptField(algorithm = AlgorithmType.AES, password = "mySecretKey")
+    private String accessSecret;  // 存储时自动加密，查询时自动解密
+}</code></pre>
+
+<p><strong>执行流程：</strong></p>
+<ol>
+<li><strong>入加密</strong>（MybatisEncryptInterceptor）：拦截 ParameterHandler.setParameters，在 SQL 执行前加密实体字段。执行后通过 FieldSnapshot.restore() 恢复原始值（防止内存污染）。</li>
+<li><strong>出解密</strong>（MybatisDecryptInterceptor）：拦截 ResultSetHandler.handleResultSets，在结果返回前解密。</li>
+<li><strong>加密头标识</strong>：加密后的字符串前缀 <code>Constants.ENCRYPT_HEADER</code>，防止重复加密。</li>
+<li><strong>加密器缓存</strong>：EncryptorManager 使用 ConcurrentHashMap 缓存加密器实例，相同算法+编码+密钥的组合复用。</li>
+</ol>
+
+<h2>4. 5 种算法速查（@EncryptField 注解支持）</h2>
+
+<table>
+<tr><th>算法</th><th>类型</th><th>密钥要求</th><th>典型场景</th></tr>
+<tr><td>BASE64</td><td>编解码</td><td>无</td><td>非敏感数据混淆（代码默认值）</td></tr>
+<tr><td>AES</td><td>对称加密</td><td>16/24/32位密钥</td><td>数据库字段加密（推荐）</td></tr>
+<tr><td>RSA</td><td>非对称加密</td><td>公私钥对，≥1024位</td><td>API 传输密钥交换</td></tr>
+<tr><td>SM2</td><td>国密非对称</td><td>公私钥对</td><td>政务/信创场景</td></tr>
+<tr><td>SM4</td><td>国密对称</td><td>16位密钥</td><td>政务/信创场景</td></tr>
+</table>
+
+<p><strong>注意：</strong>MD5、SHA256、SM3 哈希算法存在于 <code>EncryptUtils</code> 工具类中（用于数据完整性校验/密码存储），但<strong>不在 <code>AlgorithmType</code> 枚举中</strong>，不能用于 <code>@EncryptField</code> 注解。</p>
+
+<h2>5. 配置继承链</h2>
+
+<pre><code>注解值 > YAML 全局配置
+
+// 注解级别（字段级精准控制）
+@EncryptField(algorithm = AlgorithmType.SM4, password = "fieldSecret")
+
+// YAML 全局配置（兜底默认值）
+mybatis-encryptor:
+  enable: true
+  algorithm: AES             # 代码默认值 BASE64，生产建议覆写为 AES 或 SM4
+  password: globalSecret
+  encode: BASE64</code></pre>
+
+<p><code>EncryptContextFactory.create(Field field)</code> 负责合并注解值和全局配置，注解优先。</p>
+
+<h2>6. 验证要点</h2>
+<ol>
+<li>在 application.yml 中开启 <code>api-decrypt.enabled: true</code>，用前端登录页面观察 Network 面板中的加密请求体</li>
+<li>找一个标注了 @EncryptField 的实体字段，在数据库直接查看存储的是否为密文（ENC_ 前缀）</li>
+<li>关闭 mybatis-encryptor.enable，观察数据库中新插入的敏感字段是否为明文</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://www.bouncycastle.org/java.html">BouncyCastle 加密库文档</a> — SM2/SM4 国密算法的底层实现</div>
+<div class="reminder"> 想了解如何在生产环境中安全地管理加密密钥？直接问我。</div>
+
+</body>
+</html>

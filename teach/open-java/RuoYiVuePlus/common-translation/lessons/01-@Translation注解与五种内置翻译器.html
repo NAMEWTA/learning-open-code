@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 | @Translation 注解与五种内置翻译器：注解声明与 SPI 实现</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>01 | @Translation 注解与五种内置翻译器：注解声明与 SPI 实现</h1>
+
+<div class="mission">
+<strong>课程目标：</strong>理解 <code>@Translation</code> 注解的全部参数语义，掌握 <code>TranslationInterface</code> SPI 的扩展机制，熟记五种内置翻译器的类型常量与对应的远程服务。
+</div>
+
+<h2>1. 全景鸟瞰：从 VO 字段到可读名称的完整链路</h2>
+
+<p>在典型的 RuoYi-Vue-Plus 项目中，数据库存储的是 ID 和编码，但接口返回给前端时需要的是人类可读的显示名称。例如：</p>
+
+<ul>
+  <li>数据库存 <code>create_by = 1</code>，接口返回 <code>createByName = "张三"</code></li>
+  <li>数据库存 <code>oss_id_list = "1,2,3"</code>，接口返回文件的可访问 URL</li>
+  <li>数据库存 <code>status = "0"</code>，接口返回 <code>statusLabel = "正常"</code></li>
+</ul>
+
+<p><code>ruoyi-common-translation</code> 模块的核心职责，就是在 JSON 序列化阶段自动完成这个转换，无需在每个 Controller 方法里手动查询和拼接。</p>
+
+<p><strong>模块规模：</strong>共 11 个 Java 文件，按职责分为以下五层：</p>
+
+<table>
+  <tr><th>层级</th><th>文件</th><th>职责</th></tr>
+  <tr><td>注解层</td><td>@Translation、@TranslationType</td><td>声明翻译意图与 SPI 类型绑定</td></tr>
+  <tr><td>SPI 接口</td><td>TranslationInterface</td><td>定义翻译行为契约</td></tr>
+  <tr><td>处理器层</td><td>TranslationJsonFieldProcessor</td><td>三阶段管道：collect → prepare → process</td></tr>
+  <tr><td>配置层</td><td>TranslationConfig</td><td>自动装配 Spring Bean 映射</td></tr>
+  <tr><td>实现层</td><td>5 个内置 TranslationInterface 实现</td><td>用户、部门、字典、OSS 的具体翻译逻辑</td></tr>
+</table>
+
+<p><strong>核心流程图：</strong></p>
+
+<pre>
+VO 字段上 @Translation(type="user_id_to_name")
+        ↓
+TranslationJsonFieldProcessor.collect()  扫描所有带 @Translation 的字段
+        ↓
+TranslationJsonFieldProcessor.prepare()  按 (type, other) 分组，调用 translationBatch()
+        ↓    ↓    ↓
+   UserNameTranslation  →  SysUserService.selectListByIds()
+   DeptNameTranslation  →  SysDeptService.selectListByIds()
+   DictTypeTranslation  →  SysDictDataService.selectListByType()
+        ↓    ↓    ↓
+TranslationJsonFieldProcessor.process()  将翻译结果写回字段值
+</pre>
+
+<div class="insight">
+<strong>关键洞察：</strong>翻译逻辑不是侵入式地嵌在每个 Controller 里，而是作为 JSON 序列化管道的一个后处理器，在序列化时自动执行。这意味着任何返回 VO 的 Controller 方法，只要 VO 上有 <code>@Translation</code> 注解，就自动获得翻译能力。
+</div>
+
+<h2>2. @Translation 注解详解</h2>
+
+<p>注解定义在 <code>org.dromara.common.translation.annotation.Translation</code>，有三个参数：</p>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td><code>type</code></td><td>String</td><td>是</td><td>翻译类型字符串，必须与某个 <code>@TranslationType</code> 的 <code>type</code> 值精确匹配</td></tr>
+  <tr><td><code>mapper</code></td><td>String</td><td>否</td><td>源字段名。设置后，处理器读取 <strong>owner 对象</strong> 上 mapper 指向的字段值作为翻译输入，翻译结果写入当前字段</td></tr>
+  <tr><td><code>other</code></td><td>String</td><td>否</td><td>额外参数，传给 <code>TranslationInterface.translation(key, other)</code>。典型用途：字典类型编码</td></tr>
+</table>
+
+<h3>2.1 type 参数（翻译类型标识）</h3>
+
+<p><code>type</code> 是整个翻译机制的"钥匙"。它通过 <code>TranslationConfig</code> 在运行时映射到具体的 <code>TranslationInterface</code> 实现：</p>
+
+<pre>
+@Translation(type="user_id_to_name")
+        ↓ 运行时查找
+TranslationConfig.translatorMap.get("user_id_to_name")
+        ↓ 返回
+UserNameTranslation 实例
+</pre>
+
+<p>这种设计使得 <strong>注解声明与具体实现对业务代码完全透明</strong>——VO 上只写字符串，不需要 import 任何实现类。</p>
+
+<h3>2.2 mapper 参数（源字段映射）</h3>
+
+<p>这是最精妙的设计之一。考虑一个典型的 VO 场景：</p>
+
+<pre>
+public class NoticeVO {
+    private Long createById;    // DB 存储的创建人 ID = 1001
+    private String createByName; // 接口需要返回 "张三"
+
+    // 字段 createByName 本身的值可能是 null（数据库不存名称）
+    // 真正需要翻译的值在 owner 对象的 createById 字段上
+    @Translation(type = "user_id_to_name", mapper = "createById")
+    private String createByName;
+}
+</pre>
+
+<p>当 <code>mapper = "createById"</code> 时，处理器的行为是：</p>
+
+<ol>
+  <li>通过反射获取 <strong>当前字段所属的 owner 对象</strong>（即 NoticeVO 实例）</li>
+  <li>找到 owner 上名为 <code>createById</code> 的字段，读取其值 <code>1001L</code></li>
+  <li>用 <code>1001L</code> 作为 key 调用 <code>TranslationInterface.translation(1001L, null)</code></li>
+  <li>将返回的 "张三" 写入当前字段 <code>createByName</code></li>
+</ol>
+
+<p><strong>等价伪代码：</strong></p>
+
+<pre>
+// 有 mapper 时：
+Object sourceValue = owner.getCreateById();   // 从同对象另一个字段取
+currentField.set(翻译(sourceValue));
+
+// 无 mapper 时（默认行为）：
+Object sourceValue = currentField.get();      // 从当前字段自身取值
+currentField.set(翻译(sourceValue));
+</pre>
+
+<h3>2.3 other 参数（额外参数传递）</h3>
+
+<p>当一个翻译器需要区分多种翻译规则时，<code>other</code> 参数提供了额外信息。最典型的应用场景是字典翻译：</p>
+
+<pre>
+// 翻译 "性别" 字典：value "0" → label "男"
+@Translation(type = "dict_type_to_label", other = "sys_user_sex")
+private String sex;
+
+// 翻译 "状态" 字典：value "0" → label "正常"
+@Translation(type = "dict_type_to_label", other = "sys_normal_disable")
+private String status;
+</pre>
+
+<p>两个字段使用同一个翻译类型 <code>dict_type_to_label</code>，但通过 <code>other</code> 参数区分要查询哪个字典类型。处理器在分组时会以 <code>(type, other)</code> 作为复合 key：</p>
+
+<pre>
+groupKey = type + ":" + (other != null ? other : "")
+// "dict_type_to_label:sys_user_sex" vs "dict_type_to_label:sys_normal_disable"
+</pre>
+
+<div class="insight">
+<strong>设计要点：</strong><code>other</code> 参数的存在使得同一个 TranslationInterface 实现可以处理同一翻译类型的多个变体场景，避免了"每种字典各写一个翻译器"的冗余。
+</div>
+
+<h3>2.4 完整 VO 示例</h3>
+
+<p>以下是一个同时使用五种内置翻译的完整 VO 示例：</p>
+
+<pre>
+public class ComprehensiveVO {
+
+    // 1. 用户 ID → 用户姓名（字段自身值翻译）
+    @Translation(type = "user_id_to_name")
+    private Long userId;
+
+    // 2. 用户 ID → 用户昵称（通过 mapper 从其他字段取值）
+    private Long createById;
+    @Translation(type = "user_id_to_nickname", mapper = "createById")
+    private String createByName;
+
+    // 3. 部门 ID → 部门名称
+    @Translation(type = "dept_id_to_name")
+    private Long deptId;
+
+    // 4. 字典值 → 字典标签（使用 other 指定字典类型）
+    @Translation(type = "dict_type_to_label", other = "sys_user_sex")
+    private String sex;
+
+    // 5. OSS ID → 可访问 URL
+    @Translation(type = "oss_id_to_url")
+    private String ossId;
+
+    // getters and setters...
+}
+</pre>
+
+<p>当这个 VO 被序列化为 JSON 时，<code>userId</code> 字段的值会从 <code>1001</code> 被替换为 <code>"张三"</code>，<code>deptId</code> 从 <code>200</code> 变为 <code>"技术部"</code>，以此类推。</p>
+
+<h2>3. @TranslationType 与 TranslationInterface SPI</h2>
+
+<h3>3.1 @TranslationType：类型级注解绑定</h3>
+
+<p><code>@TranslationType</code> 是加在 <code>TranslationInterface</code> 实现类上的注解，只有一个参数 <code>type: String</code>：</p>
+
+<pre>
+@Component
+@TranslationType(type = "user_id_to_name")
+public class UserNameTranslation implements TranslationInterface&lt;String&gt; {
+    // ...
+}
+</pre>
+
+<p><code>TranslationConfig</code> 通过 Spring 的 <code>List&lt;TranslationInterface&lt;?&gt;&gt;</code> 注入收集所有实现类 Bean，然后读取每个实现类的 <code>@TranslationType.type()</code> 构建查找表：</p>
+
+<pre>
+Map&lt;String, TranslationInterface&lt;?&gt;&gt; translatorMap = new HashMap&lt;&gt;();
+for (TranslationInterface&lt;?&gt; impl : allImplementations) {
+    TranslationType annotation = impl.getClass().getAnnotation(TranslationType.class);
+    translatorMap.put(annotation.type(), impl);
+}
+</pre>
+
+<p>这本质上是 <strong>Spring DI + 策略模式</strong>，而不是 Java ServiceLoader。每一个带有 <code>@TranslationType</code> 的 Spring Bean 都会被自动发现和注册。</p>
+
+<h3>3.2 TranslationInterface 核心契约</h3>
+
+<pre>
+public interface TranslationInterface&lt;T&gt; {
+
+    // 单个翻译（所有实现必须覆盖）
+    T translation(Object key, String other);
+
+    // 批量翻译（建议覆盖，默认循环调用 translation 并打印警告）
+    default Map&lt;Object, T&gt; translationBatch(Set&lt;Object&gt; keys, String other) {
+        log.warn("translationBatch is not overridden, falling back to N+1 mode");
+        Map&lt;Object, T&gt; result = new HashMap&lt;&gt;();
+        for (Object key : keys) {
+            result.put(key, translation(key, other));
+        }
+        return result;
+    }
+
+    // === 工具方法（default，无需覆盖）===
+
+    // 将 Set&lt;Object&gt; 转为 Set&lt;Long&gt;，支持逗号分隔的复合值拆分
+    default Set&lt;Long&gt; collectLongIds(Set&lt;Object&gt; keys) { ... }
+
+    // 将逗号分隔字符串解析为 List&lt;Long&gt;
+    default List&lt;Long&gt; parseLongIds(String ids) { ... }
+
+    // 批量映射 + 逗号拼接输出
+    default String joinMappedValues(String ids, Function&lt;String, String&gt; mapper) { ... }
+}
+</pre>
+
+<h3>3.3 泛型参数 T 的含义</h3>
+
+<p>泛型 <code>T</code> 定义翻译结果的类型。所有内置实现都使用 <code>String</code>，但接口设计本身是开放的——如果你需要返回一个复杂对象（如 <code>OrderSummary</code>），只需要让 <code>TranslationInterface&lt;OrderSummary&gt;</code> 的实现返回该类型即可。</p>
+
+<h3>3.4 批量翻译的性能退化陷阱</h3>
+
+<div class="mission">
+<strong>重要警告：</strong>如果自定义实现没有覆盖 <code>translationBatch()</code>，默认实现会循环调用 <code>translation()</code>，产生 N+1 问题。<br>
+例如：100 个用户 ID = 100 次 <code>SelectById</code> 查询 = 100 次数据库往返。<br>
+所有五个内置实现都主动覆盖了 <code>translationBatch()</code> 以避免此问题。
+</div>
+
+<h3>3.5 工具方法详解</h3>
+
+<p><strong>collectLongIds</strong>：将翻译输入值统一转为 Long 集合。关键能力是处理逗号分隔的多值字符串：</p>
+
+<pre>
+// 输入 Set{"1", "2,3,4", 5L, "6,7"}
+// 输出 Set{1L, 2L, 3L, 4L, 5L, 6L, 7L}
+</pre>
+
+<p><strong>parseLongIds</strong>：将单个逗号分隔字符串拆分为 Long 列表。与 collectLongIds 的区别是它只处理单个字符串，不处理集合。</p>
+
+<p><strong>joinMappedValues</strong>：将逗号分隔的 ID 字符串逐一映射后重新用逗号拼接。典型场景是 OSS ID 列表翻译：</p>
+
+<pre>
+// 输入 ids="1,2,3"，mapper = (id) -> "https://oss.example.com/file/" + id
+// 输出 "https://oss.example.com/file/1,https://oss.example.com/file/2,..."
+</pre>
+
+<h2>4. 五种内置翻译器详解</h2>
+
+<table>
+  <tr><th>常量</th><th>实现类</th><th>远程服务</th><th>输入</th><th>输出</th></tr>
+  <tr>
+    <td><code>USER_ID_TO_NAME</code></td>
+    <td>UserNameTranslation</td>
+    <td>RemoteUserService</td>
+    <td>userId (Long)</td>
+    <td>userName (String)</td>
+  </tr>
+  <tr>
+    <td><code>USER_ID_TO_NICKNAME</code></td>
+    <td>NicknameTranslation</td>
+    <td>RemoteUserService</td>
+    <td>userId (Long)</td>
+    <td>nickName (String)</td>
+  </tr>
+  <tr>
+    <td><code>DEPT_ID_TO_NAME</code></td>
+    <td>DeptNameTranslation</td>
+    <td>RemoteDeptService</td>
+    <td>deptId (Long)</td>
+    <td>deptName (String)</td>
+  </tr>
+  <tr>
+    <td><code>DICT_TYPE_TO_LABEL</code></td>
+    <td>DictTypeTranslation</td>
+    <td>RemoteDictService</td>
+    <td>dictValue (String)</td>
+    <td>dictLabel (String)</td>
+  </tr>
+  <tr>
+    <td><code>OSS_ID_TO_URL</code></td>
+    <td>OssUrlTranslation</td>
+    <td>RemoteOssService</td>
+    <td>ossId (Long)</td>
+    <td>fileUrl (String)</td>
+  </tr>
+</table>
+
+<h3>4.1 UserNameTranslation — 用户 ID 转用户姓名</h3>
+
+<pre>
+@Component
+@TranslationType(type = TransConstant.USER_ID_TO_NAME)
+public class UserNameTranslation implements TranslationInterface&lt;String&gt; {
+
+    @Autowired
+    private RemoteUserService remoteUserService;
+
+    @Override
+    public String translation(Object key, String other) {
+        // 单个查询
+    }
+
+    @Override
+    public Map&lt;Object, String&gt; translationBatch(Set&lt;Object&gt; keys, String other) {
+        Set&lt;Long&gt; userIds = collectLongIds(keys);
+        List&lt;SysUserVo&gt; users = remoteUserService.selectListByIds(userIds);
+        // 构建 Map&lt;userId, userName&gt; 返回
+    }
+}
+</pre>
+
+<p>特点：调用远程 Feign 接口 <code>RemoteUserService</code>，一次性传入所有用户 ID 批量查询，避免 N+1。</p>
+
+<h3>4.2 NicknameTranslation — 用户 ID 转用户昵称</h3>
+
+<p>与 UserNameTranslation 调用同一个远程服务 <code>RemoteUserService</code>，但映射到 <code>nickName</code> 字段。这两个翻译器同时存在是因为业务场景中有时需要姓名、有时需要昵称，分别使用不同的翻译类型。</p>
+
+<pre>
+// VO 上的典型用法
+private Long userId;
+@Translation(type = "user_id_to_name")
+private String userNameDisplay;
+
+private Long approverId;
+@Translation(type = "user_id_to_nickname", mapper = "approverId")
+private String approverNickname;
+</pre>
+
+<h3>4.3 DeptNameTranslation — 部门 ID 转部门名称</h3>
+
+<p>调用 <code>RemoteDeptService</code> 批量查询部门信息，映射到部门名称。处理逻辑与用户翻译器完全一致，只是远程服务和映射目标不同。</p>
+
+<h3>4.4 DictTypeTranslation — 字典类型转标签（含 other 参数）</h3>
+
+<p>这是唯一一个必须依赖 <code>other</code> 参数的翻译器。因为系统中存在多种字典（性别、状态、类型等），翻译器需要知道查询哪个字典类型：</p>
+
+<pre>
+@Component
+@TranslationType(type = TransConstant.DICT_TYPE_TO_LABEL)
+public class DictTypeTranslation implements TranslationInterface&lt;String&gt; {
+
+    @Autowired
+    private RemoteDictDataService dictDataService;
+
+    @Override
+    public Map&lt;Object, String&gt; translationBatch(Set&lt;Object&gt; keys, String other) {
+        // other 参数 = 字典类型编码，如 "sys_user_sex"
+        List&lt;SysDictDataVo&gt; dictList = dictDataService.selectDictDataByType(other);
+        // 构建 Map&lt;dictValue, dictLabel&gt; 返回
+    }
+}
+</pre>
+
+<p><strong>关键点：</strong>在 <code>TranslationJsonFieldProcessor.collect()</code> 阶段，所有 <code>other="sys_user_sex"</code> 的字段会被分到同一组，<code>other="sys_normal_disable"</code> 的字段会被分到另一组。每组独立调用一次 <code>translationBatch()</code>，保证字典数据只查询一次。</p>
+
+<h3>4.5 OssUrlTranslation — OSS ID 转可访问 URL</h3>
+
+<p>将文件存储 ID 翻译为可访问的完整 URL。输入可能是单个 ID 或多个逗号分隔的 ID：</p>
+
+<pre>
+// 单个文件
+@Translation(type = "oss_id_to_url")
+private Long avatarOssId;
+
+// 多个文件（逗号分隔）
+@Translation(type = "oss_id_to_url")
+private String attachmentIds;  // "1,2,3" → 翻译结果也是逗号分隔的 URL
+</pre>
+
+<p>OssUrlTranslation 利用 <code>joinMappedValues</code> 工具方法处理逗号分隔的多值场景：</p>
+
+<pre>
+@Override
+public String translation(Object key, String other) {
+    String ids = (String) key;
+    return joinMappedValues(ids, id -> {
+        // 按 ID 查询 OSS 记录，拼接完整 URL
+    });
+}
+</pre>
+
+<h2>5. TransConstant 常量的设计价值</h2>
+
+<p><code>TransConstant</code> 是一个接口，定义了 5 个字符串常量：</p>
+
+<pre>
+public interface TransConstant {
+    String USER_ID_TO_NAME = "user_id_to_name";
+    String USER_ID_TO_NICKNAME = "user_id_to_nickname";
+    String DEPT_ID_TO_NAME = "dept_id_to_name";
+    String DICT_TYPE_TO_LABEL = "dict_type_to_label";
+    String OSS_ID_TO_URL = "oss_id_to_url";
+}
+</pre>
+
+<p><strong>为什么不用字符串字面量？</strong></p>
+
+<ol>
+  <li><strong>编译期校验：</strong>使用 <code>TransConstant.USER_ID_TO_NAME</code> 代替 <code>"user_id_to_name"</code>，IDE 可以自动补全和重构</li>
+  <li><strong>避免拼写错误：</strong><code>"user_id_to_nmae"</code>（typo）在运行时才会被发现，而常量名写错会直接编译失败</li>
+  <li><strong>统一双端绑定：</strong>同一个常量同时用在 <code>@Translation(type = TransConstant.XXX)</code> 和 <code>@TranslationType(type = TransConstant.XXX)</code> 上，确保注解端与实现端永远一致</li>
+  <li><strong>可发现性：</strong>打开 TransConstant.java 即可一览所有可用翻译类型，不需要在代码库里搜索字符串</li>
+</ol>
+
+<div class="insight">
+<strong>最佳实践：</strong>自定义翻译器时，新定义的翻译类型常量也应该追加到 TransConstant 中，而非在 VO 或实现类里私自定义字符串。
+</div>
+
+<h2>6. 综合练习与自测</h2>
+
+<div class="quiz">
+<details>
+<summary><strong>自测题 1：参数匹配（点击展开）</strong></summary>
+<p><strong>Q1：</strong>VO 上写了 <code>@Translation(type = "user_id_to_name", mapper = "ownerId")</code>，注解加在 <code>userName</code> 字段上。处理器在执行翻译时的输入值来自哪里？</p>
+<p><strong>Q2：</strong>如果不设置 <code>mapper</code> 参数，翻译的输入值取自哪里？</p>
+<p><strong>Q3：</strong><code>other</code> 参数在 <code>DictTypeTranslation</code> 中的实际作用是什么？</p>
+<hr>
+<p><strong>A1：</strong>来自 <strong>owner 对象</strong>的 <code>ownerId</code> 字段值。处理器通过反射读取当前字段所属对象的 ownerId 字段，作为翻译 key。</p>
+<p><strong>A2：</strong>取自当前字段自身的值。即注解加在哪个字段上，就用那个字段的值作为翻译 key。</p>
+<p><strong>A3：</strong><code>other</code> 传入的是字典类型编码（如 "sys_user_sex"），翻译器据此查询特定字典的数据字典表，构建 value→label 的映射。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary><strong>自测题 2：架构理解（点击展开）</strong></summary>
+<p><strong>Q1：</strong><code>TranslationConfig</code> 是如何发现并注册所有翻译器实现的？用的是 Java ServiceLoader 吗？</p>
+<p><strong>Q2：</strong>五个内置翻译器中，哪个翻译类型使用了 <code>other</code> 参数？为什么其他四个不需要？</p>
+<p><strong>Q3：</strong>如果新增了一个翻译器并为其定义了新的常量，需要修改 <code>TranslationConfig</code> 吗？</p>
+<hr>
+<p><strong>A1：</strong>不是 Java ServiceLoader。而是通过 Spring DI：<code>TranslationConfig</code> 的 <code>translationJsonFieldProcessor(List&lt;TranslationInterface&lt;?&gt;&gt; list)</code> 方法接收 Spring 注入的所有 Bean，然后读取每个实现类的 <code>@TranslationType</code> 注解构建 type→impl 映射。</p>
+<p><strong>A2：</strong><code>DICT_TYPE_TO_LABEL</code>（DictTypeTranslation）。因为字典翻译需要区分不同字典类型（性别、状态等），同一个翻译器要处理多种字典。其他四个翻译器的翻译规则是唯一的，不需要额外参数区分。</p>
+<p><strong>A3：</strong>不需要。只要实现类上有 <code>@TranslationType</code> 注解并注册为 Spring Bean，TranslationConfig 会自动发现它。这是自动装配的优势。</p>
+</details>
+</div>
+
+<div class="cite">
+<strong>参考源文件：</strong>Translation.java、TranslationType.java、TranslationInterface.java、TransConstant.java、UserNameTranslation.java、NicknameTranslation.java、DeptNameTranslation.java、DictTypeTranslation.java、OssUrlTranslation.java
+</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。课程中任何概念或代码片段不理解的地方，随时可以要求详细解释或辅助阅读源码。</div>
+
+<div class="nav">
+<span>上一课：无（本系列第一课）</span>
+<span>下一课：<a href="02-三阶段管道与自定义翻译器.html">02 | 三阶段管道与自定义翻译器</a></span>
+</div>
+
+</body>
+</html>

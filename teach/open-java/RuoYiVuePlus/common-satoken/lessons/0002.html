@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 配置与 DAO — SaTokenConfig 与 PlusSaTokenDao 深度解析</title>
+<style>
+  body { max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.75; color: #2c2c2c; background: #fcfcfc; }
+  h1 { border-bottom: 3px solid #1a56db; padding-bottom: .5rem; margin-top: 0; font-size: 1.75rem; }
+  h2 { margin-top: 2.5rem; color: #1e3a5f; font-size: 1.3rem; }
+  h3 { margin-top: 1.8rem; font-size: 1.05rem; color: #333; }
+  code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+  pre code { display: block; background: #1e2127; color: #abb2bf; padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; line-height: 1.6; font-size: .88em; }
+  .mission { background: linear-gradient(135deg, #e8f0fe 0%, #d4e4fc 100%); border-left: 5px solid #1a56db; padding: 1rem 1.3rem; border-radius: 6px; margin: 1.2rem 0; }
+  .flow { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px dashed #94a3b8; padding: 1rem 1.3rem; border-radius: 5px; white-space: pre; line-height: 1.8; font-size: .88em; overflow-x: auto; }
+  .side { background: #fff9e6; border-left: 4px solid #f0b400; padding: .8rem 1.2rem; border-radius: 4px; margin: 1rem 0; font-size: .95em; }
+  .step { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.3rem; margin: .8rem 0; display: flex; gap: 1rem; align-items: flex-start; }
+  .step .num { background: #1a56db; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85em; flex-shrink: 0; }
+  .step .where { color: #64748b; font-size: .8em; margin-top: .2rem; }
+  .quiz { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.2rem; margin: .8rem 0; }
+  .quiz .opt { display: block; margin: .3rem 0; padding: .3rem .6rem; border-radius: 4px; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: #1a56db; font-weight: 600; }
+  .cite { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: .8rem 1.1rem; margin: 1.5rem 0; font-size: .9em; }
+  .reminder { background: #f1f5f9; border-radius: 6px; padding: .8rem 1.2rem; margin: 1rem 0; font-size: .95em; color: #475569; }
+  .nav { color: #94a3b8; font-size: .85em; margin-top: 2rem; text-align: center; }
+  .tag { display: inline-block; background: #1a56db; color: #fff; padding: .15em .7em; border-radius: 12px; font-size: .8em; margin-left: .5rem; vertical-align: middle; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+  th, td { border: 1px solid #e2e8f0; padding: .5rem .7rem; text-align: left; font-size: .93em; }
+  th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 配置与 DAO — SaTokenConfig 与 PlusSaTokenDao 深度解析 <span class="tag" style="background:#10b981">存储与配置</span></h1>
+
+<div class="mission">
+<strong>本节目标</strong>：理解 SaTokenConfig 四个 Bean 的注册逻辑，掌握 PlusSaTokenDao 的 Caffeine + Redis 双层缓存读写策略，并与 PlusSmsDao 对比两种 DAO 设计思路。
+</div>
+
+<p>第 1 课我们建立了模块全景视图。这一节聚焦两个核心文件：<code>SaTokenConfig</code>（装配入口）和 <code>PlusSaTokenDao</code>（存储引擎）。前者决定了"框架跑起来的姿势"，后者决定了"每毫秒认证请求的数据路径"。</p>
+
+<h2>一、SaTokenConfig：四个 Bean 的装配逻辑</h2>
+
+<p><code>SaTokenConfig</code> 是一个 Spring Boot <code>@AutoConfiguration</code> 类，通过 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件声明，由 Spring Boot 自动加载。</p>
+
+<p>类上有两个关键注解：</p>
+
+<pre><code>@AutoConfiguration
+@PropertySource(factory = YmlPropertySourceFactory.class, value = "classpath:common-satoken.yml")</code></pre>
+
+<p><code>@PropertySource</code> 配合自定义 <code>YmlPropertySourceFactory</code> 将 <code>common-satoken.yml</code> 加载到 Spring 环境变量，使 Sa-Token 框架能读取到自定义配置。</p>
+
+<p>类内部注册了 4 个 <code>@Bean</code>，每一个都在替代 Sa-Token 的默认行为：</p>
+
+<table>
+<tr><th>Bean 方法</th><th>返回类型</th><th>实例</th><th>替代默认逻辑的原因</th></tr>
+<tr>
+  <td><code>getStpLogicJwt()</code></td>
+  <td>StpLogic</td>
+  <td><code>new StpLogicJwtForSimple()</code></td>
+  <td>默认 StpLogic 生成随机字符串 Token；JWT 模式下改为签发 JWT Token（简单模式，框架完全接管生成逻辑）</td>
+</tr>
+<tr>
+  <td><code>stpInterface()</code></td>
+  <td>StpInterface</td>
+  <td><code>new SaPermissionImpl()</code></td>
+  <td>框架默认无权限实现；注入自定义实现后，每次鉴权时回调获取当前用户的权限码和角色列表</td>
+</tr>
+<tr>
+  <td><code>saTokenDao()</code></td>
+  <td>SaTokenDao</td>
+  <td><code>new PlusSaTokenDao()</code></td>
+  <td>默认用内存 Map 存储 Token，单机可用但分布式不可共享；替换为 Caffeine + Redis 双层存储</td>
+</tr>
+<tr>
+  <td><code>saTokenExceptionHandler()</code></td>
+  <td>SaTokenExceptionHandler</td>
+  <td>handler 实例</td>
+  <td>框架默认异常处理返回英文错误信息；替换为中文提示，前端可直接展示</td>
+</tr>
+</table>
+
+<p class="side"><strong>设计模式</strong>：Sa-Token 框架通过"接口 + 默认实现 + Bean 覆盖"的方式实现了<strong>策略模式</strong>。你不需要修改框架源码，只需向容器注册自己的 Bean，Spring 的依赖注入自动将你的实现替换默认实现。这正是 Spring Boot AutoConfiguration 的经典用法。</p>
+
+<h2>二、common-satoken.yml 配置详解</h2>
+
+<p>这是模块内置的默认配置（可被 Nacos 同名配置覆盖）：</p>
+
+<pre><code># 内置配置 不允许修改 如需修改请在 nacos 上写相同配置覆盖
+# Sa-Token配置
+sa-token:
+  # 允许动态设置 token 有效期
+  dynamic-active-timeout: true
+  # 允许从 请求参数 读取 token
+  is-read-body: true
+  # 允许从 header 读取 token
+  is-read-header: true
+  # 关闭 cookie 鉴权 从根源杜绝 csrf 漏洞风险
+  is-read-cookie: false
+  # token前缀
+  token-prefix: "Bearer"</code></pre>
+
+<p>逐条说明每一项的含义：</p>
+
+<table>
+<tr><th>配置项</th><th>值</th><th>含义</th></tr>
+<tr>
+  <td><code>dynamic-active-timeout</code></td>
+  <td>true</td>
+  <td>动态设置 Token 有效期。开启后，每次操作 Token 时都会自动续期，实现"活跃不过期"的效果。比如用户 30 分钟内一直在操作，Token 就不会过期</td>
+</tr>
+<tr>
+  <td><code>is-read-body</code></td>
+  <td>true</td>
+  <td>允许从请求体中读取 Token。适用于 POST/PUT 请求中 Token 放在 JSON 或表单参数里的场景</td>
+</tr>
+<tr>
+  <td><code>is-read-header</code></td>
+  <td>true</td>
+  <td>允许从 HTTP Header 读取 Token。标准做法是 <code>Authorization: Bearer eyJhbG...</code></td>
+</tr>
+<tr>
+  <td><code>is-read-cookie</code></td>
+  <td>false</td>
+  <td><strong>关闭 Cookie 鉴权</strong>。Cookie 会被浏览器自动携带，攻击者可通过 CSRF 伪造请求。关闭后在根源上杜绝 CSRF 漏洞风险</td>
+</tr>
+<tr>
+  <td><code>token-prefix</code></td>
+  <td>"Bearer"</td>
+  <td>Token 前缀。框架在解析时会自动去掉此前缀，前端请求时需加此前缀（如 <code>Bearer eyJhbG...</code>）</td>
+</tr>
+</table>
+
+<div class="side">
+<strong>安全提醒</strong>：<code>is-read-cookie: false</code> 是安全关键配置。Cookie 鉴权模式下，浏览器会自动在每次请求中带上 Cookie，攻击者只需诱使用户点击一个链接即可发起 CSRF 攻击。关闭 Cookie 后，前端必须主动在 Header 中设置 Token，攻击者无法跨域伪造这个 Header。
+</div>
+
+<h2>三、PlusSaTokenDao：双层缓存的读写策略</h2>
+
+<p><code>PlusSaTokenDao</code> 实现了 <code>SaTokenDaoBySessionFollowObject</code> 接口，这是 Sa-Token 框架的 DAO 抽象层。它的核心工程决策是 <strong>Caffeine（本地缓存）+ Redis（网络存储）双层架构</strong>：</p>
+
+<h3>3.1 Caffeine 缓存配置</h3>
+
+<pre><code>new CaffeineCache(
+    cacheName,
+    Caffeine.newBuilder()
+        .expireAfterWrite(5, java.util.concurrent.TimeUnit.SECONDS)  // 写入后5秒过期
+        .initialCapacity(100)                                         // 初始容量100
+        .maximumSize(1000)                                            // 最大容量1000
+        .build(),
+    false,  // 不允许存null值
+    true    // 微秒级时间戳（用于判断缓存新鲜度）
+);</code></pre>
+
+<p>三个参数的含义：</p>
+<ul>
+  <li><strong>5 秒过期</strong>：本地缓存的生命周期极短。这意味着最终一致性窗口不超过 5 秒</li>
+  <li><strong>初始 100 / 最大 1000</strong>：控制内存占用，1000 条缓存条目在 JVM 中几乎无感</li>
+  <li><strong>不允许 null</strong>：避免缓存穿透 — null 值不会被放入 Caffeine，每次都回源 Redis</li>
+</ul>
+
+<h3>3.2 读取流程（get / getObject）</h3>
+
+<p>所有读操作最终调用私有方法 <code>getCacheValue(key)</code>，流程如下：</p>
+
+<div class="flow">读请求 (key = "Authorization:login:token:xxx")
+  │
+  ├─ 1. Caffeine.get(key) ── 命中？──&gt; 直接返回
+  │
+  └─ 2. 未命中 → RedisUtils.getCacheObject(key)
+        │
+        ├─ 3. Redis 有值？──&gt; put into Caffeine → 返回数据
+        │
+        └─ 4. Redis 也无值？──&gt; return null</div>
+
+<h3>3.3 写入流程（set / setObject）</h3>
+
+<p>所有写操作最终调用 <code>writeValue(key, value, timeout)</code>：</p>
+
+<div class="flow">写请求 (key + value + TTL)
+  │
+  ├─ 1. RedisUtils.setCacheObject(key, value, timeout)
+  │     └─ timeout &lt; 0？永久有效  |  timeout &gt; 0？定时过期
+  │
+  └─ 2. Caffeine.invalidate(key)  ← 关键：让本地缓存失效
+        └─ 下次读时从 Redis 重新加载，保证数据一致性</div>
+
+<p class="side"><strong>为什么不直接更新 Caffeine？</strong> 如果写操作同时更新 Caffeine 和 Redis，分布式环境下不同节点的 Caffeine 内容不同，无法保证一致性。让 Caffeine 失效 + 读时回源是分布式缓存的经典模式 — "Cache-Aside" 策略。</p>
+
+<h3>3.4 搜索操作（searchData）</h3>
+
+<p><code>searchData(prefix, keyword, start, size, sortType)</code> 用于模糊搜索 Token（例如管理员查看所有在线用户）。它也使用了 Caffeine 做结果缓存，减轻 <code>RedisUtils.keys(pattern)</code> 的性能压力。</p>
+
+<h3>3.5 TTL 精度补偿（toTimeoutSeconds）</h3>
+
+<p>从 Redis 获取的过期时间通常是毫秒级，转换为秒时存在精度损失。方法中使用了 <strong>+1 补偿</strong>：</p>
+
+<pre><code>// Redis 返回的毫秒 TTL 转为秒，+1 补偿精度损失
+private long toTimeoutSeconds(Long ttl) {
+    if (ttl == null || ttl &lt; 0) return ttl;
+    return (ttl / 1000) + 1;  // 向上取整补偿
+}</code></pre>
+
+<p>这样确保 Token 有效期不会因为取整而被低估，避免用户 Token 提前失效。</p>
+
+<h2>四、与 PlusSmsDao 的对比</h2>
+
+<p>两个模块都有 DAO 层，但设计思路截然不同，体现了"不同业务需求 → 不同存储策略"的工程决策：</p>
+
+<table>
+<tr><th>对比维度</th><th>PlusSmsDao (sms)</th><th>PlusSaTokenDao (satoken)</th></tr>
+<tr><td>存储后端</td><td>内存 ConcurrentHashMap</td><td>Redis（主）+ Caffeine（读缓存）</td></tr>
+<tr><td>数据性质</td><td>短信发送间隔的临时限流数据</td><td>Token / Session 等持久认证数据</td></tr>
+<tr><td>读策略</td><td>直接 Map.get()</td><td>Caffeine 查 → Redis 查 → null</td></tr>
+<tr><td>写策略</td><td>直接 Map.put()</td><td>Redis 写入 + Caffeine.invalidate()</td></tr>
+<tr><td>过期机制</td><td>调用方自行控制，无 TTL</td><td>Redis TTL 精确控制</td></tr>
+<tr><td>一致性</td><td>单机强一致（仅本 JVM 可见）</td><td>最终一致（最多 5 秒窗口）</td></tr>
+<tr><td>分布式支持</td><td>不支持（每节点独立计数）</td><td>天然支持（Redis 共享存储）</td></tr>
+<tr><td>数据安全性</td><td>丢失无所谓（进程重启即清空）</td><td>关键数据（Redis 持久化 + AOF）</td></tr>
+</table>
+
+<div class="side">
+<strong>核心启示</strong>：<code>PlusSmsDao</code> 存的是"发短信的频控记录"，丢了最多让用户等 60 秒重新发一次，代价极低；<code>PlusSaTokenDao</code> 存的是"你是谁、你有多少权限"，丢了意味着用户被踢下线或权限失效，代价极高。两种 DAO 的设计差异正是"业务数据价值"决定"存储策略投入"的体现。
+</div>
+
+<h2>想一想</h2>
+
+<details>
+<summary>为什么写操作不更新 Caffeine 而是让它失效？</summary>
+<p><strong>分布式一致性问题</strong>：在多实例部署下，一个写请求只会到达一个节点。如果写操作直接更新该节点的 Caffeine，其他节点的 Caffeine 仍然保留旧数据，造成节点间数据不一致。<br>
+<strong>失效 + 回源（Cache-Aside）模式</strong>：让本地缓存失效，下次任何节点读取时都从 Redis（共享数据源）重新加载。这样保证了"所有节点的数据最终都从同一个源头（Redis）获得"，实现了最终一致性。<br>
+<strong>成本考量</strong>：如果要保证强一致，需要广播失效消息到所有节点（如 Redis Pub/Sub 或 MQ），增加系统复杂度。5 秒的最终一致性窗口对于 Token 有效期管理来说足够实用。</p>
+</details>
+
+<details>
+<summary>Caffeine 配置 5 秒过期，如果用户在这 5 秒内被管理员踢下线会怎样？</summary>
+<p><strong>最坏情况：5 秒窗口期</strong>：管理员调用 <code>StpUtil.kickout(userId)</code> 后，Redis 中的 Token 立即被删除。但其他节点（或同一节点）的 Caffeine 缓存可能仍有该 Token 的副本。<br>
+<strong>实际影响</strong>：在 Caffeine 过期前的 5 秒内，持有该 Token 的用户仍可能通过鉴权。5 秒后缓存过期，下次鉴权请求回源 Redis 发现 Token 已不存在，返回 null，用户被实际拦截。<br>
+<strong>工程取舍</strong>：这是一个典型的 CP vs AP 取舍 — 选择 AP（可用性 + 性能），牺牲了 CP 中的强一致性。对于绝大多数业务场景，踢人后 5 秒内完全踢下线是可接受的。如果业务要求实时踢人，需要引入 Redis Pub/Sub 广播缓存失效消息。</p>
+</details>
+
+<h2>提取练习</h2>
+
+<div class="quiz">
+<strong>Q1. SaTokenConfig 注册了哪个 Bean 来替代 Sa-Token 默认的随机字符串 Token？</strong>
+<div class="opt">A. SaTokenDao</div>
+<div class="opt">B. StpInterface</div>
+<div class="opt">C. StpLogic（StpLogicJwtForSimple）</div>
+<div class="opt">D. SaTokenExceptionHandler</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。<code>getStpLogicJwt()</code> 方法注册了 <code>StpLogicJwtForSimple</code>，替代默认的 StpLogic（随机字符串模式），使框架使用 JWT 签发 Token。A 是存储层，B 是权限回调，D 是异常处理。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q2. PlusSaTokenDao 读取数据时的回源顺序是什么？</strong>
+<div class="opt">A. Redis → Caffeine → null</div>
+<div class="opt">B. Caffeine → Redis → null</div>
+<div class="opt">C. Redis → null</div>
+<div class="opt">D. Caffeine → null</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。先查本地 Caffeine 缓存，命中则直接返回；未命中则回源 Redis，Redis 有值则更新 Caffeine 后返回；Redis 也无值则返回 null。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q3. 为什么 common-satoken.yml 中 is-read-cookie 设为 false？</strong>
+<div class="opt">A. Cookie 传输效率低</div>
+<div class="opt">B. 禁用 Cookie 鉴权，从根源杜绝 CSRF 风险</div>
+<div class="opt">C. Cookie 无法跨域传递</div>
+<div class="opt">D. Sa-Token 不支持 Cookie 方式</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。Cookie 会被浏览器自动携带，攻击者可通过 CSRF 伪造请求。设置 <code>is-read-cookie: false</code> 后 Token 必须通过 Header 或请求体传递，攻击者无法跨域设置，从根源上杜绝了 CSRF 漏洞。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q4. PlusSaTokenDao.set() 方法写入 Redis 后对 Caffeine 做了什么？</strong>
+<div class="opt">A. put() — 同时更新 Caffeine</div>
+<div class="opt">B. refresh() — 异步刷新 Caffeine</div>
+<div class="opt">C. invalidate() — 让本地缓存失效</div>
+<div class="opt">D. 不操作 Caffeine</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。写操作调用 <code>writeValue()</code> 方法，写入 Redis 成功后执行 <code>invalidate(key)</code> 让本地缓存失效。下次读时从 Redis 重新加载，保证数据一致性（Cache-Aside 模式）。
+</details>
+</div>
+
+<div class="cite">
+<strong>推荐读物</strong><br>
+· <a href="https://sa-token.cc/doc.html#/up/custom-dao">Sa-Token 自定义 Dao 层文档</a> — 了解 SaTokenDao 接口的设计契约<br>
+· <a href="https://github.com/ben-manes/caffeine/wiki">Caffeine Wiki</a> — 深入理解本地缓存的最佳实践<br>
+· 源码入口：<code>org/dromara/common/satoken/config/SaTokenConfig.java</code> — 模块装配入口<br>
+· 存储层：<code>org/dromara/common/satoken/core/dao/PlusSaTokenDao.java</code> — 双层缓存实现<br>
+· 配置：<code>common-satoken.yml</code> — Token 读取方式与安全策略
+</div>
+
+<div class="reminder">
+下一节我们将深入 <code>SaPermissionImpl</code> 的权限数据加载逻辑和 <code>SaTokenExceptionHandler</code> 的异常翻译机制，理解"如何告诉框架你是谁"以及"鉴权失败时用户看到什么"。
+</div>
+
+<div class="nav">第 2 课 / 共 5 课 · 上一课：全景 | 下一课：权限验证</div>
+
+</body>
+</html>

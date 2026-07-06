@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0007 - 多数据源与 SQL 日志</title>
+<style>
+body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+p, li { font-size: 0.97rem; }
+code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; }
+.mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+.mission b { color: #1d6fd6; }
+blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+.flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+.region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+.region h3 { margin-top: 0.9rem; }
+.where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+.side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+.why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+.why b { color: #1f9d4d; }
+details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+details[open] summary { margin-bottom: 0.6rem; }
+.quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+.quiz p { font-weight: 600; margin: 0.6rem 0; }
+.opt { display: block; padding: 0.35rem 0; color: #333; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: #f4f6f8; }
+.cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+.cite a, .reminder a { color: #1d6fd6; }
+.reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+.nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+.tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>0007 &#8212; 多数据源与 SQL 日志 <span class="tag">ruoyi-common-mybatis</span></h1>
+
+<div class="mission">
+  <b>学习目标：</b>掌握 ruoyi-common-mybatis 模块如何集成 baomidou dynamic-datasource 实现多数据源支持，以及如何通过 SqlLogInterceptor 提供生产级 SQL 日志输出。
+</div>
+
+<h2>1. Dynamic-Datasource 集成原理</h2>
+
+<p>RuoYi-Vue-Plus 使用 <b>baomidou dynamic-datasource</b> 作为多数据源框架。该框架的核心是 <code>DynamicRoutingDataSource</code>，它是一个支持运行时切换数据源的路由数据源。</p>
+
+<div class="region">
+  <h3>DataBaseHelper 如何获取数据源</h3>
+  <p class="where">helper/DataBaseHelper.java</p>
+  <p><code>DataBaseHelper</code> 是一个纯静态工具类（私有构造器），在类加载时通过 <code>SpringUtils.getBean(DynamicRoutingDataSource.class)</code> 获取全局唯一的 <code>DynamicRoutingDataSource</code> 实例：</p>
+  <pre><code>private static final DynamicRoutingDataSource DS =
+    SpringUtils.getBean(DynamicRoutingDataSource.class);</code></pre>
+</div>
+
+<div class="flow">
+DataSource 解析链路：
+  DS.determineDataSource()
+      └── DynamicRoutingDataSource 从当前线程上下文获取 dsKey
+            └── DynamicDataSourceContextHolder.peek() 拿到线程绑定的数据源名称
+                  └── 根据 dsKey 从 DS.dataSourceMap 中取出对应的 DataSource
+</div>
+
+<div class="why">
+  <b>关键设计：</b><code>DynamicDataSourceContextHolder.peek()</code> 使用 ThreadLocal 存储当前线程的数据源 key。通过 <code>@DS("slave")</code> 注解或在代码中调用 <code>DynamicDataSourceContextHolder.push("slave")</code> 即可切换数据源。若 peek() 返回 null，则 fallback 为 <code>"primary"</code>（即 master 数据源）。
+</div>
+
+<div class="side">
+  <b>注意：</b><code>DynamicRoutingDataSource.determineDataSource()</code> 方法不仅返回当前数据源，还会触发数据源的懒初始化（如果该数据源尚未加载）。这意味着首次访问某个从库时会执行连接池初始化。
+</div>
+
+<h2>2. DataBaseType 数据库类型检测</h2>
+
+<div class="region">
+  <h3>getDataBaseType() 工作流程</h3>
+  <p class="where">helper/DataBaseHelper.java &amp; enums/DataBaseType.java</p>
+  <p>该方法通过 JDBC 元数据获取数据库产品名称，并与 <code>DataBaseType</code> 枚举匹配，结果缓存于 <code>ConcurrentHashMap</code>：</p>
+
+  <div class="flow">
+getDataBaseType() 执行流程：
+  1. DS.determineDataSource() → 获取当前 DataSource
+  2. DynamicDataSourceContextHolder.peek() → 获取 dsKey（null 则用 "primary"）
+  3. DB_TYPE_CACHE.computeIfAbsent(key, ...) → 检查缓存
+       ├── 命中缓存 → 直接返回 DataBaseType
+       └── 未命中 → 走以下流程：
+             a. dataSource.getConnection() → 获取 JDBC Connection
+             b. conn.getMetaData() → 获取 DatabaseMetaData
+             c. metaData.getDatabaseProductName() → 获取产品名
+                  MySQL → "MySQL"
+                  Oracle → "Oracle"
+                  PostgreSQL → "PostgreSQL"
+                  SQL Server → "Microsoft SQL Server"
+             d. DataBaseType.find(databaseProductName) → 匹配枚举
+             e. 结果放入 DB_TYPE_CACHE，key = dsName
+  </div>
+</div>
+
+<div class="region">
+  <h3>DataBaseType 枚举</h3>
+  <p class="where">enums/DataBaseType.java</p>
+  <table>
+    <tr><th>枚举值</th><th>数据库产品名</th><th>便捷判断方法</th></tr>
+    <tr><td><code>MY_SQL</code></td><td><code>"MySQL"</code></td><td><code>isMySql()</code></td></tr>
+    <tr><td><code>ORACLE</code></td><td><code>"Oracle"</code></td><td><code>isOracle()</code></td></tr>
+    <tr><td><code>POSTGRE_SQL</code></td><td><code>"PostgreSQL"</code></td><td><code>isPostgreSql()</code></td></tr>
+    <tr><td><code>SQL_SERVER</code></td><td><code>"Microsoft SQL Server"</code></td><td><code>isSqlServer()</code></td></tr>
+  </table>
+  <p><code>find(databaseProductName)</code> 方法遍历枚举值匹配产品名，未匹配或参数为空时 <b>默认返回 MY_SQL</b>。这保证了向后兼容性。</p>
+</div>
+
+<div class="why">
+  <b>缓存设计：</b>使用 <code>ConcurrentHashMap</code> 以数据源名称为 key 缓存检测结果。这意味着每个数据源的数据库类型只在首次访问时检测一次（通过 <code>computeIfAbsent</code> 的原子操作保证线程安全），后续直接从缓存读取，避免重复的 JDBC 连接开销。
+</div>
+
+<p>还有一个重载方法 <code>getDataBaseType(String dsName)</code>，用于按指定数据源名称检测数据库类型，同样支持缓存。</p>
+
+<h2>3. findInSet 跨数据库兼容</h2>
+
+<p>MySQL 的 <code>FIND_IN_SET(str, strlist)</code> 函数在其他数据库中不存在，但业务中经常需要查询"某字段是否在逗号分隔的字符串列表中"。<code>DataBaseHelper.findInSet()</code> 通过 switch 语句根据数据库类型生成对应的 SQL 片段。</p>
+
+<div class="region">
+  <h3>各数据库 SQL 对照</h3>
+  <p class="where">helper/DataBaseHelper.java - findInSet(var1, var2)</p>
+  <table>
+    <tr><th>数据库</th><th>生成的 SQL 片段</th><th>原理</th></tr>
+    <tr>
+      <td>MySQL（默认）</td>
+      <td><code>find_in_set('value', column) &lt;&gt; 0</code></td>
+      <td>原生函数</td>
+    </tr>
+    <tr>
+      <td>Oracle</td>
+      <td><code>instr(','||column||',' , ',value,') &lt;&gt; 0</code></td>
+      <td>用 instr 在拼接的字符串中查找</td>
+    </tr>
+    <tr>
+      <td>PostgreSQL</td>
+      <td><code>(select strpos(','||column||',' , ',value,')) &lt;&gt; 0</code></td>
+      <td>用 strpos 在拼接的字符串中查找</td>
+    </tr>
+    <tr>
+      <td>SQL Server</td>
+      <td><code>charindex(',value,' , ','+column+',') &lt;&gt; 0</code></td>
+      <td>用 charindex 在拼接的字符串中查找</td>
+    </tr>
+  </table>
+</div>
+
+<div class="why">
+  <b>为什么要在值前后加逗号？</b>假设字段值为 <code>'12,123'</code>，如果直接 <code>instr('12,123', '12')</code> 会误匹配。而 <code>instr(',12,123,', ',12,')</code> 只在值前后都加逗号后精确匹配，避免了值部分重合的误判。
+</div>
+
+<details>
+  <summary>查看 findInSet 源码实现</summary>
+  <pre><code>public static String findInSet(Object var1, String var2) {
+    String var = Convert.toStr(var1);
+    SqlUtil.filterKeyword(var);
+    SqlUtil.filterKeyword(var2);
+    return switch (getDataBaseType()) {
+        case ORACLE -> "instr(','||%s||',' , ',%s,') &lt;&gt; 0".formatted(var2, var);
+        case POSTGRE_SQL -> "(select strpos(','||%s||',' , ',%s,')) &lt;&gt; 0".formatted(var2, var);
+        case SQL_SERVER -> "charindex(',%s,' , ','+%s+',') &lt;&gt; 0".formatted(var, var2);
+        default -> "find_in_set('%s' , %s) &lt;&gt; 0".formatted(var, var2);
+    };
+}</code></pre>
+</details>
+
+<h2>4. SqlLogInterceptor 深度解析</h2>
+
+<div class="region">
+  <h3>拦截器注册</h3>
+  <p class="where">interceptor/SqlLogInterceptor.java</p>
+  <p><code>SqlLogInterceptor</code> 实现了 MyBatis 的 <code>Interceptor</code> 接口，通过 <code>@Intercepts</code> 注解声明拦截点：</p>
+  <pre><code>@Intercepts({
+    @Signature(type = StatementHandler.class, method = "query",
+               args = {Statement.class, ResultHandler.class}),
+    @Signature(type = StatementHandler.class, method = "update",
+               args = {Statement.class}),
+    @Signature(type = StatementHandler.class, method = "batch",
+               args = {Statement.class}),
+    @Signature(type = StatementHandler.class, method = "queryCursor",
+               args = {Statement.class})
+})</code></pre>
+  <p>拦截了 <code>StatementHandler</code> 的 query、update、batch、queryCursor 四个方法，覆盖了所有 SQL 执行路径。</p>
+</div>
+
+<div class="region">
+  <h3>intercept() 核心流程</h3>
+  <div class="flow">
+intercept(Invocation invocation):
+  1. StatementHandler → PluginUtils.realTarget(invocation.getTarget())
+  2. BoundSql boundSql ← statementHandler.getBoundSql()
+  3. MappedStatement ms ← mappedStatement()
+  4. long startTime ← System.currentTimeMillis()
+  5. try:
+       Object result = invocation.proceed()   ← 执行真实SQL
+       printSql(ms, boundSql, elapsed, null)  ← 打印成功日志
+       return result
+     catch (Throwable e):
+       printSql(ms, boundSql, elapsed, e)     ← 打印异常日志（包含错误信息）
+       throw e                                ← 重新抛出异常
+  </div>
+  <p><b>关键特性：</b>无论 SQL 执行成功还是失败，都会打印日志。异常时额外输出错误类型和错误消息。</p>
+</div>
+
+<div class="region">
+  <h3>buildFullSql() — 参数化 SQL 还原</h3>
+  <p>这是最核心的方法，将带 <code>?</code> 占位符的预编译 SQL 还原为完整的可执行 SQL：</p>
+
+  <p><b>步骤1 — buildParameterValues()：</b>从 BoundSql 中提取参数值并格式化。对于每个 ParameterMapping：</p>
+  <ul>
+    <li>OUT 模式的参数跳过</li>
+    <li>先从 <code>boundSql.getAdditionalParameter(propertyName)</code> 查找（动态SQL 的额外参数如 foreach 集合）</li>
+    <li>再从 <code>parameterObject</code> 本身或 MetaObject 中获取</li>
+    <li>最后调用 <code>formatParameter()</code> 格式化</li>
+  </ul>
+
+  <p><b>formatParameter() 类型处理：</b></p>
+  <table>
+    <tr><th>Java 类型</th><th>SQL 输出格式</th></tr>
+    <tr><td><code>null</code></td><td><code>null</code></td></tr>
+    <tr><td><code>Number / Boolean</code></td><td>原始值（如 <code>123</code>、<code>true</code>）</td></tr>
+    <tr><td><code>java.util.Date</code></td><td><code>'yyyy-MM-dd HH:mm:ss'</code>（通过 Hutool DateUtil）</td></tr>
+    <tr><td><code>LocalDateTime</code></td><td><code>'yyyy-MM-dd HH:mm:ss'</code></td></tr>
+    <tr><td><code>LocalDate</code></td><td><code>'yyyy-MM-dd'</code></td></tr>
+    <tr><td><code>LocalTime</code></td><td><code>'HH:mm:ss'</code></td></tr>
+    <tr><td><code>TemporalAccessor</code></td><td><code>'toString()'</code></td></tr>
+    <tr><td><code>Enum</code></td><td><code>'enum.name()'</code></td></tr>
+    <tr><td>其他</td><td><code>'toString()'</code>（单引号内的单引号转义为 <code>''</code>）</td></tr>
+  </table>
+
+  <p><b>步骤2 — replacePlaceholders()：</b>字符级遍历 SQL 字符串，将位于引号外的 <code>?</code> 替换为参数值，<b>引号内的 <code>?</code> 不替换</b>：</p>
+  <pre><code>// 核心逻辑：逐字符扫描，跟踪单引号和双引号状态
+for (int i = 0; i &lt; sql.length(); i++) {
+    char current = sql.charAt(i);
+    if (current == '\'' && !inDoubleQuote) inSingleQuote = !inSingleQuote;
+    else if (current == '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
+    if (current == '?' && !inSingleQuote && !inDoubleQuote
+        && parameterIndex &lt; parameters.size()) {
+        builder.append(parameters.get(parameterIndex++));
+    } else {
+        builder.append(current);
+    }
+}</code></pre>
+</div>
+
+<div class="region">
+  <h3>printChunk() — 超长 SQL 分片</h3>
+  <p>当日志输出模式为 <code>"log"</code> 且 SQL 超过 <b>8000 字符</b>时，使用 UUID 作为 logId 将 SQL 分片输出：</p>
+  <pre><code>// 分片格式: sqlLogId={uuid} part=1/3 {sql_chunk_1}
+//          sqlLogId={uuid} part=2/3 {sql_chunk_2}
+//          sqlLogId={uuid} part=3/3 {sql_chunk_3}</code></pre>
+  <p>通过相同 UUID 可将分片日志聚合还原为完整 SQL。</p>
+</div>
+
+<div class="region">
+  <h3>控制台输出与线程安全</h3>
+  <p>当 <code>output = "console"</code> 时，SQL 输出到 <code>System.err</code>。使用 <code>ReentrantLock</code> 保证多条 SQL 同时输出时不会交错：</p>
+  <pre><code>private static final ReentrantLock CONSOLE_LOCK = new ReentrantLock();
+
+private void printConsole(String message) {
+    CONSOLE_LOCK.lock();
+    try {
+        System.err.println(message);
+        System.err.println();  // 空行分隔
+    } finally {
+        CONSOLE_LOCK.unlock();
+    }
+}</code></pre>
+</div>
+
+<h2>5. SqlLogProperties 配置</h2>
+
+<div class="region">
+  <h3>配置类</h3>
+  <p class="where">config/properties/SqlLogProperties.java</p>
+  <pre><code>@Data
+@ConfigurationProperties(prefix = "mybatis-plus.sql-log")
+public class SqlLogProperties {
+    private Boolean enabled = false;   // 默认关闭
+    private String output = "console"; // 默认控制台输出
+}</code></pre>
+</div>
+
+<div class="region">
+  <h3>条件装配</h3>
+  <p class="where">config/MybatisPlusConfig.java</p>
+  <p>在 <code>MybatisPlusConfig</code> 中，<code>SqlLogInterceptor</code> 的 Bean 注册使用了 <code>@ConditionalOnProperty</code>：</p>
+  <pre><code>@Bean
+@ConditionalOnProperty(prefix = "mybatis-plus.sql-log", name = "enabled",
+                       havingValue = "true")
+public SqlLogInterceptor sqlLogInterceptor(SqlLogProperties sqlLogProperties) {
+    return new SqlLogInterceptor(sqlLogProperties);
+}</code></pre>
+  <p>只有在配置中设置 <code>mybatis-plus.sql-log.enabled=true</code> 时，拦截器才会被创建。</p>
+</div>
+
+<div class="side">
+  <b>使用建议：</b>开发环境推荐 <code>output=console</code>（直接查看），生产环境推荐 <code>output=log</code>（写入日志文件，带时间戳和 Mapper ID）。<b>注意：</b>SQL 日志会包含完整参数值，生产环境谨慎开启，避免敏感数据泄露。
+</div>
+
+<h2>6. PlusPostInitTableInfoHandler — 全局逻辑删除开关</h2>
+
+<div class="region">
+  <h3>功能说明</h3>
+  <p class="where">handler/PlusPostInitTableInfoHandler.java</p>
+  <p>实现了 MyBatis-Plus 的 <code>PostInitTableInfoHandler</code> 接口，在每张表的 <code>TableInfo</code> 初始化完成后回调：</p>
+  <pre><code>public class PlusPostInitTableInfoHandler implements PostInitTableInfoHandler {
+    @Override
+    public void postTableInfo(TableInfo tableInfo, Configuration configuration) {
+        String flag = SpringUtils.getProperty("mybatis-plus.enableLogicDelete", "true");
+        if (!Convert.toBool(flag)) {
+            ReflectUtils.setFieldValue(tableInfo, "withLogicDelete", false);
+        }
+    }
+}</code></pre>
+  <p>通过读取配置 <code>mybatis-plus.enableLogicDelete</code>（默认 true），若设为 false 则使用反射将每张表的 <code>withLogicDelete</code> 字段设为 false，实现<b>全局关闭逻辑删除</b>。</p>
+</div>
+
+<div class="why">
+  <b>设计意图：</b>MyBatis-Plus 的逻辑删除是表级别的配置（通过 <code>@TableLogic</code> 注解）。这个 Handler 提供了一个全局开关，无需逐个移除注解即可在需要时（如数据迁移、特殊报表查询）统一关闭逻辑删除功能。
+</div>
+
+<h2>7. MybatisExceptionHandler — 统一异常处理</h2>
+
+<div class="region">
+  <h3>异常映射</h3>
+  <p class="where">handler/MybatisExceptionHandler.java</p>
+  <table>
+    <tr><th>异常类型</th><th>HTTP 状态码</th><th>返回消息</th></tr>
+    <tr><td><code>DuplicateKeyException</code></td><td>409 CONFLICT</td><td>"数据库中已存在该记录，请联系管理员确认"</td></tr>
+    <tr><td><code>MyBatisSystemException</code>（根因为 <code>NotLoginException</code>）</td><td>401 UNAUTHORIZED</td><td>"认证失败，无法访问系统资源"</td></tr>
+    <tr><td><code>MyBatisSystemException</code>（根因为 <code>CannotFindDataSourceException</code>）</td><td>500 INTERNAL_ERROR</td><td>"未找到数据源，请联系管理员确认"</td></tr>
+    <tr><td><code>MyBatisSystemException</code>（其他根因）</td><td>500 INTERNAL_ERROR</td><td>异常原始消息</td></tr>
+  </table>
+  <p><code>getRootCause()</code> 方法递归查找最底层的根因异常，<code>findCause()</code> 可按类型查找异常链中的特定异常。</p>
+</div>
+
+<div class="reminder">
+  <b>本节核心要点回顾：</b><br>
+  1. <code>DataBaseHelper</code> 通过 Spring 容器获取 <code>DynamicRoutingDataSource</code>，结合 ThreadLocal 实现数据源切换感知<br>
+  2. 数据库类型检测使用 JDBC <code>DatabaseMetaData</code> + <code>ConcurrentHashMap</code> 缓存<br>
+  3. <code>findInSet()</code> 通过 switch 表达式为 4 种数据库生成原生 SQL<br>
+  4. <code>SqlLogInterceptor</code> 拦截 StatementHandler，逐字符还原参数化 SQL，支持 8000 字符分片<br>
+  5. 条件装配 <code>@ConditionalOnProperty</code> 控制拦截器启用
+</div>
+
+<h2>自测题</h2>
+
+<div class="quiz">
+  <p>Q1: DataBaseHelper 中，当 DynamicDataSourceContextHolder.peek() 返回 null 时，fallback 的数据源 key 是什么？</p>
+  <span class="opt">A. "master"</span>
+  <span class="opt">B. "default"</span>
+  <span class="opt">C. "primary"</span>
+  <span class="opt">D. "main"</span>
+  <details><summary>查看答案</summary><b>答案：C。</b> 源码中 <code>final String key = dsKey != null ? dsKey : "primary";</code></details>
+</div>
+
+<div class="quiz">
+  <p>Q2: SqlLogInterceptor 的 replacePlaceholders() 方法中，什么情况下 <code>?</code> 不会被替换为参数值？</p>
+  <span class="opt">A. 参数列表为空时</span>
+  <span class="opt">B. ? 在单引号或双引号内部时</span>
+  <span class="opt">C. 参数类型为 OUT 时</span>
+  <span class="opt">D. SQL 长度超过 8000 时</span>
+  <details><summary>查看答案</summary><b>答案：B。</b> 源码使用 <code>inSingleQuote</code> 和 <code>inDoubleQuote</code> 标志跟踪引号状态，引号内的 ? 是字符串字面量，不替换。</details>
+</div>
+
+<div class="quiz">
+  <p>Q3: 以下关于 findInSet 的描述，哪个是正确的？</p>
+  <span class="opt">A. 所有数据库都使用相同的 SQL 表达式</span>
+  <span class="opt">B. Oracle 版本使用 regexp_like 实现</span>
+  <span class="opt">C. PostgreSQL 版本使用 strpos 函数，在字段值前后加逗号防止部分匹配</span>
+  <span class="opt">D. SQL Server 版本直接调用 MySQL 的 find_in_set</span>
+  <details><summary>查看答案</summary><b>答案：C。</b> PostgreSQL 版本使用 <code>strpos(','||column||',' , ',value,')</code>，逗号包裹确保精确匹配。</details>
+</div>
+
+<div class="quiz">
+  <p>Q4: MybatisExceptionHandler 对 DuplicateKeyException 返回的 HTTP 状态码是什么？</p>
+  <span class="opt">A. 400</span>
+  <span class="opt">B. 404</span>
+  <span class="opt">C. 409</span>
+  <span class="opt">D. 500</span>
+  <details><summary>查看答案</summary><b>答案：C。</b> 409 Conflict，表示资源冲突（唯一键重复）。</details>
+</div>
+
+<div class="cite">
+  <b>参考源文件：</b><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataBaseHelper.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/enums/DataBaseType.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/interceptor/SqlLogInterceptor.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/config/properties/SqlLogProperties.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/handler/PlusPostInitTableInfoHandler.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/handler/MybatisExceptionHandler.java</code><br>
+  <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/config/MybatisPlusConfig.java</code>
+</div>
+
+<div class="nav">&laquo; 上一课：0006 | 下一课：0008 实战整合 &raquo;</div>
+
+</body>
+</html>

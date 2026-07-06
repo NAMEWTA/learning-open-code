@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 03 · API 加解密过滤器链</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>速查 03 · API 加解密过滤器链</h1>
+<p class="a">过滤器：CryptoFilter | 请求 Wrapper：DecryptRequestBodyWrapper | 响应 Wrapper：EncryptResponseBodyWrapper</p>
+
+<h2>CryptoFilter 完整流程</h2>
+<div class="chain">
+<strong>CryptoFilter.doFilter(request, response, chain)</strong>
+  │
+  ├─ 1. getApiEncryptAnnotation(servletRequest)        → 获取 @ApiEncrypt 注解
+  │     └─ requestMappingHandlerMapping.getHandler() → HandlerMethod → getMethodAnnotation(ApiEncrypt.class)
+  │
+  ├─ 2. boolean responseFlag = apiEncrypt != null && apiEncrypt.response()
+  │
+  ├─ 3. 判断 POST/PUT？
+  │     ├─ YES → 检查 headerFlag ("encrypt-key") 请求头
+  │     │        ├─ 存在 → new DecryptRequestBodyWrapper() ← 解密请求体
+  │     │        └─ 不存在 → 有 @ApiEncrypt？→ 403 Forbidden / 没有 → 放行
+  │     └─ NO  → 跳过解密
+  │
+  ├─ 4. responseFlag == true？
+  │     └─ YES → new EncryptResponseBodyWrapper() ← 包装响应
+  │
+  ├─ 5. chain.doFilter(requestWrapper, responseWrapper)  ← 执行后续过滤器链
+  │
+  └─ 6. responseFlag == true？
+        └─ YES → responseBodyWrapper.getEncryptContent() → getWriter().write(encryptContent)
+</div>
+
+<h2>解密链（请求）— DecryptRequestBodyWrapper 构造过程</h2>
+
+<table>
+  <tr><th>步骤</th><th>操作</th><th>输入</th><th>输出</th></tr>
+  <tr><td>1</td><td>读请求头</td><td><code>request.getHeader("encrypt-key")</code></td><td>RSA 密文（AES 密钥）</td></tr>
+  <tr><td>2</td><td>RSA 解密</td><td>headerRsa + privateKey</td><td>Base64 编码的 AES 密钥</td></tr>
+  <tr><td>3</td><td>Base64 解码</td><td>Base64 AES 密钥</td><td>24 字节原始 AES 密钥</td></tr>
+  <tr><td>4</td><td>读原始 body</td><td><code>request.getInputStream()</code></td><td>AES 密文（请求体）</td></tr>
+  <tr><td>5</td><td>AES 解密</td><td>body 密文 + AES 密钥</td><td>明文 JSON 字符串</td></tr>
+  <tr><td>6</td><td>缓存字节</td><td>明文字符串</td><td><code>byte[] body</code>（供 getInputStream 返回）</td></tr>
+</table>
+
+<h2>加密链（响应）— EncryptResponseBodyWrapper.getEncryptContent()</h2>
+
+<table>
+  <tr><th>步骤</th><th>操作</th><th>输入</th><th>输出</th></tr>
+  <tr><td>1</td><td>生成 AES 密钥</td><td>SecureRandom 24 字节</td><td>Base64 编码的随机密钥</td></tr>
+  <tr><td>2</td><td>Base64 编码密钥</td><td>原始 AES 密钥</td><td>Base64 AES 密钥</td></tr>
+  <tr><td>3</td><td>RSA 加密密钥</td><td>Base64 AES 密钥 + RSA 公钥</td><td>RSA 密文（放入响应头 encrypt-key）</td></tr>
+  <tr><td>4</td><td>设置 CORS 暴露头</td><td><code>Access-Control-Expose-Headers: encrypt-key</code></td><td>前端可读响应头</td></tr>
+  <tr><td>5</td><td>读取原始响应</td><td><code>this.getContent()</code>（ByteArrayOutputStream 缓存）</td><td>明文 JSON</td></tr>
+  <tr><td>6</td><td>AES 加密</td><td>明文 JSON + AES 密钥</td><td>密文（返回给 CryptoFilter 写出）</td></tr>
+</table>
+
+<h2>密钥协商协议速查</h2>
+
+<table>
+  <tr><th>阶段</th><th>客户端</th><th>服务端</th></tr>
+  <tr><td>请求前</td><td>生成随机 AES 密钥，RSA 公钥加密后放 header</td><td>—</td></tr>
+  <tr><td>请求到达</td><td>—</td><td>从 header 取 RSA 密文 → 私钥解密 → 得到 AES 密钥 → 解密 body</td></tr>
+  <tr><td>响应前</td><td>—</td><td>生成新的随机 AES 密钥 → RSA 公钥加密 → 放响应 header → AES 加密 body</td></tr>
+  <tr><td>响应到达</td><td>从 header 取 RSA 密文 → 公钥解密 → 得到 AES 密钥 → 解密 body</td><td>—</td></tr>
+</table>
+
+<h2>请求头标志说明</h2>
+
+<table>
+  <tr><th>配置项</th><th>默认值</th><th>作用</th></tr>
+  <tr><td><code>api-decrypt.header-flag</code></td><td><code>encrypt-key</code></td><td>用于传输 RSA 加密后的 AES 密钥的请求头名称</td></tr>
+</table>
+
+<p class="a">通过 <code>ApiDecryptProperties.getHeaderFlag()</code> 获取，可在 yml 中自定义。</p>
+
+<h2>常见陷阱</h2>
+
+<ul>
+  <li><strong>GET 请求不拦截：</strong> 只用 POST/PUT，加密数据必须随 body 发送。如果你的加密接口用了 GET，CryptoFilter 不会解密。</li>
+  <li><strong>@ApiEncrypt(response=true) 影响所有响应：</strong> 即使请求没有加密头，只要注解标记了 <code>response=true</code>，响应也会被加密返回。注意前后端的同步。</li>
+  <li><strong>CORS + encrypt-key：</strong> 如果前端跨域请求，必须确认 <code>Access-Control-Expose-Headers</code> 包含了 <code>encrypt-key</code>，否则前端 JS 无法读取加密密钥。</li>
+  <li><strong>RSA 密钥格式：</strong> 必须是 PEM 格式的 BASE64 编码。启动时会校验，密钥格式错误直接启动失败（Fail-Fast）。</li>
+  <li><strong>加密后 Content-Length 变化：</strong> AES 加密后数据长度会变化，响应头的 <code>Content-Length</code> 由 Wrapper 自动更新为密文长度。</li>
+</ul>
+
+<h2>关键源码文件</h2>
+
+<table>
+  <tr><th>文件</th><th>类</th><th>路径</th></tr>
+  <tr><td>CryptoFilter.java</td><td><code>CryptoFilter implements Filter</code></td><td><code>org.dromara.common.encrypt.filter</code></td></tr>
+  <tr><td>DecryptRequestBodyWrapper.java</td><td><code>extends HttpServletRequestWrapper</code></td><td><code>org.dromara.common.encrypt.filter</code></td></tr>
+  <tr><td>EncryptResponseBodyWrapper.java</td><td><code>extends HttpServletResponseWrapper</code></td><td><code>org.dromara.common.encrypt.filter</code></td></tr>
+  <tr><td>ApiEncrypt.java</td><td><code>@ApiEncrypt</code> 注解</td><td><code>org.dromara.common.encrypt.annotation</code></td></tr>
+  <tr><td>ApiDecryptProperties.java</td><td>配置属性（密钥、headerFlag）</td><td><code>org.dromara.common.encrypt.properties</code></td></tr>
+</table>
+
+<p class="a">速查 03 · API 加解密过滤器链 · CryptoFilter / Wrapper · 配套课程：<a href="../lessons/0003.html">第 3 课</a></p>
+
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 事件驱动解耦 + 办理人解析 + 节点扩展</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 事件驱动解耦 + 办理人解析 + 节点扩展 <span class="tag">核心设计</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5、#6）</b>：学完你能讲清三个关键设计——① 引擎回调→Spring 事件→业务模块 @EventListener 的完整事件驱动链；② 办理人是按 USER/ROLE/DEPT/POST/SPEL 五种类型通过 storageId 前缀解析的；③ 节点扩展（按钮权限/抄送配置/SpEL 动态办理人）如何挂在流程节点上。
+</div>
+
+<h2>一、事件驱动解耦：引擎 → 业务</h2>
+
+<h3>整条链路</h3>
+
+<div class="flow">引擎流转完节点
+    │
+    ▼
+GlobalListener.finish()       ← Warm-Flow 引擎接口（四个回调之一）
+    │  WorkflowGlobalListener.java:178
+    ▼
+determineFlowStatus()          ← 判断流程是否已结束 (:310)
+    │  如果 isTaskEnd → 置 FINISH
+    ▼
+flowProcessEventHandler.
+  processHandler(flowCode, instance, status, params, submit)
+    │  FlowProcessEventHandler.java:35
+    ▼
+new ProcessEvent{flowCode,instanceId,businessId,...}
+SpringUtils.context().publishEvent(processEvent)   ← :48
+    │
+    ▼
+业务模块 @EventListener 接收
+    │  TestLeaveServiceImpl.java:211
+    │  @EventListener(condition =
+    │    "#processEvent.flowCode.startsWith('leave')")
+    ▼
+testLeave.setStatus(processEvent.getStatus())   ← 回写业务表</div>
+
+<h3>四个引擎回调时机</h3>
+
+<p><span class="where">WorkflowGlobalListener.java:60-258</span> 实现了 <code>GlobalListener</code> 接口，四个回调：</p>
+
+<table>
+<tr><th>回调</th><th>行号</th><th>做了什么</th></tr>
+<tr><td><code>create()</code></td><td>:66</td><td>空方法，预留扩展</td></tr>
+<tr><td><code>start()</code></td><td>:76-101</td><td>解析节点 ext 中的<strong>抄送配置和默认变量</strong>，写入变量 Map。后续 finish 里用这些变量来创建抄送记录</td></tr>
+<tr><td><code>assignment()</code></td><td>:109-132</td><td><strong>任务分派时动态调整办理人</strong>：处理弹窗选人（pass:nodeCode / back:nodeCode 变量）、将申请人设为申请节点的办理人</td></tr>
+<tr><td><code>finish()</code></td><td>:178-258</td><td><strong>最重要</strong>：判断流程状态 → 发 ProcessEvent（总体状态变化）、发 ProcessTaskEvent（新任务创建）、发消息通知（抄送/待办提醒/结果通知），最后清理临时变量</td></tr>
+</table>
+
+<h3>三种 Spring 事件</h3>
+
+<p><span class="where">ruoyi-api/.../api/event/</span> 定义了三个事件 DTO（跨模块契约）：</p>
+
+<table>
+<tr><th>事件</th><th>发的时机</th><th>包含什么</th><th>业务怎么区分的</th></tr>
+<tr><td><code>ProcessEvent</code></td><td>流程状态变化（完成/退回/撤销/作废/终止）</td><td>flowCode、businessId、status、nodeCode、params</td><td>@EventListener condition 按 flowCode 过滤</td></tr>
+<tr><td><code>ProcessTaskEvent</code></td><td>每个新任务创建时</td><td>flowCode、businessId、taskId、nodeCode</td><td>同上</td></tr>
+<tr><td><code>ProcessDeleteEvent</code></td><td>删除流程实例时</td><td>flowCode、businessId</td><td>同上</td></tr>
+</table>
+
+<p>关键设计点：<strong>事件定义在 ruoyi-api 里，不是 ruoyi-workflow</strong>。这意味着业务模块只依赖 api 包就能监听流程事件，完全不需要依赖 workflow 实现模块。这是真正的解耦。</p>
+
+<h2>二、办理人解析：五种类型 + storageId 前缀</h2>
+
+<p><span class="where">FlwTaskAssigneeServiceImpl.java</span> 实现了 <code>HandlerSelectService</code>（Warm-Flow 设计器的选人接口）和 <code>IFlwTaskAssigneeService</code>。核心是 storageId 的编码规则：</p>
+
+<table>
+<tr><th>类型</th><th>storageId 格式</th><th>示例</th><th>解析为</th></tr>
+<tr><td>USER</td><td>纯数字 或 "user:" 前缀被省略</td><td>"123"</td><td>直接查 sys_user 表</td></tr>
+<tr><td>ROLE</td><td>"role:" + 角色ID</td><td>"role:456"</td><td>按角色 ID 查 sys_user_role 关联</td></tr>
+<tr><td>DEPT</td><td>"dept:" + 部门ID</td><td>"dept:789"</td><td>按部门 ID 查 sys_user_dept 关联</td></tr>
+<tr><td>POST</td><td>"post:" + 岗位ID</td><td>"post:101"</td><td>按岗位 ID 查 sys_user_post 关联</td></tr>
+<tr><td>SPEL</td><td>$ 或 # 开头</td><td>"#{@spelRuleComponent.selectDeptLeaderById...}"</td><td>SpEL 表达式，运行时动态执行</td></tr>
+</table>
+
+<p>解析逻辑在 <code>parseStorageId()</code> (:307-326)：先看是否 SpEL 表达式（$ 或 # 开头），再看是否含 ":"，有则按前缀匹配枚举，没有则默认为 USER。</p>
+
+<p><code>fetchUsersByStorageIds()</code> (:204-218) 聚合所有类型的 ID，分别调对应的 system-api Service 查出用户列表，最后合并、去重。这就是设计器选人后落到 task.permissionList 的全过程。</p>
+
+<h2>三、SpEL 规则组件</h2>
+
+<p><span class="where">rule/SpelRuleComponent.java:23-41</span> — 目前只有一个方法 <code>selectDeptLeaderById(Long initiatorDeptId)</code>：根据发起人部门 ID 查出部门负责人。这个 Bean 被注册到 Spring 容器后，流程设计器的 SpEL 表达式就可以写 <code>#{@spelRuleComponent.selectDeptLeaderById(initiatorDeptId)}</code> 来动态获取办理人。</p>
+
+<p><span class="where">domain/FlowSpel.java</span> / <span class="where">FlwSpelServiceImpl.java</span> — SpEL 表达式本身是预定义的模板，存在 <code>flw_spel</code> 表里。FlwSpelController 提供 CRUD，FlwSpelServiceImpl 把 SpEL 当一种「办理人类型」通过 <code>selectSpelByTaskAssigneeList()</code> 供设计器选人列表。</p>
+
+<h2>四、节点扩展（NodeExtVo）</h2>
+
+<p>流程设计器里每个节点可以配一个 JSON <code>ext</code> 字段。引擎流转到节点时，<code>WorkflowGlobalListener.start()</code> 调 <code>flwNodeExtService.parseNodeExt(ext, variables)</code> 解析成 <code>NodeExtVo</code>，包含三块配置：</p>
+
+<table>
+<tr><th>扩展项</th><th>对应枚举</th><th>作用</th></tr>
+<tr><td>按钮权限</td><td>ButtonPermissionEnum</td><td>pop/trust/transfer/copy/back/addSign/subSign/termination/file — 控制前端审批弹窗显示哪些按钮。默认：抄送/退回/终止/附件打开，其余关闭</td></tr>
+<tr><td>抄送配置</td><td>CopySettingEnum</td><td>设置默认抄送人（按用户/角色/部门等）</td></tr>
+<tr><td>节点变量</td><td>—</td><td>设置该节点运行时注入的默认变量</td></tr>
+</table>
+
+<p>前端看到这些按钮权限的来源：<code>FlwTaskServiceImpl.selectById():712-738</code> 里从 <code>NodeExtVo</code> 的 <code>buttonPermissions</code> 映射出 <code>flowTaskVo.buttonList</code>，前端 <code>submitVerify.vue:322-325</code> 遍历展示。</p>
+
+<h2>五、消息通知：三支路</h2>
+
+<p><code>finish()</code> 里根据变量发不同的 Spring 事件，对应三个专用监听器：</p>
+
+<table>
+<tr><th>变量条件</th><th>事件</th><th>用途</th></tr>
+<tr><td>FLOW_COPY_LIST 存在</td><td>WorkflowCopyEvent</td><td>创建抄送记录 + 发抄送消息</td></tr>
+<tr><td>MESSAGE_TYPE 存在 + 非退回申请人</td><td>WorkflowTaskMessageEvent</td><td>给下一节点办理人发待办消息</td></tr>
+<tr><td>已完成/已退回</td><td>WorkflowResultMessageEvent</td><td>给发起人发结果通知</td></tr>
+</table>
+
+<div class="side">
+💡 <b>设计总结</b>：整个事件驱动设计有三层解耦——① 引擎通过 GlobalListener 回调不直接接触业务代码；② FlowProcessEventHandler 把引擎数据转成跨模块 DTO 再发 Spring 事件；③ 事件定义在 ruoyi-api 里，业务模块只依赖 api。每一层都是单向依赖，业务模块完全不知道引擎的存在。
+</div>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. 如果我要让「财务审批」这个业务收到流程事件，下面哪个是正确的做法？</p>
+<span class="opt">A. 在 WorkflowGlobalListener 里加 if (flowCode == "finance")</span>
+<span class="opt">B. 在自己的业务 Service 里写 @EventListener(condition = "#processEvent.flowCode == 'finance'")</span>
+<span class="opt">C. 改引擎源码</span>
+<details><summary>看答案</summary><b>B</b>。这正是 TestLeave 的做法（:211）。事件是全局广播，通过 SpEL condition 按 flowCode 过滤。A 会污染引擎层，不可扩展。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. storageId "role:5" 会解析出什么办理人？</p>
+<span class="opt">A. 用户 ID 为 5 的人</span>
+<span class="opt">B. 角色 ID 为 5 的所有成员</span>
+<span class="opt">C. 部门 ID 为 5 的所有人</span>
+<details><summary>看答案</summary><b>B</b>。前缀 "role:" 匹配 TaskAssigneeEnum.ROLE，调 userService.selectUsersByRoleIds([5]) 查出角色下所有用户。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 流程设计器里关了某节点的「退回」按钮，这个配置是怎么到达前端审批弹窗的？</p>
+<span class="opt">A. 写在前端菜单权限里</span>
+<span class="opt">B. 存在 flow_node.ext JSON 里 → parseNodeExt → buttonList → getTask() 返回 → submitVerify 遍历显示</span>
+<span class="opt">C. 存在 Redis 里</span>
+<details><summary>看答案</summary><b>B</b>。设计器存 ext → NodeExtVo.buttonPermissions → selectById 读 node ext 映射为 buttonList → 前端根据 buttonList 判断显示哪些按钮。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="http://warm-flow.cn/#/warm-flow/listener" target="_blank">Warm-Flow 文档 · 监听器</a> + <a href="https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html#context-functionality-events-annotation" target="_blank">Spring @EventListener 官方文档</a>——对照两个文档你会发现 WorkflowGlobalListener 正是 listener 文档的最佳实践范例。</div>
+<div class="reminder">💡 有疑问？直接问我——比如「为什么 PROCESS 事件的 params 是 Map 不是强类型的？」「如果我想在 @EventListener 里再发起一个子流程，要怎么写？」下一课讲前端对接：待办/审批组件/流程设计器。</div>
+<div class="nav">课程 0005 / 使命：读懂 ruoyi-workflow · 下一课预告：前端工作流对接（Vue + React）</div>
+
+</body>
+</html>

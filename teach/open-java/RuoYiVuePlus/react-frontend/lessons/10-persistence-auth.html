@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>10 · 持久化：Token 认证、localStorage 与数据留存</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+  .wrong { background: #ffeef0; border-left: 3px solid #d73a49; padding: 0.5rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+  .right { background: #e8f5e9; border-left: 3px solid #22863a; padding: 0.5rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./09-axios-interceptor.html">09 Axios拦截器</a> · → <a href="./11-dynamic-routes-1.html">11 动态路由上</a></div>
+
+<h1>10 · 持久化：Token 认证、localStorage 与数据留存</h1>
+
+<p><strong>胜利条件：</strong>能说出 ruoyi-react 用几种持久化方式（localStorage、Cookie、Zustand persist、react-query 缓存）；理解 Token 从登录→存储→每次请求携带→过期处理→退出的完整生命周期；能追踪"记住我"功能的实现。</p>
+
+<h2>一、前端持久化的四层架构</h2>
+
+<div class="diagram"><code>
+┌─────────────────────────────────────────────────┐
+│ ① Token 认证层（auth.ts）                          │
+│    localStorage: 'Admin-Token'                    │
+│    用途：每次请求自动携带，验证身份                  │
+├─────────────────────────────────────────────────┤
+│ ② 布局偏好层（appStore persist）                    │
+│    localStorage: 'layout-setting-react'            │
+│    用途：主题、侧边栏、暗黑模式、语言、组件尺寸       │
+├─────────────────────────────────────────────────┤
+│ ③ 标签页历史层（tagsViewStore persist）             │
+│    localStorage: 'tags-view-visited-react'         │
+│    用途：刷新后恢复之前打开的页面标签                │
+├─────────────────────────────────────────────────┤
+│ ④ Cookie 辅助层（cookie.ts）                        │
+│    用途：记住用户名（Remember Me 功能）              │
+├─────────────────────────────────────────────────┤
+│ ⑤ 服务端缓存层（react-query）                       │
+│    内存缓存（刷新丢失）                              │
+│    用途：字典数据 10 分钟 staleTime、请求去重        │
+└─────────────────────────────────────────────────┘</code></div>
+
+<h2>二、Token 完整生命周期</h2>
+
+<h3>第 1 站：登录 → 拿到 token</h3>
+
+<p><span class="file-ref">src/pages/login.tsx</span></p>
+
+<pre><code>const handleSubmit = async (values: LoginParams) => {
+  setLoading(true);
+  try {
+    // 1. 调登录 API（请求体被 RSA+AES 加密！）
+    const res = await login({
+      username: values.username,
+      password: values.password,
+      uuid: captchaInfo.uuid,
+      code: values.code,
+    });
+
+    // 2. 存入 localStorage
+    setToken(res.data.access_token);
+    // → localStorage.setItem('Admin-Token', token_value)
+
+    // 3. 记住我（可选）
+    if (values.rememberMe) {
+      setCookie('username', values.username);      // 存用户名到 Cookie
+      localStorage.setItem('rememberMe', 'true');
+    }
+
+    // 4. 跳转
+    history.push(from || '/index');
+  } catch (error) {
+    setErrorMsg(error.message);
+  } finally {
+    setLoading(false);
+  }
+};</code></pre>
+
+<h3>第 2 站：每次请求 → 自动携带 token</h3>
+
+<p><span class="file-ref">src/api/request.ts</span> 请求拦截器</p>
+
+<pre><code>if (getToken() && !config.headers?.isToken) {
+  config.headers.Authorization = 'Bearer ' + getToken();
+  // → 每个请求的 Header 都自动带上
+  // Authorization: Bearer eyJhbGciOi...
+}</code></pre>
+
+<h3>第 3 站：token 过期 → 处理 401</h3>
+
+<pre><code>// 响应拦截器
+if (code === 401) {
+  // 弹出重新登录弹窗
+  Modal.confirm({
+    title: '登录状态已过期',
+    onOk: () => {
+      removeToken();     // 清除旧 token
+      history.push('/login');
+    },
+  });
+}</code></pre>
+
+<h3>第 4 站：主动退出 → 清理 token</h3>
+
+<pre><code>const handleLogout = () => {
+  removeToken();                                  // 清除 localStorage
+  useUserStore.getState().logout();               // 清 userInfo
+  usePermissionStore.getState().reset();          // 清路由
+  useTagsViewStore.getState().delAllViews();      // 清标签
+  history.push('/login');
+};</code></pre>
+
+<h2>三、auth.ts：Token 存取工具</h2>
+
+<p><span class="file-ref">src/utils/auth.ts</span></p>
+
+<pre><code>const TOKEN_KEY = 'Admin-Token';
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function removeToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}</code></pre>
+
+<div class="right">
+<strong>为什么用 localStorage 而不是 sessionStorage？</strong><br>
+localStorage 在新标签页、浏览器重启后仍存在（取决于"记住我"策略）。sessionStorage 关标签页就没了。后端通过 token 过期时间控制安全性，前端只管存取。
+</div>
+
+<h2>四、Zustand persist：自动化的持久化</h2>
+
+<p>appStore 和 tagsViewStore 使用 Zustand 的 <code>persist</code> 中间件，<strong>声明式持久化</strong>——不用手写 localStorage：</p>
+
+<pre><code>// appStore: 布局设置持久化
+export const useAppStore = create(
+  persist(
+    (set) => ({
+      darkMode: false,
+      layoutSettings: {...},
+      toggleDarkMode: () => set(s => ({ darkMode: !s.darkMode })),
+    }),
+    {
+      name: 'layout-setting-react',  // ← localStorage key
+      // Zustand 自动：
+      // - 每次 state 变化 → JSON.stringify → localStorage
+      // - 应用启动时 → localStorage.getItem → JSON.parse → 初始化 state
+    }
+  )
+);</code></pre>
+
+<p>打开 Chrome DevTools → Application → Local Storage，你会看到：</p>
+
+<div class="diagram"><code>
+Key                                Value
+Admin-Token                        eyJhbGciOi...
+layout-setting-react               {"state":{"darkMode":false,"layoutSettings":{...}},"version":0}
+tags-view-visited-react            {"state":{"visitedViews":[...]},"version":0}
+app-locale                         zh_CN
+antd-component-size                middle
+rememberMe                         true
+username                            admin</code></div>
+
+<h2>五、"记住我"功能追踪</h2>
+
+<pre><code>// 登录时：勾选"记住我"
+→ setCookie('username', values.username)      // Cookie（可设过期时间）
+→ localStorage.setItem('rememberMe', 'true')
+
+// 下次打开登录页：检查是否记住
+useEffect(() => {
+  if (localStorage.getItem('rememberMe') === 'true') {
+    const savedUsername = getCookie('username');
+    if (savedUsername) {
+      form.setFieldsValue({ username: savedUsername });
+      setRememberMe(true);
+    }
+  }
+}, []);</code></pre>
+
+<h2>六、安全性考量</h2>
+
+<table>
+<tr><th>存储位置</th><th>风险</th><th>ruoyi-react 的应对</th></tr>
+<tr><td>localStorage Token</td><td>XSS 攻击可读取</td><td>后端 token 有过期时间；登录请求体加密</td></tr>
+<tr><td>localStorage 布局设置</td><td>低风险</td><td>仅 UI 偏好，无敏感数据</td></tr>
+<tr><td>Cookie 用户名</td><td>XSS 可读取</td><td>仅存用户名（非密码），可选功能</td></tr>
+</table>
+
+<h2>七、实战检验</h2>
+
+<ol>
+  <li>打开 Chrome DevTools → Application → Local Storage，列出所有 key 和它们的用途</li>
+  <li>清空 <code>Admin-Token</code>，刷新页面——观察是否自动跳转登录页</li>
+  <li>修改布局设置（切换暗黑模式），观察 <code>layout-setting-react</code> 的 JSON 变化</li>
+  <li>在 login.tsx 中给 <code>getToken()</code> 返回处打断点，完整追踪一次 token 的读取→使用→存储过程</li>
+  <li>思考：如果把 token 从 localStorage 改为 sessionStorage，什么场景会出问题？</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://developer.mozilla.org/zh-CN/docs/Web/API/Window/localStorage">MDN — localStorage</a> + <a href="https://zustand.docs.pmnd.rs/integrations/persisting-store-data">Zustand — Persist middleware</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："localStorage、sessionStorage、Cookie、IndexedDB 分别适合存什么？为什么 Token 不能放 Cookie？"</div>
+
+</body>
+</html>

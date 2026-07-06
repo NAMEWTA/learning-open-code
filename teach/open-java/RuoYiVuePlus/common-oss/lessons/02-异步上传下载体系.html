@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>异步上传下载体系</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>02 - 异步上传下载体系</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>追踪 upload(File) 的完整异步执行路径，理解 CompletableFuture + handleAsync 的异步编排模式，掌握 OutputStreamDownloadSubscriber 的响应式流下载机制，以及 OssAsyncExecutorConfig 的虚拟线程 vs 线程池选择。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>传统的文件上传下载是同步阻塞的——线程等待网络 IO 完成才能继续。在大文件场景下，这会导致线程池快速耗尽。OSS 模块全面采用<strong>异步非阻塞</strong>模式：基于 <code>CompletableFuture</code> 编排、<code>S3TransferManager</code> 分段传输、<code>OutputStreamDownloadSubscriber</code> 响应式流消费。</p>
+
+<p>核心数据流：</p>
+<pre>
+上传: File → RandomAccessFile → ReadableByteChannel
+      → AsyncRequestBody → S3TransferManager.upload()
+      → CompletableFuture → PutObjectResult
+
+下载: S3TransferManager.download()
+      → CompletableFuture → OutputStreamDownloadSubscriber
+      → Consumer&lt;ByteBuffer&gt; → WritableByteChannel → File/OutputStream
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 upload(File) 的完整代码路径</h3>
+<p>以 <code>upload(File)</code> 为例，追踪模板方法如何将所有上传重载汇聚到同一个私有方法：</p>
+<pre>
+OssClient.upload(File file)
+  → upload(bucket, file)               // 自动填入默认 bucket
+    → upload(bucket, file.getName(), file)  // 用文件名作为 key
+      → bucketUpload(bucket, key, AsyncRequestBody, Options)
+        // ↑ 所有上传重载最终汇聚于此（私有方法）
+        → 构建 S3 PutObjectRequest
+        → 构建 UploadRequest (含 ACL、分段阈值等)
+        → S3TransferManager.upload(uploadRequest)
+          → 返回 CompletableFuture&lt;CompletedUpload&gt;
+          → handleAsync(future, executor)
+            → 成功 → PutObjectResult(response)
+            → 失败 → S3StorageException.form(cause)
+</pre>
+
+<p><strong>为什么有 6 种入参但只有一个汇聚点？</strong></p>
+<ul>
+  <li><code>File</code> → <code>FileChannel.open(path).map(...) → ByteBuffer</code></li>
+  <li><code>InputStream</code> → <code>AsyncRequestBody.fromInputStream(is, size, executor)</code></li>
+  <li><code>byte[]</code> → <code>AsyncRequestBody.fromBytes(bytes)</code></li>
+  <li><code>Path</code> → 同 File 逻辑</li>
+  <li><code>MultipartFile</code> → 先转 byte[] 或 InputStream</li>
+  <li><code>Resource</code> → InputStream 包装</li>
+</ul>
+<p>所有入参最终都转换为 <code>AsyncRequestBody</code>——AWS SDK 的统一请求体抽象。汇聚到一个私有方法（<code>bucketUpload</code>）后，上传逻辑（构建请求、执行、异常处理、结果包装）只写一次。</p>
+
+<h3>2.2 CompletableFuture + handleAsync 异步编排</h3>
+<p>模块中大量使用 <code>handleAsync</code> 模式：</p>
+<pre>
+future.handleAsync((result, throwable) -> {
+    if (throwable != null) {
+        throw S3StorageException.form(throwable);
+    }
+    return convertResult(result);
+}, executor);
+</pre>
+<p><strong>handleAsync 的优势：</strong></p>
+<ul>
+  <li>同时处理成功和失败（一个回调覆盖两种结果）</li>
+  <li>指定 executor 执行回调（不占用 SDK 的 IO 线程）</li>
+  <li>异常统一转换为 <code>S3StorageException</code>（模块自身的异常体系）</li>
+</ul>
+
+<h3>2.3 OssAsyncExecutorConfig：虚拟线程 or 线程池</h3>
+<p><code>DefaultOssClientImpl.doInitialize()</code> 根据配置决定异步执行器：</p>
+<table>
+  <tr><th>配置</th><th>执行器</th><th>适用场景</th></tr>
+  <tr><td><code>enabledVirtualThread=true</code></td><td><code>Executors.newVirtualThreadPerTaskExecutor()</code></td><td>高并发小文件（如头像上传）</td></tr>
+  <tr><td><code>enabledVirtualThread=false</code></td><td><code>Executors.newScheduledThreadPool(corePoolSize)</code></td><td>大文件传输（需要限制并发数）</td></tr>
+</table>
+
+<blockquote><strong>为什么大文件场景需要限流？</strong>虚拟线程数量无上限，但网络带宽和磁盘 IO 是有限的。如果同时上传 1000 个大文件，虚拟线程会全部创建但同时争抢带宽，导致每个都慢。固定线程池可以控制并发数（如 corePoolSize=CPU 核数），保证每个线程获得足够的网络资源。</blockquote>
+
+<h3>2.4 OutputStreamDownloadSubscriber：响应式流下载</h3>
+<p>实现 <code>Consumer&lt;ByteBuffer&gt;</code> 和 <code>AutoCloseable</code>，是异步下载的数据消费者：</p>
+<pre>
+accept(ByteBuffer byteBuffer):
+  while (byteBuffer.hasRemaining()) {
+      channel.write(byteBuffer);  // 写入目标 Channel
+  }
+  // FileOutputStream 优化：直接用 FileChannel (bypass Channels.newChannel)
+</pre>
+
+<p><strong>FileOutputStream 优化：</strong>当 target 是 <code>FileOutputStream</code> 时，直接使用 <code>FileOutputStream.getChannel()</code> 而不是 <code>Channels.newChannel()</code> 包装，减少一层间接调用。这是性能敏感的 IO 代码中常见的微优化。</p>
+
+<h3>2.5 HandleAsyncResult：成功/失败的统一包装</h3>
+<p>Java <code>record</code> 类型，两个字段：<code>result: T</code> 和 <code>error: Throwable</code>：</p>
+<pre>
+HandleAsyncResult&lt;PutObjectResult&gt; result = client.doCustomUpload(request);
+if (result.isSuccess()) {
+    return result.getResult().eTag();
+} else {
+    throw S3StorageException.form(result.getError());
+}
+</pre>
+<p>为什么不用 <code>CompletableFuture</code> 直接返回？因为 <code>doCustomUpload</code> 需要同时提供同步和异步两种使用方式。<code>HandleAsyncResult</code> 让调用方可以选择同步检查结果，也可以继续用 CompletableFuture 链式编排。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么所有上传方法最终汇聚到 bucketUpload 一个私有方法，而不是每个 public 方法各自实现？</p>
+<p><strong>参考:</strong> 避免逻辑重复和性能差异。请求构建、ACL 设置、异常处理、结果包装这些逻辑对所有入参类型完全一致。汇聚到一个方法后，修改一次即可影响所有 12 个上传重载。如果各自实现，容易产生行为不一致的 bug（如只给 File 加了 ACL，忘记给 byte[] 加）。</p>
+<p><strong>Q2:</strong> handleAsync 和 thenApply/thenAccept 在异常处理上有什么区别？</p>
+<p><strong>参考:</strong> thenApply 只处理成功，异常会沿 CompletableFuture 链传播直到被 exceptionally 捕获。handleAsync 同时接收 result 和 throwable 两个参数，一家回调完成成功和失败的处理。在 OSS 模块中，handleAsync 更适合——因为无论成功还是失败都要转换为统一的 PutObjectResult 或 S3StorageException。</p>
+<p><strong>Q3:</strong> OutputStreamDownloadSubscriber 为什么要单独优化 FileOutputStream？</p>
+<p><strong>参考:</strong> FileOutputStream.getChannel() 返回与文件直接关联的 FileChannel，可以调用 position()、truncate() 等原生操作。而 Channels.newChannel(OutputStream) 返回的是适配器模式包装的 WritableByteChannel，无法使用 FileChannel 的额外能力。在大文件下载场景中，直接使用 FileChannel 性能更好且功能更完整。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 一行上传
+OssFactory.instance().upload(new File("/tmp/report.pdf"));
+
+完整异步链路:
+1. upload(File) → upload(defaultBucket, file)
+2. File → RandomAccessFile → FileChannel.map() → ByteBuffer
+3. AsyncRequestBody.fromByteBuffer(byteBuffer)
+4. S3TransferManager.upload(UploadRequest)
+   ├─ 小文件(&lt;分段阈值) → putObject (单次 PUT)
+   └─ 大文件(≥分段阈值) → createMultipartUpload
+                           → uploadPart × N (并行)
+                           → completeMultipartUpload
+5. CompletableFuture&lt;CompletedUpload&gt;
+6. .handleAsync((response, error) → {
+     if error → S3StorageException
+     return PutObjectResult(eTag, versionId, ...)
+   }, asyncExecutor)
+7. 返回 PutObjectResult (含文件 URL、ETag 等信息)
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>模块使用 AWS SDK 的 S3TransferManager 而不是直接操作 S3AsyncClient，是因为 TransferManager 封装了分段上传的复杂逻辑——自动判断文件大小、超过阈值时智能分段、并行上传段、失败重试、断点续传。开发者只需调用 upload()，不需要关心文件是 1KB 还是 1GB。这是典型的「让专业的人做专业的事」——AWS SDK 负责传输细节，OSS 模块负责项目化适配。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/transfer/s3/S3TransferManager.html">S3TransferManager API</a> · 入口文件：<code>client/AbstractOssClientImpl.java</code> · <code>io/OutputStreamDownloadSubscriber.java</code> · <code>model/HandleAsyncResult.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解配置热更新与 URL 构建。</div>
+<div class="nav"><a href="01-工厂模式与客户端抽象.html">← 上一课</a><a href="03-配置热更新与URL构建.html">下一课 →</a></div>
+</body>
+</html>

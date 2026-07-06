@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · LogAspect 切面处理全流程：从拦截到发布事件</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · LogAspect 切面处理全流程：从拦截到发布事件 <span class="tag">核心引擎</span></h1>
+
+<div class="mission">
+<b>本节目标</b>：逐行读懂 <code>LogAspect.java</code> 的 276 行代码，理解从 AOP 拦截到 <code>SpringUtils.context().publishEvent()</code> 的完整链路——包括参数收集、异常处理、长度限制、过滤机制的每一个设计决策。
+</div>
+
+<h2>一、LogAspect 的定位：整个模块的「发动机」</h2>
+
+<p>如果把 ruoyi-common-log 模块比作一辆车：</p>
+<ul>
+  <li><code>@Log</code> 注解 = 方向盘（你告诉它去哪）</li>
+  <li><code>LogAspect</code> = 发动机（一切动力来源）</li>
+  <li><code>OperLogEvent</code> = 传送带（把数据运到目的地）</li>
+  <li><code>SysOperLogServiceImpl.recordOper()</code> = 仓库（最终存储）</li>
+</ul>
+
+<p>LogAspect 坐在这条链路的正中间——它拦截被 <code>@Log</code> 标记的方法，收集运行时上下文（IP、用户、参数、结果、耗时），组装成 <code>OperLogEvent</code>，然后通过 Spring 事件机制「发射」出去。后面的监听器只管接收，完全不知道前面发生了什么。</p>
+
+<div class="side">
+<b>一句话定位</b>：<code>LogAspect</code> 是一个 <b>Spring AOP 环绕切面</b>，它把「注解声明 + 运行时上下文收集 + 事件发布」三个动作串联在一起，是整个操作日志模块唯一的调度中心。
+</div>
+
+<h2>二、@AutoConfiguration 标记了什么？为什么不需要 @ComponentScan？</h2>
+
+<p>在 Spring Boot 2.7 之前，要自动注册一个切面，你需要：</p>
+
+<pre><code>// 旧方式：需要 META-INF/spring.factories
+@Configuration
+@ComponentScan("org.dromara.common.log.aspect") // ← 需要注解扫描
+public class LogAutoConfiguration { }</code></pre>
+
+<p>RuoYi-Vue-Plus 用的是 Spring Boot 3.x 的新机制：</p>
+
+<pre><code>@Slf4j
+@Aspect          // ← 告诉 Spring：这是一个切面
+@AutoConfiguration  // ← 替代 @Configuration，自动注册到 Spring 容器
+public class LogAspect { ... }</code></pre>
+
+<table>
+<tr><th>对比项</th><th>旧方式 (@Configuration + @ComponentScan)</th><th>新方式 (@AutoConfiguration)</th></tr>
+<tr><td>注册方式</td><td>需要 spring.factories 或 @ComponentScan</td><td>Spring Boot 自动发现并注册</td></tr>
+<tr><td>文件数量</td><td>需要一个单独的配置类</td><td>切面类自己就是配置入口，少一个文件</td></tr>
+<tr><td>排除控制</td><td>需要 @ConditionalOnProperty 单独声明</td><td>可以用 spring.autoconfigure.exclude 排除</td></tr>
+<tr><td>适用版本</td><td>Spring Boot 2.x</td><td>Spring Boot 3.x（使用了 spring-boot-autoconfigure 的新 SPI）</td></tr>
+</table>
+
+<div class="side">
+<b>关键点</b>：<code>@AutoConfiguration</code> 让 <code>LogAspect</code> 既是切面又是配置类，一个注解干两件事。Spring Boot 3.x 的自动配置机制会自动读取 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件，不需要 <code>@ComponentScan</code> 扫描。
+</div>
+
+<h2>三、切点表达式 "@annotation(controllerLog)" 如何工作</h2>
+
+<p>来看切面的核心入口：</p>
+
+<pre><code>@Around(value = "@annotation(controllerLog)")
+public Object doAround(ProceedingJoinPoint joinPoint, Log controllerLog) throws Throwable {</code></pre>
+
+<p>这个切点表达式的含义：</p>
+<ul>
+  <li><code>@Around</code>：环绕通知，在目标方法执行前后都能插入逻辑</li>
+  <li><code>@annotation(controllerLog)</code>：匹配任何标有 <code>@Log</code> 注解的方法</li>
+  <li>括号内的 <code>controllerLog</code> 是参数名，Spring AOP 会把匹配到的 <code>@Log</code> 注解实例自动注入</li>
+</ul>
+
+<p><strong>实际效果</strong>：当一个 Controller 写这样的代码时——</p>
+
+<pre><code>@Log(title = "用户管理", businessType = BusinessType.DELETE)
+@DeleteMapping("/{userIds}")
+public R&lt;Void&gt; remove(@PathVariable Long[] userIds) {
+    userService.deleteUserByIds(userIds);
+    return R.ok();
+}</code></pre>
+
+<p>AOP 代理会自动拦截：①执行前开秒表 → ②执行目标方法 → ③成功后收集上下文 → ④组装事件 → ⑤发布。如果第②步抛异常，走异常分支。</p>
+
+<h2>四、doAround 方法的双路径：正常返回 vs 异常</h2>
+
+<p>这是整个切面里最精简也最重要的逻辑分叉：</p>
+
+<pre><code>@Around(value = "@annotation(controllerLog)")
+public Object doAround(ProceedingJoinPoint joinPoint, Log controllerLog) throws Throwable {
+    StopWatch stopWatch = new StopWatch();
+    stopWatch.start();
+    try {
+        Object jsonResult = joinPoint.proceed();             // ← 执行目标方法
+        handleLog(joinPoint, controllerLog, null, jsonResult, stopWatch);  // 路径 A
+        return jsonResult;                                    // ← 返回原结果
+    } catch (Exception e) {
+        handleLog(joinPoint, controllerLog, e, null, stopWatch);           // 路径 B
+        throw e;                                               // ← 原样抛出异常
+    }
+}</code></pre>
+
+<div class="flow">用户请求 → Controller方法(@Log标记)
+                │
+                ▼
+        doAround() 开始
+                │
+        StopWatch.start()  ← 开始计时
+                │
+        joinPoint.proceed()  ← 执行真正的业务方法
+           ╱              ╲
+         成功               异常
+          │                 │
+    handleLog(e=null)   handleLog(e=异常)
+    jsonResult=返回值    jsonResult=null
+          │                 │
+    return jsonResult    throw e (原样抛出)
+          │                 │
+    监听器收到事件      监听器收到事件(status=FAIL)
+    状态=SUCCESS        包含错误消息</div>
+
+<p>两个关键设计：</p>
+<ol>
+  <li><strong>不吞异常</strong>：<code>catch(Exception e)</code> 后记录日志，然后 <code>throw e</code> 原样抛出——日志记录失败不影响业务流程。</li>
+  <li><strong>无论成败都记录</strong>：成功时 <code>jsonResult</code> 有值、<code>e</code> 为 null；失败时 <code>jsonResult</code> 为 null、<code>e</code> 有值。两个分支都调用 <code>handleLog</code>，只是参数不同。</li>
+</ol>
+
+<h2>五、handleLog 的 7 个步骤详细拆解</h2>
+
+<pre><code>protected void handleLog(final JoinPoint joinPoint, Log controllerLog,
+                         final Exception e, Object jsonResult, StopWatch stopWatch) {
+    try {
+        // ======== 7 个步骤，按顺序执行 ========
+    } catch (Exception exp) {
+        log.error("记录操作日志异常", exp);  // ← 最外层兜底
+    }
+}</code></pre>
+
+<p>注意最外层的 try-catch：即使内部任何一步抛出异常（比如获取 LoginUser 时 Redis 挂了），也只打 error 日志，不会把异常抛给调用方——这是 <strong>日志记录失败不影响业务</strong> 的底线保障。</p>
+
+<div class="step">
+<span class="num">1</span><strong>创建 OperLogEvent，默认 SUCCESS</strong>
+<span class="where">handleLog() 第 91-93 行</span>
+<pre><code>OperLogEvent operLog = new OperLogEvent();
+operLog.setStatus(BusinessStatus.SUCCESS.ordinal());  // 乐观假设：默认成功</code></pre>
+<p>先创建一个空事件对象，状态默认为 <code>SUCCESS</code>（ordinal=0）。这是一种「乐观假设」模式——先默认成功，后面如果有异常再改为 <code>FAIL</code>。</p>
+</div>
+
+<div class="step">
+<span class="num">2</span><strong>从 ServletUtils 获取 HttpServletRequest，提取 IP 和 URL</strong>
+<span class="where">handleLog() 第 94-98 行</span>
+<pre><code>HttpServletRequest request = ServletUtils.getRequest();  // 从 RequestContextHolder 取
+String ip = ServletUtils.getClientIP();                   // 处理代理头 X-Forwarded-For
+operLog.setOperIp(ip);
+operLog.setOperUrl(limit(request.getRequestURI(), MAX_URL_LENGTH));  // 截断到 255 字符
+operLog.setClientKey(limit(request.getHeader(LoginHelper.CLIENT_KEY), MAX_CLIENT_KEY_LENGTH));</code></pre>
+<p><code>ServletUtils.getRequest()</code> 底层是 <code>RequestContextHolder.getRequestAttributes()</code>——通过 ThreadLocal 拿到当前线程绑定的 HttpServletRequest。不需要传参，因为 Web 请求在单线程内处理。</p>
+<p>IP 获取会处理多层代理场景（nginx → tomcat），按优先级检查 X-Forwarded-For、Proxy-Client-IP、WL-Proxy-Client-IP 等头。</p>
+</div>
+
+<div class="step">
+<span class="num">3</span><strong>从 LoginHelper 获取当前登录用户信息（9 个字段）</strong>
+<span class="where">handleLog() 第 100-112 行</span>
+<pre><code>LoginUser loginUser = LoginHelper.getLoginUser();
+if (ObjectUtil.isNotNull(loginUser)) {
+    operLog.setOperName(loginUser.getUsername());     // ① 操作账号
+    operLog.setUserId(loginUser.getUserId());          // ② 用户ID
+    operLog.setDeptId(loginUser.getDeptId());          // ③ 部门ID
+    operLog.setDeptName(loginUser.getDeptName());      // ④ 部门名称
+    operLog.setDeviceType(loginUser.getDeviceType());   // ⑤ 设备类型(PC/APP/...)
+    operLog.setBrowser(loginUser.getBrowser());         // ⑥ 浏览器
+    operLog.setOs(loginUser.getOs());                   // ⑦ 操作系统
+    if (StringUtils.isBlank(operLog.getClientKey())) {
+        operLog.setClientKey(loginUser.getClientKey()); // ⑧ 客户端标识(fallback)
+    }
+}
+// ⑨ 注意：第 2 步已从请求头设置 clientKey，这里只在为空时才用登录信息兜底</code></pre>
+<p><code>LoginHelper.getLoginUser()</code> 底层通过 Sa-Token 的 <code>StpUtil.getTokenSession()</code> 拿当前登录用户——同样基于 ThreadLocal。如果用户未登录（比如公开接口），<code>loginUser</code> 为 null，这些字段留空。</p>
+</div>
+
+<div class="step">
+<span class="num">4</span><strong>异常处理：有异常则标记 FAIL + 记录错误消息</strong>
+<span class="where">handleLog() 第 114-117 行</span>
+<pre><code>if (e != null) {
+    operLog.setStatus(BusinessStatus.FAIL.ordinal());   // 状态改为 FAIL(1)
+    operLog.setErrorMsg(limit(e.getMessage(), MAX_CONTENT_LENGTH));  // 错误消息截断到 3800
+}</code></pre>
+<p>注意：异常消息也做了截断保护。某些框架的异常消息可能非常长（比如 SQL 异常带完整 SQL），截断到 3800 字符防止数据库字段溢出。</p>
+</div>
+
+<div class="step">
+<span class="num">5</span><strong>设置方法名（全限定类名.方法名()）</strong>
+<span class="where">handleLog() 第 118-121 行</span>
+<pre><code>String className = joinPoint.getTarget().getClass().getName();
+String methodName = joinPoint.getSignature().getName();
+operLog.setMethod(className + "." + methodName + "()");
+// 例：org.dromara.system.controller.system.SysUserController.remove()</code></pre>
+<p>同时设置请求方式（GET/POST/PUT/DELETE）：</p>
+<pre><code>operLog.setRequestMethod(request.getMethod());</code></pre>
+</div>
+
+<div class="step">
+<span class="num">6</span><strong>getControllerMethodDescription：从注解属性填充事件</strong>
+<span class="where">getControllerMethodDescription() 第 146-162 行</span>
+<pre><code>public void getControllerMethodDescription(JoinPoint joinPoint, Log log,
+        OperLogEvent operLog, Object jsonResult) {
+    operLog.setBusinessType(log.businessType().ordinal());     // 业务类型枚举序号
+    operLog.setTitle(log.title());                             // 模块标题
+    operLog.setOperatorType(log.operatorType().ordinal());     // 操作人类别序号
+    if (log.isSaveRequestData()) {
+        setRequestValue(joinPoint, operLog, log.excludeParamNames());  // ⑤ 请求参数
+    }
+    if (log.isSaveResponseData() && ObjectUtil.isNotNull(jsonResult)) {
+        operLog.setJsonResult(limit(JsonUtils.toJsonString(jsonResult), MAX_CONTENT_LENGTH));  // ⑥ 响应结果
+    }
+}</code></pre>
+<p>这个方法把 <code>@Log</code> 注解声明的静态属性（title、businessType、operatorType）和运行时动态数据（请求参数、响应结果）合并到事件中。注意最后的控制开关：<code>isSaveRequestData</code> 和 <code>isSaveResponseData</code> 默认为 <code>true</code>，可以关闭以保护敏感数据。</p>
+</div>
+
+<div class="step">
+<span class="num">7</span><strong>停止计时，设置 costTime，发布事件</strong>
+<span class="where">handleLog() 第 126-130 行</span>
+<pre><code>stopWatch.stop();
+operLog.setCostTime(stopWatch.getDuration().toMillis());  // 耗时（毫秒）
+SpringUtils.context().publishEvent(operLog);               // 发布到 Spring 事件总线</code></pre>
+<p>最后一步：关闭秒表，计算毫秒级耗时，然后通过 <code>SpringUtils.context().publishEvent()</code> 把事件发布到 Spring 的 ApplicationEventMulticaster。所有加了 <code>@EventListener</code> 的方法会异步收到这个事件（如果标注了 <code>@Async</code>）。</p>
+</div>
+
+<h2>六、参数收集逻辑详解：paramsMap vs argsArrayToString</h2>
+
+<p>这是整个切面里最复杂的逻辑分支，定在 <code>setRequestValue()</code> 方法中：</p>
+
+<pre><code>private void setRequestValue(JoinPoint joinPoint, OperLogEvent operLog,
+                             String[] excludeParamNames) {
+    Map&lt;String, String&gt; paramsMap = ServletUtils.getParamMap(ServletUtils.getRequest());
+    String requestMethod = operLog.getRequestMethod();
+    if (MapUtil.isEmpty(paramsMap)
+        && StringUtils.equalsAny(requestMethod, HttpMethod.PUT.name(),
+                                 HttpMethod.POST.name(), HttpMethod.DELETE.name())) {
+        // 路径 A：paramsMap 为空 + 请求方式是 PUT/POST/DELETE
+        String params = argsArrayToString(joinPoint.getArgs(), excludeParamNames);
+        operLog.setOperParam(limit(params, MAX_CONTENT_LENGTH));
+    } else {
+        // 路径 B：paramsMap 不为空，或 GET 请求
+        MapUtil.removeAny(paramsMap, SystemConstants.EXCLUDE_PROPERTIES);
+        MapUtil.removeAny(paramsMap, excludeParamNames);
+        operLog.setOperParam(limit(JsonUtils.toJsonString(paramsMap), MAX_CONTENT_LENGTH));
+    }
+}</code></pre>
+
+<p><strong>为什么有两条路径？</strong></p>
+
+<table>
+<tr><th>场景</th><th>走哪条路</th><th>原因</th></tr>
+<tr><td>GET 请求（参数在 URL 上）</td><td>路径 B（paramsMap）</td><td>GET 参数自然在 request.getParameterMap() 中，用 paramsMap 即可</td></tr>
+<tr><td>POST 表单提交</td><td>路径 B（paramsMap）</td><td>表单数据也在 request.getParameterMap() 中</td></tr>
+<tr><td>POST JSON（@RequestBody）</td><td>路径 A（argsArrayToString）</td><td>JSON 体不在 request.getParameterMap() 中，只能从方法参数里取</td></tr>
+<tr><td>PUT JSON（@RequestBody）</td><td>路径 A（argsArrayToString）</td><td>同上</td></tr>
+<tr><td>DELETE JSON（@RequestBody）</td><td>路径 A（argsArrayToString）</td><td>同上</td></tr>
+</table>
+
+<p><strong>核心判断逻辑</strong>：<code>paramsMap</code> 为空 <strong>并且</strong> 请求方式是 PUT/POST/DELETE 时，说明请求体是 JSON（没有出现在 URL 参数中），需要从方法参数序列化。否则直接用 paramsMap。</p>
+
+<h2>七、参数过滤机制：isFilterObject / isFilterValue</h2>
+
+<p><code>argsArrayToString()</code> 在拼接参数时会调用 <code>isFilterObject()</code> 过滤不合适的对象：</p>
+
+<pre><code>public boolean isFilterObject(final Object o) {
+    Class&lt;?&gt; clazz = o.getClass();
+    if (clazz.isArray()) {
+        if (MultipartFile.class.isAssignableFrom(clazz.getComponentType())) {
+            return true;  // ← MultipartFile[] 直接过滤
+        }
+        // 递归检查数组中的每个元素
+        for (int i = 0; i &lt; Array.getLength(o); i++) {
+            if (isFilterValue(Array.get(o, i))) return true;
+        }
+        return false;
+    } else if (Collection.class.isAssignableFrom(clazz)) {
+        // 遍历集合的每个元素
+        for (Object value : (Collection&lt;?&gt;) o) {
+            if (isFilterValue(value)) return true;
+        }
+    } else if (Map.class.isAssignableFrom(clazz)) {
+        // 遍历 Map 的每个 value
+        for (Object value : ((Map&lt;?,&gt;) o).values()) {
+            if (isFilterValue(value)) return true;
+        }
+    }
+    return isFilterValue(o);  // 最终判断单个对象
+}
+
+private boolean isFilterValue(Object value) {
+    return value instanceof MultipartFile       // 文件上传对象
+        || value instanceof HttpServletRequest   // 请求对象（包含大量不需要的信息）
+        || value instanceof HttpServletResponse  // 响应对象
+        || value instanceof BindingResult;       // 参数校验结果
+}</code></pre>
+
+<p><strong>为什么过滤这 4 种类型？</strong></p>
+
+<table>
+<tr><th>过滤类型</th><th>原因</th></tr>
+<tr><td><code>MultipartFile</code></td><td>文件上传是二进制流，序列化无意义且可能引起 OOM；数组场景还做了特殊处理——如果数组组件类型就是 MultipartFile，整组跳过递归</td></tr>
+<tr><td><code>HttpServletRequest</code></td><td>请求对象内部关联大量容器对象（Session、ServletContext、RequestDispatcher），序列化会引发循环引用或输出大量无用数据</td></tr>
+<tr><td><code>HttpServletResponse</code></td><td>同上，响应对象也不应被记录</td></tr>
+<tr><td><code>BindingResult</code></td><td>Spring MVC 参数校验的结果对象，里面包含校验错误信息，但业务日志关注的是业务参数而非校验元数据</td></tr>
+</table>
+
+<div class="side">
+<b>设计启示</b>：这个方法对数组、集合、Map 做了三层递归检查——即使你传了一个 <code>List&lt;HttpServletRequest&gt;</code> 进来，它也能在遍历时发现并过滤。这是一种「防御性编程」，确保无论参数结构多复杂，不该记录的对象一个都不会漏。
+</div>
+
+<h2>八、excludeParamNames 的工作原理</h2>
+
+<p><code>@Log</code> 注解有一个 <code>excludeParamNames</code> 属性：</p>
+
+<pre><code>@Log(title = "用户管理", businessType = BusinessType.INSERT,
+     excludeParamNames = {"avatar", "remark"})  // ← 排除头像和备注
+@PostMapping
+public R&lt;Void&gt; add(@Validated @RequestBody SysUserBo user) { ... }</code></pre>
+
+<p>排除流程分两步：</p>
+<ol>
+  <li><strong>系统级排除</strong>：<code>SystemConstants.EXCLUDE_PROPERTIES = {"password", "oldPassword", "newPassword", "confirmPassword"}</code>——所有日志默认排除密码字段</li>
+  <li><strong>注解级排除</strong>：<code>excludeParamNames</code> 属性指定的字段名</li>
+</ol>
+
+<p>在路径 B（paramsMap）中，两者合并后用 <code>MapUtil.removeAny()</code> 删除；在路径 A（argsArrayToString）中，两者合并后传给 <code>JsonUtils.toJsonStringExcludeFields()</code> 作为排除字段列表。</p>
+
+<div class="side">
+<b>安全提醒</b>：密码类字段（password、oldPassword、newPassword、confirmPassword）在 <code>SystemConstants.EXCLUDE_PROPERTIES</code> 中硬编码，无论你写不写注解都会自动排除。这是一种「默认安全」策略——即使开发者忘记排除密码，框架也不会把密码记录到日志表中。
+</div>
+
+<h2>九、三个长度限制的设计考量</h2>
+
+<table>
+<tr><th>常量</th><th>值</th><th>限制对象</th><th>设计考量</th></tr>
+<tr><td><code>MAX_URL_LENGTH</code></td><td>255</td><td>请求URL</td><td>数据库 <code>varchar(255)</code> 字段的常见上限；URL 超过 255 字符通常意味着带了大量 query 参数，记录完整 URL 意义不大</td></tr>
+<tr><td><code>MAX_CLIENT_KEY_LENGTH</code></td><td>32</td><td>客户端标识</td><td>ClientKey 设计为短标识（如 "eip"、"pc"），32 字符足够且防止异常请求头注入超长值</td></tr>
+<tr><td><code>MAX_CONTENT_LENGTH</code></td><td>3800</td><td>请求参数、响应结果、错误消息</td><td>最大 3800 字符——平衡了「能看到完整请求」和「不撑爆数据库」两个需求。MySQL TEXT 类型可存 65535 字符，3800 是保守上限，考虑万一用了 <code>varchar</code> 存储也能兼容</td></tr>
+</table>
+
+<p>截断工具方法：</p>
+
+<pre><code>private String limit(String value, int maxLength) {
+    return StringUtils.substring(value, 0, maxLength);
+}</code></pre>
+
+<p>简单但有效——如果 <code>value</code> 为 null 则返回空字符串，不会抛 NPE。</p>
+
+<h2>十、异常安全：外层 try-catch 保护</h2>
+
+<p>回到 <code>handleLog</code> 的整体结构，最外层有一个容易被忽略的 try-catch：</p>
+
+<pre><code>protected void handleLog(...) {
+    try {
+        // ... 7 个步骤的全部逻辑 ...
+    } catch (Exception exp) {
+        log.error("记录操作日志异常", exp);  // ← 唯一的处理：打日志
+    }
+}</code></pre>
+
+<p>这意味着什么？如果在第 2 步获取 LoginUser 时 Redis 超时了，在第 6 步序列化 JSON 时循环引用了，在任何一步出问题——最坏的情况就是「日志没记录成功」，业务请求照常返回。</p>
+
+<p><strong>这是一个经典的「非功能需求不应影响功能需求」的设计</strong>。操作日志是辅助功能（横切关注点），它的失败不应该导致用户的业务操作失败。用户删了一条数据，数据确实删了，只是日志表里没记录下来——这是可以接受的权衡。</p>
+
+<h2>十一、Loader 与运行时上下文获取</h2>
+
+<p>LogAspect 依赖三个「数据源」来获取运行时信息，它们各自从不同的地方拿数据：</p>
+
+<table>
+<tr><th>工具类</th><th>获取的信息</th><th>数据来源</th><th>底层机制</th></tr>
+<tr>
+  <td><code>ServletUtils</code></td>
+  <td>HttpServletRequest、IP、URI、请求参数</td>
+  <td><code>RequestContextHolder</code></td>
+  <td>ThreadLocal 绑定——每个请求线程在进入 DispatcherServlet 时，Spring 把 request 绑定到线程的 ThreadLocal 中</td>
+</tr>
+<tr>
+  <td><code>LoginHelper</code></td>
+  <td>登录用户（LoginUser）、客户端标识</td>
+  <td>Sa-Token 的 <code>StpUtil</code></td>
+  <td>Sa-Token 在用户登录时将 LoginUser 存入 Redis（key=token），通过当前线程的 token 取值。本质上也是 ThreadLocal（token 绑定在请求上下文中）</td>
+</tr>
+<tr>
+  <td><code>SpringUtils</code></td>
+  <td>ApplicationContext（用于 publishEvent）</td>
+  <td><code>ApplicationContextAware</code></td>
+  <td>Spring 容器启动时回调 setApplicationContext()，静态持有 ApplicationContext 引用。不依赖线程，全局唯一</td>
+</tr>
+</table>
+
+<div class="side">
+<b>为什么这些工具类可以「无参调用」？</b><br>
+三个工具类共享一个前提假设：<b>请求在单线程内处理</b>。Tomcat 线程池中，每个请求独占一个线程，ThreadLocal 变量自然不会串。但要注意：如果你在业务代码中新开了线程，ThreadLocal 就失效了——这也是为什么 <code>@Async</code> 的监听器需要重新获取 request 信息，不能直接用 ThreadLocal 数据。
+</div>
+
+<h2>十二、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. doAround() 方法中，如果目标方法抛出异常，handleLog 会被调用吗？</p>
+<span class="opt">A. 不会，异常直接抛出</span>
+<span class="opt">B. 会，且传入 e=null, jsonResult=null</span>
+<span class="opt">C. 会，且传入 e=异常对象, jsonResult=null</span>
+<span class="opt">D. 只有 BusinessException 才会调用</span>
+<details><summary>看答案</summary><b>C</b>。catch 块中调用 <code>handleLog(joinPoint, controllerLog, e, null, stopWatch)</code>——异常作为第三个参数传入，jsonResult 传 null。然后 <code>throw e</code> 原样抛出。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. POST JSON 请求（@RequestBody）的参数为什么走 argsArrayToString 而不是 paramsMap？</p>
+<span class="opt">A. JSON 格式复杂，paramsMap 无法序列化</span>
+<span class="opt">B. @RequestBody 的参数不在 request.getParameterMap() 中，paramsMap 为空</span>
+<span class="opt">C. 这是一个 bug，应该走 paramsMap</span>
+<span class="opt">D. argsArrayToString 效率更高</span>
+<details><summary>看答案</summary><b>B</b>。@RequestBody 将 JSON 反序列化为方法参数，这个数据不会出现在 Servlet 的 ParameterMap 中。所以 <code>MapUtil.isEmpty(paramsMap)</code> 为 true，加上请求方式是 POST/PUT/DELETE，触发 argsArrayToString 路径直接从方法参数序列化。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 如果 handleLog 内部的 7 个步骤中某一步抛出了异常，会发生什么？</p>
+<span class="opt">A. 异常会中断业务请求，用户看到 500 错误</span>
+<span class="opt">B. 异常被 catch 后打印 error 日志，业务请求不受影响</span>
+<span class="opt">C. 异常被 catch 后静默忽略，日志也不打</span>
+<span class="opt">D. 只有 RuntimeException 会被捕获</span>
+<details><summary>看答案</summary><b>B</b>。handleLog 最外层的 <code>catch(Exception exp)</code> 捕获所有异常，只执行 <code>log.error(...)</code> 打印日志，不会向上抛出。业务请求正常返回。这是「日志失败不影响业务」的底线设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. <code>excludeParamNames</code> 和 <code>SystemConstants.EXCLUDE_PROPERTIES</code> 是什么关系？</p>
+<span class="opt">A. 互斥，二选一使用</span>
+<span class="opt">B. 合并使用：系统级排除 + 注解级排除都会生效</span>
+<span class="opt">C. excludeParamNames 优先级更高，覆盖系统级</span>
+<span class="opt">D. 系统级只在 paramsMap 路径生效</span>
+<details><summary>看答案</summary><b>B</b>。在两条路径中都是合并使用。在 paramsMap 路径中用 MapUtil.removeAny 分别删除；在 argsArrayToString 路径中用 ArrayUtil.addAll 合并后传给序列化方法。密码字段永远不会出现在操作日志中。</details>
+</div>
+
+<details>
+<summary>进阶思考：为什么用 ordinal() 存枚举而不是 name()？</summary>
+存 <code>ordinal()</code>（整数）比存 <code>name()</code>（字符串）有两个好处：①数据库存储更紧凑，int 占 4 字节，varchar 至少占 10+ 字节；②查询效率更高，整型索引比字符串索引快。代价是枚举顺序不能随意调整——如果有人在中间插入新枚举值，历史数据的 ordinal 就对不上了。所以你会看到 <code>BusinessType</code> 只有 10 个值且注释写了序号（0 其它、1 新增、2 修改……），这是一种约定大于配置的策略。
+</details>
+
+<div class="cite">源码位置：<code>ruoyi-common/ruoyi-common-log/src/main/java/org/dromara/common/log/aspect/LogAspect.java</code>——276 行代码，是 ruoyi-common-log 模块中最核心、最值得精读的文件。</div>
+
+<div class="reminder">学完本课，建议打开 IDE 对照 <code>LogAspect.java</code> 实际代码再看一遍。重点关注 <code>setRequestValue</code> 的条件分支和 <code>isFilterObject</code> 的递归逻辑——这两段代码在实际调试日志记录问题时最常被问到。下一课我们做实战：自定义事件、监听器和扩展。</div>
+
+<div class="nav">课程 0003 / 使命：读懂 ruoyi-common-log 操作日志模块 · 下一课预告：实战——自定义日志事件、监听器与扩展</div>
+
+</body>
+</html>

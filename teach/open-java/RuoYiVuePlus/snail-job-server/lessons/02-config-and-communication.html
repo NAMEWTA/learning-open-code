@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第2课：配置体系与通信模型</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .nav .prev, .nav .next { font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1.2rem; margin: 1rem 0; font-family: monospace; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; color: #333; }
+  .config-block { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.82em; line-height: 1.5; margin: 1rem 0; }
+  .config-block .key { color: #e06c75; }
+  .config-block .val { color: #98c379; }
+  .config-block .comment { color: #5c6370; }
+</style>
+</head>
+<body>
+
+<h1>第2课：配置体系与通信模型</h1>
+
+<blockquote>
+<strong>本课目标：</strong>逐段拆解 <code>application.yml</code> + <code>application-dev.yml</code> 的核心配置项，理解服务端的双端口通信模型、MyBatis-Plus 持久化策略，以及 Dockerfile 的 JVM 调优方案。学完本课，你能独立看懂并调整 SnailJob 服务端的所有关键配置。
+</blockquote>
+
+<h2>1. application.yml：全局配置骨架</h2>
+
+<h3>1.1 服务端口与上下文路径</h3>
+
+<pre>server:
+  port: <span style="color:#98c379;">8800</span>
+  servlet:
+    context-path: <span style="color:#98c379;">/snail-job</span></pre>
+
+<p>服务端 HTTP 运行在 <span class="keyword">8800 端口</span>，所有 HTTP 请求前缀为 <code>/snail-job</code>。这意味着 Dashboard 管理界面访问地址为 <code>http://localhost:8800/snail-job/</code>。</p>
+
+<div class="warn">
+<strong>注意：</strong>8800 是 <strong>HTTP 端口</strong>（提供 Dashboard 管理界面和 API），不是客户端连接端口。客户端通过 <strong>17888 Netty 端口</strong>与服务端通信（见下文）。
+</div>
+
+<h3>1.2 静态资源托管</h3>
+
+<pre>spring:
+  web:
+    resources:
+      static-locations: <span style="color:#98c379;">classpath:admin/</span></pre>
+
+<p>Dashboard 管理后台的静态页面、JS、CSS 由 <code>snail-job-server-starter</code> 内置，存放在 <code>classpath:admin/</code> 下。Spring Boot 从此路径加载前端资源，无需额外配置 Nginx。</p>
+
+<h3>1.3 MyBatis-Plus 持久化</h3>
+
+<pre>mybatis-plus:
+  typeAliasesPackage: <span style="color:#98c379;">com.aizuda.snailjob.template.datasource.persistence.po</span>
+  global-config:
+    db-config:
+      where-strategy: <span style="color:#98c379;">NOT_EMPTY</span>
+      logic-delete-value: <span style="color:#d19a66;">1</span>
+      logic-not-delete-value: <span style="color:#d19a66;">0</span>
+  configuration:
+    map-underscore-to-camel-case: <span style="color:#56b6c2;">true</span></pre>
+
+<p>关键点是 <code>typeAliasesPackage</code> 指向 <strong>SnailJob 框架内置的 PO 实体包</strong>——不是 RuoYi 项目自己写的类。这些 PO 对应 SnailJob 的调度元数据表：任务定义、重试记录、调度配置、工作流 DAG、节点信息等。服务端通过这些 PO 管理 MySQL 中的调度元数据。</p>
+
+<div class="tip">
+<strong>设计意图：</strong>SnailJob 框架将持久化层放在 <code>snail-job-template</code> 模块中（服务端和客户端共享），通过 MyBatis-Plus 自动映射。RuoYi 项目只需配置好数据源，SnailJob 启动时会自动创建/更新所需的数据库表。
+</div>
+
+<h2>2. application-dev.yml：环境专属配置</h2>
+
+<h3>2.1 数据源</h3>
+
+<pre>spring:
+  datasource:
+    type: <span style="color:#98c379;">com.zaxxer.hikari.HikariDataSource</span>
+    url: <span style="color:#98c379;">jdbc:mysql://localhost:3306/ry-vue?...</span>
+    hikari:
+      minimum-idle: <span style="color:#d19a66;">10</span>
+      maximum-pool-size: <span style="color:#d19a66;">20</span>
+      idle-timeout: <span style="color:#d19a66;">600000</span>
+      max-lifetime: <span style="color:#d19a66;">900000</span></pre>
+
+<p>使用 HikariCP 连接池，连接到与主应用相同的 <code>ry-vue</code> 数据库。SnailJob 的调度元数据表与 RuoYi 业务表<strong>共存于同一数据库</strong>，通过表名前缀（如 <code>sj_</code>）区分。</p>
+
+<h3>2.2 SnailJob 服务端核心配置（逐项解读）</h3>
+
+<table>
+  <tr><th>配置项</th><th>值</th><th>含义</th></tr>
+  <tr>
+    <td><code>server-port</code></td>
+    <td>17888</td>
+    <td><strong>Netty 通信端口</strong>。客户端（ruoyi-common-job）通过此端口上报心跳、任务执行结果、远程日志</td>
+  </tr>
+  <tr>
+    <td><code>retry-pull-page-size</code></td>
+    <td>100</td>
+    <td>每批次从数据库拉取的重试任务条数。值越大吞吐越高，但单次查询耗时增加</td>
+  </tr>
+  <tr>
+    <td><code>log-storage</code></td>
+    <td>7</td>
+    <td>任务执行日志保留天数，超期自动清理</td>
+  </tr>
+  <tr>
+    <td><code>merge-log-days</code></td>
+    <td>1</td>
+    <td>合并日志的天数窗口（将多条日志合并为一条保存）</td>
+  </tr>
+  <tr>
+    <td><code>merge-log-num</code></td>
+    <td>500</td>
+    <td>合并日志的最大条数阈值</td>
+  </tr>
+  <tr>
+    <td><code>bucket-total</code></td>
+    <td>128</td>
+    <td><strong>分桶总数</strong>。所有任务被哈希分配到 128 个桶，每个桶由一个 Akka Actor 负责调度。影响负载均衡粒度</td>
+  </tr>
+  <tr>
+    <td><code>load-balance-cycle-time</code></td>
+    <td>10 (秒)</td>
+    <td>负载均衡周期。每 10 秒检查一次各桶的负载，在服务端节点间重新分配</td>
+  </tr>
+  <tr>
+    <td><code>retry-max-pull-parallel</code></td>
+    <td>2</td>
+    <td>重试任务拉取的并行度（并发拉取线程数）</td>
+  </tr>
+  <tr>
+    <td><code>summary-day</code></td>
+    <td>7</td>
+    <td>Dashboard 仪表盘数据容错天数</td>
+  </tr>
+</table>
+
+<div class="tip">
+<strong>面试常见问题：</strong>"bucket-total 128 是什么意思？" —— 它是 SnailJob 分布式调度的核心概念。所有任务按一致性哈希分散到 128 个桶中，每个桶对应一个 Akka Actor。服务端集群中的节点通过 Actor 协议协商各自负责哪些桶，从而实现<strong>无中心化的负载均衡</strong>。桶数越大，负载分配越均匀，但 Actor 调度开销也越大。128 是官方推荐的平衡点。
+</div>
+
+<h3>2.3 Spring Boot Admin 客户端</h3>
+
+<pre>spring.boot.admin.client:
+  enabled: <span style="color:#56b6c2;">true</span>
+  url: <span style="color:#98c379;">http://localhost:9090/admin</span>
+  instance:
+    metadata:
+      username: <span style="color:#98c379;">${spring.boot.admin.client.username}</span>
+      userpassword: <span style="color:#98c379;">${spring.boot.admin.client.password}</span>
+  username: <span style="color:#98c379;">@monitor.username@</span>
+  password: <span style="color:#98c379;">@monitor.password@</span></pre>
+
+<p>将本服务端注册到 Spring Boot Admin 监控中心（默认 <code>localhost:9090/admin</code>）。<code>metadata</code> 中的用户名密码用于 Admin Server 回调 Actuator 端点时的 Basic Auth 认证（详见第3课）。</p>
+
+<h2>3. 双端口通信模型</h2>
+
+<p>SnailJob 服务端同时暴露两个端口，各司其职：</p>
+
+<div class="arch-diagram">                    ┌─────────────────────────────────┐
+                    │     SnailJob 服务端              │
+                    │                                 │
+  浏览器 / Admin ───│─► :8800  HTTP (Tomcat)          │
+                    │    ├── Dashboard 管理界面         │
+                    │    ├── REST API                  │
+                    │    └── Actuator 健康端点          │
+                    │                                 │
+  ruoyi-common-job ─│─► :17888  TCP (Netty)           │
+  (客户端)           │    ├── 心跳上报                  │
+                    │    ├── 任务执行结果回传            │
+                    │    ├── 远程日志 (LogbackAppender)  │
+                    │    └── 任务分派指令接收            │
+                    └─────────────────────────────────┘</div>
+
+<h3>Dockerfile 中的双端口暴露</h3>
+
+<pre>FROM bellsoft/liberica-openjdk-rocky:<span style="color:#d19a66;">21.0.11</span>-cds
+
+<span style="color:#5c6370;"># 两个端口同时暴露</span>
+EXPOSE <span style="color:#d19a66;">8800</span>
+EXPOSE <span style="color:#d19a66;">17888</span>
+
+ENTRYPOINT java \
+           -Djava.security.egd=file:/dev/./urandom \
+           -XX:+HeapDumpOnOutOfMemoryError \
+           -XX:+UseZGC \          <span style="color:#5c6370;">← 低延迟 ZGC</span>
+           ${JAVA_OPTS} \
+           -jar app.jar</pre>
+
+<p>Dockerfile 使用 BellSoft Liberica JDK 21 + <strong>ZGC</strong>（低延迟垃圾收集器），这对调度系统（对延迟敏感）很重要。两个 EXPOSE 指令确保容器化部署时 8800 和 17888 端口均可被外部访问。</p>
+
+<h2>4. 自我检测</h2>
+
+<ol>
+  <li>8800 和 17888 端口分别用于什么通信？为什么需要两个端口？</li>
+  <li><code>bucket-total: 128</code> 和 <code>load-balance-cycle-time: 10</code> 之间有什么关系？</li>
+  <li>MyBatis-Plus 的 <code>typeAliasesPackage</code> 为什么指向 <code>com.aizuda.snailjob.template.datasource.persistence.po</code> 而不是 RuoYi 项目自己的包？</li>
+  <li>Dockerfile 中使用 ZGC 的原因是什么？</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：
+  <a href="https://snailjob.io/docs/" target="_blank">SnailJob 官方文档 - 服务端配置</a> ·
+  <a href="https://baomidou.com/reference/configuration/" target="_blank">MyBatis-Plus 配置参考</a> ·
+  <a href="https://docs.spring-boot-admin.com/current/" target="_blank">Spring Boot Admin 文档</a>
+</div>
+
+<div class="nav">
+  <a class="prev" href="01-server-architecture-and-startup.html">← 上一课：服务端架构与启动原理</a>
+  <a class="next" href="03-security-and-logging.html">下一课：安全防护与日志体系 →</a>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师，可以深入解释每个配置项的参数调优策略或通信协议细节。</div>
+</body>
+</html>

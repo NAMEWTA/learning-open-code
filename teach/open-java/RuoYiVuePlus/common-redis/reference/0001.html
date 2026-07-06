@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 01 · ruoyi-common-redis 模块全景</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+<h1>速查 01 · ruoyi-common-redis 模块全景</h1>
+<p class="a">配套课程：<code>lessons/0001.html</code> · 使命：全面读懂 ruoyi-common-redis 缓存服务模块</p>
+
+<h2>一句话定位</h2>
+<div class="chain">它是 <b>Redisson 的业务封装层</b>：把偏底层的 Redisson 包装成 RuoYi 业务可直接用的<br>「缓存 / 限流 / 防重 / 分布式队列 / 发号器 / 原子值」等开箱能力。</div>
+
+<h2>5 大区域 + 关键类</h2>
+<table>
+<tr><th>区域</th><th>职责</th><th>关键类</th></tr>
+<tr><td>config 配置</td><td>启动装配，定地基规则</td><td><code>RedisConfig</code>(序列化/前缀/单机集群)、<code>CacheConfig</code>、<code>RateLimiterConfig</code>、<code>IdempotentConfig</code>、<code>RedissonProperties</code></td></tr>
+<tr><td>handler 处理器</td><td>挂在框架扩展点的钩子</td><td><code>KeyPrefixHandler</code>(key 加/去前缀)、<code>RedisExceptionHandler</code>(兜 Lock4j 锁失败)</td></tr>
+<tr><td>aspectj/annotation 切面+注解</td><td>把注解变成拦截行为</td><td><code>@RateLimiter</code>+<code>RateLimiterAspect</code>、<code>@RepeatSubmit</code>+<code>RepeatSubmitAspect</code>、<code>LimitType</code></td></tr>
+<tr><td>manager 缓存管理</td><td>二级缓存核心</td><td><code>PlusSpringCacheManager</code>、<code>CaffeineCacheDecorator</code></td></tr>
+<tr><td>utils 工具</td><td>业务最常用入口</td><td><code>RedisUtils</code>、<code>CacheUtils</code>、<code>QueueUtils</code>、<code>SequenceUtils</code></td></tr>
+</table>
+
+<h2>四个工具类怎么选</h2>
+<table>
+<tr><th>用它</th><th>场景</th><th>底层对象</th></tr>
+<tr><td><code>RedisUtils</code></td><td>裸操作：存取对象/集合/Map、过期、限流、发布订阅、原子计数</td><td>RBucket/RList/RSet/RMap/RAtomicLong/RTopic</td></tr>
+<tr><td><code>CacheUtils</code></td><td>操作 <code>@Cacheable</code> 那套 Spring Cache 命名空间</td><td>Spring CacheManager</td></tr>
+<tr><td><code>QueueUtils</code></td><td>轻量分布式队列（普通/优先级/订阅消费）</td><td>RBlockingQueue</td></tr>
+<tr><td><code>SequenceUtils</code></td><td>分布式唯一单号，如 P20260630000001</td><td>RIdGenerator</td></tr>
+</table>
+
+<h2>RedisConfig 三处定制（必记）</h2>
+<ul>
+<li><b>序列化</b> <code>CompositeCodec</code>：key=String（cli 可读）、value=JSON（存复杂对象）</li>
+<li><b>前缀</b> <code>setNameMapper(KeyPrefixHandler)</code>：所有 key 自动加项目前缀，业务无感</li>
+<li><b>双模式</b>：<code>singleServerConfig</code>/<code>clusterServersConfig</code> 哪个非空用哪个</li>
+<li><b>安全</b>：Jackson 3.x 用 <code>BasicPolymorphicTypeValidator</code> 防反序列化漏洞（建议改包名白名单）</li>
+</ul>
+
+<h2>两个注解对比</h2>
+<table>
+<tr><th></th><th><code>@RateLimiter</code></th><th><code>@RepeatSubmit</code></th></tr>
+<tr><td>意图</td><td>控访问频率（防刷爆）</td><td>防同一操作重复提交（防数据错）</td></tr>
+<tr><td>底层</td><td>Redisson RRateLimiter 令牌桶</td><td>setObjectIfAbsent（SETNX+过期）</td></tr>
+<tr><td>key</td><td>URI+(IP/实例)+SpEL key</td><td>URI+token+参数 MD5</td></tr>
+<tr><td>幂等关键</td><td>令牌耗尽返回 -1 → 抛异常</td><td>成功留键、失败/异常删键</td></tr>
+</table>
+
+<h2>二级缓存</h2>
+<div class="chain">@Cacheable → PlusSpringCacheManager → [CaffeineCacheDecorator(本地30s)] → RedissonCache(Redis)<br>缓存名格式：<b>cacheName#ttl#maxIdle#maxSize#local</b>（参数直接写注解里，不改配置类）</div>
+
+<h2>易混点</h2>
+<ul>
+<li><code>RedisUtils</code>（裸 key 自己拼）≠ <code>CacheUtils</code>（Spring Cache 命名空间，和 @Cacheable 同源）——选错会"对不上"。</li>
+<li>工具类用 <code>SpringUtils.getBean</code> 取 client，必须容器就绪后才能用（运行期工具，非启动期组件）。</li>
+<li>限流"控频率"、防重"控重复"——别混。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：Redisson、Codec、NameMapper、令牌桶、二级缓存、幂等、RIdGenerator</p>
+</body>
+</html>

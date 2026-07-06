@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>06 · ruoyi-common-mybatis（中）：数据权限体系全链路</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>06 · ruoyi-common-mybatis（中）：数据权限体系全链路</h1>
+
+<p><strong>核心问题：</strong>部门经理只能看自己部门的数据，普通员工只能看自己的数据，超级管理员可以看全部——这个「同一张表，不同人看到不同行」的效果如何实现？</p>
+
+<div class="info">
+<strong>三级协作机制：</strong>AOP 切面（Spring）→ 注解收集 → MyBatis 拦截器（JSqlParser）→ SpEL 模板解析 → SQL WHERE 注入。最终做到：在 Mapper 上加两个注解，所有查询自动附加数据权限过滤。
+</div>
+
+<h2>1. 核心注解</h2>
+
+<pre><code>// 标注在 Mapper 接口的方法或类上
+@DataPermission({
+    @DataColumn(key = {"deptName"}, value = {"d.dept_id"}),
+    @DataColumn(key = {"userName"}, value = {"u.user_id"})
+})
+public interface SysUserMapper extends BaseMapperPlus&lt;SysUser, SysUserVo&gt; {
+    // 此接口的所有 SELECT/UPDATE/DELETE 自动应用数据权限
+}</code></pre>
+
+<p><strong>@DataColumn</strong>：声明 SpEL 模板中的占位符 key 与数据库列名的映射。<br>
+<strong>@DataPermission.joinStr</strong>：SELECT 默认 OR（任一角色满足即可），UPDATE/DELETE 默认 AND。</p>
+
+<h2>2. 数据权限范围枚举（DataScopeType）</h2>
+
+<table>
+<tr><th>类型</th><th>编码</th><th>SpEL SQL 模板（核心）</th></tr>
+<tr><td>ALL（全部）</td><td>1</td><td>空 — 不过滤，返回全部数据</td></tr>
+<tr><td>CUSTOM</td><td>2</td><td><code>#{#deptName} IN ( #{@sdss.getRoleCustom(#roleId)} )</code></td></tr>
+<tr><td>DEPT（本部门）</td><td>3</td><td><code>#{#deptName} = #{#user.deptId}</code></td></tr>
+<tr><td>DEPT_AND_CHILD</td><td>4</td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild(#user.deptId)} )</code></td></tr>
+<tr><td>SELF（仅本人）</td><td>5</td><td><code>#{#userName} = #{#user.userId}</code></td></tr>
+<tr><td>DEPT_AND_CHILD_OR_SELF</td><td>6</td><td>按部门及以下或本人过滤（组合条件）</td></tr>
+</table>
+
+<p>SpEL 变量：<code>user</code>→当前 LoginUser，<code>sdss</code>→数据权限服务 Bean，<code>deptName</code>/<code>userName</code>→由 @DataColumn 替换，<code>roleId</code>→遍历用户角色时注入。</p>
+
+<h2>3. 全链路执行流程</h2>
+
+<pre>
+Step 1: AOP 切面拦截（Sping AOP）
+    DataPermissionPointcut.matches()
+      → 检查方法/类是否有 @DataPermission
+    DataPermissionAdvice.invoke()
+      → DataPermissionHelper.setPermission(annotation)  // 写入 ThreadLocal
+      → invocation.proceed()
+      → finally: DataPermissionHelper.removePermission() // 清理
+
+Step 2: MyBatis 拦截器
+    PlusDataPermissionInterceptor
+      .beforeQuery() 或 .beforePrepare()
+      检查: InterceptorIgnoreHelper.willIgnoreDataPermission()?
+      检查: dataPermissionHandler.invalid()? (ThreadLocal 有注解吗?)
+
+Step 3: PlusDataPermissionHandler.getSqlSegment（核心）
+    1. 获取当前登录用户 → 超级管理员直接返回（无过滤）
+    2. 筛选参与数据权限的角色 (通过 DataPermissionAccess)
+    3. 遍历角色，使用 SpEL 解析各角色的 dataScope 模板
+       - NullSafe: null 变量返回默认值 "-1"
+       - 使用 DataPermissionHelper.ignore() 防止模板内 SQL 死循环
+    4. SELECT: OR 拼接各角色条件
+       UPDATE/DELETE: AND 拼接
+
+Step 4: JSqlParser 修改 SQL AST
+    SELECT ... FROM sys_user u WHERE (原条件) AND (数据权限条件)
+</pre>
+
+<h2>4. 权限上下文管理</h2>
+
+<pre><code>// DataPermissionHelper — 三级存储
+ThreadLocal&lt;DataPermission&gt;    → 当前 Mapper 的权限注解
+SaStorage（Sa-Token 请求域）    → 通用上下文变量 {user, roleId...}
+DataPermissionIgnoreContext     → 忽略状态栈（嵌套支持）
+
+// 临时忽略数据权限（防止 SpEL 模板内 SQL 死循环）
+DataPermissionHelper.ignore(() -> {
+    // 这里的 SQL 不会被数据权限过滤
+    return someMapper.selectById(id);
+});</code></pre>
+
+<h2>5. DataBaseHelper — 跨数据库方言</h2>
+
+<pre><code>// 动态获取当前数据源类型
+DataBaseType type = DataBaseHelper.getDataBaseType();
+// 支持: MY_SQL, ORACLE, POSTGRE_SQL, SQL_SERVER
+
+// 跨数据库 FIND_IN_SET
+String sql = DataBaseHelper.findInSet(value, columnName);
+// MySQL: FIND_IN_SET(value, columnName)
+// Oracle: INSTR(',' || columnName || ',', ',' || value || ',') > 0
+// PostgreSQL: POSITION(',' || value || ',' IN ',' || columnName || ',') > 0</code></pre>
+
+<h2>6. 前端对应</h2>
+<p>前端 <code>store/modules/user.ts</code> 中的 <code>getInfo()</code> 获取用户 roles/permissions，然后 <code>v-hasPermi</code> 指令控制按钮可见性。但数据权限是后端层面的行级过滤——前端即使绕过按钮，后端 SQL 也会自动过滤，确保了安全。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>在 SysUserMapper 上找到 @DataPermission 注解，查看它的 @DataColumn 映射</li>
+<li>用两个不同角色（部门经理 vs 普通员工）登录，查看同一用户列表页面，对比返回数据量</li>
+<li>在 PlusDataPermissionHandler.getSqlSegment 方法打断点，观察 SpEL 模板解析过程</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/core/expressions.html">Spring SpEL 表达式官方文档</a></div>
+<div class="reminder"> 想了解如何自定义一个新的 DataScopeType（比如「本部门及兄弟部门」）？直接问我。</div>
+
+</body>
+</html>

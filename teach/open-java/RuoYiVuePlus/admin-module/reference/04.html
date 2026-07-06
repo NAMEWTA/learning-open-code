@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 事件监听 — 登录后的副作用处理</title>
+<style>
+  body { max-width: 820px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.5rem; border-bottom: 3px solid #2c3e50; padding-bottom: 0.5rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #2c3e50; background: #f0f4f8; padding: 0.4rem 0.8rem; border-radius: 6px; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; color: #333; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.8rem 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .snip { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .snip .label { font-size: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem; }
+  .snap { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.6rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .nav { margin-top: 2rem; font-size: 0.85rem; color: #aaa; }
+  .nav a { color: #1d6fd6; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.4rem 0.8rem; border-radius: 0 6px 6px 0; margin: 0.8rem 0; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<h1>速查 04 · 事件监听 — 登录后的副作用处理 <span class="tag">cheat sheet</span></h1>
+
+<h2>双层事件架构全景</h2>
+<div class="snap">LoginHelper.login(loginUser, model)
+  └── Sa-Token 框架：签发 token
+        │
+        ├── UserActionListener.doLogin()        ← 第一层：Sa-Token 钩子
+        │     └── context.publishEvent(new UserLoginSuccessEvent(...))
+        │           │
+        │           └── UserLoginSuccessListener  ← 第二层：Spring 事件监听
+        │                 └── handleLoginSuccess()
+        │                       ├── 解析 User-Agent → 浏览器+OS
+        │                       ├── IP + 归属地解析 (ip2region)
+        │                       ├── 写入 Redis 在线用户缓存
+        │                       ├── recordLoginInfo() → LoginInfoEvent → DB 日志
+        │                       └── updateLastLoginInfo() → sys_user 表
+        │
+        ├── doLogout()   ← 主动退出
+        ├── doKickout()  ← 被踢下线
+        └── doReplaced() ← 被顶下线</div>
+
+<h2>第一层: UserActionListener (Sa-Token 钩子)</h2>
+<div class="snip">
+<div class="label">桥梁角色：Sa-Token 事件 → Spring 事件</div>
+<pre><code>@Component
+public class UserActionListener implements SaTokenListener {
+
+    @Override
+    public void doLogin(String loginType, Object loginId,
+                        String tokenValue, SaLoginParameter loginParameter) {
+        SpringUtils.context()
+            .publishEvent(new UserLoginSuccessEvent(loginId, tokenValue, loginParameter));
+    }
+
+    @Override
+    public void doLogout(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+
+    @Override
+    public void doKickout(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+
+    @Override
+    public void doReplaced(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+}</code></pre>
+</div>
+
+<h2>三种退出场景对比</h2>
+<table>
+  <tr><th>回调</th><th>触发场景</th><th>配置关联</th><th>操作</th></tr>
+  <tr><td><code>doLogout()</code></td><td>用户主动退出</td><td>AuthController.logout()</td><td>删 Redis 在线缓存</td></tr>
+  <tr><td><code>doKickout()</code></td><td>管理员踢人</td><td>StpUtil.kickout(loginId)</td><td>删 Redis 在线缓存</td></tr>
+  <tr><td><code>doReplaced()</code></td><td>新登录顶掉旧会话</td><td>is-concurrent: false</td><td>删 Redis 在线缓存</td></tr>
+</table>
+
+<h2>Java 17 record: UserLoginSuccessEvent</h2>
+<div class="snip">
+<div class="label">一行替代 40+ 行传统 POJO</div>
+<pre><code>public record UserLoginSuccessEvent(
+    Object loginId,
+    String tokenValue,
+    SaLoginParameter loginParameter
+) {}</code></pre>
+</div>
+<p><code>record</code> 自动生成：规范构造器、equals()、hashCode()、toString()、访问器方法。适用于不可变数据载体场景（事件、DTO、VO）。</p>
+
+<h2>第二层: UserLoginSuccessListener (业务副作用)</h2>
+<div class="snip">
+<div class="label">5 项业务操作</div>
+<pre><code>@Component
+public class UserLoginSuccessListener {
+    @EventListener
+    public void handleLoginSuccess(UserLoginSuccessEvent event) {
+        // 1. User-Agent 解析
+        UserAgent userAgent = UserAgentUtil.parse(
+            ServletUtils.getRequest().getHeader("User-Agent"));
+
+        // 2. IP 归属地解析
+        String ip = ServletUtils.getClientIP();
+        String location = AddressUtils.getRealAddressByIP(ip);  // ip2region
+
+        // 3. 组装在线用户信息 + 写入 Redis
+        UserOnlineDTO dto = new UserOnlineDTO();
+        dto.setIpaddr(ip);
+        dto.setLoginLocation(location);
+        dto.setBrowser(userAgent.getBrowser().getName());
+        dto.setOs(userAgent.getOs().getName());
+        dto.setTokenId(tokenValue);
+        dto.setUserName(username);
+        // ... 更多字段
+        RedisUtils.setCacheObject(ONLINE_TOKEN_KEY + tokenValue, dto, Duration.ofSeconds(timeout));
+
+        // 4. 发布登录日志事件 (异步写入 DB)
+        loginService.recordLoginInfo(username, LOGIN_SUCCESS, "user.login.success");
+
+        // 5. 更新用户表登录信息
+        loginService.updateLastLoginInfo(userId, ip);
+    }
+}</code></pre>
+</div>
+
+<h2>三层关注点分离</h2>
+<table>
+  <tr><th>层级</th><th>组件</th><th>职责</th><th>耦合对象</th></tr>
+  <tr><td>框架层</td><td><code>UserActionListener</code></td><td>监听 Sa-Token 生命周期，翻译为 Spring 事件</td><td>Sa-Token API</td></tr>
+  <tr><td>业务层</td><td><code>UserLoginSuccessListener</code></td><td>在线信息、IP 归属地、浏览器解析、Redis 缓存</td><td>Redis、ip2region、Hutool UA</td></tr>
+  <tr><td>日志层</td><td><code>LoginInfoEvent</code> + <code>LogListener</code></td><td>异步写入登录日志到数据库</td><td>数据库、线程池</td></tr>
+</table>
+
+<h2>退出登录完整流程</h2>
+<div class="snap">AuthController.logout()
+  └── loginService.logout()
+        ├── recordLoginInfo(username, LOGOUT, "退出成功") → LoginInfoEvent → DB
+        └── finally { StpUtil.logout() }
+              └── UserActionListener.doLogout() → deleteObject(online_token:xxx)
+
+关键设计：recordLoginInfo 可能抛异常，StpUtil.logout() 在 finally 中确保执行。
+两层 try-catch 吞掉 NotLoginException —— "没有登录态也应正常返回"</div>
+
+<div class="warn">⚠️ 设计优势：AuthController 只需 10 行，不含副作用代码。新增副作用只需加一个 @EventListener 方法，不改现有代码。测试隔离——可独立测试策略逻辑（mock 监听器），也可独立测试监听器（手动发布事件）。</div>
+
+<h2>关键文件位置速查</h2>
+<table>
+  <tr><th>关注点</th><th>文件</th></tr>
+  <tr><td>Sa-Token 钩子</td><td><code>ruoyi-admin/.../web/listener/UserActionListener.java</code></td></tr>
+  <tr><td>Spring 事件监听</td><td><code>ruoyi-admin/.../web/listener/UserLoginSuccessListener.java</code></td></tr>
+  <tr><td>登录成功事件</td><td><code>ruoyi-admin/.../web/event/UserLoginSuccessEvent.java</code></td></tr>
+  <tr><td>登录日志事件</td><td><code>ruoyi-common-log/.../event/LoginInfoEvent.java</code></td></tr>
+  <tr><td>IP 归属地工具</td><td><code>ruoyi-common-core/.../utils/AddressUtils.java</code></td></tr>
+  <tr><td>ip2region 数据库</td><td><code>ruoyi-admin/src/main/resources/ip2region_v4.xdb</code></td></tr>
+  <tr><td>在线用户 DTO</td><td><code>ruoyi-common-core/.../domain/dto/UserOnlineDTO.java</code></td></tr>
+  <tr><td>Sa-Token 侦听器接口</td><td><code>cn.dev33.satoken.listener.SaTokenListener</code></td></tr>
+</table>
+
+<div class="nav">速查索引：<a href="01.html">01 · 启动入口与配置</a> | <a href="02.html">02 · 认证策略工厂</a> | <a href="03.html">03 · 五种策略对比</a></div>
+
+</body>
+</html>

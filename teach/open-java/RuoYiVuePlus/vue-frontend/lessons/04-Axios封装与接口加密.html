@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>04 Axios 封装与接口加密</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>04 Axios 封装与接口加密</h1>
+
+<p>RuoYi-Vue-Plus 的 Axios 封装不仅是简单的请求库包装——它实现了一套完整的企业级安全传输方案：<strong>Token 注入、RSA+AES 混合加密、防重复提交、响应解密、统一错误处理、401 过期弹窗</strong>。<strong>学完本课后，你将能逐行解释 request.ts 中的请求/响应拦截器链。</strong></p>
+
+<h2>Axios 实例创建</h2>
+
+<pre><code>// 创建 axios 实例（不是 axios 全局单例）
+const service = axios.create({
+  baseURL: import.meta.env.VITE_APP_BASE_API, // 开发: /dev-api  生产: /prod-api
+  timeout: 50000,                             // 50 秒超时
+  transitional: {
+    clarifyTimeoutError: true                 // Axios 1.x+ 清晰超时错误
+  }
+});</code></pre>
+
+<p>所有 API 请求都通过这个实例发出。自定义实例允许配置独立的拦截器链，不与第三方库共享。</p>
+
+<h2>请求拦截器：三层安全检查</h2>
+
+<p>请求拦截器处理三个关键 header 标志：<code>isToken</code>、<code>repeatSubmit</code>、<code>isEncrypt</code>：</p>
+
+<pre><code>service.interceptors.request.use(
+  (config) => {
+    // 【第1层】Token 注入
+    const isToken = config.headers?.isToken === false;
+    if (getToken() && !isToken) {
+      config.headers['Authorization'] = 'Bearer ' + getToken();
+    }
+
+    // 【第2层】GET 请求参数扁平化映射
+    if (config.method === 'get' && config.params) {
+      let url = config.url + '?' + tansParams(config.params);
+      url = url.slice(0, -1);
+      config.params = {};
+      config.url = url;
+    }
+
+    // 【第3层】防止重复提交（仅 POST/PUT）
+    if (!isRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
+      const requestObj = {
+        url: config.url,
+        data: JSON.stringify(config.data),
+        time: new Date().getTime()
+      };
+      const sessionObj = cache.session.getJSON('sessionObj');
+      if (sessionObj && s_data === requestObj.data
+          && requestObj.time - s_time < 500      // 500ms 间隔
+          && s_url === requestObj.url) {
+        return Promise.reject(new Error('数据正在处理，请勿重复提交'));
+      }
+      cache.session.setJSON('sessionObj', requestObj);
+    }
+
+    // 【第4层】参数加密（见下一节）
+    if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+      // RSA 加密 AES 密钥 + AES 加密请求体
+    }
+
+    return config;
+  }
+);</code></pre>
+
+<div class="tip">
+  <strong>防重复提交原理：</strong> 使用 <code>sessionStorage</code> 存储最近一次请求的 (url, data, time)。若新请求在 500ms 内具有相同的 url 和 data，判定为重复提交而拒绝。当用户猛击"保存"按钮时，第二次点击会被拦截。注意：<code>repeatSubmit: false</code> 是关闭防重复（相当于"本接口允许重复提交"），语义上与名字相反。
+</div>
+
+<h2>RSA + AES 混合加密方案</h2>
+
+<p>当 <code>VITE_APP_ENCRYPT=true</code> 且接口声明 <code>isEncrypt: true</code> 时，请求/响应体经过如下处理：</p>
+
+<pre><code>// ====== 加密（crypto.ts）======
+
+// 1. 生成一个随机的 32 位 AES 密钥
+export const generateAesKey = (): WordArray => {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);                  // Web Crypto API 真随机数
+  return CryptoJS.enc.Utf8.parse(
+    Array.from(array, b => b.toString(16).padStart(2, '0'))
+      .join('').slice(0, 32)
+  );
+};
+
+// 2. AES-ECB + PKCS7 加密请求体
+export const encryptWithAes = (message, aesKey): string => {
+  const encrypted = CryptoJS.AES.encrypt(message, aesKey, {
+    mode: CryptoJS.mode.ECB,
+    padding: CryptoJS.pad.Pkcs7
+  });
+  return encrypted.toString();
+};
+
+// 3. RSA 公钥加密 AES 密钥（jsencrypt.ts）
+export const encrypt = (txt: string) => {
+  const encryptor = new JSEncrypt();
+  encryptor.setPublicKey(import.meta.env.VITE_APP_RSA_PUBLIC_KEY);
+  return encryptor.encrypt(txt);
+};</code></pre>
+
+<p><strong>在请求拦截器中的组装逻辑：</strong></p>
+
+<pre><code>// 请求拦截器中
+if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+  const aesKey = generateAesKey();                     // 生成 AES 密钥
+  config.headers['encrypt-key'] = encrypt(
+    encryptBase64(aesKey)                              // RSA 公钥加密 AES 密钥 → 放入 header
+  );
+  config.data = encryptWithAes(                        // AES 加密请求体
+    JSON.stringify(config.data), aesKey
+  );
+}</code></pre>
+
+<p><strong>在响应拦截器中的解密逻辑：</strong></p>
+
+<pre><code>// 响应拦截器中
+if (VITE_APP_ENCRYPT === 'true') {
+  const keyStr = res.headers['encrypt-key'];     // 后端返回的加密 AES 密钥
+  if (keyStr) {
+    const base64Str = decrypt(keyStr);            // RSA 私钥解密 → Base64 字符串
+    const aesKey = decryptBase64(base64Str);      // Base64 解码 → AES 密钥
+    const decryptData = decryptWithAes(res.data, aesKey); // AES 解密响应体
+    res.data = JSON.parse(decryptData);           // JSON 字符串 → 对象
+  }
+}</code></pre>
+
+<blockquote>
+  <strong>为什么是 RSA + AES 混合？</strong> RSA 加密速度慢但适合加密小数据（如密钥），AES 加密速度快但密钥分发困难。混合方案中：AES 加密大体积的请求体，RSA 只加密 AES 的 32 字节密钥并通过 header 传输。每次请求生成新的随机 AES 密钥，即使截获一次请求的 AES 密钥也无法解密其他请求。
+</blockquote>
+
+<h2>响应拦截器：统一错误码处理</h2>
+
+<pre><code>service.interceptors.response.use(
+  (res) => {
+    const code = res.data.code || HttpStatus.SUCCESS; // 200
+    const msg = res.data.msg || errorCode[code] || errorCode['default'];
+
+    // 二进制数据直接返回（文件下载）
+    if (res.request.responseType === 'blob' || res.request.responseType === 'arraybuffer') {
+      return res.data;
+    }
+
+    if (code === 401) {
+      // Token 过期 → 弹出重新登录对话框
+      if (!isRelogin.show) {
+        isRelogin.show = true;                         // 全局锁，防止重复弹窗
+        ElMessageBox.confirm('登录状态已过期...', '系统提示', {
+          confirmButtonText: '重新登录',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }).then(() => {
+          useUserStore().logout().then(() => {
+            router.replace({ path: '/login', query: { redirect: ... } });
+          });
+        }).catch(() => { isRelogin.show = false; });
+      }
+      return Promise.reject('无效的会话...');
+    } else if (code === 500) {
+      ElMessage({ message: msg, type: 'error' });
+      return Promise.reject(createHandledError(msg));
+    } else if (code === HttpStatus.WARN) {
+      ElMessage({ message: msg, type: 'warning' });
+      return Promise.reject(createHandledError(msg));
+    } else if (code !== HttpStatus.SUCCESS) {
+      ElNotification.error({ title: msg });
+      return Promise.reject(createHandledError(msg));
+    }
+    return Promise.resolve(res.data);
+  },
+  async (error) => {
+    // 网络错误 / 超时 / 状态码错误统一处理
+    const message = (await extractErrorMessage(error)) || errorCode['default'];
+    ElMessage({ message, type: 'error', duration: 5000 });
+    error.isHandled = true;   // 标记为已处理，防止上层重复弹窗
+    return Promise.reject(error);
+  }
+);</code></pre>
+
+<div class="warn">
+  <strong>isRelogin 全局锁：</strong> 当 token 过期时，可能同时有多个请求返回 401。如果没有全局锁，用户会看到多个"重新登录"弹窗堆叠。<code>isRelogin.show</code> 是一个模块级变量，第一个 401 将其设为 true，后续 401 检测到已显示则跳过弹窗。
+</div>
+
+<h2>createHandledError 与 isHandledRequestError</h2>
+
+<p>在路由守卫中，当 <code>getInfo()</code> 请求失败时，如果错误已被响应拦截器处理过（弹了提示），就不应再弹一次：</p>
+
+<pre><code>// request.ts
+function createHandledError(message) {
+  const error = new Error(message);
+  error.isHandled = true;
+  return error;
+}
+
+export function isHandledRequestError(error) {
+  return Boolean(error?.isHandled);
+}
+
+// permission.ts 路由守卫中
+const [err] = await tos(useUserStore().getInfo());
+if (err) {
+  if (!isHandledRequestError(err)) {
+    ElMessage.error(err.message); // 仅未处理错误才弹窗
+  }
+  return { path: '/' };
+}</code></pre>
+
+<h2>拦截器链全景图</h2>
+
+<pre><code>
+请求出发
+  │
+  ├─ 1. Content-Language 注入
+  ├─ 2. Authorization: Bearer &lt;token&gt;
+  ├─ 3. GET params → URL query string
+  ├─ 4. 防重复提交检查（sessionStorage）
+  ├─ 5. RSA加密AES密钥 → encrypt-key header
+  │    AES加密请求体
+  │    FormData 去除 Content-Type
+  ▼
+发送请求 ───────────────────────────→ 服务器
+                                      │
+  ┌───────────────────────────────────┘
+  ▼
+响应返回
+  │
+  ├─ 6. RSA解密 encrypt-key → 得到AES密钥
+  │    AES解密响应体 → JSON.parse
+  ├─ 7. 二进制数据直接返回
+  ├─ 8. code===401 → 重新登录弹窗（全局锁）
+  ├─ 9. code===500 → ElMessage.error + createHandledError
+  ├─ 10. code===WARN → ElMessage.warning + createHandledError
+  ├─ 11. code!==SUCCESS → ElNotification.error
+  └─ 12. code===SUCCESS → resolve(res.data)
+</code></pre>
+
+<div class="cite">📖 推荐一手资料：<a href="https://axios-http.com/zh/docs/interceptors">Axios 拦截器文档</a> · <a href="https://github.com/travist/jsencrypt">JSEncrypt 文档</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以追问：「为什么 AES 使用 ECB 模式？」「如何新增一个自定义拦截器？」「防重复提交的 sessionStorage 会不会跨页面串数据？」「RSA 密钥对如何生成？」</div>
+</body>
+</html>

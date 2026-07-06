@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 权限验证 — SaPermissionImpl 权限码校验全流程</title>
+<style>
+  body { max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.75; color: #2c2c2c; background: #fcfcfc; }
+  h1 { border-bottom: 3px solid #1a56db; padding-bottom: .5rem; margin-top: 0; font-size: 1.75rem; }
+  h2 { margin-top: 2.5rem; color: #1e3a5f; font-size: 1.3rem; }
+  h3 { margin-top: 1.8rem; font-size: 1.05rem; color: #333; }
+  code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+  pre code { display: block; background: #1e2127; color: #abb2bf; padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; line-height: 1.6; font-size: .88em; }
+  .mission { background: linear-gradient(135deg, #e8f0fe 0%, #d4e4fc 100%); border-left: 5px solid #1a56db; padding: 1rem 1.3rem; border-radius: 6px; margin: 1.2rem 0; }
+  .flow { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px dashed #94a3b8; padding: 1rem 1.3rem; border-radius: 5px; white-space: pre; line-height: 1.8; font-size: .88em; overflow-x: auto; }
+  .side { background: #fff9e6; border-left: 4px solid #f0b400; padding: .8rem 1.2rem; border-radius: 4px; margin: 1rem 0; font-size: .95em; }
+  .step { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.3rem; margin: .8rem 0; display: flex; gap: 1rem; align-items: flex-start; }
+  .step .num { background: #1a56db; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85em; flex-shrink: 0; }
+  .step .where { color: #64748b; font-size: .8em; margin-top: .2rem; }
+  .quiz { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.2rem; margin: .8rem 0; }
+  .quiz .opt { display: block; margin: .3rem 0; padding: .3rem .6rem; border-radius: 4px; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: #1a56db; font-weight: 600; }
+  .cite { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: .8rem 1.1rem; margin: 1.5rem 0; font-size: .9em; }
+  .reminder { background: #f1f5f9; border-radius: 6px; padding: .8rem 1.2rem; margin: 1rem 0; font-size: .95em; color: #475569; }
+  .nav { color: #94a3b8; font-size: .85em; margin-top: 2rem; text-align: center; }
+  .tag { display: inline-block; background: #1a56db; color: #fff; padding: .15em .7em; border-radius: 12px; font-size: .8em; margin-left: .5rem; vertical-align: middle; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+  th, td { border: 1px solid #e2e8f0; padding: .5rem .7rem; text-align: left; font-size: .93em; }
+  th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 权限验证 — SaPermissionImpl 权限码校验全流程 <span class="tag" style="background:#7c3aed;">权限鉴权</span></h1>
+
+<div class="mission">
+<strong>本节目标</strong>：理解 StpInterface 的回调机制，掌握 SaPermissionImpl 的两种权限获取策略（本地提取 vs 远程调用），追踪一个 @SaCheckPermission 注解的完整校验链路。
+</div>
+
+<p>上一节我们了解了 SaTokenConfig 如何装配模块和 PlusSaTokenDao 如何做双层缓存。这一节深入权限校验的核心 — 当你给 Controller 方法加上 <code>@SaCheckPermission("system:user:list")</code> 后，Sa-Token 到底走了哪些逻辑来判定你是否有这个权限？</p>
+
+<h2>一、StpInterface：Sa-Token 的权限回调契约</h2>
+
+<p>Sa-Token 框架本身<strong>不知道</strong>你的用户有哪些权限。它定义了一个接口 <code>StpInterface</code>，每次需要检查权限时，就回调你的实现类来获取权限数据：</p>
+
+<pre><code>public interface StpInterface {
+
+    /**
+     * 返回指定 loginId 所拥有的权限码集合
+     */
+    List&lt;String&gt; getPermissionList(Object loginId, String loginType);
+
+    /**
+     * 返回指定 loginId 所拥有的角色标识集合
+     */
+    List&lt;String&gt; getRoleList(Object loginId, String loginType);
+}</code></pre>
+
+<p>三个关键点你必须记住：</p>
+
+<table>
+<tr><th>要点</th><th>说明</th></tr>
+<tr><td>回调时机</td><td>不是只在登录时调用一次，而是<strong>每次鉴权</strong>都回调。Sa-Token 内部有缓存优化（默认缓存 5 秒），但即便是缓存过期后的下一次鉴权，仍然会再次回调。</td></tr>
+<tr><td>权限数据源模式</td><td>这是典型的"框架提问，你回答"模式。Sa-Token 不关心权限从哪里来 — 数据库、配置文件、RPC 调用都可以 — 你只需在接口实现里返回结果。</td></tr>
+<tr><td>两个方法</td><td><code>getPermissionList</code> 返回权限码（如 <code>system:user:list</code>），<code>getRoleList</code> 返回角色标识（如 <code>admin</code>）。两者独立，互不干扰。</td></tr>
+</table>
+
+<p>在 SaTokenConfig 中，<code>SaPermissionImpl</code> 正是作为这个接口的实现注册给 Sa-Token 的：</p>
+
+<pre><code>@Bean
+public StpInterface stpInterface() {
+    return new SaPermissionImpl();
+}</code></pre>
+
+<div class="side">
+<strong>思考</strong>：为什么 Sa-Token 设计成"每次回调"，而不是"登录时一次加载、后续从 Session 中读取"？因为<strong>权限可能变更</strong> — 管理员在后台修改了某用户的权限，如果只在登录时加载，该用户必须重新登录才能生效。每次回调（配合缓存）可以在可控的延迟内反映权限变更。
+</div>
+
+<h2>二、SaPermissionImpl 的两种权限获取策略</h2>
+
+<p>打开 <code>SaPermissionImpl.java</code> 的 <code>getPermissionList</code> 方法，你会发现它并不简单 — 内部有两套策略来获取权限码：</p>
+
+<h3>策略 1：快速路径 — 从当前 LoginUser 中直接提取</h3>
+
+<pre><code>// 策略 1: 优先从当前登录用户的 LoginUser 对象中提取
+LoginUser loginUser = LoginHelper.getLoginUser();
+if (loginUser != null &amp;&amp;
+    StringUtils.equals(loginUser.getUserId().toString(), resolveUserId(loginId))) {
+    // 当前登录用户就是被检查的用户，直接从 LoginUser.permissions 中取
+    return loginUser.getMenuPermission();
+}</code></pre>
+
+<p>这个分支的逻辑非常直接：</p>
+<ul>
+  <li>通过 <code>LoginHelper.getLoginUser()</code> 拿到当前线程绑定的 LoginUser 对象（它是登录时写入 TokenSession 的）</li>
+  <li>比较当前登录用户的 userId 和被检查的 loginId 是否一致</li>
+  <li>如果一致，直接从 <code>loginUser.getMenuPermission()</code> 返回权限码列表 — <strong>零网络开销、零数据库查询</strong></li>
+</ul>
+
+<p class="side"><strong>覆盖 99% 的场景</strong>：绝大多数情况下，用户访问接口时检查的是<strong>自己的</strong>权限。这个快速路径避免了每次鉴权都去查数据库或调远程服务。</p>
+
+<h3>策略 2：降级路径 — 通过 PermissionService 远程获取</h3>
+
+<pre><code>// 策略 2: 降级 — 通过远程 PermissionService 获取权限
+try {
+    PermissionService permissionService =
+        SpringContextHolder.getBean(PermissionService.class);
+    return permissionService.getMenuPermission(Long.valueOf(resolveUserId(loginId)));
+} catch (NoSuchBeanDefinitionException e) {
+    throw new ServiceException("PermissionService bean not found — " +
+        "确保 ruoyi-framework 模块已引入", e);
+}</code></pre>
+
+<p>这个分支用于<strong>跨用户权限检查</strong>（例如管理员想检查某个普通用户是否有某权限）：</p>
+<ul>
+  <li>通过 <code>SpringContextHolder.getBean()</code> 动态获取 PermissionService Bean（注意是动态查找，不是 @Autowired）</li>
+  <li>调用 <code>getMenuPermission(userId)</code> 远程查询指定用户的权限码</li>
+  <li>如果 PermissionService 不存在（比如模块未引入），抛出明确的 ServiceException</li>
+</ul>
+
+<div class="side">
+<strong>为什么用 SpringContextHolder 动态查找而不是 @Autowired 注入？</strong><br>
+<code>ruoyi-common-satoken</code> 是 common 模块，它不应该对 <code>ruoyi-framework</code> 有编译期依赖（Maven 依赖方向是 framework → common，不能反向）。但运行时 framework 确实提供了 PermissionService 实现，所以用运行时动态查找来解耦。
+</div>
+
+<h2>三、权限校验的完整时序</h2>
+
+<p>下面用一个 <code>@SaCheckPermission("system:user:list")</code> 注解追踪一次完整的权限校验链路：</p>
+
+<div class="flow">@SaCheckPermission("system:user:list")
+        │
+        ▼
+Sa-Token 拦截器 (StpLogic.checkPermission)
+        │
+        ▼
+StpUtil.checkPermission("system:user:list")
+        │
+        ▼
+检查缓存: permissionListCache (默认 5s TTL)
+        │
+   ┌────┴────┐
+   │ 命中 → 直接返回权限列表      │  未命中 → 继续 │
+   └─────────┘                    │
+                                  ▼
+SaPermissionImpl.getPermissionList(loginId, loginType)
+        │
+        ├──[路径1: 本地LoginUser]──→ 从 LoginUser.permissions 中提取
+        │                                │
+        │                           ┌────┴────┐
+        │                           │ userId 匹配 → 直接返回权限列表  │
+        │                           │ userId 不匹配 → 走路径2        │
+        │                           └─────────────────────────┘
+        │
+        └──[路径2: 远程PermissionService]──→ getMenuPermission(userId)
+                                               │
+                                          ┌────┴────┐
+                                          │ Bean 存在 → RPC 查询权限  │
+                                          │ Bean 不存在 → 抛异常      │
+                                          └─────────────────────────┘
+        │
+        ▼
+得到权限码列表 ["system:user:list", "system:user:add", ...]
+        │
+        ▼
+contains("system:user:list") ?
+        │
+   ┌────┴────┐
+   │ 是 → 放行，进入 Controller       │  否 → 403 NotPermissionException │
+   └──────────────────────────────────┘</div>
+
+<h2>四、resolveUserId 的用户类型解析</h2>
+
+<p>SaPermissionImpl 里还有一个关键方法 <code>resolveUserId</code>，它负责从 Sa-Token 的 loginId 中提取数字 userId：</p>
+
+<pre><code>private String resolveUserId(Object loginId) {
+    // loginId 格式: "type:userId"，例如 "sys_user:1"
+    return loginId.toString().split(":")[1];  // 取冒号后面的 userId 部分
+}</code></pre>
+
+<p>这个设计源于 RuoYi-Vue-Plus 的<strong>多用户类型</strong>架构：</p>
+
+<table>
+<tr><th>用户类型</th><th>loginId 示例</th><th>解析出的 userId</th></tr>
+<tr><td>后台管理员</td><td><code>sys_user:1</code></td><td><code>1</code></td></tr>
+<tr><td>App 端用户</td><td><code>app_user:42</code></td><td><code>42</code></td></tr>
+</table>
+
+<p>与此相反的操作在 <code>LoginHelper</code> 中 — <code>getUserType()</code> 方法解析 loginId 的类型前缀（冒号前的部分）来获取 <code>UserType</code> 枚举：</p>
+
+<pre><code>public static UserType getUserType() {
+    String loginId = LoginHelper.getLoginId();
+    // "sys_user:1" → "sys_user" → UserType.SYS_USER
+    return UserType.getUserType(loginId.split(":")[0]);
+}</code></pre>
+
+<p class="side"><strong>设计优势</strong>：这种双段式 loginId 格式（类型:ID）让一个 Sa-Token 实例可以同时服务多种用户体系。Sa-Token 框架本身不关心 <code>loginId</code> 的内容是什么，只要它是唯一的即可。类型前缀是 RuoYi 自己加的语义层。</p>
+
+<h2>🤔 想一想</h2>
+
+<details>
+<summary>为什么 SaPermissionImpl 优先从 LoginUser 提取权限，而不是每次都远程调用？</summary>
+<p><strong>性能与延迟</strong>：远程调用（即使是 Dubbo 或 HTTP RPC）每次都有网络往返延迟（通常 1-10ms），加上序列化/反序列化开销。而对于 99% 的日常请求，被检查的用户就是当前登录用户本人，LoginUser 对象已经存在于线程上下文或 TokenSession 中，直接读取是<strong>纯内存操作，纳秒级耗时</strong>。<br><br>
+<strong>可用性</strong>：如果每次都依赖远程 PermissionService，一旦那个服务不可用，整个系统的鉴权都会失败（单点故障）。本地提取策略让最常见场景<strong>不依赖外部服务</strong>，大幅提高鉴权链路的可靠性。<br><br>
+<strong>缓存设计</strong>：即使远程调用，Sa-Token 也会缓存权限列表 5 秒。但本地提取连这个缓存查询都省了 — 直接从 LoginUser 对象里读，是比缓存更快的"热数据"。</p>
+</details>
+
+<details>
+<summary>如果微服务环境下 PermissionService 在另一个服务里，当前实现能直接工作吗？</summary>
+<p><strong>能工作，但需要正确配置</strong>。<code>SaPermissionImpl</code> 通过 <code>SpringContextHolder.getBean(PermissionService.class)</code> 获取 Bean，只要这个 Bean 在 Spring 容器中存在即可。在微服务架构中，PermissionService 通常是一个 <strong>Dubbo 或 Feign 的远程调用代理</strong>，它作为 Spring Bean 注入到当前服务的容器中。<br><br>
+<strong>潜在问题</strong>：如果网络抖动导致 RPC 调用超时，鉴权也会超时。建议对远程 PermissionService 调用添加<strong>熔断降级</strong>（如 Sentinel），在远程服务不可用时使用本地缓存的权限数据或默认拒绝。<br><br>
+<strong>另外</strong>：SaPermissionImpl 的策略 1（本地提取）本身就是一种"降级设计" — 只要当前用户检查的是自己的权限，就不会触发远程调用，天然规避了微服务间通信的问题。</p>
+</details>
+
+<h2>提取练习</h2>
+
+<div class="quiz">
+<strong>Q1. SaPermissionImpl 实现了哪个接口，使其能被 Sa-Token 框架回调？</strong>
+<div class="opt">A. SaTokenDao</div>
+<div class="opt">B. StpInterface</div>
+<div class="opt">C. StpLogic</div>
+<div class="opt">D. PermissionService</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。SaPermissionImpl 实现 StpInterface 接口，重写 getPermissionList 和 getRoleList 方法。A 是存储层接口，B 是权限回调接口，C 是认证逻辑接口，D 是业务层权限服务。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q2. getPermissionList 方法的返回值类型是什么？</strong>
+<div class="opt">A. Set&lt;String&gt;</div>
+<div class="opt">B. String[]</div>
+<div class="opt">C. List&lt;String&gt;</div>
+<div class="opt">D. Collection&lt;Permission&gt;</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。StpInterface 的 getPermissionList 返回 List&lt;String&gt;，每个字符串是一个权限码，如 "system:user:list"。Sa-Token 通过 contains() 判断用户是否拥有指定权限。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q3. 对于 loginId = "sys_user:1"，resolveUserId 返回什么？</strong>
+<div class="opt">A. "sys_user"</div>
+<div class="opt">B. "1"</div>
+<div class="opt">C. "sys_user:1"</div>
+<div class="opt">D. 抛出异常</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。resolveUserId 按 ":" 分割后取索引 [1]，即冒号后面的数字部分 "1"。如果需要解析出用户类型（"sys_user"），应使用 LoginHelper.getUserType()。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q4. SaPermissionImpl 获取权限的两种策略分别是什么？</strong>
+<div class="opt">A. 从数据库查询 / 从 Redis 缓存读取</div>
+<div class="opt">B. 从 LoginUser 本地提取 / 调用 PermissionService 远程获取</div>
+<div class="opt">C. 从 JWT Token 解析 / 从 Session 中读取</div>
+<div class="opt">D. 从配置文件读取 / 从注解中获取</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。策略 1 是从当前登录用户的 LoginUser 对象中本地提取权限（快速路径，覆盖 99% 场景），策略 2 是通过 PermissionService 远程获取指定用户的权限（降级路径，用于跨用户权限检查）。
+</details>
+</div>
+
+<div class="cite">
+<strong>推荐读物</strong><br>
+· <a href="https://sa-token.cc/doc.html#/use/at-check">Sa-Token 官方文档 — 权限认证</a> — 了解 @SaCheckPermission 和 StpInterface 的框架设计<br>
+· 模块源码入口：<code>SaPermissionImpl.java</code> — 从 getPermissionList 方法开始跟踪两种策略<br>
+· 对比参考：<code>LoginHelper.java</code> — 理解 loginId 的双段式格式和 getUserType 方法
+</div>
+
+<div class="reminder">
+📌 下一课将学习异常处理与 LoginHelper 工具类 — 理解 SaTokenExceptionHandler 如何把 Sa-Token 的英文异常翻译为前端可读的中文提示，以及 LoginHelper 提供的便捷静态方法体系。
+</div>
+
+<div class="nav">第 3 课 / 共 5 课 · 下一课：异常处理与 LoginHelper 工具类</div>
+
+</body>
+</html>

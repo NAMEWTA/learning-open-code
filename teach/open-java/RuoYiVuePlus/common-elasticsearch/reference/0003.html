@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · 环境后处理器 + ES CRUD 实战参考</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 0.9rem; border-radius: 6px; overflow-x: auto; font-size: 0.78rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · 环境后处理器 + ES CRUD 实战参考</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-elasticsearch 搜索引擎模块</p>
+
+<h2>ActuatorEnvironmentPostProcessor 核心逻辑</h2>
+<div class="chain">class ActuatorEnvironmentPostProcessor
+    implements EnvironmentPostProcessor, Ordered {
+
+  postProcessEnvironment(env, app):
+    enable = env.getProperty("easy-es.enable", "false")
+    System.setProperty(
+      "management.health.elasticsearch.enabled", enable)
+
+  getOrder():
+    return Ordered.HIGHEST_PRECEDENCE  // Integer.MIN_VALUE
+}</div>
+
+<h2>为什么需要这个类</h2>
+<ul>
+<li>Spring Boot Actuator 内置 <code>ElasticsearchHealthIndicator</code>，默认启用</li>
+<li>如果 easy-es.enable=false 但健康检查仍开着 → 健康检查连接 ES 失败 → health 返回 DOWN</li>
+<li>此处理器在启动最早阶段把 easy-es 开关同步到健康检查开关，避免误报</li>
+</ul>
+
+<h2>关键技术点</h2>
+<table>
+<tr><th>技术点</th><th>说明</th></tr>
+<tr><td><code>EnvironmentPostProcessor</code></td><td>Spring Boot SPI，在 Environment 准备后、Context 刷新前执行</td></tr>
+<tr><td><code>Ordered.HIGHEST_PRECEDENCE</code></td><td>值为 Integer.MIN_VALUE，确保最先执行</td></tr>
+<tr><td><code>spring.factories</code></td><td>注册方式：<code>org.springframework.boot.EnvironmentPostProcessor=类名</code></td></tr>
+<tr><td><code>System.setProperty</code></td><td>直接设 JVM 系统属性，绕过 Spring Environment 体系，确保 Actuator 能读到</td></tr>
+</table>
+
+<h2>ES CRUD 开发模板（三文件骨架）</h2>
+
+<h3>1. 实体类</h3>
+<pre><code>// 放在 org.dromara.xxx.domain 包
+@Data
+public class Product {
+    private String id;      // ES 文档 ID（String 类型！）
+    private String name;
+    private BigDecimal price;
+}</code></pre>
+
+<h3>2. Mapper 接口 ⚠ 必须在 esmapper 包下!</h3>
+<pre><code>// 放在 org.dromara.xxx.esmapper 包
+package org.dromara.xxx.esmapper;
+public interface ProductMapper extends BaseEsMapper&lt;Product&gt; {
+}</code></pre>
+
+<h3>3. Controller / Service 使用</h3>
+<pre><code>@RequiredArgsConstructor
+@RestController
+public class ProductController {
+    private final ProductMapper productMapper;
+
+    // 精确查询
+    public Product getByName(String name) {
+        LambdaEsQueryWrapper&lt;Product&gt; w =
+            new LambdaEsQueryWrapper&lt;&gt;();
+        w.eq(Product::getName, name);
+        return productMapper.selectOne(w);
+    }
+
+    // 模糊搜索
+    public List&lt;Product&gt; search(String kw) {
+        LambdaEsQueryWrapper&lt;Product&gt; w =
+            new LambdaEsQueryWrapper&lt;&gt;();
+        w.like(Product::getName, kw);
+        return productMapper.selectList(w);
+    }
+
+    // 插入
+    public Integer add(Product p) {
+        return productMapper.insert(p);
+    }
+
+    // 更新(按ID)
+    public void update(Product p) {
+        productMapper.updateById(p);
+    }
+
+    // 删除(按ID)
+    public Integer delete(String id) {
+        return productMapper.deleteById(id);
+    }
+}</code></pre>
+
+<h2>常用查询条件速查</h2>
+<table>
+<tr><th>条件</th><th>代码</th><th>ES DSL 对应</th></tr>
+<tr><td>精确匹配</td><td><code>w.eq(Entity::getField, val)</code></td><td><code>term</code></td></tr>
+<tr><td>模糊匹配</td><td><code>w.like(Entity::getField, val)</code></td><td><code>match/wildcard</code></td></tr>
+<tr><td>大于</td><td><code>w.gt(Entity::getField, val)</code></td><td><code>range gt</code></td></tr>
+<tr><td>大于等于</td><td><code>w.ge(Entity::getField, val)</code></td><td><code>range gte</code></td></tr>
+<tr><td>小于</td><td><code>w.lt(Entity::getField, val)</code></td><td><code>range lt</code></td></tr>
+<tr><td>小于等于</td><td><code>w.le(Entity::getField, val)</code></td><td><code>range lte</code></td></tr>
+<tr><td>IN 条件</td><td><code>w.in(Entity::getField, vals)</code></td><td><code>terms</code></td></tr>
+<tr><td>OR 组合</td><td><code>w.and(ww -&gt; ww.eq(...).or().eq(...))</code></td><td><code>bool should</code></td></tr>
+<tr><td>排序</td><td><code>w.orderByAsc(Entity::getField)</code></td><td><code>sort</code></td></tr>
+</table>
+
+<h2>application.yml 关键配置</h2>
+<pre><code>easy-es:
+  enable: true              # 必须设为 true
+  address: localhost:9200   # ES 集群地址（逗号分隔）
+  schema: http
+  # username:               # 生产环境建议启用认证
+  # password:
+  global-config:
+    print-dsl: true         # 开发时打开，看生成的 DSL
+    db-config:
+      id-type: customize    # ID 由应用生成（与实体 String id 配合）
+      field-strategy: not_null
+      refresh-policy: immediate</code></pre>
+
+<h2>排障清单</h2>
+<ul>
+<li>Mapper 注入失败 → 检查包名是否以 <code>esmapper</code> 结尾</li>
+<li>查询结果为空 → 确认 <code>print-dsl: true</code> 打开后看控制台打印的 DSL 是否正确</li>
+<li>启动报 ES 连接超时 → 确认 ES 服务已启动（<code>curl localhost:9200</code> 测试）</li>
+<li>ID 类型问题 → ES 文档 ID 是 String，不要用 Long</li>
+<li>实体类缺少无参构造 → Lombok @Data 自动生成，无需担心</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：EnvironmentPostProcessor、Elasticsearch Health Indicator、LambdaEsQueryWrapper、BaseEsMapper</p>
+</body>
+</html>

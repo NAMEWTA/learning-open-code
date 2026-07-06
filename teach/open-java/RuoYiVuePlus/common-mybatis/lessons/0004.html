@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0004 - 数据权限体系（下）：DataScopeType、上下文与多租户</title>
+<style>
+body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+p, li { font-size: 0.97rem; }
+code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; }
+.mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+.mission b { color: #1d6fd6; }
+blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+.flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+.region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+.region h3 { margin-top: 0.9rem; }
+.where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+.side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+.why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+.why b { color: #1f9d4d; }
+details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+details[open] summary { margin-bottom: 0.6rem; }
+.quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+.quiz p { font-weight: 600; margin: 0.6rem 0; }
+.opt { display: block; padding: 0.35rem 0; color: #333; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: #f4f6f8; }
+.cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+.cite a, .reminder a { color: #1d6fd6; }
+.reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+.nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+.tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>0004 - 数据权限体系（下）：DataScopeType、上下文与多租户 <span class="tag">核心机制</span></h1>
+
+<div class="mission">
+<b>学习目标：</b>掌握数据权限的后半部分——理解 6 种 DataScopeType 如何通过 SpEL 模板生成 SQL WHERE 条件，上下文变量如何跨层流转，以及端到端完整调用链。
+</div>
+
+<h2>一、DataScopeType 深度解析</h2>
+
+<p class="where">org.dromara.common.mybatis.enums.DataScopeType</p>
+
+<p>共 6 种数据范围类型，每种定义了 SpEL 模板和 fallback SQL：</p>
+
+<table>
+<tr><th>代码</th><th>名称</th><th>code</th><th>sqlTemplate（匹配到 key 时）</th><th>elseSql（key 未匹配时）</th></tr>
+<tr>
+<td>1</td><td>全部数据权限</td><td><code>ALL</code></td>
+<td><code>""</code>（空字符串）</td>
+<td><code>""</code></td>
+</tr>
+<tr>
+<td>2</td><td>自定义数据权限</td><td><code>CUSTOM</code></td>
+<td><code> #{#deptName} IN ( #{@sdss.getRoleCustom(#roleId)} ) </code></td>
+<td><code> 1 = 0 </code></td>
+</tr>
+<tr>
+<td>3</td><td>本部门数据权限</td><td><code>DEPT</code></td>
+<td><code> #{#deptName} = #{#user.deptId} </code></td>
+<td><code> 1 = 0 </code></td>
+</tr>
+<tr>
+<td>4</td><td>本部门及以下</td><td><code>DEPT_AND_CHILD</code></td>
+<td><code> #{#deptName} IN ( #{@sdss.getDeptAndChild(#user.deptId)} ) </code></td>
+<td><code> 1 = 0 </code></td>
+</tr>
+<tr>
+<td>5</td><td>仅本人数据</td><td><code>SELF</code></td>
+<td><code> #{#userName} = #{#user.userId} </code></td>
+<td><code> 1 = 0 </code></td>
+</tr>
+<tr>
+<td>6</td><td>本部门及以下（或本人）</td><td><code>DEPT_AND_CHILD_OR_SELF</code></td>
+<td><code> #{#deptName} IN ( #{@sdss.getDeptAndChild(#user.deptId)} ) OR #{#userName} = #{#user.userId} </code></td>
+<td><code> 1 = 0 </code></td>
+</tr>
+</table>
+
+<div class="why">
+<b>elseSql 的作用：</b>当 <code>@DataColumn</code> 中找不到 DataScopeType 模板引用的 key（如 <code>deptName</code>）时，使用 <code>elseSql</code> 作为回退。<code>1 = 0</code> 意味着"该角色在此查询中不生效"，即没有匹配的数据列就返回空集。非 ALL 类型的 elseSql 均为 <code>1 = 0</code>，这是安全优先的设计——找不到匹配列时宁可返回空数据，也不泄漏数据。
+</div>
+
+<div class="region">
+<h3>1.1 SpEL 模板"双槽位"设计</h3>
+<p>每个 DataScopeType 模板中同时出现 <code>#{#deptName}</code> 和 <code>#{#userName}</code> 两种占位符。在运行时，handler 会遍历 <code>@DataPermission</code> 中所有的 <code>@DataColumn</code>，用实际列名替换对应的 key：</p>
+<pre><code>// 模板： #{#deptName} IN ( #{@sdss.getDeptAndChild(#user.deptId)} )
+// 替换后：dept_id IN ( #{@sdss.getDeptAndChild(#user.deptId)} )
+// 再执行 SpEL 解析 → dept_id IN (101, 102, 103)</code></pre>
+<p>如果一个 <code>@DataColumn</code> key 在模板中不存在（如模板是 <code>#{#deptName} = ...</code> 但只定义了 <code>userName</code> 列），则执行 elseSql。</p>
+</div>
+
+<h2>二、SpEL 解析引擎在 Handler 中的应用</h2>
+
+<p class="where">org.dromara.common.mybatis.handler.PlusDataPermissionHandler</p>
+
+<div class="region">
+<h3>2.1 核心解析组件</h3>
+
+<table>
+<tr><th>组件</th><th>类</th><th>作用</th></tr>
+<tr><td>表达式解析器</td><td><code>SpelExpressionParser</code></td><td>Spring SpEL 标准解析器，解析 <code>#{...}</code> 模板</td></tr>
+<tr><td>模板上下文</td><td><code>TemplateParserContext</code></td><td>定义前缀 <code>#{</code> 和后缀 <code>}</code>，使解析器能识别模板边界</td></tr>
+<tr><td>Bean 解析器</td><td><code>BeanFactoryResolver(@sdss)</code></td><td><code>@sdss</code> 前缀映射到 Spring 容器中的 Bean（如 <code>SysDataScopeServiceImpl</code>），支持在 SQL 模板中调用服务方法</td></tr>
+<tr><td>空安全上下文</td><td><code>NullSafeStandardEvaluationContext</code></td><td>继承 <code>StandardEvaluationContext</code>，覆盖变量查找逻辑：变量为 null 时返回 <b>-1</b> 而非抛异常</td></tr>
+<tr><td>空安全属性访问器</td><td><code>NullSafePropertyAccessor</code></td><td>委托模式：读取对象属性时若对象为 null 则返回 null，避免 NPE</td></tr>
+</table>
+</div>
+
+<div class="region">
+<h3>2.2 buildDataFilter() 执行流程</h3>
+
+<pre><code>buildDataFilter(ExpressionWhere where, boolean isSelect) {
+    1. 获取当前登录用户 LoginUser
+    2. 如果是超级管理员 (LoginHelper.isSuperAdmin())
+       → 返回空字符串，不附加任何权限条件
+
+    3. 获取用户角色列表 → scopeRoles() 过滤角色
+       ↓ (按 @SaCheckPermission / @SaCheckRole 约束)
+
+    4. 遍历每个角色：
+       a. 获取角色的 DataScopeType（如 DEPT_AND_CHILD）
+       b. 获取对应的 sqlTemplate 字符串
+       c. 遍历 @DataPermission 中的所有 @DataColumn
+          - 若模板包含该 column.key → 替换为真实列名
+          - 使用 SpelExpressionParser 解析模板中的 #{...}
+          - NullSafeStandardEvaluationContext 安全替换变量
+          - 收集解析后的 SQL 片段
+          - 若模板不包含该 key → 使用 elseSql
+
+    5. 将所有角色的 SQL 片段 OR 连接 → 最外层 AND 到原始 WHERE
+}</code></pre>
+
+<div class="why">
+<b>NullSafeStandardEvaluationContext 的设计价值：</b>在分页查询等场景中，<code>@DataPermission</code> 可能定义了多个 <code>@DataColumn</code>（如 deptName 和 userName），但某些角色（如 SELF 类型）只用到了 userName。当模板尝试访问 <code>#deptName</code> 且 handler 按 userName 列遍历时，该变量在上下文中为 null。普通 SpEL 会抛异常，而 NullSafe 返回 -1，优雅地跳过不匹配的列。
+</div>
+</div>
+
+<h2>三、DataPermissionHelper 上下文桥梁</h2>
+
+<p class="where">org.dromara.common.mybatis.helper.DataPermissionHelper</p>
+
+<p>DataPermissionHelper 是 Advice（切面层）和 Handler（拦截器层）之间的桥梁，通过两种存储机制传递上下文：</p>
+
+<table>
+<tr><th>存储机制</th><th>存储内容</th><th>写入方</th><th>读取方</th></tr>
+<tr>
+<td><code>ThreadLocal&lt;DataPermission&gt;</code></td>
+<td>当前方法的 <code>@DataPermission</code> 注解对象（含 DataColumn[] 和 joinStr）</td>
+<td>DataPermissionAdvice.invoke()</td>
+<td>PlusDataPermissionHandler.getSqlSegment()</td>
+</tr>
+<tr>
+<td><code>SaStorage</code>（Sa-Token 请求上下文）</td>
+<td>方法参数 Map（parameter name → value），以及 DataPermissionAccess 对象</td>
+<td>DataPermissionAdvice.invoke()</td>
+<td>PlusDataPermissionHandler SpEL 变量查找</td>
+</tr>
+</table>
+
+<div class="side">
+<b>为什么用 SaStorage 而非另一个 ThreadLocal：</b>Sa-Token 的 SaStorage 天然与请求生命周期绑定，请求结束自动清理，无需手动管理。且 SpEL 解析时需要访问 <code>#user</code>、<code>#roleId</code> 等请求级变量，SaStorage 提供了统一的作用域管理。
+</div>
+
+<div class="region">
+<h3>3.1 变量传递链路</h3>
+
+<pre><code>// Advice 端（切面层）
+DataPermissionHelper.setPermission(dataPermission, args);
+  ├─ THREAD_LOCAL.set(dataPermission);          // ThreadLocal 存注解
+  └─ SaStorage: {
+       "user"      → LoginUser 对象,           // 当前用户
+       "roleId"    → 当前遍历的角色 ID,          // Handler 中动态设置
+       "deptName"  → 当前 @DataColumn.key,      // Handler 中动态设置
+       "userName"  → 当前 @DataColumn.key,      // Handler 中动态设置
+       "params"    → Mapper 方法参数 Map         // 原始方法参数
+     }
+
+// Handler 端（拦截器层）
+DataPermission dataPermission = DataPermissionHelper.getPermission();
+// → 从 ThreadLocal 取出注解，获取 DataColumn[] 和 joinStr
+</code></pre>
+</div>
+
+<h2>四、DataPermissionAccess — 权限约束模型</h2>
+
+<p class="where">org.dromara.common.mybatis.core.domain.DataPermissionAccess</p>
+
+<div class="region">
+<h3>4.1 结构定义</h3>
+
+<p>DataPermissionAccess 是一个 record 类型：</p>
+<pre><code>public record DataPermissionAccess(
+    Set&lt;String&gt; perms,       // 权限标识集合，如 {"system:user:list", "system:user:query"}
+    Set&lt;String&gt; roleKeys     // 角色标识集合，如 {"admin", "common"}
+) {
+    public boolean constrained() {
+        return (perms != null && !perms.isEmpty())
+            || (roleKeys != null && !roleKeys.isEmpty());
+    }
+}</code></pre>
+</div>
+
+<div class="region">
+<h3>4.2 resolveAccess() — 从 HandlerMethod 提取约束</h3>
+
+<p><code>PlusDataPermissionHandler.resolveAccess()</code> 通过读取当前请求的 <code>HandlerMethod</code>：</p>
+<ol>
+<li>查找方法或类上的 <code>@SaCheckPermission</code> 注解 → 提取 <code>value()</code> 作为 <code>perms</code></li>
+<li>查找方法或类上的 <code>@SaCheckRole</code> 注解 → 提取 <code>value()</code> 作为 <code>roleKeys</code></li>
+<li>封装为 <code>DataPermissionAccess</code> 对象，存入 SaStorage</li>
+</ol>
+
+<div class="why">
+<b>为什么需要 resolveAccess：</b>不是所有 Mapper 方法都需要数据权限。只有被 Controller 中 <code>@SaCheckPermission</code> 或 <code>@SaCheckRole</code> 保护的方法才需要。resolveAccess() 在请求入口捕获这些约束，scopeRoles() 在 Handler 中根据约束过滤角色，确保"不合法的角色不参与权限条件生成"。
+</div>
+</div>
+
+<div class="region">
+<h3>4.3 scopeRoles() — 角色过滤</h3>
+
+<p>用户可能拥有多个角色（如 admin、common、dept_leader），但当前请求只需要特定角色对应的数据范围。scopeRoles() 的过滤逻辑：</p>
+<ol>
+<li>如果 DataPermissionAccess 有 <code>roleKeys</code> → 只保留匹配的角色</li>
+<li>如果 DataPermissionAccess 有 <code>perms</code> → 通过 <code>dataScopeRoleMap</code>（权限 → 角色 ID 映射）反向查找关联角色</li>
+<li>如果两者都为空 → 保留所有角色（不受限场景）</li>
+</ol>
+</div>
+
+<h2>五、端到端完整链路追踪</h2>
+
+<div class="region">
+<h3>5.1 以 SysUserMapper.selectList() 为例</h3>
+
+<div class="flow">
+ [1] Controller 层
+     SysUserController.list()
+       @SaCheckPermission("system:user:list")    ← 声明权限约束
+       ↓
+     resolveAccess() 提取 perms={"system:user:list"}  → SaStorage
+
+ [2] Mapper 调用
+     SysUserMapper.selectList(queryWrapper)
+       ↓ @DataPermission({@DataColumn(key="deptName", value="dept_id")})
+       ↓ 接口方法上有注解
+
+ [3] AOP 切面拦截
+     DataPermissionPointcut.matches() → true
+     DataPermissionAdvice.invoke():
+       ├─ DataPermissionHelper.setPermission(注解, args)  → ThreadLocal
+       ├─ invocation.proceed()
+       │    ↓
+       │  [4] MyBatis 拦截器触发
+       │    PlusDataPermissionInterceptor.beforeQuery():
+       │      ├─ InterceptorIgnoreHelper → 未忽略
+       │      ├─ DataPermissionHandler.invalid() → 有效
+       │      └─ JSqlParser 解析 SQL → Select 对象
+       │
+       │  [5] Handler 生成权限条件
+       │    PlusDataPermissionHandler.getSqlSegment():
+       │      ├─ LoginHelper.isSuperAdmin() → false
+       │      ├─ buildDataFilter():
+       │      │    ├─ 获取用户角色 → scopeRoles()
+       │      │    │    ├─ DataPermissionAccess.perms={"system:user:list"}
+       │      │    │    └─ dataScopeRoleMap → roleId=2 (common角色)
+       │      │    │
+       │      │    ├─ 角色 common → DataScopeType=DEPT (code="3")
+       │      │    │    模板: #{#deptName} = #{#user.deptId}
+       │      │    │    DataColumn[{key="deptName", value="dept_id"}]
+       │      │    │    → 替换 key → "dept_id = #{#user.deptId}"
+       │      │    │    → SpEL 解析 #{#user.deptId} → 103
+       │      │    │    → SQL 片段: "dept_id = 103"
+       │      │    │
+       │      │    └─ 返回: (dept_id = 103)
+       │      │
+       │      └─ 原始 WHERE + AND + (dept_id = 103)
+
+ [6] 最终 SQL
+     SELECT * FROM sys_user WHERE del_flag = '0' AND (dept_id = 103)
+
+ [7] finally 清理
+     DataPermissionHelper.removePermission()  → ThreadLocal.remove()
+</div>
+</div>
+
+<h2>六、超级管理员绕过与多租户</h2>
+
+<div class="region">
+<h3>6.1 超级管理员豁免</h3>
+
+<p>在 <code>PlusDataPermissionHandler.getSqlSegment()</code> 中，第一步就是检查：</p>
+
+<pre><code>if (LoginHelper.isSuperAdmin()) {
+    return where.getSqlSegment();  // 原样返回，不注入任何权限条件
+}</code></pre>
+
+<p>超级管理员（roleKey = "admin" 且分配了所有权限的角色）绕过所有数据权限过滤，可以看到全部数据。这是通过 Sa-Token 的 <code>LoginHelper</code> 静态方法判断。</p>
+</div>
+
+<div class="region">
+<h3>6.2 多租户说明</h3>
+
+<p>数据权限（Data Permission）和多租户（Multi-Tenant）是两个独立但可协作的机制：</p>
+<ul>
+<li><b>数据权限</b>：基于用户角色/部门的行级过滤，通过 SpEL 动态生成 WHERE 条件</li>
+<li><b>多租户</b>：基于租户 ID 的行级隔离，通常通过 MyBatis Plus 的租户拦截器在每条 SQL 上自动追加 <code>tenant_id = ?</code></li>
+</ul>
+<p>两者在 MyBatis 拦截器链中按顺序执行，互不干扰。数据权限条件追回在租户条件之后，最终 SQL 同时包含两种约束。</p>
+</div>
+
+<h2>小节测验</h2>
+
+<div class="quiz">
+<p>Q1: 当 DataScopeType 为 <code>DEPT_AND_CHILD</code> 时，若 <code>@DataPermission</code> 中没有匹配 <code>deptName</code> 这个 key 的 <code>@DataColumn</code>，最终 SQL 会注入什么条件？</p>
+<label class="opt"><input type="radio" name="q1"> A. 不注入任何条件，返回全部数据</label>
+<label class="opt"><input type="radio" name="q1"> B. <code>1 = 1</code>，恒真</label>
+<label class="opt"><input type="radio" name="q1"> C. <code>1 = 0</code>，返回空集</label>
+<label class="opt"><input type="radio" name="q1"> D. 抛出异常</label>
+<details><summary>查看答案</summary><p><b>C</b>。elseSql 为 <code>1 = 0</code>，安全优先——找不到匹配的数据列时返回空结果，防止数据泄漏。</p></details>
+</div>
+
+<div class="quiz">
+<p>Q2: <code>NullSafeStandardEvaluationContext</code> 在 SpEL 变量为 null 时返回什么值？</p>
+<label class="opt"><input type="radio" name="q2"> A. null</label>
+<label class="opt"><input type="radio" name="q2"> B. 抛出 NullPointerException</label>
+<label class="opt"><input type="radio" name="q2"> C. <b>-1</b></label>
+<label class="opt"><input type="radio" name="q2"> D. 空字符串 ""</label>
+<details><summary>查看答案</summary><p><b>C</b>。返回 -1 使得 SQL 条件变为 <code>dept_id = -1</code> 或 <code>dept_id IN (-1)</code>，实际查询不到任何数据，安全且不中断流程。</p></details>
+</div>
+
+<div class="quiz">
+<p>Q3: <code>scopeRoles()</code> 根据什么信息来过滤用户角色？</p>
+<label class="opt"><input type="radio" name="q3"> A. 用户的部门 ID</label>
+<label class="opt"><input type="radio" name="q3"> B. <code>DataPermissionAccess</code> 中的 <code>perms</code> 和 <code>roleKeys</code></label>
+<label class="opt"><input type="radio" name="q3"> C. 数据库连接信息</label>
+<label class="opt"><input type="radio" name="q3"> D. HTTP 请求头</label>
+<details><summary>查看答案</summary><p><b>B</b>。DataPermissionAccess 从 <code>@SaCheckPermission</code> 和 <code>@SaCheckRole</code> 注解提取权限和角色标识，scopeRoles() 据此过滤——只保留当前请求关联的角色，避免无关角色的数据范围污染 SQL。</p></details>
+</div>
+
+<div class="reminder">
+<b>核心要点回顾：</b><br>
+1. 6 种 DataScopeType 覆盖了从"全部数据"到"仅本人"的完整权限粒度<br>
+2. SpEL 模板通过 <code>#{#deptName}</code> 占位符 + <code>@sdss</code> Bean 引用实现动态 SQL 生成<br>
+3. ThreadLocal + SaStorage 双通道实现 Advice → Handler 的上下文传递<br>
+4. <code>resolveAccess()</code> 从 Controller 注解提取权限约束，<code>scopeRoles()</code> 按约束过滤角色<br>
+5. 超级管理员完全绕过数据权限；多租户与数据权限是独立的两层过滤
+</div>
+
+<div class="cite">
+<p><b>源文件索引：</b></p>
+<p>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/handler/PlusDataPermissionHandler.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/enums/DataScopeType.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataPermissionHelper.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/core/domain/DataPermissionAccess.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataPermissionIgnoreContext.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/interceptor/PlusDataPermissionInterceptor.java</code>
+</p>
+</div>
+
+<div class="nav">上一课：0003 数据权限体系（上） | 下一课：0005 逻辑删除与自动填充</div>
+
+</body>
+</html>

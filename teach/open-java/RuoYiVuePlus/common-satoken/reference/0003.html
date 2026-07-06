@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 03 · SaPermissionImpl 权限验证</title>
+<style>
+body { max-width: 760px; margin: 0 auto; padding: 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.7; color: #2c2c2c; background: #fff; }
+h1 { border-bottom: 2px solid #1a56db; padding-bottom: .4rem; font-size: 1.5rem; }
+h2 { margin-top: 2rem; color: #1e3a5f; font-size: 1.15rem; }
+h3 { margin-top: 1.5rem; font-size: 1rem; }
+code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+pre code { display: block; background: #1e2127; color: #abb2bf; padding: .8rem 1rem; border-radius: 5px; overflow-x: auto; font-size: .85em; line-height: 1.5; }
+.chain { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px solid #cbd5e1; padding: .8rem 1rem; border-radius: 4px; white-space: pre; font-size: .85em; line-height: 1.7; overflow-x: auto; }
+.a { color: #64748b; font-size: .85em; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; margin: .6rem 0; }
+th, td { border: 1px solid #e2e8f0; padding: .4rem .6rem; text-align: left; font-size: .9em; }
+th { background: #f1f5f9; font-weight: 600; }
+@media print { body { font-size: 11pt; } pre code, .chain { background: #f8f8f8; color: #000; border: 1px solid #ccc; } }
+</style>
+</head>
+<body>
+
+<h1>速查 03 · SaPermissionImpl 权限验证</h1>
+<p class="a">配套第 3 课学习</p>
+
+<h2>StpInterface 方法契约</h2>
+<table>
+  <thead>
+    <tr>
+      <th>方法</th>
+      <th>参数</th>
+      <th>返回值</th>
+      <th>调用时机</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>getPermissionList(Object loginId, String loginType)</td>
+      <td>loginId: 当前登录用户ID; loginType: 登录类型(如 "login")</td>
+      <td>List&lt;String&gt; — 权限码列表</td>
+      <td>每次 @SaCheckPermission 校验时调用</td>
+    </tr>
+    <tr>
+      <td>getRoleList(Object loginId, String loginType)</td>
+      <td>loginId: 当前登录用户ID; loginType: 登录类型</td>
+      <td>List&lt;String&gt; — 角色标识列表</td>
+      <td>每次 @SaCheckRole 校验时调用</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>SaPermissionImpl 权限获取策略</h2>
+<table>
+  <thead>
+    <tr>
+      <th>策略</th>
+      <th>条件</th>
+      <th>数据来源</th>
+      <th>适用场景</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>策略1: 本地提取</td>
+      <td>当前 LoginUser 存在且 loginId 匹配</td>
+      <td>LoginUser.permissions</td>
+      <td>99% 场景 — 同服务内鉴权</td>
+    </tr>
+    <tr>
+      <td>策略2: 远程调用</td>
+      <td>LoginUser 不存在或 loginId 不匹配</td>
+      <td>PermissionService.getMenuPermission()</td>
+      <td>跨服务鉴权 / 用户缓存过期</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>resolveUserId 解析逻辑</h2>
+<pre><code>/**
+ * 从 Sa-Token 的 loginId 中解析出真实的用户 ID
+ *
+ * Sa-Token 的 loginId 格式: "loginType:userId:deviceType"
+ * 例如: "login:1:web" 表示登录类型=login, userId=1, 设备=web
+ *
+ * 此处取第二段作为 userId，若格式不符则直接将整个 loginId 作为 userId
+ */
+private Long resolveUserId(Object loginId) {
+    if (loginId == null) return null;
+    String str = loginId.toString();
+    String[] parts = str.split(":");
+    if (parts.length >= 2) {
+        return Long.valueOf(parts[1]);
+    }
+    return Long.valueOf(str);
+}</code></pre>
+
+<h2>loginId 格式说明</h2>
+<table>
+  <thead>
+    <tr>
+      <th>格式示例</th>
+      <th>用户类型前缀</th>
+      <th>解析出的userId</th>
+      <th>使用场景</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>login:1:web</td>
+      <td>login</td>
+      <td>1</td>
+      <td>后台用户 Web 端登录</td>
+    </tr>
+    <tr>
+      <td>login:5:app</td>
+      <td>login</td>
+      <td>5</td>
+      <td>后台用户 App 端登录</td>
+    </tr>
+    <tr>
+      <td>app:100:app</td>
+      <td>app</td>
+      <td>100</td>
+      <td>App 用户登录</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>—</td>
+      <td>1</td>
+      <td>纯数字格式（兼容旧数据）</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>权限校验异常</h2>
+<table>
+  <thead>
+    <tr>
+      <th>异常类型</th>
+      <th>触发条件</th>
+      <th>HTTP状态码</th>
+      <th>返回消息</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>NotPermissionException</td>
+      <td>缺少指定权限码</td>
+      <td>403</td>
+      <td>"无此权限：{permission}"</td>
+    </tr>
+    <tr>
+      <td>NotRoleException</td>
+      <td>缺少指定角色</td>
+      <td>403</td>
+      <td>"无此角色：{role}"</td>
+    </tr>
+    <tr>
+      <td>NotLoginException</td>
+      <td>未登录或 Token 过期</td>
+      <td>401</td>
+      <td>"未登录或会话已超时"</td>
+    </tr>
+    <tr>
+      <td>DisableLoginException</td>
+      <td>账号已被封禁</td>
+      <td>403</td>
+      <td>"此账号已被封禁"</td>
+    </tr>
+    <tr>
+      <td>NotSafeException</td>
+      <td>二级认证未通过</td>
+      <td>403</td>
+      <td>"需要二次认证"</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="a">相关术语 — <a href="#">glossary:StpInterface</a>, <a href="#">glossary:LoginUser</a>, <a href="#">glossary:NotPermissionException</a></p>
+
+</body>
+</html>

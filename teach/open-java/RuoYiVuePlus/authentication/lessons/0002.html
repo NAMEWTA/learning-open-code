@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 客户端体系 + grantType + 策略模式</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.83rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 客户端体系 + grantType + 策略模式 <span class="tag">设计动机</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #2）</b>：讲清「客户端（<code>sys_client</code>）+ grantType + 策略模式」这套设计<strong>解决了什么问题</strong>，以及新增一种登录方式时，系统的哪几处会参与。这是 <a href="0001.html">第 1 课</a>全景图里第 3、4 步的放大。
+</div>
+
+<p>上一课我们看到登录请求带了两个字段：<code>clientId</code> 和 <code>grantType</code>。这一课我们回答：<strong>为什么要有这两个东西？少了它们会怎样？</strong></p>
+
+<h2>一、问题：一个系统要面对多少种「登录」？</h2>
+<p>想象 RuoYi 要支撑的真实场景：</p>
+<ul>
+<li>PC 管理后台 → 账号密码 + 图形验证码登录</li>
+<li>手机 App → 短信验证码登录</li>
+<li>微信小程序 → openid 静默登录</li>
+<li>对接企业 SSO / Gitee / GitHub → 第三方社交登录</li>
+</ul>
+<p>这些登录方式<strong>入参不同、校验逻辑不同、token 有效期诉求也不同</strong>（App 的 token 可能要存 30 天，后台只存几小时）。如果全塞进一个 <code>if/else` 大方法，会迅速腐烂成谁也不敢动的 800 行怪物。RuoYi 用两个正交的维度把它拆开。</p>
+
+<h2>二、维度一：grantType + 策略模式（「怎么校验」）</h2>
+<p>每一种登录方式 = 一个实现 <code>IAuthStrategy</code> 接口的策略 Bean。关键在 Bean 的<strong>命名约定</strong>：</p>
+
+<pre><code>// 五个策略类的注解，注意 Bean 名字
+@Service("password" + IAuthStrategy.BASE_NAME)  // → "passwordAuthStrategy"
+@Service("sms" + IAuthStrategy.BASE_NAME)       // → "smsAuthStrategy"
+@Service("email" + IAuthStrategy.BASE_NAME)     // → "emailAuthStrategy"
+@Service("social" + IAuthStrategy.BASE_NAME)    // → "socialAuthStrategy"
+@Service("xcx" + IAuthStrategy.BASE_NAME)       // → "xcxAuthStrategy"</code></pre>
+
+<p>分发时不靠 switch，而是用 grantType 直接<strong>拼出 Bean 名去容器里取</strong>：</p>
+
+<pre><code>// IAuthStrategy.java:31
+static LoginVo login(String body, SysClientVo client, String grantType) {
+    String beanName = grantType + BASE_NAME;        // "sms" + "AuthStrategy"
+    if (!SpringUtils.containsBean(beanName)) {
+        throw new ServiceException("授权类型不正确!");
+    }
+    IAuthStrategy instance = SpringUtils.getBean(beanName);
+    return instance.login(body, client);
+}</code></pre>
+
+<div class="why">
+✅ <b>这样设计的好处</b>：新增一种登录方式，只需写一个新策略类、起对名字，<strong>AuthController 和分发逻辑一行都不用改</strong>——这就是「对扩展开放，对修改关闭」的开闭原则落地。差异被关进各策略，主干永远干净。
+</div>
+
+<h2>三、维度二：sys_client（「谁来登录、token 怎么配」）</h2>
+<p><code>sys_client</code> 是一张配置表，每行是一个接入端。看它的视图对象 <code>SysClientVo</code> 字段：</p>
+
+<table>
+<tr><th>字段</th><th>含义</th><th>在认证里的作用</th></tr>
+<tr><td><code>clientId</code></td><td>客户端唯一 id</td><td>登录请求带它，后端据此查配置</td></tr>
+<tr><td><code>grantType</code></td><td>该端<strong>允许</strong>的授权类型（逗号分隔）</td><td>限制「这个端只能用这些登录方式」</td></tr>
+<tr><td><code>deviceType</code></td><td>设备类型（pc/app…）</td><td>Sa-Token 多设备登录的区分维度</td></tr>
+<tr><td><code>timeout</code> / <code>activeTimeout</code></td><td>token 固定/活跃超时</td><td>每个端 token 有效期可不同</td></tr>
+<tr><td><code>accessPath</code></td><td>允许访问的路径</td><td>拦截器据此限制接口范围（第 4 课）</td></tr>
+<tr><td><code>ipWhitelist</code></td><td>IP 白名单</td><td>拦截器据此限制来源 IP（第 4 课）</td></tr>
+<tr><td><code>status</code></td><td>状态（0 正常 1 停用）</td><td>停用的客户端直接拒绝登录</td></tr>
+</table>
+
+<p>AuthController 在分发前先做两道客户端校验：</p>
+<pre><code>// AuthController.java:83
+SysClientVo client = clientService.queryByClientId(clientId);
+// ① 查不到 client，或 client 不允许这个 grantType → 拒绝
+if (ObjectUtil.isNull(client) || !StringUtils.contains(client.getGrantType(), grantType)) {
+    return R.fail(MessageUtils.message("auth.grant.type.error"));
+// ② 客户端被停用 → 拒绝
+} else if (!SystemConstants.NORMAL.equals(client.getStatus())) {
+    return R.fail(MessageUtils.message("auth.grant.type.blocked"));
+}
+LoginVo loginVo = IAuthStrategy.login(body, client, grantType);  // 通过才分发</code></pre>
+
+<div class="side">
+💡 <b>两个维度正交</b>：grantType 决定<strong>怎么校验身份</strong>，sys_client 决定<strong>谁能用这种方式、token 怎么配</strong>。同一个 grantType（如 sms）可被多个客户端共用，同一个客户端也能开放多个 grantType。组合自由。
+</div>
+
+<h2>四、串起来：新增「钉钉扫码登录」要动哪几处？</h2>
+<p>这是检验你是否真懂这套设计的试金石。答案是<strong>三处</strong>：</p>
+<ol>
+<li>写一个 <code>DingTalkAuthStrategy implements IAuthStrategy</code>，注解 <code>@Service("dingtalk" + BASE_NAME)</code>，在 <code>login()</code> 里实现钉钉的身份校验 + <code>LoginHelper.login()</code>。</li>
+<li>在 <code>sys_client</code> 表里，给需要的客户端的 <code>grantType</code> 字段追加 <code>dingtalk</code>。</li>
+<li>前端登录时传 <code>grantType: 'dingtalk'</code> 和对应入参。</li>
+</ol>
+<p><strong>AuthController、IAuthStrategy、LoginHelper、拦截器——全都不用改。</strong> 这就是这套设计的回报。</p>
+
+<details>
+<summary>🤔 想一想：分发用「拼 Bean 名」而不是 <code>switch(grantType)</code>，除了开闭原则，还有什么隐藏好处？</summary>
+解耦 + 可插拔。各策略是独立的 Spring Bean，能各自注入自己需要的依赖（密码策略要 <code>CaptchaProperties</code>，社交策略要 <code>SocialProperties</code> 和 <code>ISysSocialService</code>）。用 switch 的话所有依赖都得堆在一个类里。而且策略还能放在不同模块/jar 里，靠 Bean 名约定「即插即用」。
+</details>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 同一个 <code>grantType:'sms'</code> 的登录请求，带不同的 <code>clientId</code>，会发生什么？</p>
+<span class="opt">A. 报错，一个 grantType 只能绑一个客户端</span>
+<span class="opt">B. 走同一个 smsAuthStrategy 校验，但 token 超时/设备类型按各自客户端配置生成</span>
+<span class="opt">C. 完全一样，clientId 无意义</span>
+<span class="opt">D. 第二个客户端会把第一个踢下线</span>
+<details><summary>看答案</summary><b>B</b>。策略由 grantType 决定（都走 smsAuthStrategy），但 <code>buildLoginParameter(client)</code> 会按各自 <code>SysClientVo</code> 的 timeout/deviceType 生成不同的登录参数。这正是两个维度正交的体现。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 如果前端传了 <code>grantType:'wechat'</code> 但没有对应的策略 Bean，会在哪一步、怎么失败？</p>
+<span class="opt">A. 前端 axios 拦截器拦下</span>
+<span class="opt">B. AuthController 客户端校验阶段（若 client.grantType 不含 wechat）或 IAuthStrategy 分发时 containsBean 为 false 抛「授权类型不正确」</span>
+<span class="opt">C. 数据库报错</span>
+<span class="opt">D. 静默成功，返回空 token</span>
+<details><summary>看答案</summary><b>B</b>。两道防线：先在 Controller 校验 <code>client.getGrantType()</code> 是否包含该类型；即便包含，分发时 <code>SpringUtils.containsBean("wechatAuthStrategy")</code> 为 false 也会抛 ServiceException。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://plus-doc.dromara.org/#/ruoyi-vue-plus/framework/client" target="_blank">RuoYi-Vue-Plus 官方文档 · 客户端管理</a>——对照本课理解 sys_client 各字段的产品意图。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「buildLoginParameter 里的 extra 信息后面拦截器怎么用？」「策略 Bean 名拼错了启动时会报错还是运行时？」下一课进入第 1 课全景图的第 6 步——<strong>Sa-Token 到底怎么签发 token</strong>，LoginUser 存哪、JWT 和 Redis 各管什么。</div>
+
+<div class="nav">课程 0002 / 上一课：<a href="0001.html">鸟瞰全链路</a> · 下一课：Sa-Token 签发 token（LoginHelper / LoginUser / JWT / Redis）</div>
+
+</body>
+</html>

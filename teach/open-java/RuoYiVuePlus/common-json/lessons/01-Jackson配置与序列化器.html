@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 · Jackson 配置与序列化器</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>第 1 课 · Jackson 配置与序列化器</h1>
+<div class="mission"><strong>本节目标：</strong>学完能讲清 <code>ruoyi-common-json</code> 模块的「三驾马车」架构——JacksonConfig（序列化配置中心）、JsonEnhancementConfig（字段增强入口）、JsonUtils（业务工具门面）。理解 tools.jackson 的 re-shade 背景、JsonMapper 的不可变构造模式，以及 SimpleModule 中注册的 5 个序列化/反序列化器各自的设计动机与核心逻辑。</div>
+
+<h2>一、模块总览：它是 Jackson 3.x 的业务定制层</h2>
+
+<p><code>ruoyi-common-json</code> 模块的定位非常清晰：<strong>它不是一个新的 JSON 框架，而是在 Jackson 3.x 的基础上，为 RuoYi 业务场景封装了序列化规则、字段增强、格式校验三大能力</strong>。整个模块只有 12 个 Java 文件，但覆盖了从基础序列化到响应后处理再到参数校验的完整链路。</p>
+
+<p>从 <code>pom.xml</code> 看它的技术栈：</p>
+
+<pre><code>&lt;!-- 核心模块 --&gt;
+ruoyi-common-core              → SpringUtils、StringUtils 等基础工具
+&lt;!-- Jackson 序列化 --&gt;
+spring-boot-starter-jackson    → Spring Boot 自动装配 Jackson（引入 tools.jackson）
+&lt;!-- 隐式依赖 --&gt;
+Hutool (DateUtil)              → 日期多格式解析
+Jakarta Validation             → @JsonPattern 校验注解</code></pre>
+
+<p>模块的目录结构刚好按职责划分为 5 个包：</p>
+
+<pre><code>org/dromara/common/json/
+├── config/        JacksonConfig（规则注册中心） + JsonEnhancementConfig（增强装配入口）
+├── handler/       BigNumberSerializer、CustomDateDeserializer、CustomLocalDateTimeDeserializer
+├── enhance/       增强框架四件套：Context、FieldContext、Processor、ValueEnhancer
+├── validate/      @JsonPattern + JsonPatternValidator + JsonType
+└── utils/         JsonUtils（业务统一门面，10 个公开方法）</code></pre>
+
+<h2>二、为什么是 tools.jackson？——Maven Shade 隔离版本冲突</h2>
+
+<p>RuoYi-Vue-Plus 的 Jackson 不是标准包名 <code>com.fasterxml.jackson</code>，而是 <code>tools.jackson</code>。这不是笔误，而是一项关键的工程决策。</p>
+
+<blockquote><strong>Maven Shade 插件的工作原理：</strong>在构建时将 Jackson 3.x 的所有 .class 文件从 <code>com/fasterxml/jackson/</code> 路径重定位到 <code>tools/jackson/</code> 路径，同时将所有 import 语句中的包名一并替换。最终产出的 JAR 中不包含任何 <code>com.fasterxml</code> 引用。</blockquote>
+
+<p>这样做的动机是<strong>版本冲突隔离</strong>。在一个大型 Spring Boot 项目中，不同的依赖库可能引入不同版本的 Jackson：有些老库还在用 Jackson 2.x（<code>com.fasterxml.jackson</code>），而 Spring Boot 3.x 默认已经迁移到 Jackson 3.x（也是 <code>com.fasterxml.jackson</code>）。如果不在包名层面做隔离，classpath 上会出现两个同名但版本不同的类，JVM 只会加载其中一个——另一个直接失效，导致运行时 ClassNotFoundException 或 MethodNotFoundException。</p>
+
+<p>经过 Shade 重打包后：</p>
+<ul>
+  <li>RuoYi 自身的代码全部使用 <code>tools.jackson</code> 包名 —— 指向 Jackson 3.x 的能力</li>
+  <li>第三方老库仍然使用 <code>com.fasterxml.jackson</code> 包名 —— 走它们自己的 Jackson 版本</li>
+  <li>两个版本在 JVM 层面是完全不同的类，井水不犯河水</li>
+</ul>
+
+<div class="insight"><strong>设计洞察：</strong>这种方案比「全局统一 Jackson 版本 + exclude 冲突传递依赖」更稳健。因为 exclude 只能解决依赖树上的冲突，但对「某些库直接把 Jackson 类 shade 进自己的 JAR」这种情况无能为力。而 re-shade 是在自己的地盘上彻底改名，从根本上避免了冲突。</div>
+
+<h2>三、三驾马车全景</h2>
+
+<p>模块有三个入口类，分别对应业务代码与 JSON 能力交互的三种场景：</p>
+
+<table>
+<tr><th>入口类</th><th>职责</th><th>业务场景</th><th>所在包</th></tr>
+<tr><td><code>JacksonConfig</code></td><td>序列化规则注册中心——定义全局的序列化/反序列化行为</td><td>定义「Java 对象怎么变成 JSON」「JSON 怎么变回 Java 对象」</td><td><code>config/</code></td></tr>
+<tr><td><code>JsonEnhancementConfig</code></td><td>字段增强装配入口——收集所有 JsonFieldProcessor 交给引擎</td><td>定义「响应出站前，JSON 字段还能做什么额外加工」</td><td><code>config/</code></td></tr>
+<tr><td><code>JsonUtils</code></td><td>业务工具门面——10 个静态方法覆盖常见 JSON 操作</td><td>业务代码里「把对象转成 JSON 字符串」「把 JSON 字符串转成对象」</td><td><code>utils/</code></td></tr>
+</table>
+
+<p>三者关系：<strong>JacksonConfig 打地基（规则层）→ JsonEnhancementConfig 建加工链（增强层）→ JsonUtils 开门迎客（门面层）</strong>。业务代码 90% 的时间只碰 JsonUtils，但 JsonUtils 底层委托给 JacksonConfig 配置出来的全局 JsonMapper。</p>
+
+<h2>四、JsonMapper：Jackson 3.x 的不可变入口</h2>
+
+<p>在 Jackson 2.x 中，入口类是 <code>ObjectMapper</code>；在 Jackson 3.x 中，它改名为 <code>JsonMapper</code>。改名不只是换个标识符，而是反映了一个设计哲学的变化：</p>
+
+<blockquote><strong>不可变（immutable）+ 建造者模式（builder pattern）</strong>：JsonMapper 实例一旦创建就不可修改。所有配置通过 <code>JsonMapper.builder()</code> 链式调用设置，最后 <code>.build()</code> 产出最终实例。这避免了 ObjectMapper 可变的 setter 方法带来的线程安全隐患。</blockquote>
+
+<p>在 RuoYi 中，全局 JsonMapper 由 Spring Boot 的 <code>JacksonAutoConfiguration</code> 自动创建。JacksonConfig 通过 <code>@AutoConfiguration(before = JacksonAutoConfiguration.class)</code> 确保自定义的 SimpleModule 在 JsonMapper 创建之前注册：</p>
+
+<pre><code>@AutoConfiguration(before = JacksonAutoConfiguration.class)
+public class JacksonConfig {
+
+    @Bean
+    public SimpleModule registerJavaTimeModule() {
+        SimpleModule module = new SimpleModule();
+        // ... 注册 5 个序列化/反序列化处理器
+        return module;
+    }
+
+    @Bean
+    public JsonMapperBuilderCustomizer jsonInitCustomizer() {
+        return builder -> {
+            builder.defaultTimeZone(TimeZone.getDefault());
+        };
+    }
+}</code></pre>
+
+<p><strong>before = JacksonAutoConfiguration.class</strong> 是这段代码的关键。Spring Boot 的自动装配机制按顺序执行：先跑 JacksonConfig（注册 Module + 设置时区），再跑 JacksonAutoConfiguration（用已注册的 Module 构建 JsonMapper）。如果顺序反过来，Module 没有被注册进去，所有自定义序列化行为都不会生效。</p>
+
+<h2>五、SimpleModule 中的 5 个处理器</h2>
+
+<p><code>registerJavaTimeModule()</code> 方法创建了一个 <code>SimpleModule</code> 并向其中注册了 5 个自定义处理器。SimpleModule 是 Jackson 的插件式扩展机制——你可以在不修改 Jackson 核心代码的前提下，插进去自己的序列化/反序列化逻辑。</p>
+
+<h3>5.1 BigNumberSerializer —— Long 精度保护</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/handler/BigNumberSerializer.java</code></p>
+
+<p>这是模块中最具业务价值的自定义序列化器。它解决的是一个经典的跨语言精度问题：</p>
+
+<blockquote>JavaScript 的 Number 类型基于 IEEE 754 双精度浮点数，安全整数范围是 <code>[-9007199254740991, 9007199254740991]</code>（即 <code>Number.MIN_SAFE_INTEGER</code> 到 <code>Number.MAX_SAFE_INTEGER</code>）。Java 的 Long 类型最大值是 <code>9223372036854775807</code>，远超 JS 的安全范围。当后端返回一个 19 位的 Long 给前端时，JS 会丢失最后几位的精度。</blockquote>
+
+<p>BigNumberSerializer 的设计完美应对这个问题：</p>
+
+<pre><code>public class BigNumberSerializer extends NumberSerializer {
+
+    public static final BigNumberSerializer INSTANCE = new BigNumberSerializer(Number.class);
+    private static final long MAX_SAFE_INTEGER = 9007199254740991L;
+    private static final long MIN_SAFE_INTEGER = -9007199254740991L;
+
+    @Override
+    public void serialize(Number value, JsonGenerator gen, SerializationContext provider) {
+        if (value.longValue() >= MIN_SAFE_INTEGER && value.longValue() <= MAX_SAFE_INTEGER) {
+            super.serialize(value, gen, provider);  // 在安全范围内：JSON number
+        } else {
+            gen.writeString(value.toString());       // 超出安全范围：JSON string
+        }
+    }
+}</code></pre>
+
+<p><strong>核心逻辑很简单但精准：</strong>用 <code>value.longValue()</code> 获取数值后与两个安全边界比较。在范围内的正常写成 JSON 数字（如 <code>12345</code>）；超出范围的写成 JSON 字符串（如 <code>"9223372036854775807"</code>）。前端拿到字符串后可以用 BigInt 处理，不会丢失精度。</p>
+
+<p>JacksonConfig 中注册了三类类型：</p>
+
+<pre><code>module.addSerializer(Long.class, BigNumberSerializer.INSTANCE);      // Long 包装类
+module.addSerializer(Long.TYPE, BigNumberSerializer.INSTANCE);       // long 基本类型
+module.addSerializer(BigInteger.class, BigNumberSerializer.INSTANCE); // BigInteger</code></pre>
+
+<p>注意 <code>Long.TYPE</code> 和 <code>Long.class</code> 在 Jackson 中是分开注册的——前者对应 <code>long</code> 基本类型字段，后者对应 <code>Long</code> 包装类型字段。两者都注册才能覆盖所有场景。</p>
+
+<div class="insight"><strong>设计洞察：为什么不用「大于 Integer.MAX_VALUE 就转 String」的简单判断？</strong>因为业务中很多 Long 值（如数据库自增主键）虽然没有超过 Long 的理论范围，但远超 Integer 范围，却又在 JS 安全整数之内。用 Integer.MAX_VALUE 做阈值会误杀大量合法场景。用 JS 的安全整数边界才是精准的对症下药。</div>
+
+<h3>5.2 ToStringSerializer —— BigDecimal 直接转字符串</h3>
+
+<p>BigDecimal 的序列化没有使用自定义实现，而是直接复用 Jackson 内置的 <code>ToStringSerializer</code>：</p>
+
+<pre><code>module.addSerializer(BigDecimal.class, ToStringSerializer.instance);</code></pre>
+
+<p>这意味着任何 BigDecimal 值都会被序列化为 JSON 字符串而非数字。例如 <code>new BigDecimal("123.45")</code> 输出 <code>"123.45"</code> 而不是 <code>123.45</code>。</p>
+
+<p><strong>为什么不用自定义 Serializer？</strong>因为 BigDecimal 的核心问题不是数值范围（它没有 JS 精度问题——前端可以用 string 接收），而是<strong>数值精度</strong>。Java 中 <code>new BigDecimal("0.1")</code> 精确等于 0.1，但如果序列化成 JSON number <code>0.1</code>，前端再转回时可能变成 <code>0.10000000000000000555</code>（浮点误差）。直接输出字符串彻底避免了这个问题。</p>
+
+<h3>5.3 CustomDateDeserializer —— 多格式日期自动识别</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/handler/CustomDateDeserializer.java</code></p>
+
+<p>后端接收前端传来的日期时，格式可能是各式各样的：<code>2024-01-15</code>、<code>2024/01/15 14:30:00</code>、<code>1705312200000</code>（毫秒时间戳）、<code>1705312200</code>（秒时间戳）、ISO 8601 格式……如果每换一个前端就得改后端解析逻辑，成本太高。</p>
+
+<p>CustomDateDeserializer 把这件事完全委托给 Hutool 的 <code>DateUtil.parse()</code>：</p>
+
+<pre><code>public class CustomDateDeserializer extends ValueDeserializer&lt;Date&gt; {
+
+    @Override
+    public Date deserialize(JsonParser p, DeserializationContext ctxt) {
+        String text = p.getString();
+        if (text == null || text.isBlank()) {
+            return null;                     // 空字符串 → null
+        }
+        DateTime parse = DateUtil.parse(text.trim());
+        return parse.toJdkDate();            // Hutool 自动识别格式
+    }
+}</code></pre>
+
+<p><code>DateUtil.parse()</code> 内部有一套格式试错机制：按优先级依次尝试常见的日期格式模板匹配，同时判断是否为纯数字（时间戳）。这比写一长串 <code>@JsonFormat</code> 注解或自定义多格式解析器简洁得多。</p>
+
+<p><strong>空字符串返回 null</strong> 是一个细节但重要的设计：前端可能传空字符串而非 null，Java 的 Date 字段不允许空字符串赋值，转成 null 避免了反序列化异常。</p>
+
+<h3>5.4 CustomLocalDateTimeDeserializer —— 同逻辑，不同返回类型</h3>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/handler/CustomLocalDateTimeDeserializer.java</code></p>
+
+<p>与 CustomDateDeserializer 几乎完全相同，唯一的区别在最后一行：</p>
+
+<pre><code>// CustomDateDeserializer:
+return parse.toJdkDate();
+
+// CustomLocalDateTimeDeserializer:
+return parse.toLocalDateTime();</code></pre>
+
+<p>两者都使用 Hutool 的 <code>DateUtil.parse()</code> 做格式识别，区别仅在于最终返回的 Java 类型。这是 DRY（Don't Repeat Yourself）原则下的合理设计——多格式解析的核心逻辑复用 Hutool，不需要自己再写一套。</p>
+
+<h3>5.5 LocalDateTimeSerializer —— 统一输出格式</h3>
+
+<p>序列化方向的 LocalDateTime 处理更简单——不需要智能识别，只需要<strong>统一输出格式</strong>：</p>
+
+<pre><code>DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+module.addSerializer(LocalDateTime.class, new LocalDateTimeSerializer(formatter));</code></pre>
+
+<p>所有 <code>LocalDateTime</code> 字段序列化时统一输出为 <code>"2024-01-15 14:30:00"</code> 格式。这是给前端一个确定性的契约：你不用猜测日期格式，返回的一定是这个样子。</p>
+
+<table>
+<tr><th>处理器</th><th>方向</th><th>目标类型</th><th>核心逻辑</th></tr>
+<tr><td>BigNumberSerializer</td><td>序列化</td><td>Long / long / BigInteger</td><td>超 JS 安全范围→string，范围内→number</td></tr>
+<tr><td>ToStringSerializer</td><td>序列化</td><td>BigDecimal</td><td>全部输出为 string，避免浮点精度丢失</td></tr>
+<tr><td>LocalDateTimeSerializer</td><td>序列化</td><td>LocalDateTime</td><td>统一格式化为 yyyy-MM-dd HH:mm:ss</td></tr>
+<tr><td>CustomDateDeserializer</td><td>反序列化</td><td>Date</td><td>Hutool DateUtil.parse 多格式自动识别</td></tr>
+<tr><td>CustomLocalDateTimeDeserializer</td><td>反序列化</td><td>LocalDateTime</td><td>同上，转 LocalDateTime</td></tr>
+</table>
+
+<h2>六、JsonEnhancementConfig —— 字段增强的装配入口</h2>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/config/JsonEnhancementConfig.java</code></p>
+
+<p>这个类极其简洁——只有一个 Bean 方法，但它是整个增强框架的<strong>插件装配点</strong>：</p>
+
+<pre><code>@AutoConfiguration
+public class JsonEnhancementConfig {
+
+    @Bean
+    public JsonValueEnhancer jsonValueEnhancer(JsonMapper jsonMapper, List&lt;JsonFieldProcessor&gt; processors) {
+        return new JsonValueEnhancer(jsonMapper, processors);
+    }
+}</code></pre>
+
+<p><strong>Spring 的自动收集机制</strong>是关键：方法参数 <code>List&lt;JsonFieldProcessor&gt; processors</code> 不需要 <code>@Autowired</code> 注解。Spring 容器会自动扫描所有实现了 <code>JsonFieldProcessor</code> 接口的 Bean，收集成一个 List 注入进来。</p>
+
+<p>这意味着：任何人都可以写一个新的 Processor 实现（比如自定义的脱敏处理器、翻译处理器），只要加上 <code>@Component</code> 注解，Spring 就会自动将其注入到 <code>JsonValueEnhancer</code> 的处理器列表中，无需修改任何配置类。这是典型的<strong>开闭原则（对扩展开放、对修改关闭）</strong>实践。</p>
+
+<h2>七、JsonUtils 门面 —— 业务代码的唯一入口</h2>
+
+<p><strong>文件：</strong><code>org/dromara/common/json/utils/JsonUtils.java</code></p>
+
+<p>JsonUtils 是一个静态工具类，通过 <code>SpringUtils.getBean(JsonMapper.class)</code> 获取全局 JsonMapper 单例：</p>
+
+<pre><code>@NoArgsConstructor(access = AccessLevel.PRIVATE)
+public class JsonUtils {
+    private static final JsonMapper JSON_MAPPER = SpringUtils.getBean(JsonMapper.class);
+    // 10 个公开方法...
+}</code></pre>
+
+<p>10 个方法覆盖了业务中最常见的 JSON 操作场景：</p>
+
+<table>
+<tr><th>方法</th><th>入参</th><th>出参</th><th>典型场景</th></tr>
+<tr><td><code>toJsonString</code></td><td>Object</td><td>String</td><td>对象转 JSON 字符串，记日志、返回响应</td></tr>
+<tr><td><code>parseObject</code></td><td>String, Class</td><td>T</td><td>JSON 字符串转对象</td></tr>
+<tr><td><code>parseObject</code></td><td>byte[], Class</td><td>T</td><td>从 Redis 取出的字节数组转对象</td></tr>
+<tr><td><code>parseObject</code></td><td>String, TypeReference</td><td>T</td><td>复杂泛型反序列化，如 <code>List&lt;SysUser&gt;</code></td></tr>
+<tr><td><code>parseMap</code></td><td>String</td><td>Dict</td><td>JSON 对象转 Hutool Dict</td></tr>
+<tr><td><code>parseArrayMap</code></td><td>String</td><td>List&lt;Dict&gt;</td><td>JSON 数组转 Dict 列表</td></tr>
+<tr><td><code>parseArray</code></td><td>String, Class</td><td>List&lt;T&gt;</td><td>JSON 数组转指定类型列表</td></tr>
+<tr><td><code>toJsonStringExcludeFields</code></td><td>Object, String...</td><td>String</td><td>序列化并移除敏感字段（如 password）</td></tr>
+<tr><td><code>removeFields</code></td><td>JsonNode, String...</td><td>JsonNode</td><td>递归删除 JSON 树中的指定字段</td></tr>
+<tr><td><code>isJson/isJsonObject/isJsonArray</code></td><td>String</td><td>boolean</td><td>JSON 格式校验</td></tr>
+</table>
+
+<p><strong>注意 3 个重要的设计细节：</strong></p>
+<ul>
+  <li><strong>空值处理策略不一致：</strong><code>parseObject(String, Class)</code> 用 <code>StringUtils.isEmpty</code> 判空（空字符串也返回 null），但 <code>parseObject(String, TypeReference)</code> 用 <code>StringUtils.isBlank</code> 判空（空白字符串也返回 null）。这不是 bug——后者处理的通常是复杂泛型场景，对输入格式要求更严格。</li>
+  <li><strong>parseArray 特殊处理：</strong>空字符串返回 <code>new ArrayList&lt;&gt;()</code> 而非 null（其它方法返回 null）。这是为了避免调用方做空值判断——业务代码通常期望「空输入 → 空列表」。</li>
+  <li><strong>static 初始化的限制：</strong>因为 JsonMapper 通过 <code>SpringUtils.getBean</code> 获取，JsonUtils 必须在 Spring 容器就绪之后才能调用。在 <code>static {}</code> 块或 Spring 容器启动前调用会抛异常。</li>
+</ul>
+
+<div class="insight"><strong>设计洞察：为什么 parseMap 返回 Dict 而不是 Map？</strong>Dict 是 Hutool 提供的扩展 Map，继承了 HashMap 并添加了类型安全的 getter（如 <code>getStr()</code>、<code>getInt()</code>、<code>getBool()</code>）。业务代码中解析配置 JSON 时，用 <code>dict.getStr("key")</code> 比 <code>(String) map.get("key")</code> 更安全也更简洁。这是 RuoYi 体系中广泛使用 Dict 的习惯延续。</div>
+
+<h2>检验环节</h2>
+
+<div class="quiz">
+<p><strong>Q1. Jackson 3.x 的入口类叫什么？它与 Jackson 2.x 的 ObjectMapper 有什么核心区别？</strong></p>
+<details><summary>看答案</summary>
+<p>Jackson 3.x 的入口类是 <code>JsonMapper</code>（替代了 2.x 的 ObjectMapper）。核心区别是 JsonMapper 是<strong>不可变（immutable）的</strong>，所有配置通过 <code>JsonMapper.builder()</code> 建造者模式设置，避免了 ObjectMapper 可变 setter 带来的线程安全问题。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q2. BigNumberSerializer 对值为 <code>12345L</code> 和 <code>9223372036854775807L</code> 的 Long，分别序列化出什么？</strong></p>
+<details><summary>看答案</summary>
+<p><code>12345L</code> 在 [-9007199254740991, 9007199254740991] 范围内，输出 JSON number <code>12345</code>。<code>9223372036854775807L</code> 超出范围，输出 JSON string <code>"9223372036854775807"</code>。</p>
+</details>
+</div>
+
+<div class="quiz">
+<p><strong>Q3. JacksonConfig 上 <code>@AutoConfiguration(before = JacksonAutoConfiguration.class)</code> 如果删掉会怎样？</strong></p>
+<details><summary>看答案</summary>
+<p>Spring Boot 的 JacksonAutoConfiguration 会先创建 JsonMapper，然后才执行 JacksonConfig 注册 SimpleModule。结果是注册的 Module 不会生效——BigNumberSerializer、CustomDateDeserializer 等全部不会应用到 JsonMapper 上。所有序列化走 Jackson 默认行为。</p>
+</details>
+</div>
+
+<div class="cite">推荐一手资料：<a href="https://github.com/FasterXML/jackson-docs/wiki/Jackson3-GettingStarted" target="_blank">Jackson 3.x Getting Started</a> — 对比 2.x 的 ObjectMapper 迁移到 3.x 的 JsonMapper；<a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER" target="_blank">MDN: Number.MAX_SAFE_INTEGER</a> — 理解 JS 安全整数边界。源码见 <code>org/dromara/common/json/config/JacksonConfig.java</code>、<code>handler/BigNumberSerializer.java</code>、<code>handler/CustomDateDeserializer.java</code>、<code>handler/CustomLocalDateTimeDeserializer.java</code>。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。例如可以问：「SimpleModule 和 Jackson 的 Module 接口是什么关系？」「为什么 BigNumberSerializer 继承 NumberSerializer 而不是直接继承 JsonSerializer？」「Hutool DateUtil.parse 的格式识别顺序是怎样的？」</div>
+
+<div class="nav"><a href="../">模块首页</a><a href="02-JSON增强框架三阶段.html">下一课：JSON 增强框架三阶段 </a></div>
+</body>
+</html>

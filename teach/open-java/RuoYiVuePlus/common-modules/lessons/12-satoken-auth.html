@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>12 · ruoyi-common-satoken：认证与权限核心</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>12 · ruoyi-common-satoken：认证与权限核心</h1>
+
+<p><strong>核心问题：</strong>如何在微服务架构下实现统一的 Token 认证、分布式会话、权限校验和多账号体系？</p>
+
+<div class="info">
+<strong>模块定位：</strong>5 个 Java 文件。基于 <strong>Sa-Token</strong>（国产权限认证框架）深度定制。JWT 简单模式（Token 自包含），Caffeine+Redis 二级缓存，支持多账号体系（sys_user / app_user）。
+</div>
+
+<h2>1. 五大核心组件</h2>
+
+<table>
+<tr><th>组件</th><th>职责</th></tr>
+<tr><td><code>SaTokenConfig</code></td><td>@AutoConfiguration，注册 StpLogic（JWT）、StpInterface（权限源）、SaTokenDao（持久层）</td></tr>
+<tr><td><code>PlusSaTokenDao</code></td><td>Caffeine 本地缓存 + Redis 分布式缓存，二级缓存架构</td></tr>
+<tr><td><code>SaPermissionImpl</code></td><td>实现 StpInterface，提供权限列表和角色列表</td></tr>
+<tr><td><code>SaTokenExceptionHandler</code></td><td>将 Sa-Token 异常转为统一 R 响应</td></tr>
+<tr><td><code>LoginHelper</code></td><td>静态工具方法：getLoginUser()、getUserId()、isSuperAdmin() 等</td></tr>
+</table>
+
+<h2>2. 多账号体系设计</h2>
+
+<pre><code>// 用户类型枚举
+SYS_USER("sys_user"),   // 后台管理系统用户
+APP_USER("app_user"),   // 移动客户端用户
+
+// loginId 格式：userType + ":" + userId
+// 例如："sys_user:1761100000000000001"
+
+// LoginHelper.getUserType() 通过正则匹配 loginId 反解用户类型
+</code></pre>
+
+<p><strong>前端对应：</strong><code>store/modules/user.ts</code> 中存储 token、roles[]、permissions[]。登录成功后调用 <code>getInfo()</code> 获取权限。前端 <code>v-hasPermi</code> 指令检查 permissions 数组。</p>
+
+<h2>3. Token 生命周期</h2>
+
+<pre><code># common-satoken.yml
+sa-token:
+  dynamic-active-timeout: true   # 每次操作自动续期（滑动过期）
+  is-read-body: true             # 支持从请求体读取 token
+  is-read-header: true           # 支持从 Header 读取 token
+  is-read-cookie: false          # 关闭 Cookie 鉴权（杜绝 CSRF）
+  token-prefix: "Bearer"         # Token 前缀
+</code></pre>
+
+<p><strong>JWT 简单模式</strong>：Token 本身即包含用户信息（自包含 JWT），无需每次都查询 Redis 做身份校验。Redis 仅存储用户扩展信息（session）和权限数据。</p>
+
+<h2>4. PlusSaTokenDao — 二级缓存架构</h2>
+
+<pre><code>
+读取流程:
+  Caffeine 本地缓存（命中?） → 返回
+                      ↓（未命中）
+  Redis 分布式缓存（加载） → 回填 Caffeine → 返回
+
+Caffeine 配置:
+  maximumSize: 1000
+  expireAfterWrite: 5s     # 写入后 5 秒过期
+  initialCapacity: 100
+
+写入流程:
+  Redis 写入 → Caffeine.invalidate(key)  # 保证一致性
+</code></pre>
+
+<h2>5. 权限数据双来源</h2>
+
+<pre><code>// SaPermissionImpl 解析用户权限：
+1. 先尝试从当前登录用户的 TokenSession 获取（零查询）
+2. 若不存在，通过 Spring 容器获取 PermissionService Bean（远程服务）
+3. 从 loginId 解析 userId，调用 getMenuPermission(userId) 或 getRolePermission(userId)
+</code></pre>
+
+<h2>6. 异常处理映射表</h2>
+
+<table>
+<tr><th>Sa-Token 异常</th><th>内部日志消息</th><th>API 返回给前端</th><th>HTTP</th></tr>
+<tr><td>NotPermissionException</td><td>"权限码校验失败"</td><td>"没有访问权限，请联系管理员授权"</td><td>403</td></tr>
+<tr><td>NotRoleException</td><td>"角色权限校验失败"</td><td>"没有访问权限，请联系管理员授权"</td><td>403</td></tr>
+<tr><td>TOKEN_TIMEOUT</td><td>—</td><td>"登录已过期，请重新登录"</td><td>401</td></tr>
+<tr><td>BE_REPLACED</td><td>—</td><td>"当前账号已在其他设备登录，您已被强制下线"</td><td>401</td></tr>
+<tr><td>KICK_OUT</td><td>—</td><td>"账号已被管理员强制下线"</td><td>401</td></tr>
+<tr><td>TOKEN_FREEZE</td><td>—</td><td>"账号已被冻结，请联系管理员处理"</td><td>401</td></tr>
+</table>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>在浏览器 DevTools → Application → Local Storage 中找到 Admin-Token</li>
+<li>用两个不同角色的账号登录，对比 getInfo 接口返回的 permissions 数组差异</li>
+<li>在前端通过 v-hasPermi 隐藏一个按钮，然后在 Postman 中直接调用该 API，确认后端也做了权限校验（Sa-Token 拦截）</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://sa-token.cc/doc.html">Sa-Token 官方文档</a></div>
+<div class="reminder"> 想知道如何新增一个用户类型（如 visitor）实现三账号体系？直接问我。</div>
+
+</body>
+</html>

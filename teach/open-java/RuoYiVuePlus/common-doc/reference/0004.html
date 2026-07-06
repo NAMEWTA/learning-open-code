@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 04 · SaToken 安全元数据模型</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 04 · SaToken 安全元数据模型</h1>
+<p class="a">配套课程：<code>lessons/0004.html</code> · 使命：读懂 ruoyi-common-doc 接口文档模块</p>
+
+<h2>为什么用字符串类名而非 import</h2>
+<div class="chain">ruoyi-common-doc <b>不依赖</b> sa-token jar。
+用 ClassLoaderUtil.loadClass("cn.dev33.satoken.annotation.SaCheckPermission") 动态加载：
+  classpath 有 sa-token → Class 实例正常 → 解析注解 → 生成权限文档
+  classpath 无 sa-token → loadClass 返回 null → supports() 返回 false → 静默跳过
+这是 <b>可选依赖（Optional Dependency）</b> 的标准实现模式。</div>
+
+<h2>加载的 4 个注解</h2>
+<table>
+<tr><th>常量</th><th>全限定类名</th><th>用途</th></tr>
+<tr><td><code>SA_CHECK_PERMISSION_CLASS</code></td><td><code>cn.dev33.satoken.annotation.SaCheckPermission</code></td><td>权限校验</td></tr>
+<tr><td><code>SA_CHECK_ROLE_CLASS</code></td><td><code>cn.dev33.satoken.annotation.SaCheckRole</code></td><td>角色校验</td></tr>
+<tr><td><code>SA_IGNORE_CLASS</code></td><td><code>cn.dev33.satoken.annotation.SaIgnore</code></td><td>忽略校验</td></tr>
+<tr><td><code>SA_CHECK_LOGIN_CLASS</code></td><td><code>cn.dev33.satoken.annotation.SaCheckLogin</code></td><td>需登录（仅加载，未用于 supports）</td></tr>
+</table>
+
+<h2>supports() 判断逻辑</h2>
+<div class="chain">hasAnnotation(hm, SA_CHECK_ROLE_CLASS)       // 方法或类上有 @SaCheckRole
+|| hasAnnotation(hm, SA_CHECK_PERMISSION_CLASS) // 方法或类上有 @SaCheckPermission
+|| hasAnnotation(hm, SA_IGNORE_CLASS)           // 方法或类上有 @SaIgnore
+→ true 时该 Resolver 介入
+
+注意：不含 @SaCheckLogin —— 因为 metadata 默认就显示「需要登录」。</div>
+
+<h2>resolve() 三段式解析</h2>
+<div class="chain">1. @SaIgnore？→ metadata.ignore = true → return "忽略权限检查"（短路）
+2. resolvePermissionCheck()：方法注解 → 类注解（叠加）
+    反射读 value/mode/type/orRole → metadata.addPermission()
+3. resolveRoleCheck()：方法注解 → 类注解（叠加）
+    反射读 value/mode/type → metadata.addRole()
+→ return metadata.toMarkdownString()</div>
+
+<h2>SaTokenSecurityMetadata 四种输出策略</h2>
+<table>
+<tr><th>条件</th><th>输出</th></tr>
+<tr><td>ignore = true</td><td>权限策略：忽略权限检查</td></tr>
+<tr><td>!ignore && permissions 空 && roles 空</td><td>权限策略：需要登录</td></tr>
+<tr><td>permissions 非空</td><td>权限校验：`perm1` & `perm2`<br>或角色：`role1`</td></tr>
+<tr><td>roles 非空</td><td>角色校验：`role1` | `role2`</td></tr>
+</table>
+
+<h2>AuthInfo 结构</h2>
+<table>
+<tr><th>字段</th><th>来源注解属性</th><th>示例</th></tr>
+<tr><td><code>values</code></td><td><code>value</code>（必填）</td><td><code>["system:user:list"]</code></td></tr>
+<tr><td><code>mode</code></td><td><code>mode</code>（默认 AND）</td><td><code>"AND"</code> → 显示 <code>&</code></td></tr>
+<tr><td><code>type</code></td><td><code>type</code></td><td><code>"按钮权限"</code></td></tr>
+<tr><td><code>orValues</code></td><td><code>orRole</code></td><td><code>["superAdmin"]</code></td></tr>
+<tr><td><code>orType</code></td><td>（固定）</td><td><code>"role"</code></td></tr>
+</table>
+<div class="chain">getModeSymbol(): null→" & " | AND→" & " | OR→" | "</div>
+
+<h2>端到端示例</h2>
+<div class="chain">Controller:
+  /** 系统用户管理 */
+  public class SysUserController {
+      /** 查询用户列表 */
+      @SaCheckPermission({"system:user:list","system:user:query"}, mode=AND)
+      @GetMapping("/list")
+      public TableDataInfo list() { ... }
+  }
+
+Swagger UI 输出:
+  分组: "系统用户管理"
+  GET /list 摘要: "查询用户列表"
+  详情: "查询用户列表
+        访问权限
+        权限校验：`system:user:list` & `system:user:query`"</div>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SaTokenSecurityMetadata、JavadocResolver、可选依赖</p>
+</body>
+</html>

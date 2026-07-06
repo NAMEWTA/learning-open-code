@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · Map 任务：动态分片，只分不汇</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .chain { font-family: Consolas, monospace; font-size: 0.82rem; background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; margin: 0.6rem 0; line-height: 1.6; }
+  .warn { background: #fff3f3; border-left: 3px solid #e34c4c; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn b { color: #c0392b; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · Map 任务：动态分片，只分不汇 <span class="tag">模式 5</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5）</b>：学完你能讲清 Map 任务的完整链路——根 Map 方法拆分数据 → <code>MapHandler.doMap()</code> 将子任务分发给集群 → 各子 Map 方法并行执行 → 结果各自返回（不汇总），并理解它为什么比静态分片更灵活。
+</div>
+
+<p>上一课静态分片的问题是：分片数写死在服务端。如果要处理 1~200 的累加，静态分片得手动配 "<code>1,50</code>" "<code>51,100</code>" "<code>101,150</code>" "<code>151,200</code>"。Map 任务则让<strong>代码自己决定怎么拆</strong>——数据变了，改代码就行。</p>
+
+<h2>一、TestMapJobAnnotation — 动态拆分 + 并行执行</h2>
+
+<div class="region">
+<h3>完整源码（两个 @MapExecutor 方法）</h3>
+<span class="where">ruoyi-job/src/main/java/org/dromara/job/snailjob/TestMapJobAnnotation.java</span>
+<pre><code>@Component
+@JobExecutor(name = "testMapJobAnnotation")
+public class TestMapJobAnnotation {
+
+    // ========== ① 根 Map 任务：拆分数据 ==========
+    @MapExecutor
+    public ExecuteResult doJobMapExecute(MapArgs mapArgs, MapHandler mapHandler) {
+        // 生成 1~200 并每 50 个一组拆成 4 片
+        int partitionSize = 50;
+        List&lt;Integer&gt; sourceList = IntStream.rangeClosed(1, 200).boxed().toList();
+        List&lt;List&lt;Integer&gt;&gt; partition = StreamUtils.groupByKey(sourceList,
+            i -&gt; (i - 1) / partitionSize)
+            .values().stream().toList();
+
+        SnailJobLog.REMOTE.info("端口:{}完成分配任务", SpringUtil.getProperty("server.port"));
+        // 关键：把 4 片分发给集群中的子任务 "doCalc"
+        return mapHandler.doMap(partition, "doCalc");
+    }
+
+    // ========== ② 子 Map 任务：处理一片数据 ==========
+    @MapExecutor(taskName = "doCalc")
+    public ExecuteResult doCalc(MapArgs mapArgs) {
+        List&lt;Integer&gt; sourceList = (List&lt;Integer&gt;) mapArgs.getMapResult();
+        // 累加这一片的所有数字
+        int partitionTotal = sourceList.stream().mapToInt(i -&gt; i).sum();
+        ThreadUtil.sleep(3, TimeUnit.SECONDS);  // 模拟耗时
+        SnailJobLog.REMOTE.info("端口:{},partitionTotal:{}",
+            SpringUtil.getProperty("server.port"), partitionTotal);
+        return ExecuteResult.success(partitionTotal);
+    }
+}</code></pre>
+</div>
+
+<h2>二、Map 任务的执行模型</h2>
+
+<div class="flow">① 服务端触发 testMapJobAnnotation
+       │
+       ▼
+② 根 Map: doJobMapExecute() 执行
+   ├── 生成 1~200 的列表
+   ├── 按每 50 个拆分 → 4 片: [1~50] [51~100] [101~150] [151~200]
+   └── mapHandler.doMap(partition, "doCalc")
+       │
+       │  SnailJob 将这 4 片子任务放入队列
+       │  由集群中的执行器认领
+       │
+       ├──→ doCalc([1~50])      执行器 A → sum=1275
+       ├──→ doCalc([51~100])    执行器 B → sum=3775
+       ├──→ doCalc([101~150])   执行器 A → sum=6275
+       └──→ doCalc([151~200])   执行器 C → sum=8775
+
+③ 每个子任务各自返回 ExecuteResult.success(partitionTotal)
+   → 4 条独立的执行记录，各自有各自的 sum
+   → <b>没有汇总阶段！</b>（这是 Map vs MapReduce 的关键区别）</div>
+
+<h2>三、Map 任务的三个关键角色</h2>
+
+<table>
+<tr><th>角色</th><th>注解</th><th>方法签名</th><th>职责</th></tr>
+<tr>
+  <td><strong>根 Map</strong></td>
+  <td><code>@MapExecutor</code>（不带 taskName）</td>
+  <td><code>ExecuteResult root(MapArgs, MapHandler)</code></td>
+  <td>准备数据 → 拆分 → 调用 <code>mapHandler.doMap()</code> 分发</td>
+</tr>
+<tr>
+  <td><strong>子 Map</strong></td>
+  <td><code>@MapExecutor(taskName = "xxx")</code></td>
+  <td><code>ExecuteResult sub(MapArgs)</code></td>
+  <td>接收一片数据 → 处理 → 返回结果</td>
+</tr>
+<tr>
+  <td><strong>MapHandler</strong></td>
+  <td>由框架注入</td>
+  <td><code>doMap(List&lt;?&gt; list, String taskName)</code></td>
+  <td>将拆分后的数据列表分发给集群中的子 Map 任务</td>
+</tr>
+</table>
+
+<div class="why"><b><code>@MapExecutor</code> 不带 taskName = 根任务，带 taskName = 子任务</b>。根任务只有一个（被 <code>@JobExecutor(name)</code> 指向），子任务可以多个。根任务通过 <code>mapHandler.doMap(data, "子任务名")</code> 将数据发给对应的子任务。如果数据量大（比如 10 万条拆成 1000 片），子任务会被多个执行器实例并行消费。</div>
+
+<h2>四、Map 任务 vs 静态分片（核心对比）</h2>
+
+<table>
+<tr><th>维度</th><th>静态分片</th><th>Map 任务（动态分片）</th></tr>
+<tr><td>分片规则定义者</td><td>服务端（后台配置）</td><td>客户端（代码中的拆分逻辑）</td></tr>
+<tr><td>分片数灵活度</td><td>固定，改要动后台</td><td>动态，数据变分片自动变</td></tr>
+<tr><td>适合场景</td><td>分片策略稳定（如每天按日期范围跑）</td><td>数据量不可预测（如某个表行数不定）</td></tr>
+<tr><td>子任务分发</td><td>服务端直接调度</td><td><code>mapHandler.doMap()</code> 客户端触发分发</td></tr>
+<tr><td>结果处理</td><td>各自独立返回</td><td>各自独立返回（Map 不汇总）</td></tr>
+</table>
+
+<h2>五、MapHandler.doMap() 的机制</h2>
+
+<div class="chain">
+<b>mapHandler.doMap(partition, "doCalc") 做了什么？</b>
+
+1. 接收参数：一个 List（4 片数据）+ 目标子任务名
+2. 将 List 中的每个元素（一片数据）封装成一个 Map 子任务
+3. 将这些子任务提交到 SnailJob 的任务队列
+4. 集群中的执行器实例认领并执行（负载均衡）
+5. 根任务的返回值 = doMap 的调度结果（不是子任务的汇总）
+
+注意：doMap 只是<b>触发分发</b>，子任务是<b>异步</b>执行的。根任务返回 success 不代表子任务已经跑完——它们可能在队列中排队等待。
+</div>
+
+<div class="warn"><b>⚠️ Map 任务的「只分不汇」意味着什么？</b>如果你需要知道「所有分片的累加总和」，仅靠 Map 任务是拿不到的——因为每个子任务的结果是独立的。你需要的是下一课的 MapReduce 任务，它有一个 <code>@ReduceExecutor</code> 来收集所有子任务结果并做汇总。Map = 分片处理 + 各自独立结果，MapReduce = 分片处理 + 汇总成一个最终结果。</div>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>mapHandler.doMap(partition, "doCalc")</code> 中第二个参数 "doCalc" 是什么？</p>
+<span class="opt">A. 根任务的方法名</span>
+<span class="opt">B. 子 Map 任务的名字——对应 <code>@MapExecutor(taskName = "doCalc")</code></span>
+<span class="opt">C. 日志中的标签，没有实际路由功能</span>
+<span class="opt">D. SnailJob 服务端的任务名</span>
+<details><summary>看答案</summary><b>B</b>。根任务通过 taskName 指定要调用哪个子 Map 执行器。你可以在同一个类中定义多个子 Map（如 "doCalc"、"doEncrypt"、"doExport"），根任务选择性地分发给不同的子任务。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Map 任务中，如果 4 片子任务中有一片执行失败了，会发生什么？</p>
+<span class="opt">A. 所有 4 片自动回滚</span>
+<span class="opt">B. 失败的那片根据服务端配置重试，其余 3 片的结果不受影响</span>
+<span class="opt">C. 根任务也标记为失败</span>
+<span class="opt">D. 整个集群宕机</span>
+<details><summary>看答案</summary><b>B</b>。Map 子任务是独立调度单元。每个子任务有自己的执行记录和重试策略（在服务端配置）。成功的那 3 片已经返回了各自的结果，失败的那片会按重试策略处理。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 根任务返回 <code>ExecuteResult.success(...)</code> 时，子任务一定都执行完了吗？</p>
+<span class="opt">A. 一定执行完了，因为是同步调用</span>
+<span class="opt">B. 不一定——<code>mapHandler.doMap()</code> 只是把子任务提交到队列，它们可能还在排队或执行中</span>
+<span class="opt">C. 取决于子任务的数量</span>
+<span class="opt">D. 子任务一定会失败，因为根任务先返回了</span>
+<details><summary>看答案</summary><b>B</b>。<code>doMap</code> 是异步分发——它把子任务丢进 SnailJob 队列就返回了。根任务的返回值只表示「分发成功」，不代表子任务已执行完毕。这个异步特性是 Map 任务实现并行处理的基础。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. <code>@MapExecutor</code> 不带 <code>taskName</code> 的方法有几个限制？</p>
+<span class="opt">A. 没有限制，可以定义多个</span>
+<span class="opt">B. 一个类里只能有一个不带 taskName 的 @MapExecutor——它是根任务</span>
+<span class="opt">C. 必须和 @JobExecutor 分开在不同的类中</span>
+<span class="opt">D. 必须返回 void</span>
+<details><summary>看答案</summary><b>B</b>。不带 taskName 的 <code>@MapExecutor</code> 是根 Map 任务，一个 <code>@JobExecutor</code> 类中只能有一个。它必须有 <code>MapArgs</code> + <code>MapHandler</code> 两个参数。带 <code>taskName</code> 的可以有多个——它们是不同的子任务。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://juejin.cn/post/7446362500478894106" target="_blank">掘金：SnailJob Map 任务教程</a>——了解 Map 任务在 SnailJob 后台的配置方式（路由策略选「Map 动态分片」）。配套速查见 <code>reference/0005.html</code>，术语见 <code>GLOSSARY.md</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「Map 任务和 CompletableFuture 的并行有什么区别？」「大量子任务会不会把 SnailJob 队列撑爆？」「子任务能在根任务的不同实例上执行吗？」下一课我们加上「汇总」：<strong>MapReduce 任务——分片 + Reduce 汇总</strong>。</div>
+
+<div class="nav">课程 0005 / 使命：全面读懂 ruoyi-job 任务调度模块 · 上一课：<a href="0004.html">静态分片</a> · 下一课预告：MapReduce 任务</div>
+
+</body>
+</html>

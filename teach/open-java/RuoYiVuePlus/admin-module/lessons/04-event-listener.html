@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 事件监听 — 登录后的副作用处理</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 事件监听 — 登录后的副作用处理 <span class="tag">架构解耦</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能解释 <code>UserActionListener</code>（Sa-Token 钩子）和 <code>UserLoginSuccessListener</code>（Spring 事件监听器）的分工关系，理解为什么登录成功后不直接在 AuthController 里写日志，以及 Java 17 的 <code>record</code> 如何替代传统 Event 类。
+</div>
+
+<p>前 3 课我们追踪了 <strong>怎么登录</strong>。这一课关注：<strong>登录之后发生了什么？</strong> 写入在线用户缓存、记录登录日志、解析 IP 归属地、更新最近登录时间——这些"副作用"如果写在 AuthController 里，控制器会膨胀到不可维护。RuoYi 用了一个精巧的双层事件架构来解耦。</p>
+
+<h2>一、双层事件的架构全景</h2>
+
+<div class="diagram">LoginHelper.login(loginUser, model)   ← 策略中调用，Sa-Token 内部
+         │
+         ▼
+Sa-Token 框架内部：完成 token 签发
+         │
+         ├── 调用已注册的 SaTokenListener 列表
+         │       │
+         │       ▼
+         │   UserActionListener.doLogin()   ← 【第一层：Sa-Token 生命周期钩子】
+         │       │
+         │       └── 发布 Spring 事件：
+         │           SpringUtils.context()
+         │             .publishEvent(new UserLoginSuccessEvent(loginId, tokenValue, loginParameter))
+         │                 │
+         │                 ▼
+         │           UserLoginSuccessListener   ← 【第二层：Spring 事件监听器】
+         │             .handleLoginSuccess()
+         │                 │
+         │                 ├── 解析 User-Agent → 浏览器 + 操作系统
+         │                 ├── 获取客户端 IP
+         │                 ├── 调用 AddressUtils.getRealAddressByIP(ip) → IP 归属地
+         │                 ├── 构建 UserOnlineDTO → 写入 Redis 在线缓存
+         │                 ├── loginService.recordLoginInfo() → 发布 LoginInfoEvent
+         │                 └── loginService.updateLastLoginInfo() → 更新数据库登录时间
+         │
+         ├── 触发 doLogout()   ← 退出登录时
+         ├── 触发 doKickout()  ← 被管理员踢下线时
+         └── 触发 doReplaced() ← 被新登录顶下线时</div>
+
+<h2>二、第一层：UserActionListener — Sa-Token 的生命周期钩子</h2>
+
+<p>Sa-Token 框架定义了一个 <code>SaTokenListener</code> 接口，包含 13 个生命周期回调方法。RuoYi 的 <code>UserActionListener</code> 实现了其中与登录/退出相关的 4 个：</p>
+
+<pre><code>@Component
+public class UserActionListener implements SaTokenListener {
+
+    // ── 登录成功 ──
+    @Override
+    public void doLogin(String loginType, Object loginId,
+                        String tokenValue, SaLoginParameter loginParameter) {
+        // 将 Sa-Token 的事件"翻译"为 Spring 事件
+        SpringUtils.context()
+            .publishEvent(new UserLoginSuccessEvent(loginId, tokenValue, loginParameter));
+    }
+
+    // ── 退出登录 ──
+    @Override
+    public void doLogout(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+
+    // ── 被踢下线 ──
+    @Override
+    public void doKickout(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+
+    // ── 被顶下线 ──
+    @Override
+    public void doReplaced(String loginType, Object loginId, String tokenValue) {
+        RedisUtils.deleteObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue);
+    }
+}</code></pre>
+
+<div class="side">
+💡 <b>为什么需要一个"翻译层"？</b> Sa-Token 的 <code>SaTokenListener</code> 是框架级别的钩子，它的职责是"通知你发生了什么"。而 Spring 的 <code>@EventListener</code> 是业务级别的，允许多个监听器分工协作。UserActionListener 扮演了"桥梁"角色：接收到 Sa-Token 的登录通知，然后发布一个 Spring 事件，让业务代码可以独立响应。
+</div>
+
+<h3>退出/踢出/顶下线的统一处理</h3>
+
+<p>三种退出场景做的事完全一样：删除 Redis 中的在线用户缓存。区别在于触发来源：</p>
+<table>
+  <tr><th>回调方法</th><th>触发场景</th><th>配置关联</th></tr>
+  <tr><td><code>doLogout()</code></td><td>用户主动点击"退出登录"</td><td><code>AuthController.logout()</code></td></tr>
+  <tr><td><code>doKickout()</code></td><td>管理员在后台将用户踢下线</td><td><code>StpUtil.kickout(loginId)</code></td></tr>
+  <tr><td><code>doReplaced()</code></td><td>同一账号在新设备登录，旧会话被顶掉</td><td><code>is-concurrent: false</code></td></tr>
+</table>
+
+<h2>三、Java 17 record：UserLoginSuccessEvent</h2>
+
+<p>这是一个教科书级别的 Java 17 record 用法：</p>
+
+<pre><code>public record UserLoginSuccessEvent(
+    Object loginId,
+    String tokenValue,
+    SaLoginParameter loginParameter
+) {}</code></pre>
+
+<p>就一行。对比传统的 POJO 写法：</p>
+
+<pre><code>// 传统写法（需要 40+ 行）
+public class UserLoginSuccessEvent {
+    private final Object loginId;
+    private final String tokenValue;
+    private final SaLoginParameter loginParameter;
+
+    public UserLoginSuccessEvent(Object loginId, String tokenValue,
+                                  SaLoginParameter loginParameter) {
+        this.loginId = loginId;
+        this.tokenValue = tokenValue;
+        this.loginParameter = loginParameter;
+    }
+    // getters, equals(), hashCode(), toString() ... 30+ 行
+}</code></pre>
+
+<div class="side">
+💡 <code>record</code> 自动生成：规范构造器、<code>equals()</code>、<code>hashCode()</code>、<code>toString()</code>、以及命名良好的访问器方法（<code>loginId()</code> 而非 <code>getLoginId()</code>）。事件对象是"不可变数据载体"的完美场景。
+</div>
+
+<h2>四、第二层：UserLoginSuccessListener — 业务副作用处理</h2>
+
+<p>这是实际干活的类。它监听 <code>UserLoginSuccessEvent</code>，执行 4 项业务操作：</p>
+
+<pre><code>@Component
+public class UserLoginSuccessListener {
+
+    private final SysLoginService loginService;
+
+    @EventListener
+    public void handleLoginSuccess(UserLoginSuccessEvent event) {
+        SaLoginParameter loginParameter = event.loginParameter();
+
+        // 1. 解析浏览器和操作系统
+        UserAgent userAgent = UserAgentUtil.parse(
+            ServletUtils.getRequest().getHeader("User-Agent"));
+
+        // 2. 获取客户端 IP
+        String ip = ServletUtils.getClientIP();
+        String username = (String) loginParameter.getExtra(LoginHelper.USER_NAME_KEY);
+        String tokenValue = event.tokenValue();
+
+        // 3. 组装在线用户信息 + 解析 IP 归属地
+        UserOnlineDTO dto = new UserOnlineDTO();
+        dto.setIpaddr(ip);
+        dto.setLoginLocation(AddressUtils.getRealAddressByIP(ip));  // ip2region
+        dto.setBrowser(userAgent.getBrowser().getName());
+        dto.setOs(userAgent.getOs().getName());
+        dto.setLoginTime(System.currentTimeMillis());
+        dto.setTokenId(tokenValue);
+        dto.setUserName(username);
+        dto.setClientKey((String) loginParameter.getExtra(LoginHelper.CLIENT_KEY));
+        dto.setDeviceType(loginParameter.getDeviceType());
+        dto.setDeptName((String) loginParameter.getExtra(LoginHelper.DEPT_NAME_KEY));
+
+        // 4. 写入 Redis 在线用户缓存（token 为永久 -1 时不设 TTL）
+        if (loginParameter.getTimeout() == -1) {
+            RedisUtils.setCacheObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue, dto);
+        } else {
+            RedisUtils.setCacheObject(CacheNames.ONLINE_TOKEN_KEY + tokenValue,
+                dto, Duration.ofSeconds(loginParameter.getTimeout()));
+        }
+
+        // 5. 发布登录日志事件
+        loginService.recordLoginInfo(username, Constants.LOGIN_SUCCESS,
+            MessageUtils.message("user.login.success"));
+
+        // 6. 更新用户表最近登录IP和时间
+        loginService.updateLastLoginInfo(
+            (Long) loginParameter.getExtra(LoginHelper.USER_KEY), ip);
+    }
+}</code></pre>
+
+<h3>逐项拆解</h3>
+
+<div class="step">
+<span class="num">1</span> <b>IP 归属地解析</b>：<code>AddressUtils.getRealAddressByIP(ip)</code> 使用 <code>ip2region_v4.xdb</code> 离线数据库，无需网络请求。文件在 <code>ruoyi-admin/src/main/resources/ip2region_v4.xdb</code>。解析结果如 "中国-广东省-深圳市"。
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>User-Agent 解析</b>：Hutool 的 <code>UserAgentUtil.parse()</code> 解析请求头中的 User-Agent 字符串，提取浏览器名称（如 "Chrome"、"Firefox"）和操作系统（如 "Windows 10"、"macOS"）。<span class="where">UserLoginSuccessListener.java:44</span>
+</div>
+
+<div class="step">
+<span class="num">3</span> <b>在线用户缓存</b>：Redis key 为 <code>"online_token:" + tokenValue</code>，value 为 <code>UserOnlineDTO</code> 序列化。TTL 与 token 有效期相同。如果 token 永不过期（<code>timeout == -1</code>），则不设 TTL。这个缓存是后台"在线用户"页面的数据源。<span class="where">UserLoginSuccessListener.java:60-64</span>
+</div>
+
+<div class="step">
+<span class="num">4</span> <b>登录日志事件</b>：<code>recordLoginInfo()</code> 内部发布一个 <code>LoginInfoEvent</code>，由 <code>ruoyi-common-log</code> 模块的异步监听器消费，写入数据库登录日志表。注意这是 <strong>又一层事件解耦</strong>——日志写入不在当前线程执行。<span class="where">SysLoginService.java:134-141</span>
+</div>
+
+<div class="step">
+<span class="num">5</span> <b>更新登录信息</b>：直接更新 <code>sys_user</code> 表的 <code>login_ip</code> 和 <code>login_date</code> 字段。使用 <code>DataPermissionHelper.ignore()</code> 跳过数据权限过滤——因为更新自己的登录信息不应受数据权限限制。<span class="where">SysLoginService.java:184-191</span>
+</div>
+
+<h2>五、完整的事件链路</h2>
+
+<div class="diagram">策略实例.login()
+    │
+    └── LoginHelper.login(loginUser, model)
+            │
+            ├── Sa-Token: 签发 token，写入 Redis 会话
+            │
+            ├── UserActionListener.doLogin()
+            │     └── SpringUtils.context()
+            │           .publishEvent(new UserLoginSuccessEvent(...))
+            │               │
+            │               └── UserLoginSuccessListener.handleLoginSuccess()
+            │                     ├── 在线用户缓存     → Redis
+            │                     └── recordLoginInfo()
+            │                           └── SpringUtils.context()
+            │                                 .publishEvent(new LoginInfoEvent(...))
+            │                                     │
+            │                                     └── LogListener (ruoyi-common-log)
+            │                                           └── 异步写入数据库登录日志
+            │
+            └── 策略返回 LoginVo → AuthController → R.ok(loginVo) 响应客户端</div>
+
+<h2>六、为什么这样设计：三个关注点分离</h2>
+
+<table>
+  <tr><th>层级</th><th>组件</th><th>职责</th><th>耦合对象</th></tr>
+  <tr><td>框架层</td><td><code>UserActionListener</code></td><td>监听 Sa-Token 生命周期，翻译为 Spring 事件；退出时清理 Redis 缓存</td><td>Sa-Token API</td></tr>
+  <tr><td>业务层</td><td><code>UserLoginSuccessListener</code></td><td>登录成功后的业务数据组装：在线信息、IP 归属地、浏览器解析</td><td>Redis、ip2region、Hutool UA 解析</td></tr>
+  <tr><td>日志层</td><td><code>LoginInfoEvent</code> + <code>LogListener</code></td><td>异步写入登录日志到数据库</td><td>数据库、线程池</td></tr>
+</table>
+
+<p>好处很明确：</p>
+<ul>
+  <li><strong>AuthController 只需 10 行</strong>——解析请求、分发策略、返回结果，不包含任何副作用代码。</li>
+  <li><strong>新增副作用不影响现有代码</strong>——比如想加"登录后发送钉钉通知"，只需新增一个 <code>@EventListener</code> 方法。</li>
+  <li><strong>测试隔离</strong>——可以独立测试策略逻辑（mock 掉事件监听器），也可以独立测试监听器（手动发布事件）。</li>
+</ul>
+
+<h2>七、退出登录的完整流程</h2>
+
+<pre><code>// AuthController
+@PostMapping("/logout")
+public R&lt;Void&gt; logout() {
+    loginService.logout();  // → 发布 LoginInfoEvent 记录登出日志
+    return R.ok("退出成功");
+}
+
+// SysLoginService
+public void logout() {
+    try {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        if (ObjectUtil.isNull(loginUser)) return;
+        recordLoginInfo(loginUser.getUsername(), Constants.LOGOUT, "退出成功");
+    } catch (NotLoginException ignored) {
+    } finally {
+        try {
+            StpUtil.logout();  // → 触发 UserActionListener.doLogout() → 删 Redis 在线缓存
+        } catch (NotLoginException ignored) {
+        }
+    }
+}</code></pre>
+
+<div class="warn">
+⚠️ <b>注意 finally 块</b>：<code>StpUtil.logout()</code> 放在 finally 中，确保即使记录日志时抛异常，token 也会被清除。两层 try-catch 都吞掉了 <code>NotLoginException</code>，因为 logout 本身语义是"如果没有登录态也正常返回"。
+</div>
+
+<h2>八、自测</h2>
+
+<div class="quiz">
+<p>1. <code>UserActionListener.doLogin()</code> 中做了什么？</p>
+<label class="opt"><input type="radio" name="q1"> A. 直接写数据库登录日志</label>
+<label class="opt"><input type="radio" name="q1"> B. 发布 <code>UserLoginSuccessEvent</code> 到 Spring 容器</label>
+<label class="opt"><input type="radio" name="q1"> C. 解析 IP 归属地</label>
+<label class="opt"><input type="radio" name="q1"> D. 发送钉钉通知</label>
+</div>
+
+<div class="quiz">
+<p>2. Java 17 的 <code>record</code> 用在 <code>UserLoginSuccessEvent</code> 上的主要优势是什么？</p>
+<label class="opt"><input type="radio" name="q2"> A. 运行速度更快</label>
+<label class="opt"><input type="radio" name="q2"> B. 一行代码替代 40+ 行 POJO，自动生成 equals/hashCode/toString/访问器</label>
+<label class="opt"><input type="radio" name="q2"> C. 支持多重继承</label>
+<label class="opt"><input type="radio" name="q2"> D. 可以动态修改字段值</label>
+</div>
+
+<div class="quiz">
+<p>3. 用户被管理员踢下线时，哪个方法负责清理 Redis 在线缓存？</p>
+<label class="opt"><input type="radio" name="q3"> A. <code>AuthController.logout()</code></label>
+<label class="opt"><input type="radio" name="q3"> B. <code>UserLoginSuccessListener.handleLoginSuccess()</code></label>
+<label class="opt"><input type="radio" name="q3"> C. <code>UserActionListener.doKickout()</code></label>
+<label class="opt"><input type="radio" name="q3"> D. <code>SysLoginService.logout()</code></label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — UserActionListener 的唯一职责是"翻译" Sa-Token 事件为 Spring 事件，不做任何业务逻辑。<br>
+<b>2. B</b> — record 是"不可变数据载体"的语义糖，专为事件、DTO、VO 等场景设计。<br>
+<b>3. C</b> — doKickout() 直接删除 <code>online_token:{tokenValue}</code> 的 Redis 缓存。</p>
+</details>
+
+<div class="nav">← <a href="03-five-strategies.html">第 3 课 · 五种认证策略深度对比</a> | 课程结束 🎉</div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html#features.spring-application.application-events-and-listeners" target="_blank">Spring Boot — Application Events and Listeners</a> ·
+<a href="https://sa-token.cc/doc.html#/up/listener" target="_blank">Sa-Token 侦听器文档</a> ·
+<a href="https://openjdk.org/jeps/395" target="_blank">JEP 395: Records (Java 17)</a>
+</div>
+<div class="reminder">💡 有疑问？直接问我。你已经完成了 ruoyi-admin 模块的全部 4 节课。接下来可以进阶学习 <a href="../../2026-06-30-teach-ruoyi-auth/lessons/">ruoyi-auth 认证模块</a> 了解 Sa-Token 的更底层封装，或 <a href="../../2026-06-30-teach-ruoyi-system/lessons/">ruoyi-system 系统管理模块</a> 了解用户和客户端管理。</div>
+
+</body>
+</html>

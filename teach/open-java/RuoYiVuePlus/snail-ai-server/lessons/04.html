@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 安全、监控与部署：独立服务的运维闭环</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 安全、监控与部署：独立服务的运维闭环 <span class="tag">运维 & 部署</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4、#6、#7）</b>：学完你能解释 <code>SecurityConfig</code> + <code>ActuatorAuthFilter</code> 的两层设计，理解 snailai-server 为何需要独立的认证体系，能解读 Dockerfile 中 ZGC 的选择与双端口暴露策略，以及日志的异步写入设计。
+</div>
+
+<p>前三课讲了 snailai-server 的「骨架」「哲学」「血肉」，这一课讲它的「铠甲」——安全防护、监控上报、容器化部署、日志策略。独立部署的服务没有 RuoYi 主应用的 Sa-Token 庇护，必须自己建立一套运维闭环。</p>
+
+<h2>一、两层安全设计：SecurityConfig + ActuatorAuthFilter</h2>
+
+<p>snailai-server 的认证体系由两个文件、两层设计构成：</p>
+
+<div class="step"><span class="num">1</span><b>配置层：SecurityConfig（40 行）</b><br>
+使用 <code>@Configuration</code> + <code>@Value</code> 从环境注入凭据，通过 <code>FilterRegistrationBean</code> 注册过滤器。<br><span class="where">com.aizuda.snail.ai.starter.filter.SecurityConfig</span></div>
+
+<div class="step"><span class="num">2</span><b>过滤器层：ActuatorAuthFilter（92 行）</b><br>
+实现标准 HTTP Basic Auth 校验逻辑——解析 <code>Authorization</code> 头、Base64 解码、凭据比对。<br><span class="where">com.aizuda.snail.ai.starter.filter.ActuatorAuthFilter</span></div>
+
+<h3>1.1 SecurityConfig：凭据注入与过滤器注册</h3>
+
+<pre><code>@Configuration
+public class SecurityConfig {
+
+    @Value("${spring.boot.admin.client.username}")
+    private String username;
+    @Value("${spring.boot.admin.client.password}")
+    private String password;
+
+    @Bean
+    public FilterRegistrationBean&lt;ActuatorAuthFilter&gt; actuatorFilterRegistrationBean() {
+        FilterRegistrationBean&lt;ActuatorAuthFilter&gt; registrationBean = new FilterRegistrationBean&lt;&gt;();
+        registrationBean.setFilter(new ActuatorAuthFilter(username, password));
+        registrationBean.addUrlPatterns("/actuator", "/actuator/*");
+        return registrationBean;
+    }
+}</code></pre>
+
+<p>注意三个关键设计点：</p>
+
+<table>
+<tr><th>设计点</th><th>代码体现</th><th>意图</th></tr>
+<tr><td>凭据复用</td><td><code>@Value("${spring.boot.admin.client.username}")</code></td><td>认证凭据复用 Spring Boot Admin 客户端的用户名/密码——一套凭据，两处使用（Admin 注册 + Actuator 保护）</td></tr>
+<tr><td>最小拦截范围</td><td><code>addUrlPatterns("/actuator", "/actuator/*")</code></td><td>过滤器仅拦截 Actuator 端点，不影响其他请求（如管理后台静态页面）</td></tr>
+<tr><td>构造器注入凭据</td><td><code>new ActuatorAuthFilter(username, password)</code></td><td>凭据通过构造器传入过滤器实例——过滤器本身是无状态的，不需要从 Spring 容器获取依赖</td></tr>
+</table>
+
+<h3>1.2 ActuatorAuthFilter：HTTP Basic Auth 的标准实现</h3>
+
+<pre><code>@Override
+public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse,
+                     FilterChain filterChain) throws IOException, ServletException {
+    HttpServletRequest request = (HttpServletRequest) servletRequest;
+    HttpServletResponse response = (HttpServletResponse) servletResponse;
+
+    // 第 1 层校验：Authorization 头存在且以 "Basic " 开头
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Basic ")) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    // 第 2 层校验：Base64 解码 + 格式 "username:password"
+    String base64Credentials = authHeader.substring("Basic ".length());
+    byte[] credDecoded = Base64.getDecoder().decode(base64Credentials);
+    String credentials = new String(credDecoded, StandardCharsets.UTF_8);
+    String[] split = credentials.split(":");
+    if (split.length != 2) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    // 第 3 层校验：凭据比对
+    if (!username.equals(split[0]) || !password.equals(split[1])) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    filterChain.doFilter(request, response);  // 认证通过，放行
+}</code></pre>
+
+<p>三层防御性校验对应三种攻击场景：</p>
+
+<table>
+<tr><th>校验层</th><th>防御的攻击</th><th>失败响应</th></tr>
+<tr><td>Authorization 头检查</td><td>无认证信息的直接访问</td><td>401 + <code>WWW-Authenticate</code> 头（浏览器弹出登录框）</td></tr>
+<tr><td>Base64 解码 + 格式检查</td><td>Authorization 头格式错误（如非 "user:pass" 格式）</td><td>401</td></tr>
+<tr><td>凭据比对</td><td>错误的用户名/密码</td><td>401</td></tr>
+</table>
+
+<div class="side">
+💡 <b>设计洞察：为什么不是 Spring Security？</b><br>
+对于仅需保护 Actuator 端点的场景，引入 Spring Security 是过度设计。一个 92 行的 Servlet Filter 足以满足需求——它不需要角色、权限、会话管理，只需要简单的凭据校验。这种「够用就好」的设计哲学在独立部署的服务中很常见。
+</div>
+
+<h3>1.3 为什么 snailai-server 需要独立的认证体系？</h3>
+
+<p>snailai-server 不依赖 <code>ruoyi-common-satoken</code>，因此没有 Sa-Token 的登录态、权限校验、会话管理上下文。这是有意为之：</p>
+
+<blockquote>
+<b>独立部署 = 独立认证。</b>snailai-server 可能被任何系统通过 gRPC 调用（不仅仅是 RuoYi）。它不能假设调用方已经通过了 RuoYi 的 Sa-Token 认证。对于自己暴露的 HTTP 端点（Actuator），它使用最简单、最标准的 HTTP Basic Auth 进行保护。
+</blockquote>
+
+<h2>二、监控集成：Spring Boot Admin 客户端</h2>
+
+<p>在环境配置（dev/prod yml）中，snailai-server 作为 Spring Boot Admin 客户端注册到监控中心：</p>
+
+<pre><code>spring.boot.admin.client:
+  enabled: true
+  url: http://localhost:9090/admin
+  instance:
+    service-host-type: IP
+    metadata:
+      username: ${spring.boot.admin.client.username}
+      userpassword: ${spring.boot.admin.client.password}
+  username: @monitor.username@
+  password: @monitor.password@</code></pre>
+
+<table>
+<tr><th>配置项</th><th>含义</th></tr>
+<tr><td><code>enabled: true</code></td><td>启用客户端注册——启动时自动向 Admin Server 注册</td></tr>
+<tr><td><code>url: http://localhost:9090/admin</code></td><td>Admin Server 地址——对应 <code>ruoyi-monitor-admin</code> 模块的端口</td></tr>
+<tr><td><code>service-host-type: IP</code></td><td>使用 IP 地址（而非主机名）作为实例标识——在容器化环境中更可靠</td></tr>
+<tr><td><code>metadata.username/userpassword</code></td><td>将凭据作为实例元数据上报——Admin Server 可用这些凭据访问 snailai-server 的 Actuator 端点</td></tr>
+<tr><td><code>@monitor.username@</code></td><td>Maven 资源过滤占位符——构建时由 profile 替换</td></tr>
+</table>
+
+<div class="side">
+💡 <b>关键设计：metadata 中的 username/userpassword 就是 Actuator 的认证凭据。</b><br>
+回到 <code>SecurityConfig</code> 的 <code>@Value("${spring.boot.admin.client.username}")</code>——它复用了同一个凭据。在 Admin Server 的监控面板上，管理员点击 snailai-server 实例时，Admin Server 会用这些凭据访问 Actuator 端点，从而展示详细的内存、线程、健康信息。一套凭据，两端使用。
+</div>
+
+<h2>三、Dockerfile：ZGC 与双端口暴露</h2>
+
+<pre><code>FROM bellsoft/liberica-openjdk-rocky:21.0.11-cds
+
+LABEL maintainer="Lion Li"
+
+RUN mkdir -p /ruoyi/snailai/logs
+WORKDIR /ruoyi/snailai
+
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 JAVA_OPTS=""
+
+EXPOSE 8900
+EXPOSE 18888
+
+ADD ./target/ruoyi-snailai-server.jar ./app.jar
+
+ENTRYPOINT java -Djava.security.egd=file:/dev/./urandom \
+           -XX:+HeapDumpOnOutOfMemoryError -XX:+UseZGC ${JAVA_OPTS} \
+           -jar app.jar</code></pre>
+
+<h3>3.1 为什么选择 ZGC？</h3>
+
+<table>
+<tr><th>GC 策略</th><th>暂停时间</th><th>适用场景</th></tr>
+<tr><td>G1（默认）</td><td>毫秒级（通常 &lt; 200ms）</td><td>通用服务端应用</td></tr>
+<tr><td>ZGC</td><td>亚毫秒级（&lt; 1ms）</td><td>低延迟服务——AI 推理、实时对话</td></tr>
+<tr><td>Shenandoah</td><td>亚毫秒级</td><td>低延迟服务（Red Hat 生态）</td></tr>
+</table>
+
+<p>AI 对话场景对延迟敏感——用户发送消息后期待近乎实时的响应。如果 GC 暂停导致响应延迟抖动（从 50ms 跳到 500ms），用户体验会显著下降。ZGC 将 GC 暂停控制在 1ms 以内，确保 AI 推理服务的响应时间稳定。</p>
+
+<h3>3.2 其他 JVM 参数解读</h3>
+
+<table>
+<tr><th>参数</th><th>含义</th></tr>
+<tr><td><code>-Djava.security.egd=file:/dev/./urandom</code></td><td>使用非阻塞的随机数生成器——加速 SSL/TLS 握手和加密操作（对 AES 加密配置尤其重要）</td></tr>
+<tr><td><code>-XX:+HeapDumpOnOutOfMemoryError</code></td><td>OOM 时自动生成堆转储文件——用于事后分析内存泄漏</td></tr>
+<tr><td><code>${JAVA_OPTS}</code></td><td>环境变量注入点——运行时可通过 <code>-e JAVA_OPTS="..."</code> 追加参数（如 <code>-Xmx2g</code> 设置堆大小）</td></tr>
+</table>
+
+<h3>3.3 基础镜像选择</h3>
+
+<p><code>bellsoft/liberica-openjdk-rocky:21.0.11-cds</code> 是 BellSoft 提供的 Liberica JDK 21 镜像，基于 Rocky Linux。<code>-cds</code> 后缀表示启用了 CDS（Class Data Sharing）——将 JVM 类元数据预存档，加速启动时间。对于容器化环境（频繁重启/扩缩容），CDS 能显著减少冷启动延迟。</p>
+
+<h3>3.4 双端口暴露</h3>
+
+<p><code>EXPOSE 8900</code>（HTTP）+ <code>EXPOSE 18888</code>（gRPC）——但如前所述，gRPC 端口通常仅在内网使用。在 Docker Compose 或 Kubernetes 部署中，可以只将 8900 通过 Ingress 对外暴露，18888 仅对 ruoyi-admin 容器开放。</p>
+
+<h2>四、日志策略：异步写入 + 按级别分流</h2>
+
+<p>logback-plus.xml 定义了四个 Appender，构成一个完整的日志管道：</p>
+
+<pre><code>&lt;!-- 控制台输出 —— 按级别分色 --&gt;
+&lt;appender name="console" class="ConsoleAppender"/&gt;
+
+&lt;!-- 文件控制台日志 —— INFO 及以上，保留 1 天 --&gt;
+&lt;appender name="file_console" class="RollingFileAppender"&gt;
+    &lt;filter class="ThresholdFilter"&gt;
+        &lt;level&gt;INFO&lt;/level&gt;
+    &lt;/filter&gt;
+    &lt;maxHistory&gt;1&lt;/maxHistory&gt;
+&lt;/appender&gt;
+
+&lt;!-- 文件 INFO 日志 —— 仅 INFO 级别，保留 60 天 --&gt;
+&lt;appender name="file_info" class="RollingFileAppender"&gt;
+    &lt;filter class="LevelFilter"&gt;
+        &lt;level&gt;INFO&lt;/level&gt;  &lt;!-- 精确匹配 INFO --&gt;
+    &lt;/filter&gt;
+    &lt;maxHistory&gt;60&lt;/maxHistory&gt;
+&lt;/appender&gt;
+
+&lt;!-- 文件 ERROR 日志 —— 仅 ERROR 级别，保留 60 天 --&gt;
+&lt;appender name="file_error" class="RollingFileAppender"&gt;
+    &lt;filter class="LevelFilter"&gt;
+        &lt;level&gt;ERROR&lt;/level&gt;  &lt;!-- 精确匹配 ERROR --&gt;
+    &lt;/filter&gt;
+    &lt;maxHistory&gt;60&lt;/maxHistory&gt;
+&lt;/appender&gt;
+
+&lt;!-- 异步 INFO + 异步 ERROR —— 防止日志 IO 阻塞 AI 推理线程 --&gt;
+&lt;appender name="async_info" class="AsyncAppender"&gt;
+    &lt;discardingThreshold&gt;100&lt;/discardingThreshold&gt;
+    &lt;queueSize&gt;1024&lt;/queueSize&gt;
+    &lt;appender-ref ref="file_info"/&gt;
+&lt;/appender&gt;
+&lt;appender name="async_error" class="AsyncAppender"&gt;
+    &lt;discardingThreshold&gt;100&lt;/discardingThreshold&gt;
+    &lt;queueSize&gt;1024&lt;/queueSize&gt;
+    &lt;appender-ref ref="file_error"/&gt;
+&lt;/appender&gt;</code></pre>
+
+<p>日志管道的设计意图：</p>
+
+<table>
+<tr><th>Appender</th><th>目的地</th><th>保留策略</th><th>设计意图</th></tr>
+<tr><td><code>console</code></td><td>标准输出（容器日志）</td><td>—</td><td>开发/调试时的实时观察</td></tr>
+<tr><td><code>file_console</code></td><td>console.log（全量 ≥INFO）</td><td>1 天</td><td>Actuator logfile 端点的数据源；短期排障</td></tr>
+<tr><td><code>async_info</code></td><td>info.log（仅 INFO）</td><td>60 天</td><td>业务操作审计、对话记录追溯</td></tr>
+<tr><td><code>async_error</code></td><td>error.log（仅 ERROR）</td><td>60 天</td><td>告警接入、故障排查</td></tr>
+</table>
+
+<div class="danger">
+⚠️ <b>为什么 INFO 和 ERROR 的日志写入要用异步 Appender？</b><br>
+同步日志写入意味着每次 <code>log.info()</code> 都会触发磁盘 IO——在高并发的 AI 对话场景中，磁盘 IO 可能成为性能瓶颈，拖慢 AI 推理线程。异步 Appender 将日志写入内存队列（<code>queueSize: 1024</code>），由独立线程批量刷盘。当队列满到 <code>discardingThreshold: 100</code> 时，丢弃低级别日志（如 TRACE/DEBUG），优先保留 INFO 和 ERROR。<br>
+<br>
+但这里有一个细节：<code>file_console</code> 是<b>同步写入</b>的。所以 Actuator 的 logfile 端点总是能看到最新的日志（尽管这会带来轻微的 IO 开销）。INFO 和 ERROR 的长期归档使用异步写入，追求性能。这是一个权衡：实时性（同步 console.log）vs 吞吐量（异步 info/error.log）。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. snailai-server 为什么不使用 Sa-Token 来保护 Actuator 端点？</p>
+<span class="opt">A. Sa-Token 有安全漏洞，不适合生产环境</span>
+<span class="opt">B. snailai-server 是独立部署的服务，不依赖 ruoyi-common-satoken，没有 Sa-Token 的登录态和会话上下文——它使用标准 HTTP Basic Auth 建立独立的认证体系</span>
+<span class="opt">C. Actuator 端点不需要任何保护</span>
+<span class="opt">D. Sa-Token 的性能太差，不适合 AI 服务</span>
+<details><summary>看答案</summary><b>B</b>。snailai-server 的 pom.xml 中没有依赖任何 ruoyi-common 模块，自然也没有 Sa-Token 上下文。它被设计为独立于 RuoYi 的通用 AI 平台运行时，因此使用最简单、最通用的 HTTP Basic Auth 保护自己的端点。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Dockerfile 中选择 ZGC（-XX:+UseZGC）的核心原因是什么？</p>
+<span class="opt">A. ZGC 是 JDK 21 的默认 GC，不需要特别配置</span>
+<span class="opt">B. ZGC 将 GC 暂停控制在亚毫秒级，适合 AI 推理这种对延迟敏感的服务——避免 GC 暂停导致对话响应卡顿</span>
+<span class="opt">C. ZGC 比 G1 更节省内存</span>
+<span class="opt">D. ZGC 是唯一支持 CDS 的 GC 策略</span>
+<details><summary>看答案</summary><b>B</b>。AI 对话场景对响应延迟非常敏感——用户期待近乎实时的回复。ZGC 的亚毫秒级暂停确保 GC 不会引起响应时间的剧烈抖动。JDK 21 的默认 GC 仍然是 G1，ZGC 是需要显式指定的。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. SecurityConfig 中认证凭据为什么复用 <code>spring.boot.admin.client.username</code>？</p>
+<span class="opt">A. 纯粹的巧合——两个配置恰好同名</span>
+<span class="opt">B. 一套凭据、两处使用——既用于向 Admin Server 注册时的身份认证，也用于保护 Actuator 端点。Admin Server 用同样的凭据访问 snailai-server 的 Actuator 端点来获取监控数据</span>
+<span class="opt">C. 代码有 bug——应该使用独立的配置项</span>
+<span class="opt">D. 因为 application.yml 不支持两个不同的用户名配置</span>
+<details><summary>看答案</summary><b>B</b>。这是一个精心设计的凭据复用：Admin Server 需要凭据来访问 snailai-server 的 Actuator 端点以获取监控数据；snailai-server 的 ActuatorAuthFilter 需要用同样的凭据来校验这些请求。一套凭据让 Admin 客户端注册和 Actuator 保护共享同一个认证体系。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>RuoYi-Vue-Plus/ruoyi-extend/ruoyi-snailai-server/src/main/java/com/aizuda/snail/ai/starter/filter/ActuatorAuthFilter.java</code>，逐行追踪 <code>doFilter()</code> 的三层校验逻辑。然后打开 <code>Dockerfile</code>，思考如果改用 Shenandoah GC（<code>-XX:+UseShenandoahGC</code>），效果会有什么不同。最后打开 <code>logback-plus.xml</code>，找出同步 appender 和异步 appender 的区别。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果我想加一个 WARN 级别的独立日志文件，应该在 logback-plus.xml 里怎么配置？」「ZGC 和 G1 在内存占用上有什么区别——AI 服务应该给堆多大？」至此，snailai-server 模块的 4 课教学完成。回顾一下：模块全景（第 1 课）→ 启动委托（第 2 课）→ 配置装配（第 3 课）→ 运维闭环（第 4 课）。你现在应该能画出 snailai-server 的完整架构图，并解释每个组件的设计动机。</div>
+
+<div class="nav">课程 04 / ruoyi-snailai-server 模块讲解 · <a href="03.html">← 上一课：配置驱动的装配</a> · 课程结束 🎉</div>
+
+</body>
+</html>

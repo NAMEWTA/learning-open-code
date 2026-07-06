@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>05 Handler 大脑 — getSqlSegment 与 WHERE 拼接</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .sql-box { border: 2px solid #d9d9d9; padding: 1rem; border-radius: 6px; margin: 1rem 0; font-family: monospace; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>05 Handler 大脑 — getSqlSegment 与 WHERE 拼接</h1>
+
+<blockquote><strong>本节目标：</strong>你能口述 <code>getSqlSegment</code> 的执行流程：超管检查 → 构建过滤条件 → 包括号 → 与原 WHERE 做 AND 拼接。</blockquote>
+
+<h2>getSqlSegment：入口方法全貌</h2>
+
+<p>这是每次 SQL 改写的入口。来自 <code>PlusDataPermissionHandler.java:72-97</code>：</p>
+
+<pre><code>public Expression getSqlSegment(Expression where, boolean isSelect) {
+    try {
+        LoginUser currentUser = currentUser();           // ① 获取当前用户（有缓存）
+        if (LoginHelper.isSuperAdmin()) {                // ② 超管短路
+            return where;
+        }
+        String dataFilterSql = buildDataFilter(           // ③ 构建过滤条件
+            getDataPermission(), currentUser, isSelect);
+        if (StringUtils.isBlank(dataFilterSql)) {        // ④ 无过滤条件
+            return where;
+        }
+        Expression expression = CCJSqlParserUtil          // ⑤ 解析过滤 SQL
+            .parseExpression(dataFilterSql);
+        // ⑥ 包一层括号，防止与原条件优先级冲突
+        ParenthesedExpressionList&lt;Expression&gt; parenthesis =
+            new ParenthesedExpressionList&lt;&gt;(expression);
+        if (ObjectUtil.isNotNull(where)) {
+            // ⑦ 原条件 AND (数据权限)
+            return new AndExpression(where, parenthesis);
+        } else {
+            // ⑧ 如果原来没有 WHERE，直接用数据权限括号
+            return parenthesis;
+        }
+    } catch (JSQLParserException e) {
+        throw new ServiceException("数据权限解析异常 => " + e.getMessage());
+    } finally {
+        DataPermissionHelper.removePermission();          // ⑨ 清理 ThreadLocal
+    }
+}</code></pre>
+
+<h2>逐步拆解</h2>
+
+<h3>① currentUser() — 获取用户（含缓存）</h3>
+
+<p><code>Handler:187-195</code>：先查 <code>DataPermissionHelper.getVariable("user")</code> 缓存，没有才调 <code>LoginHelper.getLoginUser()</code> 并写回缓存。同一请求内多次 SQL 命中同一用户对象，避免反复查 Sa-Token。</p>
+
+<h3>② 超管短路 — LoginHelper.isSuperAdmin()</h3>
+
+<p><code>LoginHelper.java:236-238</code>：</p>
+
+<pre><code>public static boolean isSuperAdmin() {
+    return isSuperAdmin(getUserId());          // → 比对 SystemConstants.SUPER_ADMIN_USER_ID
+}</code></pre>
+
+<p>超管用户 ID 是常量（通常为 1761300000000000001）。如果是超管，<strong>原样返回 where</strong>，不添加任何过滤条件。这是整个体系最高优先级的短路。</p>
+
+<div class="warn"><strong>注意：</strong>即使超管有多个角色，也不会进入 buildDataFilter。也就是说，超管 <strong>不会</strong> 受到任何数据权限限制。</div>
+
+<h3>③ buildDataFilter() — 构建过滤条件</h3>
+
+<p>这是下一节课的完整内容。这里只需要知道：它返回一个 SQL 片段的字符串，例如 <code>"dept_id IN (103,104,105)"</code>。</p>
+
+<p>如果返回空字符串（用户无角色、或所有角色都是 ALL），则 <strong>不拼接任何条件</strong>。</p>
+
+<h3>⑥⑦⑧ WHERE 拼接策略</h3>
+
+<p>这是容易被忽略的细节，但决定了最终 SQL 的正确性：</p>
+
+<div class="sql-box">
+<strong>原 SQL 有 WHERE：</strong><br>
+原 WHERE <strong>AND</strong> ( 数据权限 )<br><br>
+例如：<code>WHERE status = '0' AND ( dept_id IN (103,104,105) )</code>
+</div>
+
+<div class="sql-box" style="margin-top:0.5rem;">
+<strong>原 SQL 无 WHERE：</strong><br>
+直接 ( 数据权限 )<br><br>
+例如：<code>WHERE ( dept_id IN (103,104,105) )</code>
+</div>
+
+<p><code>ParenthesedExpressionList</code>（来自 JSqlParser）确保数据权限的条件整体被包在括号里。这防止数据权限的条件与原有 WHERE 条件之间出现运算符优先级问题——比如原条件里如果有 OR，不加括号可能改变语义。</p>
+
+<h3>⑨ finally 清理</h3>
+
+<p><code>DataPermissionHelper.removePermission()</code> 放在 finally 块。这意味着：不管 buildDataFilter 是否异常，ThreadLocal 都会清理。否则这个线程复用时（Tomcat 线程池），上次残留的注解会污染下次请求。</p>
+
+<h2>isSelect 参数的影响</h2>
+
+<p><code>isSelect</code> 只影响 <code>buildDataFilter</code> 中 <code>joinStr</code> 的默认值：</p>
+
+<ul>
+  <li><strong>isSelect=true</strong>（SELECT）：默认 <code>OR</code>。用户多个角色，任一角色的条件满足即可。</li>
+  <li><strong>isSelect=false</strong>（UPDATE/DELETE）：默认 <code>AND</code>。用户多个角色，必须满足所有角色的条件。</li>
+</ul>
+
+<h2>整个 getSqlSegment 的决策树</h2>
+
+<pre><code>getSqlSegment(where, isSelect)
+ ├─ isSuperAdmin? → 原样返回（短路！）
+ ├─ buildDataFilter 返回空? → 原样返回
+ ├─ 原 where 非空? → where AND ( dataFilter )
+ └─ 原 where 为空? → ( dataFilter )
+ always finally → removePermission()</code></pre>
+
+<div class="cite">📖 推荐一手资料：源码 <code>PlusDataPermissionHandler.java:72-97</code> — 这个方法的代码比任何文档都清晰，建议逐行读三遍。</div>
+<div class="reminder">💡 试试问"如果数据权限条件拼出了 '1=0'（查不到数据），整个 SQL 会变成什么样？为什么这样做是安全的？"</div>
+
+</body>
+</html>

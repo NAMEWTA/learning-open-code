@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>06 权限控制三层体系</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>06 权限控制三层体系</h1>
+
+<p>RuoYi-Vue-Plus 实现了从前端到后端的三层权限防线：<strong>路由级</strong>（控制页面访问）、<strong>按钮级</strong>（控制 UI 元素显示）、<strong>函数级</strong>（在逻辑代码中判断权限）。每层都有超级管理员的绕过逻辑。<strong>学完本课后，你将能在项目中正确使用三层权限控制手段，并理解它们的实现原理。</strong></p>
+
+<h2>第一层：路由级权限</h2>
+
+<p>路由级权限通过两个机制实现：<span class="keyword">filterDynamicRoutes</span>（本地路由过滤）和<span class="keyword">后端菜单下发</span>（后端路由过滤）。</p>
+
+<pre><code>// 本地路由过滤 (permission store)
+export const filterDynamicRoutes = (routes: RouteRecordRaw[]) => {
+  const res: RouteRecordRaw[] = [];
+  routes.forEach(route => {
+    if (route.permissions) {
+      // 按 permissions 字段过滤
+      if (auth.hasPermiOr(route.permissions)) {
+        res.push(route);
+      }
+    } else if (route.roles) {
+      // 按 roles 字段过滤
+      if (auth.hasRoleOr(route.roles)) {
+        res.push(route);
+      }
+    }
+  });
+  return res;
+};</code></pre>
+
+<p>本地路由定义方式：</p>
+
+<pre><code>// router/index.ts 中的 dynamicRoutes
+export const dynamicRoutes: RouteRecordRaw[] = [
+  {
+    path: '/monitor',
+    component: Layout,
+    permissions: ['monitor:logininfor:list'], // 需要此权限才可访问
+    children: [...]
+  }
+];</code></pre>
+
+<p>后端菜单下发是主要方式——<code>/system/menu/getRouters</code> 返回的菜单树已经按用户角色过滤，前端只需要直接注册。双重过滤确保即使前端路由注册了，后端不会返回该用户无权访问的数据。</p>
+
+<h2>第二层：按钮级权限（v-hasPermi / v-hasRoles 指令）</h2>
+
+<p>指令通过 <strong>DOM 移除</strong> 实现无权限按钮的隐藏。核心代码：</p>
+
+<pre><code>// src/directive/permission/index.ts
+export const hasPermi: Directive = {
+  mounted(el: HTMLElement, binding: DirectiveBinding) {
+    const { permissions } = useUserStore();
+    const { value } = binding; // 如 ['system:user:add', 'system:user:edit']
+
+    if (value && value instanceof Array && value.length > 0) {
+      const hasPermission = permissions.some(permi => {
+        return permi === '*:*:*'            // 超级管理员拥有所有权限
+            || value.includes(permi);       // 只要满足其中一个权限即可
+      });
+      if (!hasPermission) {
+        el.parentNode && el.parentNode.removeChild(el); // 无权限 → 从 DOM 移除
+      }
+    }
+  }
+};
+
+export const hasRoles: Directive = {
+  mounted(el: HTMLElement, binding: DirectiveBinding) {
+    const { value } = binding; // 如 ['admin', 'test']
+    const { roles } = useUserStore();
+
+    if (value && value instanceof Array && value.length > 0) {
+      const hasRole = roles.some(role => {
+        return role === 'superadmin'
+            || role === 'admin'              // admin 角色也有所有权限
+            || value.includes(role);         // 满足其中一个角色即可
+      });
+      if (!hasRole) {
+        el.parentNode && el.parentNode.removeChild(el);
+      }
+    }
+  }
+};</code></pre>
+
+<p>在模板中使用：</p>
+
+<pre><code>&lt;!-- 权限指令：需要 system:user:add 权限 --&gt;
+&lt;el-button v-hasPermi="['system:user:add']"&gt;新增&lt;/el-button&gt;
+
+&lt;!-- 角色指令：需要 admin 或 common 角色 --&gt;
+&lt;el-button v-hasRoles="['admin', 'common']"&gt;管理操作&lt;/el-button&gt;</code></pre>
+
+<div class="warn">
+  <strong>DOM 移除 vs display:none：</strong> 指令选择 <code>removeChild</code> 而非 <code>el.style.display = 'none'</code>，因为移除的 DOM 节点无法被用户通过浏览器开发者工具恢复显示，安全性更高。但这也意味着指令只在 <code>mounted</code> 时执行一次——如果权限在运行时发生变化（如切换账号），需要重新挂载组件才能生效。
+</div>
+
+<h2>第三层：函数级权限（$auth 全局方法）</h2>
+
+<p><code>auth</code> 插件提供 6 个方法，可在组件逻辑中程序化判断权限：</p>
+
+<pre><code>// src/plugins/auth.ts
+export default {
+  // 验证用户是否具备某个权限（精确匹配）
+  hasPermi(permission: string): boolean {
+    const all_permission = '*:*:*';
+    const permissions = useUserStore().permissions;
+    return permissions.some(v => all_permission === v || v === permission);
+  },
+
+  // 验证用户是否含有指定权限，只需包含其中一个
+  hasPermiOr(permissions: string[]): boolean {
+    return permissions.some(item => authPermission(item));
+  },
+
+  // 验证用户是否含有指定权限，必须全部拥有
+  hasPermiAnd(permissions: string[]): boolean {
+    return permissions.every(item => authPermission(item));
+  },
+
+  // 验证用户是否具备某个角色
+  hasRole(role: string): boolean {
+    const super_admin = 'admin';
+    const roles = useUserStore().roles;
+    return roles.some(v => super_admin === v || v === role);
+  },
+
+  // 验证用户是否含有指定角色，只需包含其中一个
+  hasRoleOr(roles: string[]): boolean { ... },
+
+  // 验证用户是否含有指定角色，必须全部拥有
+  hasRoleAnd(roles: string[]): boolean { ... }
+};</code></pre>
+
+<p>在组件中使用（两种方式）：</p>
+
+<pre><code>// 方式1: Options API 通过全局属性
+this.$auth.hasPermi('system:user:edit')
+
+// 方式2: Composition API 直接导入
+import auth from '@/plugins/auth';
+if (auth.hasPermi('system:user:add')) {
+  // 执行新增操作
+}
+
+// 批量导出场景
+const columns = [
+  { label: '操作', visible: auth.hasPermiOr(['system:user:edit', 'system:user:remove']) }
+];</code></pre>
+
+<blockquote>
+  <strong>与 React 对比：</strong> React 中按钮级权限通常通过自定义 Hook（如 <code>usePermission()</code>）返回布尔值，结合条件渲染（<code>{hasPerm('xxx') && &lt;Button&gt;}</code>）实现。Vue 的 <code>v-hasPermi</code> 指令方案将权限判断从 JSX 逻辑中抽离到指令层，模板更干净，但灵活性（如动态权限变化）不如 Hook 方案。
+</blockquote>
+
+<h2>超级管理员绕过逻辑汇总</h2>
+
+<p>系统中权限判断的超级管理员逻辑分布在三个地方，必须保持一致：</p>
+
+<pre><code>// 1. v-hasPermi 指令 → permi === '*:*:*'
+// 2. v-hasRoles 指令 → role === 'superadmin' || role === 'admin'
+// 3. auth 插件：
+//    hasPermi → v === '*:*:*'
+//    hasRole  → v === 'admin'  (注意：这里没有 superadmin!)
+</code></pre>
+
+<div class="warn">
+  <strong>不一致风险：</strong> <code>auth.hasRole</code> 只检查 <code>admin</code>，不检查 <code>superadmin</code>；而 <code>v-hasRoles</code> 指令同时检查 <code>admin</code> 和 <code>superadmin</code>。这是历史遗留的设计差异，如果后端为某用户分配了 <code>superadmin</code> 角色而没有 <code>admin</code> 角色，通过 <code>$auth.hasRole('admin')</code> 会返回 false，这是一个已知的不一致点。
+</div>
+
+<h2>权限判断流程图</h2>
+
+<pre><code>用户请求访问 /system/user
+  │
+  ├─ 路由守卫 beforeEach
+  │   └─ 检查 token → 拉取 roles/permissions → 生成路由
+  │       └─ 如果该路由不在 permission store 的 sidebarRouters 中
+  │           → 404 或配置的 fallback 页面
+  │
+  ├─ 页面组件渲染
+  │   ├─ v-hasPermi="['system:user:add']" → 检查 permissions 数组 → 移除或保留 DOM
+  │   └─ v-hasRoles="['admin']" → 检查 roles 数组 → 移除或保留 DOM
+  │
+  └─ 组件逻辑中
+      └─ auth.hasPermi('system:user:edit') → 返回布尔值 → 条件分支</code></pre>
+
+<div class="tip">
+  <strong>最佳实践：</strong>
+  <br>1. 路由级：用后端菜单控制，无需在前端 hardcode 权限字符串
+  <br>2. 按钮级：优先用 <code>v-hasPermi</code>（以权限字符为准，比角色更细粒度）
+  <br>3. 函数级：在动态构建配置对象（如表头）时使用 <code>auth.hasPermiOr</code>
+  <br>4. 切勿在前端权限判断中做安全校验——真正的安全在后端接口层
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://cn.vuejs.org/guide/reusability/custom-directives.html">Vue 3 自定义指令</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以追问：「为什么 auth 插件使用默认导出而非命名导出？」「如何在权限变化时动态更新按钮显示？」「permissions 数组中的权限字符格式有什么约定？」</div>
+</body>
+</html>

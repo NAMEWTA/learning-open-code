@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · AnyLine 元数据引擎与动态数据源桥接</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fff3f3; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .arch table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .arch th { background: #eef4ff; padding: 0.4rem 0.6rem; text-align: left; color: #1d6fd6; }
+  .arch td { padding: 0.4rem 0.6rem; border-top: 1px solid #eee; }
+  .arch .file { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · AnyLine 元数据引擎与动态数据源桥接 <span class="tag">数据适配</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5）</b>：学完你能口述 MyBatisDataSourceMonitor 如何解决「同一个 JdbcTemplate 对应多种数据库」的适配问题，理解 <code>KEEP_ADAPTER</code>、<code>feature()</code>、<code>key()</code> 三个关键方法的作用，并掌握 AnyLine 元数据 API 的两种核心用法（列出表、读列信息）。
+</div>
+
+<h2>一、问题背景：两个框架的"领域冲突"</h2>
+
+<p>代码生成器需要读取<strong>任意数据源</strong>中的数据库表结构（表名、列名、列类型、主键、自增等元数据）。项目中使用了两套数据访问框架：</p>
+
+<div class="arch">
+<table>
+<tr><th>框架</th><th>职责</th><th>核心抽象</th></tr>
+<tr><td><strong>baomidou dynamic-datasource</strong></td><td>多数据源切换：<code>@DS("slave")</code> 注解控制当前线程用哪个数据源</td><td class="file">DynamicRoutingDataSource</td></tr>
+<tr><td><strong>AnyLine</strong></td><td>通用数据操作：提供元数据 API（<code>ServiceProxy.metadata().tables()</code>）自动读取表结构</td><td class="file">DataRuntime + adapter</td></tr>
+</table>
+</div>
+
+<p>问题出在这里：baomidou 的 <code>DynamicRoutingDataSource</code> 是一个<strong>路由代理</strong>——它包裹了多个真实数据源（MySQL、Oracle、PostgreSQL 等）。切换 <code>@DS</code> 注解只是改了路由目标，但 AnyLine 看到的 JdbcTemplate 始终是<strong>同一个对象</strong>。</p>
+
+<div class="warn">
+⚠️ <b>核心矛盾</b>：AnyLine 默认假设一个 JdbcTemplate 对应一种数据库类型，会为它绑定一个固定的 adapter（适配器）。但 DynamicRoutingDataSource 下同一个 JdbcTemplate <strong>可能背后切换成 MySQL → Oracle → PostgreSQL</strong>。如果 AnyLine 缓存了 MySQL 的 adapter，切到 Oracle 后仍然用 MySQL adapter 解析元数据，就会出错。
+</div>
+
+<h2>二、MyBatisDataSourceMonitor：桥接器的设计</h2>
+
+<p><code>MyBatisDataSourceMonitor</code> 实现了 AnyLine 的 <code>DataSourceMonitor</code> 接口，用三个方法精确控制 adapter 的匹配与缓存策略。源码位置：</p>
+
+<div class="step">
+<span class="num">1</span><b>构造函数：设置执行模式</b><br>
+<span class="where">MyBatisDataSourceMonitor.java:31-36</span>
+<pre><code>public MyBatisDataSourceMonitor() {
+    // KEEP_ADAPTER = 2: 自定义模式，由 keepAdapter() 方法决定
+    ConfigTable.KEEP_ADAPTER = 2;
+    // 禁用元数据缓存（数据源可能切换）
+    ConfigTable.METADATA_CACHE_SCOPE = 0;
+}</code></pre>
+<p>两行配置定死基调：<strong>不用 AnyLine 默认的缓存策略，一切由我们自己的 Monitor 接管</strong>。</p>
+</div>
+
+<div class="step">
+<span class="num">2</span><b>keepAdapter()：告诉 AnyLine "别缓存 adapter"</b><br>
+<span class="where">MyBatisDataSourceMonitor.java:102-109</span>
+<pre><code>public boolean keepAdapter(DataRuntime runtime, Object datasource) {
+    if (datasource instanceof JdbcTemplate jdbc) {
+        DataSource ds = jdbc.getDataSource();
+        // 关键：DynamicRoutingDataSource 不保持 adapter
+        return !(ds instanceof DynamicRoutingDataSource);
+    }
+    return true;
+}</code></pre>
+<p>当数据源是 <code>DynamicRoutingDataSource</code> 时返回 <code>false</code>，告诉 AnyLine：<strong>不要为这个 JdbcTemplate 缓存 adapter</strong>，每次操作都需要重新匹配。这就解决了「同一 JdbcTemplate 对应多种数据库」的问题。</p>
+</div>
+
+<div class="step">
+<span class="num">3</span><b>key()：用当前数据源名当唯一标识</b><br>
+<span class="where">MyBatisDataSourceMonitor.java:83-92</span>
+<pre><code>public String key(DataRuntime runtime, Object datasource) {
+    if (datasource instanceof JdbcTemplate jdbc) {
+        DataSource ds = jdbc.getDataSource();
+        if (ds instanceof DynamicRoutingDataSource) {
+            // 用 baomidou 当前上下文中持有的数据源名
+            return DynamicDataSourceContextHolder.peek();
+        }
+    }
+    return runtime.getKey();
+}</code></pre>
+<p>AnyLine 需要给 adapter 一个唯一键。如果直接用 JdbcTemplate 的 hashCode，所有数据源共享同一把钥匙，adapter 缓存就乱套了。所以这里取 baomidou 当前线程的 <strong>数据源名称</strong>（如 <code>"master"</code>、<code>"slave"</code>）作为 key。</p>
+</div>
+
+<div class="step">
+<span class="num">4</span><b>feature()：构造 adapter 匹配指纹</b><br>
+<span class="where">MyBatisDataSourceMonitor.java:47-74</span>
+<pre><code>public String feature(DataRuntime runtime, Object datasource) {
+    String feature = null;
+    if (datasource instanceof JdbcTemplate jdbc) {
+        DataSource ds = jdbc.getDataSource();
+        if (ds instanceof DynamicRoutingDataSource) {
+            String key = DynamicDataSourceContextHolder.peek();
+            feature = features.get(key);
+            if (null == feature) {
+                Connection con = null;
+                try {
+                    con = DataSourceUtils.getConnection(ds);
+                    DatabaseMetaData meta = con.getMetaData();
+                    // 产品名 + URL 合成唯一特征值
+                    feature = meta.getDatabaseProductName()
+                        .toLowerCase().replace(" ", "")
+                        + "_" + meta.getURL();
+                    features.put(key, feature);
+                } finally { /* 释放连接 */ }
+            }
+        }
+    }
+    return feature;
+}</code></pre>
+<p>feature 是 AnyLine 用来<strong>匹配正确 adapter</strong> 的指纹。它通过 JDBC 元数据拿到 <strong>产品名（如 "MySQL"、"PostgreSQL"） + 连接 URL</strong> 拼接成特征串。AnyLine 根据这个特征串选择对应的方言 adapter。同时用 <code>Map&lt;String, String&gt; features</code> 缓存，避免每次读取元数据都开一次连接。</p>
+</div>
+
+<h2>三、AnyLine 元数据 API 的实际调用</h2>
+
+<p>有了 Monitor 保障 adapter 正确匹配，代码生成器就可以安全地调用 AnyLine 的元数据 API。在 <code>GenTableServiceImpl</code> 中有两个最典型的调用场景：</p>
+
+<h3>场景 1：列出数据库中所有表</h3>
+
+<div class="step">
+<span class="where">GenTableServiceImpl.java:126-184 — selectPageDbTableList()</span>
+<pre><code>@DS("#genTable.dataName")   // ← baomidou 切换到目标数据源
+public PageResult&lt;GenTable&gt; selectPageDbTableList(GenTable genTable, PageQuery pageQuery) {
+    // AnyLine 一行读所有表元数据
+    LinkedHashMap&lt;String, Table&lt;?&gt;&gt; tablesMap =
+        ServiceProxy.metadata().tables();
+
+    // 过滤掉系统表前缀 + 已导入的表
+    tablesMap.values().stream()
+        .filter(x -> !StringUtils.startWithAnyIgnoreCase(
+            x.getName(), "sai_", "sj_", "flow_", "gen_"))
+        .filter(x -> !已导入表名列表.contains(x.getName()))
+        .map(x -> { /* 转换为 GenTable 对象 */ })
+        .toList();
+}</code></pre>
+<p><strong>关键</strong>：<code>@DS("#genTable.dataName")</code> 在方法执行前切数据源，<code>ServiceProxy.metadata().tables()</code> 透传当前 JdbcTemplate 的 connection 给 AnyLine，Monitor 的 <code>feature()</code> 正确识别了数据库类型，因而能正确解析该数据源的元数据。</p>
+</div>
+
+<h3>场景 2：读取指定表的列详细信息</h3>
+
+<div class="step">
+<span class="where">GenTableServiceImpl.java:296-316 — selectDbTableColumnsByName()</span>
+<pre><code>@DS("#dataName")
+public List&lt;GenTableColumn&gt; selectDbTableColumnsByName(
+        String tableName, String dataName) {
+    // AnyLine 一行读指定表
+    Table&lt;?&gt; table = ServiceProxy.metadata().table(tableName);
+
+    LinkedHashMap&lt;String, Column&gt; columns = table.getColumns();
+    columns.forEach((columnName, column) -> {
+        GenTableColumn tc = new GenTableColumn();
+        tc.setIsPk(column.isPrimaryKey() ? "1" : "0");
+        tc.setColumnName(column.getName());
+        tc.setColumnComment(column.getComment());
+        tc.setColumnType(column.getOriginType().toLowerCase());
+        tc.setSort(column.getPosition());
+        tc.setIsRequired(column.isNullable() ? "0" : "1");
+        tc.setIsIncrement(column.isAutoIncrement() ? "1" : "0");
+    });
+}</code></pre>
+<p>从 <code>Column</code> 对象能读到六个关键属性：<strong>名称、注释、原始类型、是否主键、是否可空、是否自增、字段位置</strong>。这就是类型推断的全部原始材料。</p>
+</div>
+
+<div class="side">
+💡 <b>一句话总结这套桥接方案</b>：<br>
+<code>@DS</code> 注解决定「连哪个库」→ <code>keepAdapter=false</code> 阻止 AnyLine 缓存 adapter → <code>key()</code> 用数据源名区分 → <code>feature()</code> 用产品名+URL 匹配正确 adapter → <code>metadata().tables()</code> 正确读取表结构。<br>
+<strong>五个环节，环环相扣。</strong>
+</div>
+
+<h2>四、导入表的完整流程（带分布式锁）</h2>
+
+<p>导入表是唯一需要防并发的操作，因为它同时操作 gen_table 和 gen_table_column 两张表，且依赖 AOP 代理调用（切数据源）。</p>
+
+<div class="flow">POST /tool/gen/importTable?tables=sys_user&dataName=master
+  │
+  ├─ GenController.importTableSave()
+  │    · @Lock4j(keys={"#dataName"})        ← 同一数据源串行导入
+  │    · @RepeatSubmit()                     ← 防重复提交
+  │
+  ├─ selectDbTableListByNames(tables, dataName)
+  │    · @DS("#dataName") → AnyLine 读表
+  │
+  └─ importGenTable(tableList, dataName)
+       · @DSTransactional                    ← 支持跨库事务
+       · for each table:
+            GenUtils.initTable(table)        ← 初始化表配置
+            tableMapper.insert(table)         ← 保存 gen_table
+            SpringUtils.getAopProxy(this)    ← 获取 AOP 代理
+              .selectDbTableColumnsByName()   ← 切数据源读列
+            GenUtils.initColumnField()        ← 推断每个列的类型
+            columnMapper.insertBatch()        ← 保存 gen_table_column</div>
+
+<p>注意 <code>SpringUtils.getAopProxy(this)</code> 的用法。因为 <code>importGenTable</code> 上挂了 <code>@DSTransactional</code>，直接 <code>this.selectDbTableColumnsByName()</code> 会绕过切面，<code>@DS</code> 不生效。所以必须通过 <strong>AOP 代理对象</strong> 调用，才能切到正确数据源读列信息。</p>
+
+<h2>五、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. MyBatisDataSourceMonitor 中哪个方法直接回答了「同一个 JdbcTemplate 可能对应多种数据库，要不要缓存 adapter」这个问题？</p>
+<span class="opt">A. feature()</span>
+<span class="opt">B. key()</span>
+<span class="opt">C. keepAdapter() —— 对 DynamicRoutingDataSource 返回 false，告诉 AnyLine 不缓存 adapter</span>
+<span class="opt">D. 构造函数中的 ConfigTable</span>
+<details><summary>看答案</summary><b>C</b>。keepAdapter() 是核心开关。对于 DynamicRoutingDataSource 返回 false，AnyLine 每次都会根据 feature() 重新匹配正确的 adapter，从而支持数据库类型切换。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. feature() 方法的返回值包含什么信息？为什么选这些信息？</p>
+<span class="opt">A. 只含数据源名称</span>
+<span class="opt">B. 只含 JDBC URL</span>
+<span class="opt">C. 数据库产品名 + JDBC URL，产品名决定方言种类，URL 区分同类型的不同实例</span>
+<span class="opt">D. JdbcTemplate 的 hashCode</span>
+<details><summary>看答案</summary><b>C</b>。产品名（如 MySQL、PostgreSQL）用于匹配 AnyLine 的方言 adapter，URL 用于区分同一类数据库的不同实例（如开发库 vs 测试库）。两者拼接确保唯一性。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. importTableSave 为什么同时用了 @Lock4j 和 @RepeatSubmit？</p>
+<span class="opt">A. 装饰性注解，没实际作用</span>
+<span class="opt">B. Lock4j 防并发导入同一数据源下的表，RepeatSubmit 防用户连续双击提交</span>
+<span class="opt">C. 这是复制粘贴错误</span>
+<details><summary>看答案</summary><b>B</b>。Lock4j 是分布式锁（按数据源名锁定），防止多个请求同时导入同一数据源的表导致重复记录；RepeatSubmit 是请求级防重（基于 Redis），防止用户快速双击提交按钮。</details>
+</div>
+
+<div class="cite">
+📖 推荐一手资料：<br>
+<a href="https://gitee.com/anyline/anyline" target="_blank">AnyLine 官方文档 — metadata API 与 adapter 机制</a><br>
+<a href="https://gitee.com/baomidou/dynamic-datasource-spring-boot-starter" target="_blank">baomidou dynamic-datasource 官方文档 — @DS 注解用法</a><br>
+📁 源码文件：<code>ruoyi-gen/src/main/java/org/dromara/gen/config/MyBatisDataSourceMonitor.java</code>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「为什么 ConfigTable.KEEP_ADAPTER = 2 而不是 1？」「如果项目中只有一种数据库，还需要 MyBatisDataSourceMonitor 吗？」下一课就往下走，放大 <code>GenUtils.initColumnField()</code>，讲透<strong>字段类型的自动推断规则</strong>。</div>
+
+<div class="nav">课程 02 / 共 4 课 · 上一课：全流程鸟瞰 · 下一课预告：字段类型自动推断规则</div>
+
+</body>
+</html>

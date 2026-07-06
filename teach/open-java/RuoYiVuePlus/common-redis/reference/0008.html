@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 08 · 异常处理、依赖边界与全局复盘</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.78rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.3rem 0.45rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.6rem 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.75rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.82rem; }
+  .todo { background:#fffbea; padding:0.5rem 1rem; border-radius:6px; font-size:0.82rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 08 · 异常处理、依赖边界与全局复盘</h1>
+<p class="a">配套课程：<code>lessons/0008.html</code> · 8 节闭环完结</p>
+
+<h2>RedisExceptionHandler</h2>
+<ul>
+<li><code>@RestControllerAdvice</code>，只兜 <code>LockFailureException</code></li>
+<li>锁竞争失败 → 返回 <code>HTTP_UNAVAILABLE</code> + "业务处理中，请稍后再试"</li>
+<li>不处理 Redis 连接异常（归全局异常处理器）</li>
+</ul>
+
+<h2>自动装配（AutoConfiguration.imports）</h2>
+<pre><code>RedisConfig          → Redisson 序列化/前缀/连接
+CacheConfig          → @EnableCaching + Caffeine + PlusSpringCacheManager
+RateLimiterConfig    → RateLimiterAspect (after=RedisConfiguration)
+IdempotentConfig     → RepeatSubmitAspect (after=RedisConfiguration)</code></pre>
+
+<h2>依赖边界</h2>
+<table>
+<tr><th>依赖</th><th>角色</th><th>边界</th></tr>
+<tr><td>redisson</td><td>★ 核心客户端</td><td>模块基石，所有工具类 CLIENT 的源头</td></tr>
+<tr><td>caffeine</td><td>本地一级缓存</td><td>可选，不传则二级缓存不启用</td></tr>
+<tr><td>lock4j</td><td>分布式锁</td><td>锁归 Lock4j 管，异常归 RedisExceptionHandler 兜</td></tr>
+<tr><td>sa-token</td><td>读 token 名</td><td>仅 RepeatSubmit 一处引用</td></tr>
+<tr><td>ruoyi-common-core</td><td>工具类/异常/常量</td><td>redis ← core 单向依赖</td></tr>
+<tr><td>ruoyi-common-json</td><td>JSON 序列化</td><td>RedisConfig 的 Jackson3 Codec、RepeatSubmit 的参数序列化</td></tr>
+</table>
+
+<h2>全局复盘：5 大区域一句话</h2>
+<table>
+<tr><th>区域</th><th>一句话</th></tr>
+<tr><td>config</td><td>配好序列化/前缀/连接 → 决定所有操作的底层规则</td></tr>
+<tr><td>handler</td><td>加透明前缀 + 兜锁失败 → 挂在框架扩展点上的小钩子</td></tr>
+<tr><td>aspectj/annotation</td><td>提供限流（控频率）和防重（控重复）两个注解保护</td></tr>
+<tr><td>manager</td><td>搭 Caffeine+Redis 二级缓存，缓存名 # 语法传参数</td></tr>
+<tr><td>utils</td><td>四扇门：裸操作/注解缓存/队列/发号 → 业务日常入口</td></tr>
+</table>
+
+<h2>8 课速览（退后看全貌）</h2>
+<table>
+<tr><th>课</th><th>区域</th><th>主题</th></tr>
+<tr><td>0001</td><td>全景</td><td>5 大区域鸟瞰 + 一句话定位</td></tr>
+<tr><td>0002</td><td>config</td><td>RedisConfig 地基：序列化/前缀/连接/安全</td></tr>
+<tr><td>0003</td><td>aspectj</td><td>@RateLimiter 限流链路与令牌桶</td></tr>
+<tr><td>0004</td><td>aspectj</td><td>@RepeatSubmit 防重提交与幂等</td></tr>
+<tr><td>0005</td><td>manager</td><td>二级缓存 Caffeine+Redis</td></tr>
+<tr><td>0006</td><td>utils</td><td>RedisUtils 6 组操作实战</td></tr>
+<tr><td>0007</td><td>utils</td><td>CacheUtils / QueueUtils / SequenceUtils</td></tr>
+<tr><td>0008</td><td>全局</td><td>异常处理、依赖边界、复盘</td></tr>
+</table>
+
+<h2>安全加固待办</h2>
+<div class="todo">
+🔐 RedisConfig 中 Jackson 3.x 的 <code>BasicPolymorphicTypeValidator</code> 当前默认全放行，建议收紧为 <code>allowIfBaseType("org.dromara")</code> 白名单（代码注释已提示）。
+</div>
+
+<p class="a">→ 术语见 <code>GLOSSARY.md</code>，课程见 <code>lessons/0001~0008.html</code></p>
+</body>
+</html>

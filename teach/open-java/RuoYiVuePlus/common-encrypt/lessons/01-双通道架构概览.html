@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 双通道架构概览：算法体系与核心组件</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; line-height: 1.3; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #2c3e50; }
+  p, li { font-size: 0.95rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · 双通道架构概览：算法体系与核心组件</h1>
+
+<div class="mission"><strong>本课任务：</strong>建立对 ruoyi-common-encrypt 模块的<b>顶层认知</b>——理解双通道架构的设计动机、掌握 IEncryptor 接口到 AlgorithmType 枚举的算法体系全貌、理解 EncryptContext / EncryptContextFactory / EncryptorManager 三组件的分工协作，以及两套独立配置系统的启用方式。</div>
+
+<h2>1. 模块定位</h2>
+
+<p><code>ruoyi-common-encrypt</code> 提供透明的数据加解密能力，服务两个完全不同的安全场景：</p>
+
+<ul>
+  <li><b>API 通信加密通道：</b>在 Controller 层拦截 HTTP 请求/响应，保护网络传输中的数据。前端加密请求体，后端解密后处理；后端加密响应体，前端解密后使用。</li>
+  <li><b>DB 字段加密通道：</b>在 MyBatis 层拦截 SQL 入参/出参，保护数据库存储中的数据。写入时自动将敏感字段加密为密文落库，查询时自动解密还原为明文。</li>
+</ul>
+
+<blockquote><b>关键认知：</b>两条通道虽然共用同一套算法体系，但它们的<b>拦截层次</b>、<b>密钥来源</b>、<b>触发方式</b>、<b>启用开关</b>完全独立。你可以只启用 API 加密而不启用 DB 加密，反之亦然。这种"共用算法 + 独立通道"的设计是本模块最核心的架构思想。</blockquote>
+
+<h2>2. 双通道架构全景对比</h2>
+
+<table>
+  <tr><th>维度</th><th>API 通信加密通道</th><th>DB 字段加密通道</th></tr>
+  <tr><td><b>拦截机制</b></td><td>Servlet <b>Filter</b> — <code>CryptoFilter</code></td><td>MyBatis <b>Plugin Interceptor</b> — <code>MybatisEncryptInterceptor</code> + <code>MybatisDecryptInterceptor</code></td></tr>
+  <tr><td><b>触发方式</b></td><td><code>@ApiEncrypt</code> 注解标注 Controller 方法</td><td><code>@EncryptField</code> 注解标注实体类 String 字段</td></tr>
+  <tr><td><b>加密算法</b></td><td>固定 <b>RSA + AES 混合</b>（RSA 保护 AES 密钥，AES 保护数据）</td><td>可选五种算法：BASE64 / AES / RSA / SM2 / SM4</td></tr>
+  <tr><td><b>密钥来源</b></td><td>yml 全局配置：<code>api-decrypt.public-key</code> / <code>private-key</code></td><td>注解优先 > yml 全局默认（<code>mybatis-encryptor.*</code>）</td></tr>
+  <tr><td><b>启用开关</b></td><td><code>api-decrypt.enabled=true</code></td><td><code>mybatis-encryptor.enable=true</code></td></tr>
+  <tr><td><b>加密标识</b></td><td>请求头 <code>encrypt-key</code>（可自定义 header-flag）</td><td>值前缀 <code>ENC_</code>（即 Constants.ENCRYPT_HEADER）</td></tr>
+  <tr><td><b>核心包装器</b></td><td>DecryptRequestBodyWrapper（请求解密）+ EncryptResponseBodyWrapper（响应加密）</td><td>EncryptedFieldProcessor（字段递归处理）+ FieldSnapshot（原始值恢复）</td></tr>
+</table>
+
+<div class="insight"><strong>设计洞察：为什么需要两条独立通道？</strong><br>
+API 加密和 DB 加密的威胁模型完全不同。API 通道面对的是<b>网络链路攻击者</b>（中间人抓包），需要密钥协商协议（RSA 保证密钥安全传输）。DB 通道面对的是<b>数据库层面攻击者</b>（拖库、运维查表），没有密钥交换需求，密钥直接配置在服务端。两者不可混用——一个在 HTTP 层拦截，一个在 SQL 层拦截，处于完全不同的抽象层次。</div>
+
+<h2>3. IEncryptor 接口 —— 加密算法的顶层契约</h2>
+
+<p><code>org.dromara.common.encrypt.encryptor.IEncryptor</code> 定义了三个方法：</p>
+
+<table>
+  <tr><th>方法</th><th>签名</th><th>说明</th></tr>
+  <tr><td><code>algorithm()</code></td><td><code>AlgorithmType algorithm()</code></td><td>返回当前加密器的算法类型枚举值，作为缓存键的一部分</td></tr>
+  <tr><td><code>encrypt()</code></td><td><code>String encrypt(String value, EncodeType encodeType)</code></td><td>加密明文，指定输出编码格式（BASE64 或 HEX）</td></tr>
+  <tr><td><code>decrypt()</code></td><td><code>String decrypt(String value)</code></td><td>解密密文。不接收 EncodeType——Hutool 的 decryptStr() 自动识别编码格式</td></tr>
+</table>
+
+<p>接口只有三个方法，设计极为精简。加密时需指定编码，解密时自动检测——这符合"产生密文的人知道编码方式，解密时不需要额外告知"的原则。</p>
+
+<h2>4. AbstractEncryptor 抽象基类</h2>
+
+<p><code>org.dromara.common.encrypt.encryptor.AbstractEncryptor</code> —— 所有五种加密器实现的共同基类。构造函数接收 EncryptContext 进行配置注入。子类在构造时做各自校验：RsaEncryptor 和 Sm2Encryptor 校验公私钥完整性，AesEncryptor 和 Sm4Encryptor 延迟到 EncryptUtils 调用时校验。</p>
+
+<h2>5. AlgorithmType 枚举 —— 五种算法的统一入口</h2>
+
+<p><code>org.dromara.common.encrypt.enums.AlgorithmType</code></p>
+
+<table>
+  <tr><th>枚举值</th><th>绑定加密器类</th><th>算法类型</th><th>密钥要求</th><th>是否真加密</th></tr>
+  <tr><td><code>DEFAULT</code></td><td><code>null</code></td><td>占位符，回退到 yml 全局默认</td><td>取决于实际算法</td><td>取决于实际</td></tr>
+  <tr><td><code>BASE64</code></td><td><code>Base64Encryptor.class</code></td><td>编码（非加密）</td><td>无密钥</td><td><b>否</b></td></tr>
+  <tr><td><code>AES</code></td><td><code>AesEncryptor.class</code></td><td>对称加密</td><td>password 16/24/32 字节</td><td><b>是</b></td></tr>
+  <tr><td><code>RSA</code></td><td><code>RsaEncryptor.class</code></td><td>非对称加密</td><td>publicKey + privateKey (>=1024 bit)</td><td><b>是</b></td></tr>
+  <tr><td><code>SM2</code></td><td><code>Sm2Encryptor.class</code></td><td>国密非对称</td><td>publicKey + privateKey</td><td><b>是</b></td></tr>
+  <tr><td><code>SM4</code></td><td><code>Sm4Encryptor.class</code></td><td>国密对称</td><td>password 恰好 16 字节</td><td><b>是</b></td></tr>
+</table>
+
+<p>AlgorithmType 的 <code>clazz</code> 字段直接指向加密器实现类。EncryptorManager 通过 <code>ReflectUtil.newInstance(clazz, encryptContext)</code> 反射创建加密器实例，添加新算法只需新增枚举值+加密器类，Manager 层无需改动。</p>
+
+<h3>5.1 五种加密器简述</h3>
+<ul>
+  <li><b>AesEncryptor：</b>对称加密，委托 <code>EncryptUtils.encryptByAes(data, password)</code> / <code>decryptByAes(data, password)</code></li>
+  <li><b>RsaEncryptor：</b>非对称加密，公钥加密+私钥解密。构造时校验公私钥完整性（Fail-Fast）</li>
+  <li><b>Sm2Encryptor：</b>国密非对称，底层依赖 Bouncy Castle。委托 <code>EncryptUtils.encryptBySm2(data, publicKey)</code></li>
+  <li><b>Sm4Encryptor：</b>国密对称，密钥必须恰好 16 字节（不同于 AES 的 16/24/32）</li>
+  <li><b>Base64Encryptor：</b><b>编码，非加密。</b>仅用于开发调试占位，生产环境不要用它保护敏感数据</li>
+</ul>
+
+<h2>6. EncryptContext —— 加密材料的"清单"</h2>
+
+<p><code>org.dromara.common.encrypt.core.EncryptContext</code> 是一个 DTO，携带算法、密码、公私钥、编码方式五个字段。它在 EncryptContextFactory → EncryptorManager → IEncryptor 之间流转，是加密器创建的"材料清单"。</p>
+
+<h2>7. EncryptContextFactory —— "注解优先，默认兜底"</h2>
+
+<p><code>org.dromara.common.encrypt.core.EncryptContextFactory</code> 的核心逻辑：当 @EncryptField 的属性是 DEFAULT 或空字符串时，回退到 yml 全局配置：</p>
+
+<pre>create(Field field):
+  algorithm = field注解 == DEFAULT ? yml全局algorithm : 注解值
+  password  = field注解 == ""      ? yml全局password  : 注解值
+  publicKey = field注解 == ""      ? yml全局publicKey : 注解值
+  privateKey= field注解 == ""      ? yml全局privateKey: 注解值
+  encode    = field注解 == DEFAULT ? yml全局encode    : 注解值
+  → 返回完整 EncryptContext</pre>
+
+<p>这使得同一表中大部分字段用全局 AES 加密，某个特别敏感的字段可以单独标注 <code>@EncryptField(algorithm=SM4, password="customKey")</code>。</p>
+
+<h2>8. EncryptorManager —— 加解密调度中心</h2>
+
+<p><code>org.dromara.common.encrypt.core.EncryptorManager</code> 维护两级缓存：</p>
+
+<table>
+  <tr><th>缓存</th><th>键</th><th>值</th><th>目的</th></tr>
+  <tr><td><code>encryptorMap</code></td><td>EncryptorCacheKey（算法+编码+密钥的元组）</td><td>IEncryptor 实例</td><td>避免每次加密都反射创建新加密器</td></tr>
+  <tr><td><code>fieldCache</code></td><td>Class&lt;?&gt;（实体类）</td><td>Set&lt;Field&gt;（@EncryptField 字段集合）</td><td>避免每次加密都反射扫描类的所有字段</td></tr>
+</table>
+
+<p>ENCRYPT_HEADER 防重复加密逻辑：</p>
+
+<pre>encrypt(value, ctx):
+  if (value.startsWith("ENC_")) return value;  // 已是密文，跳过
+  encrypted = encryptor.encrypt(value, ctx.getEncode());
+  return "ENC_" + encrypted;
+
+decrypt(value, ctx):
+  if (!value.startsWith("ENC_")) return value; // 不是密文，跳过
+  stripped = value.substring(4);
+  return encryptor.decrypt(stripped);</pre>
+
+<h2>9. 两套配置系统</h2>
+
+<table>
+  <tr><th>维度</th><th>API 层 (api-decrypt)</th><th>DB 层 (mybatis-encryptor)</th></tr>
+  <tr><td>Properties 类</td><td><code>ApiDecryptProperties</code></td><td><code>EncryptorProperties</code></td></tr>
+  <tr><td>AutoConfiguration</td><td><code>ApiDecryptAutoConfiguration</code></td><td><code>EncryptorAutoConfiguration</code></td></tr>
+  <tr><td>开关字段</td><td><code>enabled</code></td><td><code>enable</code></td></tr>
+  <tr><td>ConditionalOnProperty</td><td><code>api-decrypt.enabled=true</code></td><td><code>mybatis-encryptor.enable=true</code></td></tr>
+  <tr><td>算法</td><td>固定 RSA+AES 混合</td><td>BASE64/AES/RSA/SM2/SM4</td></tr>
+  <tr><td>默认算法</td><td>—</td><td><code>BASE64</code>（注意：仅编码，非加密！）</td></tr>
+</table>
+
+<blockquote><b>注意字段名差异：</b>API 层是 <code>enabled</code>（带 d），DB 层是 <code>enable</code>（不带 d）。写反了开关不生效——这是最容易踩的配置坑。</blockquote>
+
+<h2>10. 课后练习</h2>
+
+<details class="quiz"><summary>练习 1 · 算法选型（点击展开）</summary>
+<p><strong>Q:</strong> 某业务要求数据库字段加密后仍能等值查询（WHERE = 密文）。以下哪种算法最合适？</p>
+<p>A. RSA（每次加密结果不同，随机填充导致无法等值匹配）<br>
+B. AES（对称加密，确定性加密时同一明文产生相同密文，支持等值查询）<br>
+C. BASE64（无安全性）<br>
+D. SM2（同 RSA，非确定性加密）</p>
+<p><strong>答案：B。</strong>对称加密（使用固定 IV 或 ECB 模式）对同一明文产生相同密文，支持等值查询。RSA/SM2 每次加密结果都不同。但确定性加密会暴露"相同明文=相同密文"的模式，安全性弱于随机化加密。</p>
+</details>
+
+<details class="quiz"><summary>练习 2 · 算法定位（点击展开）</summary>
+<p><strong>Q:</strong> 关于五种算法定位，正确的是？</p>
+<p>A. BASE64 是一种轻量级加密<br>
+B. SM4 密钥长度与 AES 相同（16/24/32）<br>
+C. RSA 和 SM2 都是非对称加密，RSA 基于大素数分解，SM2 基于椭圆曲线<br>
+D. API 通道也支持通过 @EncryptField 切换算法</p>
+<p><strong>答案：C。</strong>A 错误——BASE64 是编码。B 错误——SM4 必须恰好 16 字节。D 错误——API 通道固定 RSA+AES。</p>
+</details>
+
+<details class="quiz"><summary>练习 3 · EncryptContextFactory 行为（点击展开）</summary>
+<p><strong>Q:</strong> @EncryptField 的 algorithm=SM4、password="" 时，最终 EncryptContext 的 password 是什么？</p>
+<p>A. 空字符串<br>
+B. EncryptorProperties.password（yml 全局密码）<br>
+C. null<br>
+D. 启动报错</p>
+<p><strong>答案：B。</strong>password=""（默认值）被视为"未设置"回退到 yml。但 algorithm=SM4 是显式指定的不被覆盖。结果是：SM4 算法 + yml 全局密码。</p>
+</details>
+
+<details class="quiz"><summary>练习 4 · 缓存设计（点击展开）</summary>
+<p><strong>Q:</strong> EncryptorManager 为什么需要 encryptorMap 和 fieldCache 两级缓存？</p>
+<p><strong>参考：</strong>去掉加密器缓存每次加密都反射 new 加密器+校验密钥，高并发下 GC 和 CPU 开销大。去掉字段缓存每次加密/解密都反射遍历类的所有字段，性能影响显著。两级 ConcurrentHashMap 保证线程安全，启动时预热 fieldCache，运行时按需填充 encryptorMap。</p>
+</details>
+
+<div class="reminder"><strong>学习提示：</strong>本课建立了模块的"骨架认知"。建议先打开 IDE 浏览 <code>IEncryptor</code>、<code>AlgorithmType</code>、<code>EncryptorManager</code> 三个类，对照本课内容建立直观印象。后续课程将分别深入 API 通道和 DB 通道。</div>
+
+<div class="cite">源码路径：<br>
+<code>org.dromara.common.encrypt.encryptor.IEncryptor</code> — 加密器顶层接口<br>
+<code>org.dromara.common.encrypt.enums.AlgorithmType</code> — 算法类型枚举<br>
+<code>org.dromara.common.encrypt.core.EncryptContext</code> — 加密上下文 DTO<br>
+<code>org.dromara.common.encrypt.core.EncryptContextFactory</code> — 加密上下文工厂<br>
+<code>org.dromara.common.encrypt.core.EncryptorManager</code> — 加密管理器<br>
+<code>org.dromara.common.encrypt.properties.ApiDecryptProperties</code> — API 层配置<br>
+<code>org.dromara.common.encrypt.properties.EncryptorProperties</code> — DB 层配置<br>
+底层依赖：hutool-crypto + bouncycastle bcpkix-jdk18on</div>
+
+<div class="nav"><span></span><a href="02-API加解密通道.html">下一课：API 加解密通道</a></div>
+
+</body>
+</html>

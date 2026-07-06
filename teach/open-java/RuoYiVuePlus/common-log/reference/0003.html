@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · LogAspect 处理流程</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+
+<h1>速查 03 · LogAspect 处理流程</h1>
+
+<h2>doAround 完整流程（成功 + 异常双路径）</h2>
+<div class="chain">
+@Around("@annotation(controllerLog)")
+<span class="a">┌─ doAround(joinPoint, controllerLog) ─────────────────────────┐</span>
+│ StopWatch start()                                             │
+│ <span class="a">┌─ try ───────────────────────────────────────────────────┐</span>    │
+│ <span class="a">│</span> jsonResult = joinPoint.proceed()          <span class="a">// 执行目标方法</span>  <span class="a">│</span>    │
+│ <span class="a">│</span> handleLog(joinPoint, log, null, jsonResult, sw) <span class="a">// 成功</span>  <span class="a">│</span>    │
+│ <span class="a">│</span> return jsonResult                                  <span class="a">│</span>    │
+│ <span class="a">└────────────────────────────────────────────────────────┘</span>    │
+│ <span class="a">┌─ catch (Exception e) ──────────────────────────────────┐</span>    │
+│ <span class="a">│</span> handleLog(joinPoint, log, e, null, sw)     <span class="a">// 失败</span>  <span class="a">│</span>    │
+│ <span class="a">│</span> throw e <span class="a">// 异常继续向上抛，不吞</span>                      <span class="a">│</span>    │
+│ <span class="a">└────────────────────────────────────────────────────────┘</span>    │
+<span class="a">└──────────────────────────────────────────────────────────────┘</span>
+<span class="a">注意：成功路径 jsonResult 非 null，异常路径 jsonResult=null</span>
+<span class="a">      成功路径 exception=null，异常路径 exception 非 null</span>
+</div>
+
+<h2>handleLog 7 步处理</h2>
+<table>
+  <tr><th>步骤</th><th>操作</th><th>关键代码</th></tr>
+  <tr><td>1. 创建事件</td><td>new OperLogEvent，初始 status=SUCCESS.ordinal()</td><td><code>new OperLogEvent()</code></td></tr>
+  <tr><td>2. 采集网络信息</td><td>获取 IP、URL、ClientKey（长度限制）</td><td><code>ServletUtils.getClientIP()</code><br><code>request.getRequestURI()</code></td></tr>
+  <tr><td>3. 采集用户/设备</td><td>从 LoginHelper 获取用户、部门、设备、浏览器、OS</td><td><code>LoginHelper.getLoginUser()</code></td></tr>
+  <tr><td>4. 设置异常状态</td><td>如果 e != null，status=FAIL，记录 errorMsg</td><td><code>operLog.setStatus(FAIL.ordinal())</code></td></tr>
+  <tr><td>5. 设置方法信息</td><td>className.methodName()、请求方式 GET/POST 等</td><td><code>joinPoint.getSignature().getName()</code></td></tr>
+  <tr><td>6. 注解参数处理</td><td>委托 getControllerMethodDescription() 填充 title/businessType/参数</td><td><code>getControllerMethodDescription(...)</code></td></tr>
+  <tr><td>7. 耗时 & 发布</td><td>stopWatch.stop()，计算 costTime，SpringUtils 发布事件</td><td><code>SpringUtils.context().publishEvent(operLog)</code></td></tr>
+</table>
+
+<h2>参数收集决策树</h2>
+<div class="chain">
+isSaveRequestData == true ?
+<span class="a">├─ paramsMap 不为空？</span>
+<span class="a">│   ├ 不为空 → 剔除 EXCLUDE_PROPERTIES + excludeParamNames → JSON 序列化</span>
+<span class="a">│   └ 为空 + 请求方式是 PUT/POST/DELETE？</span>
+<span class="a">│       ├ 是 → argsArrayToString(joinPoint.getArgs()) → 过滤后拼接</span>
+<span class="a">│       └ 否 → 参数为空字符串</span>
+<span class="a">└ isSaveRequestData == false → 跳过参数收集</span>
+</div>
+
+
+<h2>isFilterObject / isFilterValue 过滤类型</h2>
+<table>
+  <tr><th>过滤目标</th><th>说明</th></tr>
+  <tr><td><code>MultipartFile</code></td><td>文件上传对象，不能序列化</td></tr>
+  <tr><td><code>HttpServletRequest</code></td><td>请求对象，循环引用无法序列化</td></tr>
+  <tr><td><code>HttpServletResponse</code></td><td>响应对象，循环引用无法序列化</td></tr>
+  <tr><td><code>BindingResult</code></td><td>校验结果对象，非业务数据</td></tr>
+  <tr><td>包含以上类型的数组/集合/Map</td><td>递归检查容器内元素</td></tr>
+</table>
+
+<h2>常量限制</h2>
+<table>
+  <tr><th>常量名</th><th>值</th><th>限制对象</th></tr>
+  <tr><td><code>MAX_URL_LENGTH</code></td><td>255</td><td>请求 URL 最大长度</td></tr>
+  <tr><td><code>MAX_CLIENT_KEY_LENGTH</code></td><td>32</td><td>客户端标识最大长度</td></tr>
+  <tr><td><code>MAX_CONTENT_LENGTH</code></td><td>3800</td><td>日志内容（参数/结果/错误消息）最大长度</td></tr>
+</table>
+
+<h2>关键工具依赖</h2>
+<table>
+  <tr><th>工具类</th><th>来源模块</th><th>在 LogAspect 中的用途</th></tr>
+  <tr><td><code>LoginHelper</code></td><td>ruoyi-common-satoken</td><td>获取当前登录用户信息（用户名、部门、设备、客户端）</td></tr>
+  <tr><td><code>ServletUtils</code></td><td>ruoyi-common-core</td><td>获取 Request、IP、请求参数 Map</td></tr>
+  <tr><td><code>SpringUtils</code></td><td>ruoyi-common-core</td><td>获取 ApplicationContext，发布 Spring Event</td></tr>
+  <tr><td><code>JsonUtils</code></td><td>ruoyi-common-json</td><td>对象序列化为 JSON 字符串（含字段排除能力）</td></tr>
+  <tr><td><code>StringUtils</code></td><td>ruoyi-common-core</td><td>字符串截断（limit 函数）、空白判断</td></tr>
+</table>
+
+</body>
+</html>

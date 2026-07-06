@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查：04 Axios 封装与接口加密</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2rem; color: #409EFF; }
+  h2 { font-size: 1.2rem; margin-top: 1.8rem; border-bottom: 2px solid #409EFF; padding-bottom: 0.25rem; }
+  h3 { font-size: 1rem; margin-top: 1.2rem; color: #555; }
+  code { background: #f0f0f0; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.88em; }
+  pre { background: #282c34; color: #abb2bf; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.8em; line-height: 1.45; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.85rem; }
+  th { background: #f5f5f5; text-align: left; padding: 0.4rem 0.6rem; border: 1px solid #e0e0e0; }
+  td { padding: 0.4rem 0.6rem; border: 1px solid #e0e0e0; }
+  .tag { display: inline-block; background: #409EFF; color: #fff; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.75em; margin-right: 0.3em; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; margin: 0.8rem 0; font-size: 0.85rem; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.5rem 0.8rem; margin: 0.8rem 0; font-size: 0.85rem; }
+  .diagram { background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.8rem; border-radius: 6px; font-family: monospace; font-size: 0.82em; line-height: 1.5; white-space: pre; margin: 0.8rem 0; }
+</style>
+</head>
+<body>
+<h1>速查 04：Axios 封装与接口加密</h1>
+
+<h2>拦截器链全景</h2>
+<div class="diagram">请求 → service.interceptors.request
+├── Content-Language 注入
+├── Authorization: Bearer &lt;token&gt;  (isToken !== false)
+├── GET params → URL query string
+├── 防重复提交检查 (sessionStorage, 500ms, POST/PUT, repeatSubmit !== false)
+└── RSA+AES 加密 (isEncrypt=true, POST/PUT)
+    ├── 生成随机 32 位 AES Key (crypto.getRandomValues)
+    ├── encrypt-key header ← RSA 加密 AES Key
+    └── body ← AES-ECB/PKCS7 加密请求体
+
+      ↓ 发送 ↓
+
+响应 ← service.interceptors.response
+├── RSA 解密 encrypt-key → 得到 AES Key → AES 解密响应体
+├── 二进制/blobl → 直接返回
+├── code===401 → 重新登录弹窗（isRelogin 全局锁防重复）
+├── code===500 → ElMessage.error + createHandledError
+├── code===601 (WARN) → ElMessage.warning + createHandledError
+├── code!==200 → ElNotification.error + createHandledError
+└── code===200 → resolve(res.data)</div>
+
+<h2>自定义 Header 标志</h2>
+<table>
+<tr><th>Header</th><th>含义</th><th>典型场景</th></tr>
+<tr><td><code>isToken: false</code></td><td>跳过 Token 注入</td><td>登录接口（还没 token）</td></tr>
+<tr><td><code>isEncrypt: true</code></td><td>启用 RSA+AES 加密</td><td>登录、重置密码等敏感接口</td></tr>
+<tr><td><code>repeatSubmit: false</code></td><td>关闭防重复提交</td><td>允许快速重复提交的接口（注意语义反转）</td></tr>
+</table>
+
+<h2>加密三函数</h2>
+<pre><code>// 1. 生成随机 AES Key
+generateAesKey(): WordArray
+  → crypto.getRandomValues(new Uint8Array(32))
+  → CryptoJS.enc.Utf8.parse(hexString.slice(0, 32))
+
+// 2. AES 加密请求体
+encryptWithAes(message, aesKey): string
+  → CryptoJS.AES.encrypt(message, aesKey, { mode: ECB, padding: Pkcs7 })
+
+// 3. RSA 加密 AES Key
+encrypt(txt): string
+  → new JSEncrypt() + setPublicKey(env.VITE_APP_RSA_PUBLIC_KEY)
+  → encryptor.encrypt(txt)</code></pre>
+
+<h2>错误处理模式</h2>
+<pre><code>// createHandledError — 标记错误已被拦截器处理
+function createHandledError(msg) {
+  const err = new Error(msg);
+  err.isHandled = true;
+  return err;
+}
+
+// 路由守卫中检查
+if (!isHandledRequestError(err)) {
+  ElMessage.error(err.message); // 仅未处理错误才弹窗
+}
+
+// isRelogin 全局锁 — 防 401 弹窗堆叠
+// 模块级变量，第一个 401 设 true，后续跳过</code></pre>
+
+<h2>关键知识点</h2>
+<table>
+<tr><th>知识点</th><th>说明</th></tr>
+<tr><td><span class="tag">实例</span> axios.create()</td><td>自定义实例，独立拦截器链，不污染全局 axios</td></tr>
+<tr><td><span class="tag">防重复</span> sessionStorage</td><td>500ms 内同 url+data 判定为重复。注意 repeatSubmit: false 是"允许重复"</td></tr>
+<tr><td><span class="tag">加密</span> RSA+AES 混合</td><td>RSA 加密 AES 密钥（header），AES 加密请求体。每次新随机密钥</td></tr>
+<tr><td><span class="tag">模式</span> ECB vs CBC</td><td>当前使用 ECB 模式，非最安全但实现简单，配合每次随机密钥可接受</td></tr>
+<tr><td><span class="tag">锁</span> isRelogin.show</td><td>防止多个 401 响应同时弹窗，模块级单例锁</td></tr>
+</table>
+
+<div class="warn"><strong>注意：</strong>AES-ECB 模式不隐藏数据模式（相同明文产生相同密文），但配合每次随机密钥可缓解。生产环境建议切 CBC/GCM。防重复提交用 sessionStorage 而非模块变量，可跨路由复用。</div>
+</body>
+</html>

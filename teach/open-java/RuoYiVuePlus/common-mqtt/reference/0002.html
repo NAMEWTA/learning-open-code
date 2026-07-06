@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · MqttAutoConfiguration 自动配置</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; overflow-x: auto; line-height: 1.6; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · MqttAutoConfiguration 自动配置</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code> · 使命：读懂 ruoyi-common-mqtt 模块</p>
+
+<h2>类注解</h2>
+<table>
+<tr><th>注解</th><th>作用</th><th>关键参数</th></tr>
+<tr><td><code>@AutoConfiguration</code></td><td>声明为 Spring Boot 自动配置类</td><td>无（由 .imports 文件发现）</td></tr>
+<tr><td><code>@ConditionalOnProperty</code></td><td>配置开关，默认关闭</td><td><code>value="mqtt.client.enabled"</code>, <code>havingValue="true"</code>, <code>matchIfMissing=false</code></td></tr>
+</table>
+
+<h2>三个 Bean 方法</h2>
+<table>
+<tr><th>Bean 名称</th><th>返回类型</th><th>参数注入</th><th>职责</th></tr>
+<tr><td><code>mqttClientConnectListener</code></td><td><code>MqttClientConnectListener</code></td><td><code>MqttClientCreator</code>（由 Mica MQTT Starter 创建）</td><td>注册连接生命周期监听器</td></tr>
+<tr><td><code>mqttClientGlobalMessageListener</code></td><td><code>MqttClientGlobalMessageListener</code></td><td>无</td><td>注册全局消息监听器</td></tr>
+<tr><td><code>mqttClientCustomizer</code></td><td><code>MqttClientCustomizer</code></td><td>无（Lambda 实现函数式接口）</td><td>替换三组线程池为虚拟线程</td></tr>
+</table>
+
+<h2>虚拟线程定制器分析</h2>
+<table>
+<tr><th>线程池</th><th>名称前缀</th><th>类型</th><th>职责</th></tr>
+<tr><td><code>tioExecutor</code></td><td><code>tio-worker-virtual</code></td><td><code>SynThreadPoolExecutor</code></td><td>t-io 底层 TCP 读写 + 报文编解码</td></tr>
+<tr><td><code>groupExecutor</code></td><td><code>tio-group-virtual</code></td><td><code>ThreadPoolExecutor</code></td><td>连接组管理（创建/心跳/关闭）</td></tr>
+<tr><td><code>mqttExecutor</code></td><td><code>biz-worker-virtual</code></td><td><code>ThreadPoolExecutor</code></td><td>业务消息处理（onMessage 回调）</td></tr>
+</table>
+
+<h2>装配流程</h2>
+<div class="chain">应用启动
+  → Spring Boot 扫描所有 jar 的 .imports 文件
+  → 发现 MqttAutoConfiguration
+  → 检查 mqtt.client.enabled
+    ├─ false/missing → 跳过
+    └─ true → MqttClientCustomizer 先执行（替换线程池）
+              → 创建 ConnectListener + GlobalMessageListener
+              → Mica MQTT 连接 Broker → 进入监听循环</div>
+
+<h2>发现机制</h2>
+<div class="chain">META-INF/spring/
+  org.springframework.boot.autoconfigure.AutoConfiguration.imports
+  → 内容：org.dromara.common.mqtt.config.MqttAutoConfiguration
+  → 替代 Spring Boot 2.x 的 spring.factories</div>
+
+<h2>虚拟线程 vs 平台线程</h2>
+<table>
+<tr><th>维度</th><th>平台线程</th><th>虚拟线程</th></tr>
+<tr><td>创建开销</td><td>~1MB 栈</td><td>~数百字节</td></tr>
+<tr><td>数量上限</td><td>数千</td><td>数百万</td></tr>
+<tr><td>阻塞行为</td><td>占用 OS 线程</td><td>释放底层平台线程</td></tr>
+<tr><td>适用场景</td><td>CPU 密集</td><td>IO 密集（MQTT 场景）</td></tr>
+</table>
+
+<h2>核心配置项（application.yml）</h2>
+<table>
+<tr><th>配置</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>mqtt.client.enabled</code></td><td><code>false</code></td><td>MQTT 总开关</td></tr>
+<tr><td><code>mqtt.client.ip</code></td><td><code>127.0.0.1</code></td><td>Broker IP</td></tr>
+<tr><td><code>mqtt.client.port</code></td><td><code>1883</code></td><td>Broker 端口</td></tr>
+<tr><td><code>mqtt.client.client-id</code></td><td><code>000001</code></td><td>客户端唯一 ID（协议要求）</td></tr>
+<tr><td><code>mqtt.client.keep-alive-secs</code></td><td><code>60</code></td><td>心跳间隔（秒）</td></tr>
+<tr><td><code>mqtt.client.version</code></td><td><code>mqtt_5</code></td><td>MQTT 协议版本</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>自动配置的发现 → <code>.imports</code> 文件，<b>不是</b> @ComponentScan 或 @Import。</li>
+<li>总开关 → <code>@ConditionalOnProperty</code>，未配置时默认<b>关闭</b>。</li>
+<li>虚拟线程 → IO 密集型场景的最优解，阻塞时<b>不占</b> OS 线程。</li>
+<li><code>MqttClientCreator</code> → 由<b>Mica MQTT</b> 创建，本模块只注入使用。</li>
+<li>corePoolSize 在虚拟线程场景下<b>不重要</b>，只是满足 API 约定。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：MqttAutoConfiguration、虚拟线程、MqttClientCreator</p>
+</body>
+</html>

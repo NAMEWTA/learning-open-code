@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 监听器详解与实战消息收发</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#fef3e2; color:#d98c2e; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 监听器详解与实战消息收发 <span class="tag">实战</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5 / #7）</b>：学完你能讲清两个监听器的源码细节与职责边界，理解连接生命周期回调的关键参数含义，并能编写一个可运行的 MQTT 消息发布与订阅的实战代码。
+</div>
+
+<p>前两课我们建立了 MQTT 协议的概念框架，读懂了自动配置的装配逻辑。这一课到代码层面——看两个监听器<strong>到底接到了什么回调、拿到了什么参数、能做什么扩展</strong>，最后动手写一段收发代码。</p>
+
+<h2>第一部分：MqttClientConnectListener —— 连接生命周期的守护者</h2>
+
+<h3>1.1 完整源码</h3>
+
+<p>先看原始代码（注释保留）：</p>
+
+<pre><code>// ruoyi-common-mqtt/listener/MqttClientConnectListener.java
+@Slf4j
+public class MqttClientConnectListener implements IMqttClientConnectListener {
+
+    private final MqttClientCreator mqttClientCreator;
+
+    public MqttClientConnectListener(MqttClientCreator mqttClientCreator) {
+        this.mqttClientCreator = mqttClientCreator;
+    }
+
+    @Override
+    public void onConnected(ChannelContext context, boolean isReconnect) {
+        // 创建连接
+        log.info("MqttConnectedEvent:{}", context);
+    }
+
+    @Override
+    public void onDisconnect(ChannelContext context, Throwable throwable,
+                             String remark, boolean isRemove) {
+        // 离线时更新重连
+        log.info("MqttDisconnectEvent:{}", context, throwable);
+        // 在断线时更新 clientId、username、password
+//      mqttClientCreator.clientId("newClient" + System.currentTimeMillis())
+//          .username("newUserName")
+//          .password("newPassword");
+    }
+}</code></pre>
+
+<h3>1.2 接口定义</h3>
+
+<p>实现的接口是 <code>IMqttClientConnectListener</code>（Mica MQTT 定义），包含两个回调：</p>
+
+<table>
+<tr><th>回调方法</th><th>触发时机</th><th>参数</th><th>作用</th></tr>
+<tr>
+  <td><code>onConnected</code></td>
+  <td>客户端成功连接到 Broker（首次连接和重连均触发）</td>
+  <td>
+    <code>ChannelContext context</code> — 通道上下文（含 IP/端口/Session 信息）<br>
+    <code>boolean isReconnect</code> — 是否重连
+  </td>
+  <td>记录连接状态；是重连时可以恢复业务逻辑</td>
+</tr>
+<tr>
+  <td><code>onDisconnect</code></td>
+  <td>客户端与 Broker 断开连接（主动断开或异常断连）</td>
+  <td>
+    <code>ChannelContext context</code> — 通道上下文<br>
+    <code>Throwable throwable</code> — 断开异常（null = 正常断开）<br>
+    <code>String remark</code> — 断开说明<br>
+    <code>boolean isRemove</code> — 是否移除连接
+  </td>
+  <td>记录断开原因；动态更新重连凭证</td>
+</tr>
+</table>
+
+<h3>1.3 关键设计点</h3>
+
+<div class="step"><span class="num">1</span><b>持有 <code>MqttClientCreator</code> 引用是为了凭证轮换</b><br>
+注意第 2 课提到构造器接收了 <code>MqttClientCreator</code>，但代码里却注释掉了动态修改凭证的逻辑。这是<strong>预设的扩展点</strong>——如果你的场景需要：
+<ul>
+  <li>断线后用新的 <code>clientId</code> 重连（避免旧 ID 在 Broker 端有残留 Session）</li>
+  <li>使用短期 token 做认证，断线后自动获取新 token 填入 <code>username</code>/<code>password</code></li>
+</ul>
+只需取消注释并实现获取新凭证的逻辑即可。框架不做你不需要的复杂度，但留好了口子。
+</div>
+
+<div class="step"><span class="num">2</span><b><code>isReconnect</code> 参数区分首次连接与重连</b><br>
+<span class="where">MqttClientConnectListener.java:34</span><br>
+<code>onConnected</code> 的第二个参数 <code>isReconnect</code> 是关键区分器。
+<ul>
+  <li><code>false</code> → 首次连接成功，可以做初始化操作（如重订阅 Topic、通知业务模块）</li>
+  <li><code>true</code> → Broker 重连成功（断线后 Mica MQTT 自动重连），需要恢复状态</li>
+</ul>
+当前实现只打日志，但在生产环境中，你应该在 <code>isReconnect == false</code> 时做订阅操作（如果 Persistent Session 不可靠的话）。
+</div>
+
+<div class="step"><span class="num">3</span><b><code>throwable</code> 为 null 时的含义</b><br>
+<span class="where">MqttClientConnectListener.java:48</span><br>
+<code>onDisconnect</code> 的第二个参数 <code>Throwable throwable</code>：
+<ul>
+  <li><strong>非 null</strong> → 异常断连（网络中断、Broker 崩溃、Keep Alive 超时被踢），需要告警</li>
+  <li><strong>null</strong> → 正常断开（客户端主动 disconnect），不需要告警</li>
+</ul>
+当前代码对所有情况都打日志，生产环境可以用 <code>if (throwable != null)</code> 区分告警级别。
+</div>
+
+<h2>第二部分：MqttClientGlobalMessageListener —— 所有消息的统一入口</h2>
+
+<h3>2.1 完整源码</h3>
+
+<pre><code>// ruoyi-common-mqtt/listener/MqttClientGlobalMessageListener.java
+@Slf4j
+public class MqttClientGlobalMessageListener
+        implements IMqttClientGlobalMessageListener {
+
+    @Override
+    public void onMessage(ChannelContext context, String topic,
+                          MqttPublishMessage message, byte[] payload) {
+        log.info("MqttGlobalMessageEvent => topic: {}, msg: {}",
+                 topic, new String(payload, StandardCharsets.UTF_8));
+    }
+}</code></pre>
+
+<h3>2.2 接口与参数</h3>
+
+<p>实现的接口是 <code>IMqttClientGlobalMessageListener</code>（Mica MQTT 定义），只有一个回调方法：</p>
+
+<table>
+<tr><th>参数</th><th>类型</th><th>说明</th></tr>
+<tr>
+  <td><code>context</code></td>
+  <td><code>ChannelContext</code></td>
+  <td>通道上下文，含发送端连接信息（客户端 IP 等）</td>
+</tr>
+<tr>
+  <td><code>topic</code></td>
+  <td><code>String</code></td>
+  <td>消息的 Topic 全名（非通配符，是实际匹配到的具体 Topic）</td>
+</tr>
+<tr>
+  <td><code>message</code></td>
+  <td><code>MqttPublishMessage</code></td>
+  <td>Mica MQTT 包装的 MQTT PUBLISH 报文对象，含 QoS 等级、是否保留消息（Retain）、消息 ID 等协议层信息</td>
+</tr>
+<tr>
+  <td><code>payload</code></td>
+  <td><code>byte[]</code></td>
+  <td>消息的有效载荷（原始字节），需按业务约定解码（UTF-8 / JSON / Protobuf 等）</td>
+</tr>
+</table>
+
+<h3>2.3 "全局（Global）"的含义</h3>
+
+<p>Mica MQTT 支持两种消息监听方式：</p>
+
+<table>
+<tr><th>监听类型</th><th>粒度</th><th>适用场景</th></tr>
+<tr>
+  <td><strong>全局监听器</strong><br><code>IMqttClientGlobalMessageListener</code></td>
+  <td>一个客户端只有一个，<strong>所有 Topic 的消息都进来</strong></td>
+  <td>统一的消息入口：日志审计、消息转发、总控分发</td>
+</tr>
+<tr>
+  <td><strong>Topic 级监听器</strong><br><code>IMqttClientMessageListener</code></td>
+  <td>按 Topic 注册，<strong>只处理匹配的消息</strong></td>
+  <td>具体业务处理：设备数据入库、告警判断、指令执行</td>
+</tr>
+</table>
+
+<p>本模块选择的是<strong>全局监听器</strong>，作为所有消息的<strong>统一入口点</strong>。在这个入口里，你可以：</p>
+<ol>
+  <li><strong>打日志</strong>（当前实现）——便于排查和审计；</li>
+  <li><strong>按 topic 分流</strong>——根据 topic 前缀路由到不同的业务处理器；</li>
+  <li><strong>消息格式校验</strong>——检查 payload 是否符合预期的 JSON Schema 或 Protobuf 定义；</li>
+  <li><strong>前置处理</strong>——解密、解压缩、格式转换等。</li>
+</ol>
+
+<h2>第三部分：实战 —— 编写消息收发代码</h2>
+
+<p>理论讲完，来写代码。下面两段可以直接放到 RuoYi 项目里跑（需要先安装并启动一个 MQTT Broker，如 Mosquitto 或 EMQX）。</p>
+
+<h3>3.1 场景设定</h3>
+
+<p>假设你有一个智能家居系统，设备（如温度传感器）通过 MQTT 上报数据，后端需要：</p>
+<ul>
+  <li>接收设备上报的温度数据，存入数据库；</li>
+  <li>当温度超过阈值时，向设备下发告警指令。</li>
+</ul>
+
+<h3>3.2 发布消息（向设备下发指令）</h3>
+
+<pre><code>// 场景：业务层创建一个 MqttPublisher 工具类，用于向设备下发指令
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.dromara.mica.mqtt.core.client.MqttClientCreator;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class MqttPublisher {
+
+    private final MqttClientCreator mqttClientCreator;  // Mica MQTT 自动注入
+
+    /**
+     * 向指定设备下发指令。
+     *
+     * @param deviceId 设备 ID
+     * @param command  指令内容（JSON 字符串）
+     */
+    public void sendCommand(String deviceId, String command) {
+        String topic = "ruoyi/device/" + deviceId + "/command";
+        byte[] payload = command.getBytes(StandardCharsets.UTF_8);
+
+        // publish() 返回 CompletableFuture，可异步等待发送结果
+        mqttClientCreator.publish(topic, payload)
+            .whenComplete((result, throwable) -> {
+                if (throwable != null) {
+                    log.error("下发指令失败 => device:{}, topic:{}", deviceId, topic, throwable);
+                } else {
+                    log.info("指令已下发 => device:{}, topic:{}, payload:{}", deviceId, topic, command);
+                }
+            });
+    }
+
+    /**
+     * 示例：某个设备温度超标，下发关闭指令。
+     */
+    public void handleOverTemperature(String deviceId, double temperature) {
+        if (temperature > 60.0) {
+            String command = """
+                {"action":"shutdown","reason":"over_temperature","value":%.1f}
+                """.formatted(temperature);
+            sendCommand(deviceId, command);
+        }
+    }
+}</code></pre>
+
+<h3>3.3 扩展消息监听器（按 Topic 分发业务处理）</h3>
+
+<pre><code>// 场景：扩展全局监听器，按 topic 前缀分流到不同的业务处理器
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.dreamlu.mica.net.core.ChannelContext;
+import org.dromara.mica.mqtt.codec.message.MqttPublishMessage;
+import org.dromara.mica.mqtt.core.client.IMqttClientGlobalMessageListener;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class CustomMqttMessageListener implements IMqttClientGlobalMessageListener {
+
+    private final DeviceDataService deviceDataService;  // 你的业务服务
+    private final MqttPublisher mqttPublisher;
+
+    @Override
+    public void onMessage(ChannelContext context, String topic,
+                          MqttPublishMessage message, byte[] payload) {
+        String msgBody = new String(payload, StandardCharsets.UTF_8);
+        log.info("收到消息 => topic:{}, payload:{}", topic, msgBody);
+
+        // 按 topic 前缀分流
+        if (topic.startsWith("ruoyi/device/") && topic.endsWith("/data")) {
+            // 设备数据上报：解析 JSON → 存入数据库 → 检查阈值 → 告警
+            handleDeviceData(topic, msgBody);
+        } else if (topic.startsWith("ruoyi/device/") && topic.endsWith("/status")) {
+            // 设备状态上报：更新设备在线状态
+            handleDeviceStatus(topic, msgBody);
+        } else if (topic.startsWith("ruoyi/device/") && topic.endsWith("/event")) {
+            // 设备事件上报：记录事件日志
+            handleDeviceEvent(topic, msgBody);
+        } else {
+            log.warn("未识别的 topic: {}", topic);
+        }
+    }
+
+    private void handleDeviceData(String topic, String msgBody) {
+        // 从 topic 中提取设备 ID
+        // ruoyi/device/{deviceId}/data → 取第二个路径段
+        String deviceId = topic.split("/")[2];
+
+        // 解析消息体（假设是 JSON: {"temperature": 25.5, "humidity": 60}）
+        DeviceData data = parseDeviceData(msgBody);
+
+        // 存入数据库
+        deviceDataService.save(deviceId, data);
+
+        // 检查阈值，超标则告警
+        if (data.getTemperature() > 60.0) {
+            log.warn("设备 {} 温度超标: {:.1f}°C", deviceId, data.getTemperature());
+            mqttPublisher.handleOverTemperature(deviceId, data.getTemperature());
+        }
+    }
+
+    // ... handleDeviceStatus / handleDeviceEvent / parseDeviceData 省略
+}
+
+/**
+ * 注意：当自定义了这个 Bean 后，MqttAutoConfiguration 中定义的
+ * MqttClientGlobalMessageListener 默认 Bean 仍会存在。
+ * 如果你只需要自定义的监听器，可以使用以下方式之一：
+ *
+ * 方案 A: @Primary 标注你自定义的，让它优先注入
+ * 方案 B: 排除默认 Bean（@SpringBootApplication(exclude=...)）
+ * 方案 C: 使用 @ConditionalOnMissingBean 让默认 Bean 自动退让
+ *
+ * 实际项目中，通常保留默认 Bean 做全局日志，另起一个自定义 Bean
+ * 注册为 IMqttClientMessageListener（Topic 级）做具体业务。
+ */</code></pre>
+
+<h3>3.4 订阅 Topic</h3>
+
+<p>以上代码是<strong>接收消息</strong>和<strong>发送消息</strong>，但还缺一步——<strong>告诉 Broker 我要收哪些 Topic 的消息</strong>。订阅操作可以在应用启动后执行：</p>
+
+<pre><code>// 在某个 @PostConstruct 或 ApplicationRunner 中订阅 Topic
+
+import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
+import org.dromara.mica.mqtt.core.client.MqttClientCreator;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+public class MqttTopicSubscriber {
+
+    private final MqttClientCreator mqttClientCreator;
+
+    @PostConstruct
+    public void subscribeTopics() {
+        // 订阅设备数据上报 Topic（通配符匹配所有设备）
+        mqttClientCreator.subscribe("ruoyi/device/+/data");
+
+        // 订阅设备状态
+        mqttClientCreator.subscribe("ruoyi/device/+/status");
+
+        // 订阅设备事件
+        mqttClientCreator.subscribe("ruoyi/device/+/event");
+
+        log.info("MQTT Topic 订阅完成");
+    }
+}
+</code></pre>
+
+<div class="side">
+⚠️ <b>订阅注意事项</b>：
+<ol>
+  <li>订阅应在 <code>onConnected</code> 后执行——如果使用 Persistent Session，重连后 Broker 会恢复之前的订阅；如果不依赖 Persistent Session，应在 <code>onConnected</code>（尤其是 <code>isReconnect==false</code>）中重新订阅。</li>
+  <li><code>@PostConstruct</code> 可能在 MQTT 连接建立之前执行——更可靠的做法是在 <code>MqttClientConnectListener.onConnected()</code> 中触发订阅。</li>
+  <li>通配符 <code>+</code> 匹配任意<strong>单个</strong>设备 ID，<code>#</code> 可匹配所有子层级。</li>
+</ol>
+</div>
+
+<h2>第四部分：对比总结 —— 两个监听器的职责边界</h2>
+
+<table>
+<tr><th>维度</th><th><code>MqttClientConnectListener</code></th><th><code>MqttClientGlobalMessageListener</code></th></tr>
+<tr><td>核心关注</td><td><strong>连接</strong>（连上了没？断线了没？怎么重连？）</td><td><strong>消息</strong>（收到了什么？Topic 是什么？内容是什么？）</td></tr>
+<tr><td>触发频率</td><td>低频——每次连接/断连触发一次</td><td>高频——每条消息触发一次（可能每秒成千上万条）</td></tr>
+<tr><td>典型操作</td><td>日志、告警、更新凭证、触发重订阅</td><td>日志、消息路由、数据解析、业务处理</td></tr>
+<tr><td>扩展方式</td><td>取消注释 + 实现凭证获取逻辑</td><td>新建实现类 + 按 topic 分流 + 调用业务服务</td></tr>
+<tr><td>性能要求</td><td>低——偶发操作</td><td>高——可能成为消息吞吐的瓶颈（所以用了虚拟线程）</td></tr>
+</table>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>onConnected</code> 的 <code>isReconnect</code> 参数为 <code>true</code> 意味着什么？这种场景下通常需要做什么？</p>
+<span class="opt">A. 意味着首次连接成功，需要初始化所有状态</span>
+<span class="opt">B. 意味着断线后重连成功，可能需要恢复订阅（如果不依赖 Persistent Session）</span>
+<span class="opt">C. 意味着连接即将断开</span>
+<span class="opt">D. 没有实际意义</span>
+<details><summary>看答案</summary><b>B</b>。<code>isReconnect=true</code> 表示这是一次重连（之前断线了）。如果 Persistent Session 不可靠或未启用，应该在这里重新订阅之前的所有 Topic。首次连接时 <code>isReconnect=false</code>。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>MqttClientGlobalMessageListener</code> 的 <code>payload</code> 参数是什么类型？如何正确读取？</p>
+<span class="opt">A. String 类型，直接 toString() 即可</span>
+<span class="opt">B. byte[] 类型，需要按业务约定的编码/格式解码（如 new String(payload, StandardCharsets.UTF_8)）</span>
+<span class="opt">C. JSONObject 类型</span>
+<span class="opt">D. InputStream 类型</span>
+<details><summary>看答案</summary><b>B</b>。<code>payload</code> 是 <code>byte[]</code>，因为 MQTT 协议传递的是原始字节（可以是文本、JSON、Protobuf、二进制图片等）。必须按业务约定来解码。当前代码用 UTF-8 解码表明约定为文本消息。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么 <code>MqttClientConnectListener</code> 要持有 <code>MqttClientCreator</code>？</p>
+<span class="opt">A. 为了在 onConnected 中再次连接</span>
+<span class="opt">B. 为了在 onDisconnect 中动态修改 clientId/username/password，实现断线重连时的凭证轮换</span>
+<span class="opt">C. 为了让 Creator 不被 GC 回收</span>
+<span class="opt">D. 没有实际用途，只是遗留代码</span>
+<details><summary>看答案</summary><b>B</b>。Creator 允许在断线时更新凭证（如轮换 clientId 避免 Session 冲突、刷新短期 token）。虽然当前注释掉了，但这是留给使用者的扩展点。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 以下哪个 Topic 匹配 <code>ruoyi/device/+/data</code>？</p>
+<span class="opt">A. ruoyi/device/sensor001/data</span>
+<span class="opt">B. ruoyi/device/sensor001/status</span>
+<span class="opt">C. ruoyi/device/sensor001/nested/data</span>
+<span class="opt">D. ruoyi/gateway/data</span>
+<details><summary>看答案</summary><b>A</b>。<code>+</code> 通配符精确匹配一个层级，所以 <code>ruoyi/device/+/data</code> 匹配 <code>ruoyi/device/任意字符串/data</code>。B 的最后一段是 status 不匹配；C 有四个层级（nested/data 是两层）不匹配；D 前缀不是 device 不匹配。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://mica-mqtt.dreamlu.net/guide/spring/client.html" target="_blank">Mica MQTT 客户端 Spring Boot Starter 文档</a>——查看 <code>publish()</code> / <code>subscribe()</code> / 监听器接口的完整 API；<a href="https://mosquitto.org/man/mosquitto-8.html" target="_blank">Mosquitto Broker 手册</a>——最简单的本地 MQTT Broker，3 分钟可搭好测试环境。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「全局监听器和 Topic 级监听器如何共存？」「Persistent Session 到底可不可靠，什么情况下 Broker 会丢 Session？」「如果要支持 Protobuf 而不是 JSON，怎么改消息监听器？」三节课到这里全部结束，建议回头重做每课的「提取练习」，然后打开 IDE 对着 <code>ruoyi-common-mqtt</code> 的三个类自己讲一遍。</div>
+
+<div class="nav">课程 0003 / 使命：读懂 ruoyi-common-mqtt MQTT 客户端模块 · 上一课：MqttAutoConfiguration · 课程结束</div>
+
+</body>
+</html>

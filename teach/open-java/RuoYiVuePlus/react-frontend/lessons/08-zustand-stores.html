@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>08 · Zustand 状态管理（下）：ruoyi-react 的 6 个 Store 详解</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./07-zustand-core.html">07 Zustand上</a> · → <a href="./09-axios-interceptor.html">09 Axios拦截器</a></div>
+
+<h1>08 · Zustand 状态管理（下）：ruoyi-react 的 6 个 Store 详解</h1>
+
+<p><strong>胜利条件：</strong>能说出 6 个 store 各自的职责和关键字段；能在代码中快速判断"这个数据应该放在哪个 store"；理解 permissionStore 的 reloadMenus 是整个应用初始化的核心方法。</p>
+
+<h2>6 个 Store 全景图</h2>
+
+<table>
+<tr><th>Store</th><th>职责</th><th>数据来源</th><th>持久化</th><th>核心字段</th></tr>
+<tr><td><span class="file-ref">userStore.ts</span></td><td>当前登录用户</td><td>API getInfo()</td><td>否</td><td>userInfo, setUserInfo</td></tr>
+<tr><td><span class="file-ref">permissionStore.ts</span></td><td>🔑 权限 + 路由 + 菜单</td><td>API getRouters()</td><td>否</td><td>backendRoutes, menuData, reloadMenus()</td></tr>
+<tr><td><span class="file-ref">appStore.ts</span></td><td>布局和外观设置</td><td>用户操作</td><td><strong>✅ persist</strong></td><td>layoutSettings, darkMode, locale, componentSize</td></tr>
+<tr><td><span class="file-ref">tagsViewStore.ts</span></td><td>多标签页状态</td><td>用户操作</td><td><strong>✅ persist</strong></td><td>visitedViews, cachedViews</td></tr>
+<tr><td><span class="file-ref">dictStore.ts</span></td><td>字典数据缓存</td><td>API getDicts()</td><td>否（react-query 内存缓存）</td><td>dictCache, setDictCache</td></tr>
+<tr><td><span class="file-ref">noticeStore.ts</span></td><td>实时通知消息</td><td>SSE/WebSocket 推送</td><td>否</td><td>notices, unreadCount</td></tr>
+</table>
+
+<h2>一、userStore — 最简 Store</h2>
+
+<p><span class="file-ref">src/stores/userStore.ts</span></p>
+
+<pre><code>interface UserStore {
+  userInfo: UserInfo | null;       // 用户详情
+  setUserInfo: (info: UserInfo) => void;
+}
+
+export const useUserStore = create&lt;UserStore&gt;((set) => ({
+  userInfo: null,
+  setUserInfo: (userInfo) => set({ userInfo }),
+}));</code></pre>
+
+<p><strong>使用场景：</strong></p>
+<pre><code>// 登录后写入
+useUserStore.getState().setUserInfo(res.data);
+
+// 顶栏读取
+const { userInfo } = useUserStore();
+&lt;span&gt;{userInfo?.nickName}&lt;/span&gt;</code></pre>
+
+<h2>二、permissionStore — 最核心的 Store 🔑</h2>
+
+<p><span class="file-ref">src/stores/permissionStore.ts</span></p>
+
+<pre><code>interface PermissionStore {
+  // 数据
+  backendRoutes: BackendRoute[];     // 后端返回的原始路由树
+  menuData: MenuDataItem[];          // 格式化后的菜单数据
+  permissions: string[];             // 权限标识列表 ['system:user:list', ...]
+
+  // 核心方法——应用启动时调用
+  reloadMenus: () => Promise&lt;void&gt;;
+  // 1. 并行请求 getInfo() + getRouters()
+  // 2. getInfo() → userStore.setUserInfo(userInfo)
+  // 3. getRouters() → 格式化菜单 → menuData
+  // 4. 提取权限标识 → permissions[]
+  // 5. 保存原始路由树 → backendRoutes
+}</code></pre>
+
+<p><strong>reloadMenus 的时间线：</strong></p>
+<div class="diagram"><code>
+BasicLayout mount
+  → reloadMenus()
+    → Promise.all([getInfo(), getRouters()])
+      → getInfo() 返回 → userStore.setUserInfo(...)
+      → getRouters() 返回 → 格式化菜单逻辑
+        → 递归遍历路由树
+        → 过滤 meta.visible === false 的
+        → 图标名称 → 图标组件
+        → 生成 menuData[]
+        → 提取 permissions[]
+    → set({ backendRoutes, menuData, permissions })</code></div>
+
+<p><strong>使用场景：</strong></p>
+<pre><code>// BasicLayout 渲染菜单
+const { menuData } = usePermissionStore();
+&lt;ProLayout menuDataRender={() => menuData} /&gt;
+
+// DynamicPage 匹配页面组件
+const { backendRoutes } = usePermissionStore();
+const matchedRoute = findRouteByPath(backendRoutes, pathname);</code></pre>
+
+<h2>三、appStore — 持久化的布局设置</h2>
+
+<p><span class="file-ref">src/stores/appStore.ts</span></p>
+
+<pre><code>export const useAppStore = create(
+  persist(              // ← 关键！页面刷新后设置仍在
+    (set) => ({
+      // 布局设置
+      layoutSettings: {
+        navType: 'side',          // side | top | mix
+        sideTheme: 'dark',        // dark | light
+        fixedHeader: true,
+        showLogo: true,
+        tagsView: true,
+        // ...
+      },
+
+      // UI 偏好
+      darkMode: false,
+      locale: 'zh_CN',
+      componentSize: 'middle',
+
+      // Actions
+      setLayoutSettings: (settings) => set({ layoutSettings: settings }),
+      toggleDarkMode: () => set((s) => ({ darkMode: !s.darkMode })),
+      setLocale: (locale) => set({ locale }),
+    }),
+    { name: 'layout-setting-react' }
+  ),
+);</code></pre>
+
+<h2>四、tagsViewStore — 多标签页管理</h2>
+
+<p><span class="file-ref">src/stores/tagsViewStore.ts</span></p>
+
+<pre><code>// 核心数据结构
+{
+  visitedViews: TagView[],  // 当前打开的标签列表
+  cachedViews: string[],    // 需要缓存的组件名称列表
+}
+
+// 关键操作
+addView(view)       // 打开新标签
+delView(view)       // 关闭标签
+delOthersViews(view) // 关闭其他
+delAllViews()       // 关闭所有
+refreshView(view)   // 刷新标签
+scrollToView(view)  // 滚动到指定标签</code></pre>
+
+<p>同样使用 <code>persist</code>，刷新后保留已打开的标签列表。</p>
+
+<h2>五、dictStore — 字典数据缓存</h2>
+
+<p><span class="file-ref">src/stores/dictStore.ts</span> + <span class="file-ref">src/hooks/useDict.ts</span></p>
+
+<pre><code>// store 只负责缓存
+dictCache: Record&lt;string, DictItem[]&gt;;  // {'sys_normal_disable': [{value:'0',label:'正常'},...]}
+setDictCache: (type, data) => set({ dictCache: { ...get().dictCache, [type]: data } });
+
+// useDict hook 负责获取逻辑（含 react-query 的 10 分钟 staleTime）
+const { data: statusOptions } = useDict('sys_normal_disable');
+// 第一次：调 API → 写 dictCache → 返回
+// 第二次（10分钟内）：从 react-query 缓存返回，不调 API</code></pre>
+
+<h2>六、noticeStore — 实时通知</h2>
+
+<p><span class="file-ref">src/stores/noticeStore.ts</span></p>
+
+<pre><code>{
+  notices: NoticeItem[],           // 通知列表
+  unreadCount: number,             // 未读数
+  addNotice: (notice) => {...},    // SSE/WS 推送时添加
+  markRead: (id) => {...},         // 标记已读
+  clearAll: () => {...},
+}</code></pre>
+
+<h2>七、Store 之间如何协作？</h2>
+
+<div class="diagram"><code>
+场景：用户登录
+
+login.tsx:
+  setToken(token)                           ← localStorage
+  useUserStore.getState().setUserInfo(user)  ← userStore
+
+BasicLayout.tsx mount:
+  permissionStore.getState().reloadMenus()   ← permissionStore
+    → 内部调 getInfo() → userStore.setUserInfo(...)  ← 更新 userStore
+    → 内部调 getRouters() → set({ backendRoutes, menuData })
+
+场景：用户退出
+
+Dropdown.Item onClick:
+  removeToken()                              ← localStorage
+  useUserStore.getState().logout()           ← userStore (清 userInfo)
+  usePermissionStore.getState().reset()      ← permissionStore (清路由)
+  useTagsViewStore.getState().delAllViews()  ← tagsViewStore (清标签)
+  history.push('/login')                     ← 跳转</code></pre>
+
+<h2>八、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/stores/permissionStore.ts</span>，逐行读 <code>reloadMenus</code> 方法，画出它的调用链</li>
+  <li>打开 <span class="file-ref">src/stores/appStore.ts</span>，在浏览器中切换主题/暗黑模式，观察 localStorage 的变化</li>
+  <li>打开 <span class="file-ref">src/stores/tagsViewStore.ts</span>，理解标签页数据如何持久化和恢复</li>
+  <li>思考：如果新增一个"全局加载状态"，应该放在哪个 store？还是新建一个 store？</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://zustand.docs.pmnd.rs/apis/create">Zustand 官方文档 — create API</a> + <a href="https://zustand.docs.pmnd.rs/integrations/persisting-store-data">Persist middleware</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："permissionStore 没有 persist，每次刷新都要重新调 API 加载路由，这样设计有道理吗？"</div>
+
+</body>
+</html>

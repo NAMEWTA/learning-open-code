@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 异常处理双轨制与 SSE 流式对话</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 异常处理双轨制与 SSE 流式对话 <span class="tag">异常 & 流式</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #6~#7）</b>：学完你能解释为什么 AI Chat 接口需要独立的异常处理器，能讲清 <code>Result&lt;Void&gt;</code> 与 <code>R&lt;*&gt;</code> 双响应格式的设计动机，能追踪 React 端 SSE 流式对话的完整数据流。
+</div>
+
+<p>上一课我们看到了自动配置和用户身份桥接。这一课聚焦两个更深的设计问题：(1) 为什么 AI Chat 需要<b>独立的异常处理体系</b>？(2) 前端 SSE 流式对话的<b>数据流</b>是如何工作的？</p>
+
+<h2>一、双响应格式问题：Result vs R</h2>
+
+<p>先看一个有趣的事实。在 RuoYi-Vue-Plus 中，所有标准 REST 接口的统一响应格式是：</p>
+
+<pre><code>// RuoYi 统一响应格式
+public class R&lt;T&gt; {
+    private int code;    // 状态码
+    private String msg;  // 消息
+    private T data;      // 数据
+}</code></pre>
+
+<p>但 <code>SnailAiChatExceptionHandler</code> 返回的是 Snail AI SDK 的响应格式：</p>
+
+<pre><code>// Snail AI SDK 响应格式
+public class Result&lt;T&gt; {
+    private int status;   // 状态码（注意不是 code）
+    private String message; // 消息（注意不是 msg）
+    private T data;        // 数据
+}</code></pre>
+
+<p><strong>这两个格式不兼容。</strong>为什么不能统一？</p>
+
+<div class="danger">
+⚠️ <b>核心矛盾</b>：<code>/api/snail/chat/**</code> 路径的请求来自 <b>Snail AI 自己的前端 SDK</b>，不是 RuoYi 的前端。Snail AI 前端 SDK 期望的是 <code>{status, message, data}</code>，如果收到 <code>{code, msg, data}</code> 会解析失败。同时，<code>/snail-ai/**</code> 路径（即 <code>SnailAiController</code> 的端点）的请求来自 RuoYi 前端，需要 <code>R&lt;*&gt;</code> 格式。
+</div>
+
+<p>这就产生了 ruoyi-ai 模块中的<b>异常处理双轨制</b>：</p>
+
+<table>
+<tr><th>请求路径</th><th>消费者</th><th>期望响应格式</th><th>异常处理器</th></tr>
+<tr><td><code>/api/snail/chat/**</code></td><td>Snail AI 前端 SDK（由 SDK 内置的 <code>SnailAiChatGatewayController</code> 处理）</td><td><code>Result{status, message, data}</code></td><td><code>SnailAiChatExceptionHandler</code></td></tr>
+<tr><td><code>/snail-ai/**</code></td><td>RuoYi 前端（React/Vue）</td><td><code>R{code, msg, data}</code></td><td>RuoYi 全局异常处理器</td></tr>
+</table>
+
+<h2>二、SnailAiChatExceptionHandler 深度解析</h2>
+
+<div class="step"><span class="num">1</span><b>限定作用范围</b><br>
+<code>@RestControllerAdvice(assignableTypes = SnailAiChatGatewayController.class)</code><br>
+这不是一个全局异常处理器——它只处理 <code>SnailAiChatGatewayController</code>（Snail AI SDK 提供的控制器）抛出的异常。其他控制器的异常继续由 RuoYi 的全局异常处理器处理。<br>
+<span class="where">关键：assignableTypes 限定范围</span></div>
+
+<div class="step"><span class="num">2</span><b>最高优先级</b><br>
+<code>@Order(Ordered.HIGHEST_PRECEDENCE)</code><br>
+确保在 Spring 的异常处理器链中，这个处理器先于 RuoYi 的全局处理器执行。如果优先级不够高，RuoYi 的处理器可能先拦截异常并返回 <code>R</code> 格式，破坏了前端 SDK 的预期。</div>
+
+<div class="step"><span class="num">3</span><b>异常分类处理</b><br>
+按异常类型分层处理，共 8 个 <code>@ExceptionHandler</code> 方法：</div>
+
+<table>
+<tr><th>异常类型</th><th>HTTP 层含义</th><th>返回消息策略</th></tr>
+<tr><td><code>SnailAiAuthenticationException</code></td><td>认证失败（token 过期/无效）</td><td>status=5001，提示重新登录</td></tr>
+<tr><td><code>BaseSnailAiException</code></td><td>Snail AI 通用业务异常</td><td>返回异常消息或默认提示</td></tr>
+<tr><td><code>ModelCallException</code></td><td>AI 模型调用失败</td><td>返回异常消息或默认提示</td></tr>
+<tr><td><code>BindException</code> 等</td><td>请求参数校验失败</td><td>提取校验错误消息</td></tr>
+<tr><td><code>ConstraintViolationException</code></td><td>方法级参数校验失败</td><td>拼接所有约束冲突消息</td></tr>
+<tr><td><code>HttpMessageNotReadableException</code></td><td>请求体 JSON 解析失败</td><td>固定提示"格式错误"</td></tr>
+<tr><td><code>IllegalArgumentException</code></td><td>参数不合法</td><td>返回异常消息或默认提示</td></tr>
+<tr><td><code>IllegalStateException</code></td><td>会话状态异常</td><td>建议刷新后重试</td></tr>
+<tr><td><code>Exception</code>（兜底）</td><td>未预期的异常</td><td>通用提示，打 error 日志</td></tr>
+</table>
+
+<div class="side">
+💡 <b>关键洞察：defaultMessage() 的防御性设计</b><br>
+注意 <code>defaultMessage(e, fallback)</code> 方法：<code>return hasText(e.getMessage()) ? e.getMessage() : fallback;</code><br>
+这是因为异常消息可能为 null（如 <code>NullPointerException</code> 没有 message）。如果直接返回 null，前端 SDK 会收到 <code>{"status":0,"message":null,"data":null}</code>——用户体验很差。fallback 参数提供了友好的中文默认提示。
+</div>
+
+<h2>三、与 RuoYi 全局异常处理器的对比</h2>
+
+<p>你可以对照 <code>ruoyi-common-web</code> 中的 RuoYi 全局异常处理器（<code>GlobalExceptionHandler</code>）来理解双轨制：</p>
+
+<table>
+<tr><th>维度</th><th>SnailAiChatExceptionHandler</th><th>RuoYi GlobalExceptionHandler</th></tr>
+<tr><td>作用范围</td><td>仅 <code>SnailAiChatGatewayController</code></td><td>所有控制器</td></tr>
+<tr><td>返回格式</td><td><code>Result{status, message, data}</code></td><td><code>R{code, msg, data}</code></td></tr>
+<tr><td>优先级</td><td><code>HIGHEST_PRECEDENCE</code></td><td>默认优先级</td></tr>
+<tr><td>认证异常</td><td>独立处理（<code>SnailAiAuthenticationException</code>，status=5001）</td><td>依赖 Sa-Token 的异常处理</td></tr>
+<tr><td>日志级别</td><td>预期异常 <code>warn</code>，意外异常 <code>error</code></td><td>类似策略</td></tr>
+</table>
+
+<h2>四、SSE 流式对话：React 端的数据流</h2>
+
+<p>React 端的 <code>fetchAgentChat()</code> 函数（<code>plus-ui-react/src/api/ai/agent/index.ts</code>）实现了一个完整的 SSE（Server-Sent Events）客户端。让我们追踪数据流的每一步：</p>
+
+<div class="step"><span class="num">1</span><b>发起请求</b><br>
+<pre><code>fetch(`${baseURL}/snail-ai/agent/${agentId}/chat/stream`, {
+  method: 'POST',
+  headers: {
+    ...globalHeaders(),        // RuoYi 认证头（包含 token）
+    'Content-Language': language,
+    Accept: 'text/event-stream', // ← 告诉服务器返回 SSE 流
+    'Content-Type': 'application/json;charset=utf-8'
+  },
+  body: JSON.stringify(data),
+  signal: options.signal       // 支持 AbortController 取消
+})</code></pre>
+</div>
+
+<div class="step"><span class="num">2</span><b>建立 ReadableStream</b><br>
+<pre><code>const reader = response.body?.getReader();</code></pre>
+浏览器以流式方式读取服务器响应的字节块——不会等待完整响应。每个 <code>reader.read()</code> 返回一个 <code>{done, value}</code> 块。</div>
+
+<div class="step"><span class="num">3</span><b>SSE 事件解析</b><br>
+<pre><code>// SSE 协议的原始格式
+event: thinking\ndata: {"content":"让我想想..."}\n\n
+event: message\ndata: {"content":"你好！"}\n\n
+event: done\ndata: \n\n
+event: error\ndata: 错误消息\n\n</code></pre>
+解析逻辑：<br>
+• <code>buffer.split(/\r?\n\r?\n/)</code> —— 按双换行分割事件块（SSE 协议的事件分隔符）<br>
+• 对每个事件块，解析 <code>event:</code> 和 <code>data:</code> 行<br>
+• <code>event: thinking</code> → <code>onThinking(chunk)</code>（思考过程）<br>
+• <code>event: message</code> → <code>onMessage(chunk)</code>（对话内容）<br>
+• <code>event: done</code> → <code>onDone()</code>（流结束）<br>
+• <code>event: error</code> → <code>onError(error)</code>（流异常）</div>
+
+<div class="step"><span class="num">4</span><b>JSON 解析与规范化和</b><br>
+<pre><code>function normalizeStreamChunk(chunk: string) {
+  // 尝试单对象解析：{"content":"你好"}
+  // 若失败，按 }\\n{ 分割多对象数组
+  // 合并所有 content 字段
+}</code></pre>
+这是对 Snail AI 返回格式的兼容处理——SDK 可能返回单个 JSON 对象，也可能返回多个 JSON 对象的拼接。</div>
+
+<div class="step"><span class="num">5</span><b>React 状态增量更新</b><br>
+<pre><code>onMessage(chunk) {
+  setMessages(items => {
+    const next = [...items];
+    const lastIndex = next.length - 1;
+    next[lastIndex] = {
+      ...next[lastIndex],
+      content: next[lastIndex].content + normalizeStreamChunk(chunk)
+    };
+    return next;
+  });
+}</code></pre>
+每次收到新的 chunk，不是替换整个消息，而是<b>追加</b>到当前 AI 消息的 <code>content</code> 末尾。这就是「逐字输出」效果的实现原理。</div>
+
+<div class="side">
+💡 <b>关键洞察：为什么不用 WebSocket？</b><br>
+SSE 比 WebSocket 更适合 AI 对话场景：(1) AI 对话是单向流（服务器→客户端），不需要双向通信；(2) SSE 使用标准 HTTP，天然支持 HTTP/2 多路复用、代理穿透、认证头；(3) SSE 内置自动重连机制；(4) 实现更简单——不需要升级协议。
+</div>
+
+<h2>五、流完成后的数据刷新</h2>
+
+<p>注意 <code>fetchAgentChat</code> 的 <code>onDone</code> 回调中还有一步关键操作：</p>
+
+<pre><code>async onDone() {
+  finishSending();
+  await refreshConversationData(currentAgent.id, targetConversationId);
+}</code></pre>
+
+<p>这调用了 <code>queryClient.invalidateQueries()</code> 刷新对话列表和消息列表。为什么流已经完成了还要重新拉数据？</p>
+
+<blockquote>
+因为 SSE 流只传递增量内容（chunks），而服务器端可能对消息做了后处理（如保存到数据库、关联元数据、生成消息 ID）。流结束后重新拉取一次完整数据，确保前端状态与服务器端一致。
+</blockquote>
+
+<h2>六、同步模式作为降级方案</h2>
+
+<p>除了 SSE 流式，前端还支持同步模式（<code>fetchAgentChatSync</code>）：</p>
+
+<pre><code>// 同步模式：一次请求-响应
+const res = await fetchAgentChatSync(agentId, { conversationId, content });
+// 从响应中提取 AI 回复
+const reply = extractSyncReply(res.data);</code></pre>
+
+<p>同步模式的选择由服务器端配置决定（<code>fetchChatMode()</code> 返回 <code>mode: 'stream' | 'sync'</code>）。当网络环境不支持 SSE（如某些代理服务器会缓冲响应）时，可切换到同步模式。</p>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 为什么 SnailAiChatExceptionHandler 返回 Result{status, message, data} 而不是 R{code, msg, data}？</p>
+<span class="opt">A. 作者更喜欢 Result 的命名</span>
+<span class="opt">B. 因为 /api/snail/chat/** 的消费者是 Snail AI 前端 SDK，它期望的是 Result 格式；返回 R 格式会解析失败</span>
+<span class="opt">C. Result 是 Java 17 的 record，性能更好</span>
+<span class="opt">D. RuoYi 的 R 类不支持 Void 泛型</span>
+<details><summary>看答案</summary><b>B</b>。这是兼容性驱动的设计。<code>/api/snail/chat/**</code> 由 Snail AI SDK 的 <code>SnailAiChatGatewayController</code> 处理，它的消费者是 Snail AI 自己的前端 SDK。这个 SDK 不认识 RuoYi 的 <code>R</code> 格式。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. @Order(Ordered.HIGHEST_PRECEDENCE) 在 SnailAiChatExceptionHandler 上的作用是什么？</p>
+<span class="opt">A. 让这个处理器最先被加载</span>
+<span class="opt">B. 确保在异常处理器链中，这个处理器先于 RuoYi 的全局处理器执行，避免异常被错误地转换为 R 格式</span>
+<span class="opt">C. 提高异常处理的性能</span>
+<span class="opt">D. 让日志输出更优先</span>
+<details><summary>看答案</summary><b>B</b>。Spring 支持多个 <code>@RestControllerAdvice</code>，它们按 <code>@Order</code> 优先级排序。如果不设置最高优先级，RuoYi 的全局异常处理器可能先匹配异常并返回 <code>R</code> 格式，Snail AI 前端 SDK 就会收到错误格式的响应。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. SSE 流式对话中，前端如何实现「逐字输出」效果？</p>
+<span class="opt">A. 服务器每次发送一个字符，前端每次渲染一个字符</span>
+<span class="opt">B. 服务器发送文本块（chunks），前端通过 React setState 函数式更新将每个 chunk 追加到消息末尾</span>
+<span class="opt">C. 前端使用 CSS animation 模拟打字效果</span>
+<span class="opt">D. 前端使用 Web Worker 在后台处理</span>
+<details><summary>看答案</summary><b>B</b>。<code>onMessage</code> 回调中的 <code>setMessages(items => { ... next[lastIndex].content + normalizeStreamChunk(chunk) })</code> 是关键——每次收到新的 chunk，通过函数式 setState 追加到当前 AI 消息的 content 末尾，React 自动触发重新渲染。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-ai/src/main/java/org/dromara/common/ai/handler/SnailAiChatExceptionHandler.java</code> 和 <code>plus-ui-react/src/api/ai/agent/index.ts</code> 中的 <code>fetchAgentChat()</code> 函数，亲手追踪异常处理链和 SSE 数据流。然后打开 <code>application.yml</code> 查看 <code>/api/snail/chat/**</code> 的安全放行规则。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 SSE 流中断了，前端如何处理？」「为什么 SnailAiChatExceptionHandler 不能处理所有 AI 相关的异常？」下一课我们聚焦 <strong>双前端集成路线对比</strong>——React 原生组件 vs Vue iframe 嵌入，两种完全不同的技术选择背后的设计考量。</div>
+
+<div class="nav">课程 0003 / ruoyi-ai 模块讲解 · <a href="0002.html">← 上一课：自动配置与用户桥接</a> · 下一课预告：双前端集成路线对比</div>
+
+</body>
+</html>

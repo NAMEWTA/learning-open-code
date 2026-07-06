@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 | JustAuth 扩展与自定义提供者：3 件套范式与企业平台适配</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>02 | JustAuth 扩展与自定义提供者：3 件套范式与企业平台适配</h1>
+
+<div class="mission">
+<strong>本节目标：</strong>掌握 RuoYi 自定义 OAuth 提供者的"3 件套"开发范式，理解企业微信和钉钉与标准 OAuth 2.0 的差异处理，通晓从用户点击到登录成功的完整链路。
+</div>
+
+<h2>1. 自定义提供者 3 件套范式</h2>
+
+<p>当需要接入的第三方平台不在 JustAuth 内置的 24 个平台列表中时，RuoYi 提供了一套标准化的"3 件套"扩展范式。这套范式让每个自定义平台仅需创建 3 个文件 + 添加 1 行 switch case 即可完成接入：</p>
+
+<table>
+  <tr><th>步骤</th><th>文件名</th><th>继承/实现</th><th>必须提供什么</th></tr>
+  <tr><td>步骤 1</td><td><code>AuthXxxSource.java</code></td><td>实现 <code>AuthSource</code> 接口</td><td>3 个端点 URL：authorize()、accessToken()、userInfo()</td></tr>
+  <tr><td>步骤 2</td><td><code>AuthXxxRequest.java</code></td><td>继承 <code>AuthDefaultRequest</code></td><td>2 个方法：getAccessToken()、getUserInfo()</td></tr>
+  <tr><td>步骤 3</td><td><code>SocialUtils.java</code> switch</td><td>添加 1 个 case 分支</td><td>new AuthXxxRequest(config, cache) 的构造调用</td></tr>
+</table>
+
+<div class="insight">
+<strong>范式精髓：</strong>AuthDefaultRequest 已经实现了 authorize() 和 login() 的完整通用流程。你只需要告诉它两个平台特定的细节——"token 端点在哪里、怎么请求"以及"用户信息端点在哪里、怎么解析"。这是典型的模板方法模式。
+</div>
+
+<p>RuoYi 使用这套范式接入了 3 个自定义平台：<strong>Gitea</strong>（自托管 Git 服务）、<strong>MaxKey</strong>（国产 IAM 系统）、<strong>TopIAM</strong>（国产 IAM 系统）。三者的代码结构完全一致，差别仅在 API 端点的 URL 和返回 JSON 的字段映射。</p>
+
+<h2>2. Gitea 实例拆解</h2>
+
+<p>Gitea 是一个自托管的 Git 服务（类似 GitHub / GitLab）。许多企业内部部署了私有 Gitea 实例，其 OAuth API 端点与标准 JustAuth 内置的 Gitee 端点不同，因此需要自定义提供者。</p>
+
+<h3>步骤 1：AuthGiteaSource — 定义端点</h3>
+<pre>
+public enum AuthGiteaSource implements AuthSource {
+
+    GITEA {
+        @Override
+        public String authorize() {
+            return "{serverUrl}/login/oauth/authorize";
+        }
+
+        @Override
+        public String accessToken() {
+            return "{serverUrl}/login/oauth/access_token";
+        }
+
+        @Override
+        public String userInfo() {
+            return "{serverUrl}/api/v1/user";
+        }
+    };
+
+    // 动态替换 {serverUrl} 占位符
+    public String authorize(String serverUrl) {
+        return authorize().replace("{serverUrl}", serverUrl);
+    }
+    // ... accessToken(String)、userInfo(String) 同理
+}
+</pre>
+
+<p>关键设计：端点 URL 中使用 <code>{serverUrl}</code> 占位符，通过重载方法接收 SocialLoginConfigProperties 中的 <code>serverUrl</code> 配置值进行动态替换。这使得同一套代码可以适配不同企业各自的 Gitea 私有实例地址。</p>
+
+<h3>步骤 2：AuthGiteaRequest — 实现请求</h3>
+<pre>
+public class AuthGiteaRequest extends AuthDefaultRequest {
+
+    private final String serverUrl;
+
+    public AuthGiteaRequest(AuthConfig config, AuthStateCache cache) {
+        super(config, AuthGiteaSource.GITEA, cache);
+        // 从 config 中提取 serverUrl（存入 SocialLoginConfigProperties 的扩展字段）
+        this.serverUrl = config.getServerUrl();
+    }
+
+    @Override
+    protected AuthToken getAccessToken(AuthCallback authCallback) {
+        // 向 Gitea token 端点发送 POST 请求
+        // 请求体：client_id、client_secret、code、grant_type、redirect_uri
+        // 解析返回的 JSON 获取 access_token
+    }
+
+    @Override
+    protected AuthUser getUserInfo(AuthToken authToken) {
+        // 向 Gitea userInfo 端点发送 GET 请求（Header: Authorization: token xxx）
+        // 解析返回的 JSON 映射到 AuthUser 的 uuid、username、nickname、avatar、email
+    }
+}
+</pre>
+
+<p>只实现两个方法。token 请求通常是一个带着 application/x-www-form-urlencoded 表单体的 POST，用户信息请求通常是一个带着 Authorization Header 的 GET。AuthDefaultRequest 框架已经帮你处理了 HTTP 客户端、异常处理、state 校验等通用逻辑。</p>
+
+<h3>步骤 3：SocialUtils 中的 switch 分支</h3>
+<pre>
+// SocialUtils.getAuthRequest() 中
+case GITEA:
+    return new AuthGiteaRequest(config, authRedisStateCache);
+</pre>
+
+<p>仅一行。这就是"3 件套"的完整成本：2 个类（约 80-120 行）+ 1 行 switch。</p>
+
+<h2>3. MaxKey 与 TopIAM：私有 IAM 系统的 OAuth 适配</h2>
+
+<p>MaxKey 和 TopIAM 都是国产的企业级统一身份认证（IAM）系统。企业内部往往用它们统一管理员工账号，并与各类业务系统对接。通过 RuoYi 的自定义提供者，可以将 MaxKey / TopIAM 作为社交登录的"平台"之一，实现单点登录。</p>
+
+<h3>MaxKey 端点定义</h3>
+<pre>
+public enum AuthMaxKeySource implements AuthSource {
+    MAXKEY {
+        @Override
+        public String authorize() {
+            return "{serverUrl}/auth/oauth/v20/authorize";
+        }
+
+        @Override
+        public String accessToken() {
+            return "{serverUrl}/auth/oauth/v20/token";
+        }
+
+        @Override
+        public String userInfo() {
+            return "{serverUrl}/api/oauth/v20/userinfo";
+        }
+    };
+}
+</pre>
+
+<h3>TopIAM 端点定义</h3>
+<pre>
+public enum AuthTopIamSource implements AuthSource {
+    TOPIAM {
+        @Override
+        public String authorize() {
+            return "{serverUrl}/authentication/oauth2/authorize";
+        }
+
+        @Override
+        public String accessToken() {
+            return "{serverUrl}/authentication/oauth2/token";
+        }
+
+        @Override
+        public String userInfo() {
+            return "{serverUrl}/authentication/oauth2/userinfo";
+        }
+    };
+}
+</pre>
+
+<p>两者的实现模式与 Gitea 完全一致——唯一的区别是端点 URL 路径不同。它们同样使用 <code>{serverUrl}</code> 占位符，同样从 SocialLoginConfigProperties 的 <code>serverUrl</code> 字段获取私有部署地址。</p>
+
+<table>
+  <tr><th>特性</th><th>MaxKey</th><th>TopIAM</th></tr>
+  <tr><td>授权端点</td><td>/auth/oauth/v20/authorize</td><td>/authentication/oauth2/authorize</td></tr>
+  <tr><td>Token 端点</td><td>/auth/oauth/v20/token</td><td>/authentication/oauth2/token</td></tr>
+  <tr><td>用户信息端点</td><td>/api/oauth/v20/userinfo</td><td>/authentication/oauth2/userinfo</td></tr>
+  <tr><td>版本</td><td>OAuth 2.0</td><td>OAuth 2.0</td></tr>
+</table>
+
+<div class="insight">
+<strong>为什么这些系统需要自定义提供者？</strong>标准 JustAuth 支持的 24 个平台都是公共 SaaS 服务（GitHub、Google、微信等）。企业内部自建的 IAM 系统 API 端点与这些公共平台不同，JustAuth 无法内置覆盖。自定义提供者机制解决了"标准框架无法覆盖非标准端点"的问题。
+</div>
+
+<h2>4. 企业微信与钉钉的特殊处理</h2>
+
+<p>并非所有平台都遵循标准的 OAuth 2.0 授权码模式。企业微信和钉钉是两个典型的"非标"案例。虽然 JustAuth 已经内置了它们的支持，但理解其特殊之处有助于在下节课阅读 JustAuth 源码时抓住重点。</p>
+
+<h3>企业微信 (WeCom) 的特殊性</h3>
+<table>
+  <tr><th>差异点</th><th>标准 OAuth 2.0</th><th>企业微信</th></tr>
+  <tr><td>客户端标识</td><td>client_id + client_secret</td><td>corpId + corpSecret（企业维度而非应用维度）</td></tr>
+  <tr><td>Token 请求体格式</td><td>form-urlencoded</td><td>JSON 格式请求体</td></tr>
+  <tr><td>扩展凭证</td><td>无</td><td>agentId（企业应用 ID）</td></tr>
+  <tr><td>敏感信息</td><td>无</td><td>user_ticket 字段，需要特殊处理</td></tr>
+</table>
+
+<p>JustAuth 中对应的实现是 <code>AbstractAuthWeChatEnterpriseRequest</code>，它绕过了 AuthDefaultRequest 的标准 flow，自定义了 token 请求和用户信息获取的逻辑。这解释了为什么 SocialLoginConfigProperties 需要 <code>agentId</code> 这样的扩展字段。</p>
+
+<h3>钉钉 (DingTalk) 的特殊性</h3>
+<p>钉钉使用的 <code>AuthDingTalkV2Request</code> 同样偏离标准 OAuth 流程：</p>
+<ul>
+  <li>使用 JSON 请求体而非标准的 form-urlencoded。</li>
+  <li>钉钉的 access_token 获取需要先获取企业内部应用的 access_token，再通过临时授权码换取用户信息。</li>
+  <li>这是钉钉开放平台 V2 版 API 的特殊要求，与标准 OAuth 2.0 存在显著差异。</li>
+</ul>
+
+<div class="insight">
+<strong>关键启示：</strong>标准框架不能包打天下。企业级平台往往有自己的 API 约定。JustAuth 通过让每个平台拥有自己的 Request 子类来处理这种差异——标准平台复用 AuthDefaultRequest，特殊平台重写 login() 中的关键步骤或直接实现 AuthRequest 接口。RuoYi 的 SocialLoginConfigProperties 中预留的扩展字段（agentId、alipayPublicKey、tenantId 等）就是为了适配这些非标参数。
+</div>
+
+<h2>5. 完整登录链路：从点击按钮到业务处理</h2>
+
+<p>把前两节课学到的所有组件串联起来，展示一个完整的第三方登录请求在 RuoYi 中的生命周期：</p>
+
+<pre>
+┌─────────────────────────────────────────────────────────────────────┐
+│ 步骤 1：前端发起                                                      │
+│ 用户点击 "Gitee 登录" 按钮                                           │
+│ 前端 GET /auth?source=gitee                                         │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 步骤 2：AuthController 接收请求                                       │
+│ ① 调用 SocialUtils.getAuthRequest("gitee", socialProperties)        │
+│    → switch("gitee") → new AuthGiteeRequest(config, cache)           │
+│ ② 调用 authRequest.authorize(state)                                 │
+│    → 生成 Gitee 授权页 URL                                            │
+│    → state 存入 AuthRedisStateCache → Redis                          │
+│ ③ 返回 302 重定向到 Gitee 授权页                                      │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 步骤 3：用户授权 → 回调                                                │
+│ 用户在 Gitee 完成授权                                                │
+│ Gitee 302 重定向回 redirect_uri?code=abc&state=xyz                  │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 步骤 4：SocialUtils.loginAuth() 执行登录                               │
+│ ① 构建 AuthCallback(code="abc", state="xyz")                        │
+│ ② 调用 authRequest.login(callback)                                  │
+│    → AuthDefaultRequest.login() 内部:                                │
+│      a. 校验 state：AuthRedisStateCache.get("social_auth_code:xyz") │
+│      b. getAccessToken(callback) → POST Gitea token 端点              │
+│      c. getUserInfo(authToken) → GET Gitea userInfo 端点             │
+│    → 返回 AuthUser{uuid, username, nickname, avatar, email}         │
+│ ③ 返回 AuthUser 给 Controller                                        │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ 步骤 5：业务层处理                                                     │
+│ Controller 调用 SysLoginService.socialLogin(AuthUser)               │
+│ → 根据 uuid 查询是否已存在绑定用户                                     │
+│ → 新用户：创建账号 + 绑定社交账号                                      │
+│ → 老用户：直接登录，签发 token                                        │
+│ → 返回登录成功                                                        │
+└─────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<p>整个链路中，RuoYi 开发者需要关注的只有两件事：</p>
+<ol>
+  <li><strong>配置 YAML：</strong>填写 client-id、client-secret、redirect-uri。</li>
+  <li><strong>（如果是新平台）按 3 件套范式扩展：</strong>创建 AuthXxxSource、AuthXxxRequest、添加 switch case。</li>
+</ol>
+
+<p>其余的工作——state 校验、token 交换、用户信息获取、HTTP 调用、异常处理——全部由 JustAuth 框架和 AuthRedisStateCache 自动完成。</p>
+
+<h2>本节测验</h2>
+
+<div class="quiz">
+<details>
+<summary>测验 1：3 件套范式理解（点击展开）</summary>
+<p><strong>Q1：</strong>自定义 OAuth 提供者的 3 件套包含哪三个部分？它们分别对应 OAuth 2.0 的哪些阶段？</p>
+<p><strong>Q2：</strong>如果要将 GitLab（自托管版本 https://gitlab.your-company.com）接入 RuoYi，需要新建哪几个 Java 文件？config 中的 serverUrl 应该怎么配置？</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary>测验 2：完整链路与企业平台（点击展开）</summary>
+<p><strong>Q1：</strong>在完整登录链路中，AuthRedisStateCache 在哪个阶段被写入？在哪个阶段被读取？如果 Redis 不可用会发生什么？</p>
+<p><strong>Q2：</strong>企业微信的 OAuth 流程与标准 OAuth 2.0 有哪些核心差异？SocialLoginConfigProperties 中的 agentId 字段在设计上是如何支持这种差异的？</p>
+</details>
+</div>
+
+<div class="cite">
+参考来源：AuthGiteaSource.java、AuthGiteaRequest.java、AuthMaxKeySource.java、AuthMaxKeyRequest.java、AuthTopIamSource.java、AuthTopIamRequest.java、SocialUtils.java switch 分支、JustAuth 框架文档 (Dromara)、OAuth 2.0 RFC 6749
+</div>
+
+<div class="reminder">有疑问？直接问我 -- 我是你的 AI 教师。</div>
+
+<div class="nav">
+  <span><a href="01-OAuth2.0与26平台支持.html">← 上一课：01 | OAuth 2.0 与 26 平台支持</a></span>
+  <span></span>
+</div>
+
+</body>
+</html>

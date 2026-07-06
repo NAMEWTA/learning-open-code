@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查：配置体系与通信模型</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; margin-top: 2rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; border-bottom: 1px solid #eee; padding-bottom: 0.25rem; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.12em 0.35em; border-radius: 3px; font-size: 0.88em; }
+  pre { background: #282c34; color: #abb2bf; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.8em; line-height: 1.4; }
+  .tag { display: inline-block; background: #409EFF; color: #fff; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.7em; font-weight: 600; margin-right: 0.4em; }
+  .tag-green { background: #67C23A; }
+  .tag-orange { background: #E6A23C; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.85rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0.8rem; margin: 0.8rem 0; font-family: monospace; font-size: 0.78rem; line-height: 1.5; white-space: pre; overflow-x: auto; color: #333; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 0.8rem; border-top: 1px solid #eee; font-size: 0.85rem; }
+  .nav a { font-weight: 600; text-decoration: none; color: #409EFF; }
+</style>
+</head>
+<body>
+
+<h1>速查 #02：配置体系与通信模型</h1>
+
+<h2>双端口通信模型</h2>
+
+<div class="arch-diagram">                  ┌─────────────────────────────────┐
+                  │     SnailJob 服务端              │
+                  │                                 │
+浏览器 / Dashboard ─│─► :8800  HTTP (Tomcat)          │
+                  │    ├── Dashboard 管理界面         │
+                  │    ├── REST API                  │
+                  │    └── Actuator 健康端点          │
+                  │                                 │
+ruoyi-common-job   ─│─► :17888  TCP (Netty)           │
+(客户端)            │    ├── 心跳上报                  │
+                  │    ├── 任务执行结果回传            │
+                  │    ├── 远程日志 (LogbackAppender)  │
+                  │    └── 任务分派指令接收            │
+                  └─────────────────────────────────┘</div>
+
+<table>
+  <tr><th>端口</th><th>协议</th><th>用途</th><th>访问者</th></tr>
+  <tr><td>8800</td><td>HTTP (Tomcat)</td><td>Dashboard 管理界面、REST API、Actuator</td><td>浏览器、Admin Server</td></tr>
+  <tr><td>17888</td><td>TCP (Netty)</td><td>客户端通信：心跳、日志上报、任务分派</td><td>ruoyi-common-job 客户端</td></tr>
+</table>
+
+<h2>application.yml 核心配置速查</h2>
+
+<h3>服务端口与路径</h3>
+<pre>server:
+  port: 8800
+  servlet:
+    context-path: /snail-job        # Dashboard → :8800/snail-job/</pre>
+
+<h3>静态资源托管</h3>
+<pre>spring:
+  web:
+    resources:
+      static-locations: classpath:admin/   # 框架内置 Dashboard 前端资源</pre>
+
+<h3>MyBatis-Plus 持久化</h3>
+<pre>mybatis-plus:
+  typeAliasesPackage: com.aizuda.snailjob.template.datasource.persistence.po
+  global-config:
+    db-config:
+      where-strategy: NOT_EMPTY
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  configuration:
+    map-underscore-to-camel-case: true</pre>
+<p><span class="tag tag-green">要点</span> typeAliasesPackage 指向 SnailJob 框架内置 PO，非 RuoYi 项目代码。这些 PO 管理调度元数据表（任务定义、重试记录、调度配置、工作流 DAG、节点信息）。</p>
+
+<h2>application-dev.yml SnailJob 核心配置</h2>
+
+<table>
+  <tr><th>配置项</th><th>默认值</th><th>含义</th></tr>
+  <tr><td><code>server-port</code></td><td>17888</td><td><span class="tag">Netty</span> 客户端通信端口</td></tr>
+  <tr><td><code>retry-pull-page-size</code></td><td>100</td><td>每批次拉取重试任务条数</td></tr>
+  <tr><td><code>log-storage</code></td><td>7</td><td>任务执行日志保留天数</td></tr>
+  <tr><td><code>merge-log-days</code></td><td>1</td><td>合并日志天数窗口</td></tr>
+  <tr><td><code>merge-log-num</code></td><td>500</td><td>合并日志最大条数阈值</td></tr>
+  <tr><td><code>bucket-total</code></td><td>128</td><td><span class="tag tag-green">核心</span> 分桶总数。任务哈希分配，每桶一个 Akka Actor 调度</td></tr>
+  <tr><td><code>load-balance-cycle-time</code></td><td>10 (秒)</td><td>负载均衡周期，检查各桶负载并跨节点重分配</td></tr>
+  <tr><td><code>retry-max-pull-parallel</code></td><td>2</td><td>重试任务拉取并行线程数</td></tr>
+  <tr><td><code>summary-day</code></td><td>7</td><td>Dashboard 仪表盘容错天数</td></tr>
+</table>
+
+<h3>bucket-total 128 的分布式调度语义</h3>
+<div class="arch-diagram">所有任务 ──一致性哈希──► 128 个桶 (Bucket)
+                         │   每个桶 ──对应──► 1 个 Akka Actor
+                         │   集群节点通过 Actor 协议协商各自负责的桶
+                         │   每 10s (load-balance-cycle-time) 重分配
+                         │
+                         └── 无中心化负载均衡</div>
+
+<h2>数据源配置</h2>
+<pre>spring:
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    url: jdbc:mysql://localhost:3306/ry-vue?...  # 与主应用共用数据库
+    hikari:
+      minimum-idle: 10
+      maximum-pool-size: 20
+      idle-timeout: 600000
+      max-lifetime: 900000</pre>
+<p><span class="tag tag-orange">注意</span> SnailJob 元数据表与 RuoYi 业务表共存于同一数据库，通过表名前缀（如 sj_）区分。</p>
+
+<h2>Dockerfile JVM 调优</h2>
+<pre>FROM bellsoft/liberica-openjdk-rocky:21.0.11-cds
+
+EXPOSE 8800
+EXPOSE 17888
+
+ENTRYPOINT java \
+           -Djava.security.egd=file:/dev/./urandom \
+           -XX:+HeapDumpOnOutOfMemoryError \
+           -XX:+UseZGC \               # 低延迟垃圾收集器
+           ${JAVA_OPTS} \
+           -jar app.jar</pre>
+
+<p>使用 ZGC 的原因：调度系统对延迟敏感，ZGC 的亚毫秒级暂停时间避免 GC 抖动影响任务调度精度。</p>
+
+<h2>自我检测要点</h2>
+
+<ol>
+  <li>8800 和 17888 端口分别用于什么通信？</li>
+  <li>bucket-total: 128 与 load-balance-cycle-time: 10 有什么关系？</li>
+  <li>MyBatis-Plus 的 typeAliasesPackage 为什么指向框架的 PO 包？</li>
+  <li>Dockerfile 中选用 ZGC 的原因？</li>
+</ol>
+
+<div class="nav">
+  <a href="01.html">← 上一张速查：服务端架构与启动原理</a>
+  <a href="03.html">下一张速查：安全防护与日志体系 →</a>
+</div>
+
+</body>
+</html>

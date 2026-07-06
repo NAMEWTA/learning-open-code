@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · SecurityConfig 自动配置与鉴权链</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · SecurityConfig 自动配置与鉴权链</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code></p>
+
+<h2>SecurityConfig 类结构</h2>
+<div class="chain">@AutoConfiguration + @EnableConfigurationProperties(SecurityProperties) + implements WebMvcConfigurer
+→ 3 个安全 Bean/Override 方法</div>
+
+<h2>3 个安全组件总览</h2>
+<table>
+<tr><th>组件</th><th>类型</th><th>触发时机</th><th>核心功能</th></tr>
+<tr>
+  <td><code>saTokenContextFilterRegistration</code></td>
+  <td>Servlet Filter（重注册）</td>
+  <td>请求最早</td>
+  <td>初始化 SaTokenContext，覆盖 REQUEST+ASYNC+ERROR</td>
+</tr>
+<tr>
+  <td><code>addInterceptors → SaInterceptor</code></td>
+  <td>Spring Interceptor</td>
+  <td>Filter 之后、Controller 之前</td>
+  <td>四步鉴权链：匹配→登录→clientId→白名单</td>
+</tr>
+<tr>
+  <td><code>getSaServletFilter</code></td>
+  <td>Servlet Filter</td>
+  <td>仅 /actuator/**</td>
+  <td>Basic Auth 保护运维端点</td>
+</tr>
+</table>
+
+<h2>鉴权链四步（addInterceptors 核心）</h2>
+<table>
+<tr><th>步骤</th><th>代码</th><th>失败</th></tr>
+<tr><td>1. 路由匹配</td><td><code>SaRouter.match(allUrlHandler.getUrls())</code></td><td>不检查，放行</td></tr>
+<tr><td>2. 登录校验</td><td><code>StpUtil.checkLogin()</code></td><td>NotLoginException</td></tr>
+<tr><td>3. clientId 校验</td><td><code>equalsAny(tokenCid, headerCid, paramCid)</code></td><td>NotLoginException("-100")</td></tr>
+<tr><td>4a. 路径白名单</td><td><code>StringUtils.matches(requestPath, accessPathList)</code></td><td>NotPermissionException</td></tr>
+<tr><td>4b. IP 白名单</td><td><code>NetUtils.isMatchIpRule(rule, clientIp)</code></td><td>NotPermissionException</td></tr>
+</table>
+
+<h2>ContextFilter 重注册关键参数</h2>
+<table>
+<tr><th>参数</th><th>值</th><th>意义</th></tr>
+<tr><td>urlPatterns</td><td><code>/*</code></td><td>覆盖全部请求</td></tr>
+<tr><td>dispatcherTypes</td><td><code>REQUEST, ASYNC, ERROR</code></td><td>SSE/WebSocket 场景不会丢上下文</td></tr>
+<tr><td>asyncSupported</td><td><code>true</code></td><td>支持异步请求</td></tr>
+<tr><td>order</td><td><code>HIGHEST_PRECEDENCE</code></td><td>最先执行</td></tr>
+</table>
+
+<h2>SecurityProperties 配置</h2>
+<div class="chain">yml: security.excludes → @ConfigurationProperties(prefix="security") → SecurityProperties.excludes → excludePathPatterns()</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>ContextFilter 重注册动机：<b>默认只在 REQUEST 下初始化 → SSE/WebSocket 等 ASYNC 场景会报 SaTokenContext 未初始化</b>。</li>
+<li>clientId 校验动机：<b>防止 token 跨客户端盗用</b>（PC 的 token 在 APP 上用会被拒绝）。</li>
+<li><code>validateClientAccessRules</code> 两个检查都是 <b>配置了才校验</b>（不配 = 不限制）。</li>
+<li>actuator 的账密来自 <code>spring.boot.admin.client.username/password</code>。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SecurityConfig、SecurityProperties、LoginHelper、FilterRegistrationBean</p>
+</body>
+</html>

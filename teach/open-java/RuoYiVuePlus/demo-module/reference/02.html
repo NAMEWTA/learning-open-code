@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 02 · 缓存与并发控制</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.6rem; margin-top: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; padding-bottom: 0.25rem; border-bottom: 2px solid #f0f0f0; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.8rem 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .quick { background: #f3f8ff; border: 1px solid #d6e4ff; padding: 0.6rem 0.9rem; border-radius: 6px; font-size: 0.85rem; margin: 0.8rem 0; }
+  .navback { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; margin: 0.8rem 0; font-size: 0.82rem; }
+  .compare > div { background: #fff; border: 1px solid #e3e8ef; border-radius: 6px; padding: 0.6rem 0.8rem; }
+  .compare h4 { margin: 0 0 0.3rem 0; }
+  .warnem { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; margin: 0.8rem 0; font-size: 0.84rem; border-radius: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+
+<h1>速查 02 · 缓存与并发控制 <span class="tag">性能+安全</span></h1>
+
+<div class="quick">对应课程 第 2 课：Spring Cache 三件套 / @Lock4j 分布式锁 / @RateLimiter 限流 / 批量操作 / @RepeatSubmit 防重</div>
+
+<h2>Spring Cache 三件套速查</h2>
+<table>
+  <tr><th>注解</th><th>触发时机</th><th>方法体执行?</th><th>一句话</th></tr>
+  <tr><td><code>@Cacheable</code></td><td>查询前</td><td>命中缓存时不执行</td><td>查询时自动缓存结果</td></tr>
+  <tr><td><code>@CachePut</code></td><td>方法执行后</td><td>始终执行</td><td>写入数据库后刷新缓存</td></tr>
+  <tr><td><code>@CacheEvict</code></td><td>方法执行后</td><td>始终执行</td><td>删除数据后清除缓存</td></tr>
+</table>
+
+<h3>cacheNames 增强格式</h3>
+<p><code>"demo:cache<strong>#60s#10m#20#1</strong>"</code> — 框架扩展的 <code>#</code> 分隔格式：</p>
+<table>
+  <tr><th>段位</th><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>
+  <tr><th>含义</th><td>缓存名</td><td>TTL (60s)</td><td>maxSize (10 条)</td><td>maxIdleTime (20s)</td><td>淘汰策略 (1=条目数)</td></tr>
+</table>
+<p style="font-size:0.84rem;">也可用 <code>CacheNames.DEMO_CACHE</code> 常量，值相同。</p>
+
+<div class="warnem"><b>警告：</b>缓存注解严禁与数据权限等筛选功能一起使用，否则会造成缓存击穿和数据不一致。</div>
+
+<h2>@Cacheable 声明式 vs RedisUtils 手动式</h2>
+<div class="compare">
+<div>
+<h4>@Cacheable</h4>
+<p>✅ 一行注解零侵入<br>✅ AOP 自动管理<br>❌ 仅 Spring Bean 方法<br>❌ 不够灵活</p>
+</div>
+<div>
+<h4>RedisUtils</h4>
+<p>✅ 任意位置可用<br>✅ 精细控制过期时间<br>✅ 支持所有 Redis 数据结构<br>❌ 需手动管理一致性</p>
+</div>
+</div>
+
+<h2>@Lock4j 声明式 vs LockTemplate 编程式</h2>
+<table>
+  <tr><th>维度</th><th>@Lock4j 注解</th><th>LockTemplate 编程</th></tr>
+  <tr><td>代码量</td><td>1 行</td><td>~10 行 try-finally</td></tr>
+  <tr><td>释放锁</td><td>自动（方法结束释放）</td><td>必须手动 releaseLock()</td></tr>
+  <tr><td>获取失败</td><td>抛异常，全局异常处理器接管</td><td>返回 null，可自定义降级</td></tr>
+  <tr><td>适用</td><td>简单互斥，标准 CRUD</td><td>需自定义超时/降级/重试</td></tr>
+  <tr><td>底层</td><td colspan="2">Redisson 分布式锁（看门狗自动续期）</td></tr>
+</table>
+
+<pre><code>// 注解式
+@Lock4j(keys = {"#key"})
+@GetMapping("/test")
+public R&lt;String&gt; test(String key) { ... }
+
+// 编程式
+LockInfo lockInfo = lockTemplate.lock(key, 30000L, 5000L, RedissonLockExecutor.class);
+if (null == lockInfo) throw new RuntimeException("业务处理中");
+try { /* 业务 */ } finally { lockTemplate.releaseLock(lockInfo); }</code></pre>
+
+<h2>@RateLimiter 三种限流粒度</h2>
+<table>
+  <tr><th>limitType</th><th>计数维度</th><th>典型场景</th><th>示例</th></tr>
+  <tr><td>默认（全局）</td><td>接口全局</td><td>防止数据库整体过载</td><td><code>@RateLimiter(count=2, time=10)</code></td></tr>
+  <tr><td><code>LimitType.IP</code></td><td>请求 IP</td><td>防爬虫、防单用户刷接口</td><td><code>@RateLimiter(count=2, time=10, limitType=LimitType.IP)</code></td></tr>
+  <tr><td><code>LimitType.CLUSTER</code></td><td>服务实例</td><td>多实例各自限流互不影响</td><td><code>@RateLimiter(count=2, time=10, limitType=LimitType.CLUSTER)</code></td></tr>
+</table>
+<p style="font-size:0.84rem;"><b>key 支持 SpEL：</b><code>#变量</code> 获取简单值，<code>#{表达式}</code> 计算取值。示例：<code>key="#value"</code> 按参数值限流，<code>key="#{#value!=1?1:0}"</code> 条件取值。</p>
+
+<h2>批量操作速查</h2>
+<table>
+  <tr><th>方法</th><th>说明</th><th>关键配置</th></tr>
+  <tr><td><code>mapper.insertBatch(list)</code></td><td>批量插入，1000 条一次提交</td><td rowspan="2">JDBC URL 加 <code>rewriteBatchedStatements=true</code> 合并 SQL，性能提升 10-50x</td></tr>
+  <tr><td><code>mapper.insertOrUpdateBatch(list)</code></td><td>有 ID 则更新，无则插入</td></tr>
+  <tr><td><code>mapper.lambda().eq(...).deleteCount()</code></td><td>Lambda 条件批量删除</td><td>—</td></tr>
+</table>
+
+<h2>六个注解汇总</h2>
+<table>
+  <tr><th>注解</th><th>问题</th><th>核心参数</th></tr>
+  <tr><td><code>@Cacheable</code></td><td>查询慢</td><td>cacheNames, key, condition</td></tr>
+  <tr><td><code>@CachePut</code></td><td>缓存过时</td><td>cacheNames, key</td></tr>
+  <tr><td><code>@CacheEvict</code></td><td>脏缓存</td><td>cacheNames, key</td></tr>
+  <tr><td><code>@Lock4j</code></td><td>并发冲突</td><td>keys, expire, acquireTimeout</td></tr>
+  <tr><td><code>@RateLimiter</code></td><td>流量过载</td><td>count, time, limitType, key</td></tr>
+  <tr><td><code>@RepeatSubmit</code></td><td>重复提交</td><td>interval, timeUnit, message</td></tr>
+</table>
+
+<div class="navback">← 返回课程：<a href="../lessons/02.html">第 2 课 · 缓存与并发控制</a></div>
+</body>
+</html>

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · SnailAiChatExceptionHandler 与实战集成</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · SnailAiChatExceptionHandler 与实战集成</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-ai AI 公共模块</p>
+
+<h2>三个关键设计</h2>
+<table>
+<tr><th>设计</th><th>注解/代码</th><th>含义</th></tr>
+<tr>
+  <td><b>定点拦截</b></td>
+  <td><code>@RestControllerAdvice(assignableTypes = SnailAiChatGatewayController.class)</code></td>
+  <td>只拦截 /api/snail/chat/**，不影响 RuoYi 其它 Controller</td>
+</tr>
+<tr>
+  <td><b>最高优先级</b></td>
+  <td><code>@Order(Ordered.HIGHEST_PRECEDENCE)</code></td>
+  <td>确保先于全局 GlobalExceptionHandler 匹配异常，防止 Result 被覆盖为 R</td>
+</tr>
+<tr>
+  <td><b>响应格式隔离</b></td>
+  <td>返回 <code>Result&lt;Void&gt;</code></td>
+  <td>Snail AI 前端 SDK 按 Result(status/message/data) 解析——返回 R 则前端错误提示失效</td>
+</tr>
+</table>
+
+<h2>8 种异常三层分类</h2>
+<table>
+<tr><th>层级</th><th>异常</th><th>提示语</th><th>特殊处理</th></tr>
+<tr><td><b>业务层</b></td><td><code>SnailAiAuthenticationException</code></td><td>认证失败，请重新登录</td><td>status=5001，前端可跳登录页</td></tr>
+<tr><td><b>业务层</b></td><td><code>BaseSnailAiException</code></td><td>AI 服务请求失败，请稍后再试</td><td>业务异常兜底</td></tr>
+<tr><td><b>模型层</b></td><td><code>ModelCallException</code></td><td>模型调用失败，请稍后再试</td><td>含原始异常，log.warn 记堆栈</td></tr>
+<tr><td><b>参数层</b></td><td><code>BindException</code> / <code>MethodArgumentNotValidException</code> / <code>HandlerMethodValidationException</code></td><td>（拼接校验错误）</td><td>三合一处理 @Valid 校验</td></tr>
+<tr><td><b>参数层</b></td><td><code>ConstraintViolationException</code></td><td>（拼接约束违反）</td><td>@Validated 方法参数校验</td></tr>
+<tr><td><b>参数层</b></td><td><code>HttpMessageNotReadableException</code></td><td>请求参数格式错误</td><td>非法 JSON / 类型不匹配</td></tr>
+<tr><td><b>参数层</b></td><td><code>IllegalArgumentException</code></td><td>请求参数不合法</td><td>业务逻辑主动抛参数异常</td></tr>
+<tr><td><b>参数层</b></td><td><code>IllegalStateException</code></td><td>AI 会话状态异常，请刷新后重试</td><td>引导用户刷新而非重试</td></tr>
+<tr><td><b>兜底</b></td><td><code>Exception</code></td><td>AI 服务异常，请稍后再试</td><td>log.error 记完整堆栈</td></tr>
+</table>
+
+<h2>与 SmsExceptionHandler 对比</h2>
+<table>
+<tr><th>维度</th><th>SnailAiChatExceptionHandler</th><th>SmsExceptionHandler</th></tr>
+<tr><td>覆盖异常数</td><td>8 种（三层分类）</td><td>1 种（SmsBlendException）</td></tr>
+<tr><td>拦截范围</td><td>定点（assignableTypes）</td><td>全局</td></tr>
+<tr><td>响应格式</td><td>Result</td><td>R</td></tr>
+<tr><td>优先级</td><td>@Order(HIGHEST_PRECEDENCE)</td><td>默认</td></tr>
+<tr><td>专用状态码</td><td>5001（认证异常）</td><td>无</td></tr>
+</table>
+
+<h2>异常排查速查</h2>
+<table>
+<tr><th>现象</th><th>最可能原因</th><th>日志级别</th></tr>
+<tr><td>认证失败，请重新登录</td><td>API Key 无效或过期</td><td>WARN</td></tr>
+<tr><td>模型调用失败</td><td>API 不可达 / 额度不足 / 超时</td><td>WARN（含堆栈）</td></tr>
+<tr><td>请求参数格式错误</td><td>前端发了非法 JSON</td><td>WARN</td></tr>
+<tr><td>AI 会话状态异常</td><td>会话过期 / 状态机不一致</td><td>WARN</td></tr>
+<tr><td>AI 服务异常</td><td>未预期的运行时异常</td><td>ERROR（含完整堆栈）</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>assignableTypes 定边界</b>：API 路径不同 → 消费者不同 → 响应格式不同 → 必须隔离。</li>
+<li><b>@Order 保优先</b>：AI 异常处理器必须比全局处理器先匹配，否则 Result 变 R。</li>
+<li><b>内外有别</b>：预期异常 log.warn，未预期 log.error；对外 message 永远不含堆栈。</li>
+<li><b>三层分类</b>：业务层（框架自身异常）→ 模型层（外部调用失败）→ 参数层（请求不合法）→ 最终兜底。</li>
+<li><b>与 SMS 对比</b>：SMS 把异常「拉入」R 格式；AI 把异常处理「适配」到第三方 Result 格式。方向相反，原因相同。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SnailAiChatExceptionHandler、Result、SnailAiChatGatewayController、BaseSnailAiException、SnailAiAuthenticationException、装配套件范式</p>
+</body>
+</html>

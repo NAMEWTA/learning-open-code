@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 常量枚举与设计模式 — Interface 常量、Redis Key 协议、状态机枚举</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .insight { background: linear-gradient(135deg, #f0faf5, #e6f7ee); border: 1px solid #c3e6d3; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .insight b { color: #1a7a4c; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 常量枚举与设计模式 <span class="tag">Constants / Enum</span></h1>
+
+<div class="mission">
+<b>本节目标</b>：学完你能解释为什么 core 模块的常量用 <code>interface</code> 而非 <code>class</code>，读懂 <code>GlobalConstants</code> 的 Redis Key 前缀协议和 <code>CacheNames</code> 的缓存策略编码格式，并掌握 <code>BusinessStatusEnum</code> 的内置状态机设计。
+</div>
+
+<p>core 模块的常量体系有 6 个接口 + 7 个枚举类。它们不是简单的 <code>public static final String</code> 堆砌——每个常量集都承载了特定的架构约定。今天我们从 interface 常量模式这个设计选择讲起。</p>
+
+<h2>一、Interface 常量模式 — 为什么不用 class？</h2>
+
+<p>core 模块的 6 个常量集合——<code>Constants</code>、<code>GlobalConstants</code>、<code>HttpStatus</code>、<code>CacheNames</code>、<code>RegexConstants</code>、<code>SystemConstants</code>——全部使用 <code>interface</code> 定义，而非 <code>class</code>：</p>
+
+<pre><code>// 典型写法：interface 常量
+public interface HttpStatus {
+    int SUCCESS = 200;       // 不需要写 public static final
+    int BAD_REQUEST = 400;   // 编译器自动隐式添加
+    int WARN = 601;
+}
+
+// 对比：如果用 class 实现
+public class HttpStatus {
+    public static final int SUCCESS = 200;   // 必须显式声明
+    public static final int BAD_REQUEST = 400;
+}</code></pre>
+
+<h3>为什么选 interface？</h3>
+
+<table>
+<tr><th>对比维度</th><th>interface 常量</th><th>class + private 构造</th></tr>
+<tr><td>简洁性</td><td>字段隐式 <code>public static final</code>，少写 3 个修饰符</td><td>每个字段都要显式写全</td></tr>
+<tr><td>防实例化</td><td>interface 天生不能 new</td><td>需要手动写 <code>private 构造()</code></td></tr>
+<tr><td>多实现</td><td>调用方可以 <code>implements</code> 直接使用常量名</td><td>调用方需要 <code>import static</code> 或写全限定名</td></tr>
+<tr><td>争议</td><td>Effective Java 不推荐（污染命名空间）</td><td>更符合「常量工具类」传统</td></tr>
+</table>
+
+<div class="side">
+<b>作者的选择</b>：RuoYi-Vue-Plus 选择了 interface 模式。在框架层面，常量被大量类引用，<code>implements HttpStatus</code> 后直接写 <code>SUCCESS</code> 比 <code>HttpStatus.SUCCESS</code> 少敲不少字。这种权衡在业务代码中不推荐，但在框架常量的场景下是务实的选择。
+</div>
+
+<h2>二、GlobalConstants — Redis Key 前缀协议</h2>
+
+<p><code>GlobalConstants</code> 位于 <code>org.dromara.common.core.constant.GlobalConstants</code>，定义框架级别的 Redis Key 前缀：</p>
+
+<pre><code>public interface GlobalConstants {
+    String GLOBAL_REDIS_KEY = "global:";                     // 框架根前缀
+
+    // 各类缓存的二级前缀
+    String CAPTCHA_CODE_KEY = GLOBAL_REDIS_KEY + "captcha_codes:";   // 验证码
+    String RATE_LIMIT_KEY = GLOBAL_REDIS_KEY + "rate_limit:";        // 限流
+    String PWD_ERR_CNT_KEY = GLOBAL_REDIS_KEY + "pwd_err_cnt:";      // 密码错误计数
+    String SYS_CONFIG_KEY = GLOBAL_REDIS_KEY + "sys_config:";         // 系统配置
+    String SYS_DICT_KEY = GLOBAL_REDIS_KEY + "sys_dict:";             // 数据字典
+    String REPEAT_SUBMIT_KEY = GLOBAL_REDIS_KEY + "repeat_submit:";  // 防重复提交
+}</code></pre>
+
+<p>这个设计的意义在于 <strong>Key 命名空间隔离</strong>：</p>
+
+<div class="flow">Redis Key 命名空间三层结构：
+
+global:*          ← 框架级缓存（验证码、限流、防重提交）
+  ├── captcha_codes:*
+  ├── rate_limit:*
+  └── repeat_submit:*
+
+tenant:*          ← 租户级缓存（多租户隔离）
+business:*        ← 业务级缓存（订单、用户等业务数据）</div>
+
+<p>框架级缓存与租户、业务缓存使用不同的一级前缀，确保 <code>FLUSHDB</code> 或 Key 扫描时不会互相干扰。</p>
+
+<h2>三、CacheNames — 缓存名 + 策略编码协议</h2>
+
+<p><code>CacheNames</code> 位于 <code>org.dromara.common.core.constant.CacheNames</code>，它的常量值遵循一种<strong>自解释的编码格式</strong>：</p>
+
+<pre><code>命名格式： name#ttl#maxIdle#maxSize#local
+
+示例：
+SYS_CONFIG     = "sys_config"                         // 永不过期
+SYS_USER_NAME  = "sys_user_name#30d"                  // TTL = 30 天
+SYS_ONLINE     = "sys_online#2m#1m#200#true"          // 2min TTL, 1min 最大空闲, 200 条, 本地缓存
+SYS_OSS_CONFIG = "sys_oss_config#30d"                 // OSS 配置，30 天过期
+SYS_DICT       = "sys_dict#30d"                       // 数据字典，30 天过期</code></pre>
+
+<p>字段含义：</p>
+<table>
+<tr><th>字段</th><th>含义</th><th>格式示例</th></tr>
+<tr><td>name</td><td>缓存名称标识（必填）</td><td>sys_user_name</td></tr>
+<tr><td>ttl</td><td>过期时间（可选）</td><td>30d（天）、2h（小时）、5m（分钟）</td></tr>
+<tr><td>maxIdle</td><td>最大空闲时间（可选）</td><td>1m</td></tr>
+<tr><td>maxSize</td><td>最大缓存条目数（可选）</td><td>200</td></tr>
+<tr><td>local</td><td>是否启用本地缓存（可选）</td><td>true / false</td></tr>
+</table>
+
+<div class="insight">
+<b>设计洞察 — 字符串编码 vs 配置对象</b>：传统的做法是为每个缓存建一个 <code>CacheConfig</code> 对象（name + ttl + maxSize...），需要写大量样板代码。CacheNames 把策略编码直接嵌入字符串，解析时按 <code>#</code> 分割即可。好处是：<b>常量即文档</b>——看一眼 <code>"sys_user_name#30d"</code> 就知道这个缓存 30 天过期，不需要再去找对应的配置类。这是 "convention over configuration" 原则在缓存管理中的体现。
+</div>
+
+<h2>四、HttpStatus — 独立于 Spring 的状态码体系</h2>
+
+<p><code>HttpStatus</code> 位于 <code>org.dromara.common.core.constant.HttpStatus</code>，它<strong>不是</strong> <code>org.springframework.http.HttpStatus</code>。</p>
+
+<pre><code>public interface HttpStatus {
+    int SUCCESS = 200;             // 成功
+    int CREATED = 201;             // 已创建
+    int MOVED_PERM = 301;          // 永久移动
+    int BAD_REQUEST = 400;         // 参数错误
+    int UNAUTHORIZED = 401;        // 未授权
+    int FORBIDDEN = 403;           // 禁止访问
+    int NOT_FOUND = 404;           // 未找到
+    int ERROR = 500;               // 服务器错误
+    int WARN = 601;                // 业务警告（自定义）
+}</code></pre>
+
+<p>为什么要自建一套而不是直接用 Spring 的？</p>
+<ul>
+  <li><b>解耦 Spring Web 依赖</b>：core 模块是最底层，不应强依赖 Spring Web。自建 HttpStatus 只需要 int 常量，不引入额外依赖</li>
+  <li><b>扩展自定义码</b>：Spring 的 HttpStatus 枚举没有 601，而业务需要 WARN 码</li>
+  <li><b>轻量级</b>：int 常量比枚举更轻，传递给 R 对象时不需要转换</li>
+</ul>
+
+<h2>五、BusinessStatusEnum — 内置状态机的流程枚举</h2>
+
+<p><code>BusinessStatusEnum</code> 位于 <code>org.dromara.common.core.enums.BusinessStatusEnum</code>，它不仅仅是 7 个状态值的数据枚举，更像一个<strong>迷你状态机引擎</strong>：</p>
+
+<pre><code>public enum BusinessStatusEnum {
+    CANCEL("cancel", "已撤销"),
+    DRAFT("draft", "草稿"),
+    WAITING("waiting", "待提交"),
+    FINISH("finish", "已完成"),
+    INVALID("invalid", "已作废"),
+    BACK("back", "已退回"),
+    TERMINATION("termination", "已终止");
+
+    // === 状态机校验方法 ===
+    public static void checkStartStatus(String status) {
+        // CANCEL、DRAFT、INVALID、FINISH、TERMINATION 不能启动
+        if (CANCEL.getStatus().equals(status) || DRAFT.getStatus().equals(status)
+            || INVALID.getStatus().equals(status) || FINISH.getStatus().equals(status)
+            || TERMINATION.getStatus().equals(status)) {
+            throw new ServiceException("该状态不能启动流程");
+        }
+    }
+
+    // 类似的方法还有 checkCancelStatus / checkBackStatus / checkInvalidStatus
+}</code></pre>
+
+<p>状态转换矩阵：</p>
+
+<table>
+<tr><th>当前状态</th><th>可→启动</th><th>可→撤销</th><th>可→退回</th><th>可→作废</th></tr>
+<tr><td>草稿 DRAFT</td><td>&#10007; 否</td><td>&#10007; 否</td><td>&#10007; 否</td><td>&#10007; 否</td></tr>
+<tr><td>待提交 WAITING</td><td>&#10004; 是</td><td>&#10004; 是</td><td>&#10004; 是</td><td>&#10004; 是</td></tr>
+<tr><td>已退回 BACK</td><td>&#10004; 是</td><td>&#10004; 是</td><td>&#10004; 是</td><td>&#10004; 是</td></tr>
+<tr><td>已撤销 CANCEL</td><td>&#10004; 是</td><td>&#10007; 否</td><td>&#10007; 否</td><td>&#10007; 否</td></tr>
+</table>
+
+<p>枚举中还维护了 <code>STATUS_MAP</code> 缓存，将状态字符串映射到枚举实例，提供 O(1) 查找和辅助方法：</p>
+
+<pre><code>// 辅助分组方法
+public static List&lt;String&gt; runningStatus() {
+    // 返回 [DRAFT, WAITING, BACK, CANCEL] — 流程仍在运行中的状态
+}
+public static List&lt;String&gt; finishStatus() {
+    // 返回 [FINISH, INVALID, TERMINATION] — 流程已终结的状态
+}</code></pre>
+
+<h2>六、其它重要枚举</h2>
+
+<table>
+<tr><th>枚举类</th><th>位置</th><th>设计特点</th></tr>
+<tr><td><code>UserStatus</code></td><td><code>org.dromara.common.core.enums.UserStatus</code></td><td>OK="0" / DISABLE="1" / DELETED="2"，提供 getInfo() 方法返回中文描述</td></tr>
+<tr><td><code>DeviceType</code></td><td><code>org.dromara.common.core.enums.DeviceType</code></td><td>PC="pc" / APP="app" / MINIAPP="miniapp"，getDeviceTypesByUserType() 按用户类型过滤</td></tr>
+<tr><td><code>LoginType</code></td><td><code>org.dromara.common.core.enums.LoginType</code></td><td>PASSWORD="password" / SMS="sms" / EMAIL="email" / XSS="xss"，支持多种登录方式</td></tr>
+<tr><td><code>SensitiveStrategy</code></td><td><code>org.dromara.common.sensitive.enums.SensitiveStrategy</code></td><td>手机号 / 身份证 / 银行卡脱敏策略枚举</td></tr>
+</table>
+
+<p>这些枚举的共同设计模式：<strong>字段值 + 方法 = 数据驱动行为</strong>。枚举不仅是数据的容器，还通过 <code>getInfo()</code>、<code>getDeviceTypesByUserType()</code> 等方法将行为逻辑内聚在枚举类内部。</p>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. core 模块的常量为什么用 interface 而不是 class？</p>
+<span class="opt">A. 因为 interface 性能更好</span>
+<span class="opt">B. 因为 interface 字段隐式 public static final，写法更简洁，且天生不能实例化</span>
+<span class="opt">C. 因为作者不知道可以用 class</span>
+<span class="opt">D. 因为 interface 支持多继承</span>
+<details><summary>看答案</summary><b>B</b>。interface 的字段自动获得 public static final 修饰符，省去样板代码。同时 interface 不能 new，天然防实例化——如果用 class，还需要手动写 private 构造函数。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. CacheNames 中 <code>SYS_USER_NAME = "sys_user_name#30d"</code> 的 <code>#30d</code> 表示什么？</p>
+<span class="opt">A. 缓存条目的唯一 ID</span>
+<span class="opt">B. 缓存的 TTL（过期时间）为 30 天</span>
+<span class="opt">C. 最大缓存 30 条数据</span>
+<span class="opt">D. 这是注释信息，不影响行为</span>
+<details><summary>看答案</summary><b>B</b>。CacheNames 的字符串编码格式为 name#ttl#maxIdle#maxSize#local，#30d 位于第二个字段，表示 TTL=30 天。系统解析时会按 # 分割取各字段。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 关于 BusinessStatusEnum 的状态机，以下哪个说法正确？</p>
+<span class="opt">A. 任何状态都可以启动流程</span>
+<span class="opt">B. DRAFT（草稿）状态可以直接撤销</span>
+<span class="opt">C. checkStartStatus() 在校验时会拒绝 INVALID（已作废）和 FINISH（已完成）状态</span>
+<span class="opt">D. BusinessStatusEnum 只是普通枚举，没有任何校验逻辑</span>
+<details><summary>看答案</summary><b>C</b>。checkStartStatus() 明确拒绝 CANCEL、DRAFT、INVALID、FINISH、TERMINATION 五种状态的启动请求，只有 WAITING、BACK 等运行态才能启动。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. <code>org.dromara.common.core.constant.HttpStatus</code> 和 <code>org.springframework.http.HttpStatus</code> 是什么关系？</p>
+<span class="opt">A. 前者继承后者</span>
+<span class="opt">B. 完全独立的两套体系——前者是 int 接口常量，后者是 Spring 的 enum</span>
+<span class="opt">C. 前者是后者的包装类</span>
+<span class="opt">D. 它们是同一个类</span>
+<details><summary>看答案</summary><b>B</b>。core 模块的 HttpStatus 是自建的 interface + int 常量集合，不依赖 Spring Web。这是为了保持 core 模块的轻量性，且可以自由扩展自定义状态码（如 WARN=601）。</details>
+</div>
+
+<div class="cite">&#x1F4D6; 推荐一手资料：<code>org.dromara.common.core.constant.GlobalConstants</code> — 通读全部 Redis Key 前缀定义；<code>org.dromara.common.core.constant.CacheNames</code> — 看各种缓存策略编码的实际写法；<code>org.dromara.common.core.enums.BusinessStatusEnum</code> — 重点读 checkStartStatus() 等状态机方法的判断逻辑。</div>
+
+<div class="reminder">&#x1F4A1; 有疑问？直接问我。比如：「GlobalConstants 的 GLOBAL_REDIS_KEY 前缀和租户隔离机制如何协作？」「如果我要新增一个流程状态，需要改 BusinessStatusEnum 的哪些地方？」下一课我们进入<strong>工具类与校验注解</strong>——SpringUtils、ServletUtils、MessageUtils、MapstructUtils，以及 @DictPattern/@EnumPattern/@Xss 三个自定义校验注解。</div>
+
+<div class="nav"><a href="01-响应体与异常体系.html">上一课：01-响应体与异常体系</a> · 课程 02 · 常量枚举与设计模式 → <a href="03-工具类与校验注解.html">下一课：03-工具类与校验注解</a></div>
+
+</body>
+</html>

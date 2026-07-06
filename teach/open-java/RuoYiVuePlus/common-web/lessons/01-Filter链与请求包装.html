@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 | Filter 链与请求包装</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>01 | Filter 链与请求包装：RepeatableFilter → XssFilter 的顺序设计</h1>
+
+<div class="mission">
+<strong>课程目标：</strong>掌握 ruoyi-common-web 模块中 Filter 链的设计理念，理解 RepeatableFilter 先行缓存请求体、XssFilter 后行清洗的安全架构，以及 PlusWebInvokeTimeInterceptor 如何利用可重复读取的请求体实现完整的请求耗时统计。
+</div>
+
+<h2>1. 全景鸟瞰：ruoyi-common-web 的 5 大能力域</h2>
+
+<p>ruoyi-common-web 是若依框架的 Web 层基础设施模块，仅 17 个 Java 类，却支撑了整个系统的 HTTP 请求处理管道。它提供 5 大能力域：</p>
+
+<table>
+<tr><th>能力域</th><th>核心类</th><th>职责</th></tr>
+<tr><td>Filter 链</td><td>RepeatableFilter, XssFilter</td><td>请求体缓存 + XSS 防护</td></tr>
+<tr><td>请求统计</td><td>PlusWebInvokeTimeInterceptor</td><td>接口耗时监控与日志</td></tr>
+<tr><td>异常处理</td><td>GlobalExceptionHandler</td><td>16 种异常的全局捕获与友好响应</td></tr>
+<tr><td>响应增强</td><td>ResponseEnhancementAdvice</td><td>统一响应格式、日期格式化、脱敏</td></tr>
+<tr><td>工具能力</td><td>WaveAndCircleCaptcha, I18nLocaleResolver</td><td>验证码生成、国际化支持</td></tr>
+</table>
+
+<p>整个 HTTP 请求的完整处理管道如下：</p>
+
+<pre>
+Client Request
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  RepeatableFilter                       │  ← 第 1 关：缓存请求体
+│  (Content-Type: application/json →      │     包装为 RepeatedlyRequestWrapper
+│   读取 body 存入 byte[] 缓存)            │     后续可多次读取
+└─────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  XssFilter                              │  ← 第 2 关：XSS 清洗
+│  (GET/DELETE 跳过, excludeUrls 跳过,    │     HtmlUtil.cleanHtmlTag()
+│   其余请求包装为 XssHttpServletRequestWrapper)│  清理 HTML 标签
+└─────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  PlusWebInvokeTimeInterceptor           │  ← 第 3 关：耗时统计
+│  (preHandle: StopWatch 启动, 记请求信息   │    再次读取 body 用于日志
+│   afterCompletion: 输出耗时)             │    敏感字段自动脱敏
+└─────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  Controller                             │  ← 业务处理
+└─────────────────────────────────────────┘
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  ResponseEnhancementAdvice /            │  ← 响应后处理
+│  GlobalExceptionHandler                  │     正常：增强响应
+│                                          │     异常：全局捕获
+└─────────────────────────────────────────┘
+</pre>
+
+<div class="insight">
+<strong>核心设计思想：</strong>整个管道遵循"缓存 → 清洗 → 统计 → 处理 → 增强"的线性流程。其中 RepeatableFilter 必须排在最前面——这是整个架构正确性的前提：必须在任何消费请求体的逻辑之前，先将请求体缓存起来。
+</div>
+
+<h2>2. Filter 链的顺序设计：为什么 RepeatableFilter 必须在 XssFilter 之前</h2>
+
+<h3>2.1 顺序的决定机制</h3>
+
+<p>在 Filter 链中，顺序由注册方式决定：</p>
+
+<ul>
+  <li><strong>RepeatableFilter</strong>：通过 <code>FilterConfig</code> 配置类中 <code>FilterRegistrationBean</code> 注册，未显式设置 order，默认按注册顺序。</li>
+  <li><strong>XssFilter</strong>：通过 <code>@FilterRegistration(order = HIGHEST_PRECEDENCE + 1)</code> 注解注册，order 值为 <code>Integer.MIN_VALUE + 1</code>，在 Filter 链中优先级极高。</li>
+</ul>
+
+<blockquote>
+<p>虽然 XssFilter 的 order 值更小（数值越小越先执行），但 <strong>RepeatableFilter 在 FilterConfig 中先于 XssFilter 注册到 FilterRegistrationBean</strong>，在 Spring Boot 的 Filter 注册机制中，同类型的 Filter 按注册顺序执行。实际运行中，RepeatableFilter 确实在 XssFilter 之前执行。这是靠配置类中的注册顺序保证的，而非依赖 order 数值。</p>
+</blockquote>
+
+<h3>2.2 顺序不可颠倒的根本原因</h3>
+
+<p>考虑一个 JSON 请求体：<code>{"name": "&lt;script&gt;alert('xss')&lt;/script&gt;", "age": 25}</code></p>
+
+<p><strong>正确的顺序（RepeatableFilter 在前）：</strong></p>
+
+<pre>
+Step 1: RepeatableFilter 读原始 body → 缓存 byte[]{123, 34, 110, ...} (原始数据)
+Step 2: XssFilter 读缓存 → 清洗 → "{\"name\":\"alert('xss')\",\"age\":25}"
+Step 3: Interceptor 可再次读缓存 → 用于日志记录（拿到原始数据或清洗后数据均可）
+</pre>
+
+<p><strong>如果顺序颠倒（XssFilter 在前）：</strong></p>
+
+<pre>
+Step 1: XssFilter 读原始 body → 清洗 → 原始数据被消费，无法找回
+Step 2: RepeatableFilter 尝试读 → 但流已被消费 → 得到空 body 或不完整数据
+Step 3: Interceptor 读取失败 → 日志中 body 为空
+       Controller 也可能读取失败 → 业务异常！
+</pre>
+
+<div class="insight">
+<strong>设计原则：</strong>缓存必须在清洗之前。"先拍照，再修图"——先保存原始副本，再对副本进行加工。一旦清洗操作执行了，原始内容就不可逆地丢失了。对于日志审计和问题排查来说，有时需要看到原始请求内容（即使包含 XSS 攻击代码），这有助于安全分析和攻击溯源。
+</div>
+
+<h2>3. RepeatableFilter 与 RepeatedlyRequestWrapper：请求体的"时光机"</h2>
+
+<h3>3.1 RepeatableFilter 的过滤逻辑</h3>
+
+<p>RepeatableFilter 的 <code>doFilter</code> 方法极其简洁：</p>
+
+<pre>
+public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) {
+    ServletRequest requestWrapper = null;
+    if (request instanceof HttpServletRequest httpServletRequest) {
+        String contentType = httpServletRequest.getContentType();
+        // 仅对 JSON 请求 (application/json) 进行包装
+        if (StringUtils.startsWithIgnoreCase(contentType, "application/json")) {
+            requestWrapper = new RepeatedlyRequestWrapper(httpServletRequest, response);
+        }
+    }
+    if (requestWrapper == null) {
+        requestWrapper = request;
+    }
+    chain.doFilter(requestWrapper, response);
+}
+</pre>
+
+<p>关键设计点：</p>
+<ul>
+  <li><strong>精准匹配：</strong>仅对 Content-Type 为 <code>application/json</code> 的请求进行包装。multipart/form-data 文件上传、application/x-www-form-urlencoded 表单提交不受影响。</li>
+  <li><strong>静默降级：</strong>非 JSON 请求直接放行原 request，零开销。</li>
+  <li><strong>无侵入：</strong>对下游 Filter 和 Controller 完全透明——它们拿到的都是 HttpServletRequest 实例，不知道底层已被包装。</li>
+</ul>
+
+<h3>3.2 RepeatedlyRequestWrapper 的缓存机制</h3>
+
+<p>这是整个可重复读取能力的核心：</p>
+
+<pre>
+public class RepeatedlyRequestWrapper extends HttpServletRequestWrapper {
+    private final byte[] body;              // 请求体缓存
+
+    public RepeatedlyRequestWrapper(HttpServletRequest request, ServletResponse response) {
+        super(request);
+        // 设置请求和响应字符集为 UTF-8
+        request.setCharacterEncoding("UTF-8");
+        response.setCharacterEncoding("UTF-8");
+
+        // 一次性读取请求体到 byte[] 缓存
+        body = IoUtil.readBytes(request.getInputStream(), false);
+    }
+
+    @Override
+    public ServletInputStream getInputStream() {
+        // 每次调用都从缓存的 byte[] 创建新的 ByteArrayInputStream
+        final ByteArrayInputStream bais = new ByteArrayInputStream(body);
+        return new ServletInputStream() {
+            @Override
+            public int read() { return bais.read(); }
+            @Override
+            public boolean isFinished() { return bais.available() == 0; }
+            @Override
+            public boolean isReady() { return true; }
+            @Override
+            public void setReadListener(ReadListener listener) {}
+        };
+    }
+}
+</pre>
+
+<p><strong>工作原理：</strong></p>
+<ol>
+  <li><strong>构造时读取：</strong>在构造函数中调用 <code>IoUtil.readBytes(request.getInputStream(), false)</code>，一次性将原始请求体的所有字节读入 <code>byte[] body</code>。参数 <code>false</code> 表示不关闭流。</li>
+  <li><strong>按需创建：</strong>每次调用 <code>getInputStream()</code> 时，从 <code>body</code> 新建一个 <code>ByteArrayInputStream</code>，封装为 <code>ServletInputStream</code> 返回。每次都是全新的流，从头开始读。</li>
+  <li><strong>UTF-8 兜底：</strong>同时设置 request 和 response 的字符编码为 UTF-8，避免中文乱码。</li>
+</ol>
+
+<div class="insight">
+<strong>为什么 PlusWebInvokeTimeInterceptor 需要这个能力？</strong>Interceptor 的 preHandle 方法中需要记录请求体内容用于日志。如果没有 RepeatedlyRequestWrapper，Controller 读取完 body 后流就关闭了，Interceptor 无法再次读取。有了缓存，Interceptor 和 Controller 各读各的流，互不干扰。
+</div>
+
+<h2>4. XssFilter 三层防护体系</h2>
+
+<p>XSS 防护采用了分层的纵深防御架构，每一层各司其职：</p>
+
+<h3>4.1 第一层：Filter 层 —— 路由决策</h3>
+
+<p><code>XssFilter</code> 作为 XSS 防护的入口，负责"谁需要被清洗"的决策：</p>
+
+<pre>
+@ConditionalOnProperty(value = "xss.enabled", havingValue = "true")
+public class XssFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) {
+        HttpServletRequest req = (HttpServletRequest) request;
+
+        // ① GET/DELETE 请求不包含请求体，直接跳过
+        if (HttpMethod.GET.name().equals(method) || HttpMethod.DELETE.name().equals(method)) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // ② 在排除列表中的 URL 跳过
+        String uri = req.getRequestURI();
+        if (StringUtils.containsAnyIgnoreCase(uri, xssProperties.getExcludeUrls())) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // ③ 其余请求进行 XSS 清洗
+        chain.doFilter(new XssHttpServletRequestWrapper(req), response);
+    }
+}
+</pre>
+
+<p>三个决策点：</p>
+<ul>
+  <li><strong>GET/DELETE 跳过：</strong>这两个 HTTP 方法没有请求体，参数在 URL 中（由 Web 容器自行处理），不需要 body 级别的清洗。</li>
+  <li><strong>excludeUrls 跳过：</strong>某些接口可能故意接收 HTML 内容（如富文本编辑器），通过配置排除。</li>
+  <li><strong>开关控制：</strong><code>@ConditionalOnProperty(value = "xss.enabled")</code> 实现零成本禁用——配置 <code>xss.enabled=false</code> 即可关闭整个 Filter，类不会被加载。</li>
+</ul>
+
+<h3>4.2 第二层：Wrapper 层 —— 实际清洗</h3>
+
+<p><code>XssHttpServletRequestWrapper</code> 是真正执行清洗的地方，它覆盖了所有获取参数和请求体的方法：</p>
+
+<pre>
+public class XssHttpServletRequestWrapper extends HttpServletRequestWrapper {
+
+    @Override
+    public String getParameter(String name) {
+        return HtmlUtil.cleanHtmlTag(super.getParameter(name)).trim();
+    }
+
+    @Override
+    public String[] getParameterValues(String name) {
+        String[] values = super.getParameterValues(name);
+        if (values != null) {
+            for (int i = 0; i < values.length; i++) {
+                values[i] = HtmlUtil.cleanHtmlTag(values[i]).trim();
+            }
+        }
+        return values;
+    }
+
+    @Override
+    public Map&lt;String, String[]&gt; getParameterMap() {
+        Map&lt;String, String[]&gt; map = super.getParameterMap();
+        map.forEach((k, v) -> {
+            for (int i = 0; i < v.length; i++) {
+                v[i] = HtmlUtil.cleanHtmlTag(v[i]).trim();
+            }
+        });
+        return map;
+    }
+
+    @Override
+    public ServletInputStream getInputStream() {
+        // 对 JSON 请求体整体清洗
+        String body = new String(IoUtil.readBytes(in, false));
+        body = HtmlUtil.cleanHtmlTag(body).trim();
+        // 返回清洗后的流
+    }
+}
+</pre>
+
+<p><strong>全覆盖清洗：</strong>无论上层代码通过 <code>getParameter()</code>、<code>getParameterValues()</code>、<code>getParameterMap()</code> 还是 <code>getInputStream()</code> 获取数据，都会经过 <code>HtmlUtil.cleanHtmlTag()</code> 清洗。没有遗漏的入口。</p>
+
+<p><strong>清洗逻辑：</strong><code>HtmlUtil.cleanHtmlTag()</code> 使用正则表达式移除 HTML 标签。例如 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> → <code>alert(1)</code>。注意它不是 HTML 转义，而是直接剥离标签——攻击代码被移除，留下纯文本内容。</p>
+
+<h3>4.3 第三层：Config 层 —— 配置驱动</h3>
+
+<p><code>XssProperties</code> 提供配置入口：</p>
+
+<pre>
+@ConfigurationProperties(prefix = "xss")
+public class XssProperties {
+    private boolean enabled;          // 主开关：xss.enabled
+    private String excludeUrls;       // 排除路径：xss.excludeUrls
+}
+</pre>
+
+<p>application.yml 配置示例：</p>
+
+<pre>
+xss:
+  enabled: true
+  excludeUrls: /system/notice,/system/richText/preview
+</pre>
+
+<table>
+<tr><th>配置项</th><th>作用</th><th>默认值</th></tr>
+<tr><td><code>xss.enabled</code></td><td>总开关，false 时 Filter 不加载</td><td>true</td></tr>
+<tr><td><code>xss.excludeUrls</code></td><td>逗号分隔的 URL 列表，匹配则跳过清洗</td><td>空</td></tr>
+</table>
+
+<div class="insight">
+<strong>三层协同：</strong>Config 层决定"要不要防"（总开关），Filter 层决定"哪些要防"（路由决策），Wrapper 层决定"怎么防"（清洗实现）。三层职责分明，任何一层的改动不影响其他层。例如想替换清洗算法，只需修改 Wrapper 层即可。
+</div>
+
+<h2>5. PlusWebInvokeTimeInterceptor：请求耗时统计</h2>
+
+<h3>5.1 StopWatch 计时机制</h3>
+
+<p><code>PlusWebInvokeTimeInterceptor</code> 实现了 <code>HandlerInterceptor</code> 接口，通过 Spring MVC 的拦截器机制嵌入请求处理流程：</p>
+
+<pre>
+public class PlusWebInvokeTimeInterceptor implements HandlerInterceptor {
+
+    // ThreadLocal 保证线程安全
+    private static final ThreadLocal&lt;StopWatch&gt; STOP_WATCH_THREAD_LOCAL = new ThreadLocal&lt;&gt;();
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response,
+                             Object handler) {
+        StopWatch stopWatch = new StopWatch();
+        STOP_WATCH_THREAD_LOCAL.set(stopWatch);
+        stopWatch.start();
+
+        // 记录请求信息用于日志
+        String url = request.getRequestURI();
+        String params = maskSensitiveFields(request.getParameterMap());
+        // 从 RepeatedlyRequestWrapper 再次读 body
+        String body = getRequestBody(request);
+
+        log.info("请求开始 - URL: {}, 参数: {}, Body: {}", url, params, body);
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response,
+                                Object handler, Exception ex) {
+        StopWatch stopWatch = STOP_WATCH_THREAD_LOCAL.get();
+        stopWatch.stop();
+
+        log.info("请求完成 - 耗时: {}ms, URL: {}",
+                 stopWatch.getTotalTimeMillis(), request.getRequestURI());
+
+        STOP_WATCH_THREAD_LOCAL.remove();  // 防止内存泄漏
+    }
+}
+</pre>
+
+<h3>5.2 关键设计细节</h3>
+
+<table>
+<tr><th>设计点</th><th>实现方式</th><th>原因</th></tr>
+<tr><td>线程安全</td><td>ThreadLocal&lt;StopWatch&gt;</td><td>每个请求一个 StopWatch 实例，互不干扰</td></tr>
+<tr><td>内存泄漏防护</td><td>afterCompletion 中 remove()</td><td>线程池复用场景下，不清除会导致脏数据和内存占用</td></tr>
+<tr><td>请求体读取</td><td>依赖 RepeatedlyRequestWrapper</td><td>body 已在 Filter 层缓存，Interceptor 可安全读取</td></tr>
+<tr><td>敏感字段脱敏</td><td>password、phone 等字段写入日志前替换为 ***</td><td>防止密码、手机号等敏感信息泄露到日志文件</td></tr>
+<tr><td>精确计时</td><td>StopWatch 从 preHandle 到 afterCompletion</td><td>包含 Controller 执行 + 视图渲染 + 拦截器后处理的全链路耗时</td></tr>
+</table>
+
+<div class="insight">
+<strong>为什么不用 Filter 做耗时统计？</strong>Filter 虽然也能计时，但它覆盖的范围太广——所有请求（包括静态资源、404 页面）都会经过 Filter。Interceptor 只拦截进入 Spring MVC 的请求（匹配 HandlerMapping 的请求），统计更精准，噪声更少。此外，Interceptor 可以通过 <code>handler</code> 参数获取具体的 Controller 方法信息，日志更有价值。
+</div>
+
+<h2>本章总结</h2>
+
+<table>
+<tr><th>组件</th><th>核心职责</th><th>关键机制</th></tr>
+<tr><td>RepeatableFilter</td><td>JSON 请求体缓存</td><td>仅包装 application/json 请求，byte[] 缓存实现多次读取</td></tr>
+<tr><td>RepeatedlyRequestWrapper</td><td>可重复读的 Request 包装</td><td>构造时缓存 body，每次 getInputStream() 创建新流</td></tr>
+<tr><td>XssFilter</td><td>XSS 防护路由</td><td>GET/DELETE 跳过，excludeUrls 检查，@ConditionalOnProperty 开关</td></tr>
+<tr><td>XssHttpServletRequestWrapper</td><td>XSS 清洗执行</td><td>覆盖所有参数/body 获取方法，HtmlUtil.cleanHtmlTag() 去标签</td></tr>
+<tr><td>XssProperties</td><td>配置驱动</td><td>enabled 总开关 + excludeUrls 排除列表</td></tr>
+<tr><td>PlusWebInvokeTimeInterceptor</td><td>请求耗时统计</td><td>ThreadLocal + StopWatch，敏感字段脱敏</td></tr>
+</table>
+
+<div class="quiz">
+<details>
+<summary>📝 课后小测（点击展开）</summary>
+
+<p><strong>问题 1：</strong>如果 XssFilter 在 RepeatableFilter 之前执行，可能会导致什么问题？请描述至少两种后果。</p>
+
+<p><strong>问题 2：</strong>PlusWebInvokeTimeInterceptor 为什么能安全地从请求中读取 body 用于日志记录？如果没有 RepeatableFilter 会怎样？</p>
+
+<p><strong>问题 3：</strong><code>@ConditionalOnProperty(value = "xss.enabled")</code> 的作用是什么？设置为 false 后会有什么效果？</p>
+
+<p><strong>问题 4：</strong>为什么 XssFilter 要跳过 GET 和 DELETE 请求？这是否意味着这两种请求不存在 XSS 风险？</p>
+
+</details>
+</div>
+
+<div class="cite">
+<strong>参考源码：</strong>RepeatableFilter.java, RepeatedlyRequestWrapper.java, XssFilter.java, XssHttpServletRequestWrapper.java, XssProperties.java, PlusWebInvokeTimeInterceptor.java, FilterConfig.java
+</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav">
+<span>&larr; 目录</span>
+<span><a href="02-全局异常处理与响应增强.html">02 | 全局异常处理与响应增强 &rarr;</a></span>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 全局异常处理与响应增强</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 全局异常处理与响应增强</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code></p>
+
+<h2>GlobalExceptionHandler：16 种异常四大类</h2>
+
+<h3>业务异常（4种）</h3>
+<table>
+<tr><th>异常</th><th>响应</th><th>特殊点</th></tr>
+<tr><td><code>ServiceException</code></td><td>R.fail(code, msg) 或 R.fail(msg)</td><td>携带业务错误码</td></tr>
+<tr><td><code>BaseException</code></td><td>R.fail(e.getMessage())</td><td>-</td></tr>
+<tr><td><code>ServletException</code></td><td>R.fail("发生未知异常")</td><td>-</td></tr>
+<tr><td><code>SseException</code></td><td><b>@ResponseStatus 401</b><br>返回 String (手动 JSON 序列化)</td><td>SSE 不能用 @ResponseBody 自动序列化</td></tr>
+</table>
+
+<h3>参数校验（4种）</h3>
+<table>
+<tr><th>异常</th><th>校验来源</th></tr>
+<tr><td><code>BindException</code></td><td>@Valid 绑定失败</td></tr>
+<tr><td><code>MethodArgumentNotValidException</code></td><td>@Validated 在 Controller 参数</td></tr>
+<tr><td><code>ConstraintViolationException</code></td><td>@Validated 在 Service 方法</td></tr>
+<tr><td><code>HandlerMethodValidationException</code></td><td>Spring 6.1+ 新校验机制</td></tr>
+</table>
+
+<h3>请求格式错误（5种）</h3>
+<table>
+<tr><th>异常</th><th>响应</th></tr>
+<tr><td><code>HttpRequestMethodNotSupported</code></td><td>R.fail(405)</td></tr>
+<tr><td><code>MissingPathVariable</code></td><td>R.fail("缺少路径变量[xxx]")</td></tr>
+<tr><td><code>MethodArgumentTypeMismatch</code></td><td>R.fail("参数[xxx]要求类型'yyy'，但输入'zzz'")</td></tr>
+<tr><td><code>NoHandlerFound</code></td><td>R.fail(404)</td></tr>
+<tr><td><code>JsonParse</code> / <code>HttpMsgNotReadable</code></td><td>R.fail(400)</td></tr>
+</table>
+
+<h3>兜底未知异常（4种）</h3>
+<table>
+<tr><th>异常</th><th>处理</th></tr>
+<tr><td><code>IOException</code></td><td><b>@ResponseStatus 500</b> + void: SSE 路径静默，其他记日志</td></tr>
+<tr><td><code>AsyncRequestTimeout</code></td><td>空方法体——SSE 超时是正常行为</td></tr>
+<tr><td><code>RuntimeException</code></td><td>8 位错误编号 + R.fail</td></tr>
+<tr><td><code>Exception</code></td><td>8 位错误编号 + R.fail</td></tr>
+</table>
+
+<h2>核心原则：内外有别</h2>
+<div class="chain">内部: log.error("请求地址'{}',异常信息, 错误编号: {}", uri, errorId, e)
+           ↑ 完整堆栈         ↑ 错误编号
+外部: R.fail("发生系统异常，请联系管理员 [错误编号: " + errorId + "]")
+           ↑ 友好提示 不暴露技术细节</div>
+
+<h2>ResponseEnhancementAdvice</h2>
+<div class="chain">supports(returnType, converterType)
+  → jsonValueEnhancer.supports(converterType) ? 继续 : 跳过
+
+beforeBodyWrite(body, ..., contentType, ...)
+  → contentType 兼容 JSON? → jsonValueEnhancer.enhance(body)
+  → 否则 → return body (文件下载等不增强)</div>
+
+<h2>BaseController 三个方法</h2>
+<table>
+<tr><th>方法</th><th>代码</th></tr>
+<tr><td><code>toAjax(int rows)</code></td><td><code>rows > 0 ? R.ok() : R.fail()</code></td></tr>
+<tr><td><code>toAjax(boolean result)</code></td><td><code>result ? R.ok() : R.fail()</code></td></tr>
+<tr><td><code>redirect(String url)</code></td><td><code>StringUtils.format("redirect:{}", url)</code></td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>内外有别</b>：log.error(详情+堆栈) + R.fail(友好提示+错误编号)，绝不暴露技术细节给客户端</li>
+<li><b>SseException 返回 String</b>：SSE 不能依赖 @ResponseBody 自动序列化</li>
+<li><b>IOException 区分 SSE</b>：SSE 路径静默（断线正常），其他记日志</li>
+<li><b>AsyncRequestTimeoutException 空处理</b>：SSE 超时是预期行为</li>
+<li><b>4 种校验异常</b>：Bind / MethodArgumentNotValid / ConstraintViolation / HandlerMethodValidation —— 全部用 StreamUtils.join 合并错误消息</li>
+<li><b>ResponseEnhancementAdvice</b> 是路由层：web 模块管"何时增强"，json 模块管"如何增强"</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：GlobalExceptionHandler、ResponseEnhancementAdvice、BaseController</p>
+</body>
+</html>

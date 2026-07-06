@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>11 深度解析 — SQL拼接、SpEL引擎、BeanResolver、computeIfAbsent、登录全链路</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+  ol li, ul li { margin-bottom: 0.4rem; }
+</style>
+</head>
+<body>
+
+<h1>11 深度解析 — SQL拼接、SpEL引擎、BeanResolver、登录全链路</h1>
+
+<blockquote><strong>本节目标：</strong>你能逐行解释 <code>buildDataFilter</code> 的 SQL 拼接实例、说清 BeanResolver 的解析机制、理解 SpEL 的原理和解析器链、讲出 <code>@sdss</code> 的本质、掌握 <code>computeIfAbsent</code> 的语义、并能绘制完整的登录到 LoginUser 构建的全方法调用链。</blockquote>
+
+<!-- ==================== Q1 ==================== -->
+<h2>一、SQL 拼接实例：<code>dept_id IN (103,104,105) OR create_by = 1</code> 是怎么来的？</h2>
+
+<h3>场景设定</h3>
+
+<p>假设当前登录用户 <strong>张三</strong>，userId=1，所属部门 deptId=103。张三有两个角色：</p>
+
+<table>
+<tr><th>角色</th><th>dataScope</th><th>对应的 DataScopeType</th><th>SpEL 模板</th></tr>
+<tr>
+  <td>部门经理 (roleId=10)</td>
+  <td>4</td>
+  <td>DEPT_AND_CHILD</td>
+  <td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )</code></td>
+</tr>
+<tr>
+  <td>普通用户 (roleId=20)</td>
+  <td>5</td>
+  <td>SELF</td>
+  <td><code>#{#userName} = #{#user.userId}</code></td>
+</tr>
+</table>
+
+<p>Mapper 方法的注解假设为：</p>
+
+<pre><code>@DataPermission({
+    @DataColumn(key = "deptName", value = "dept_id"),
+    @DataColumn(key = "userName", value = "create_by")
+})</code></pre>
+
+<p>当前为 <strong>SELECT</strong> 操作。</p>
+
+<h3>逐步骤追踪</h3>
+
+<p><strong>步骤1 — 确定 joinStr（Handler:109-112）：</strong></p>
+
+<pre><code>String joinStr = isSelect ? " OR " : " AND ";  // isSelect=true → joinStr = " OR "</code></pre>
+
+<p><strong>步骤2 — 注册列名变量（Handler:128-138）：</strong></p>
+
+<pre><code>context.setVariable("deptName", "dept_id");   // #deptName = "dept_id"
+context.setVariable("userName", "create_by");  // #userName = "create_by"</code></pre>
+
+<p><strong>步骤3 — 注入用户变量：</strong></p>
+
+<pre><code>context.setVariable("user", loginUser);  // #user = 张三的 LoginUser 对象
+// loginUser.userId = 1, loginUser.deptId = 103</code></pre>
+
+<p><strong>步骤4 — 遍历角色，渲染模板：</strong></p>
+
+<p><em>角色1：部门经理 (dataScope=4 → DEPT_AND_CHILD)</em></p>
+
+<pre><code>// 模板： #{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )
+//
+// SpEL 求值过程：
+// ① #deptName      → context.lookupVariable("deptName")  → 返回 "dept_id"
+// ② #user.deptId   → context.lookupVariable("user")
+//                   → NullSafePropertyAccessor.read(context, loginUser, "deptId")
+//                   → 返回 103
+// ③ @sdss          → beanResolver.resolve(context, "sdss")
+//                   → beanFactory.getBean("sdss")
+//                   → 返回 SysDataScopeServiceImpl 实例
+// ④ .getDeptAndChild(103)
+//                   → deptMapper.selectDeptAndChildById(103)
+//                   → 查询部门树，返回 [103, 104, 105]
+//                   → StreamUtils.join → "103,104,105"
+//
+// 最终渲染结果：
+// "dept_id IN ( 103,104,105 )"</code></pre>
+
+<p>加入 conditions 集合：</p>
+
+<pre><code>conditions.add(" OR " + "dept_id IN ( 103,104,105 )");
+// → conditions = {" OR dept_id IN ( 103,104,105 )"}</code></pre>
+
+<p><em>角色2：普通用户 (dataScope=5 → SELF)</em></p>
+
+<pre><code>// 模板： #{#userName} = #{#user.userId}
+//
+// SpEL 求值过程：
+// ① #userName      → context.lookupVariable("userName") → 返回 "create_by"
+// ② #user.userId   → NullSafePropertyAccessor.read(context, loginUser, "userId")
+//                   → 返回 1
+//
+// 最终渲染结果：
+// "create_by = 1"</code></pre>
+
+<p>加入 conditions 集合：</p>
+
+<pre><code>conditions.add(" OR " + "create_by = 1");
+// → conditions = {" OR dept_id IN ( 103,104,105 )", " OR create_by = 1"}</code></pre>
+
+<p><strong>步骤5 — 组装最终 SQL（Handler:175-178）：</strong></p>
+
+<pre><code>// StreamUtils.join 将集合拼接为一个字符串
+String sql = StreamUtils.join(conditions, Function.identity(), "");
+// sql = " OR dept_id IN ( 103,104,105 ) OR create_by = 1"
+
+// substring 去掉开头的 " OR "（5个字符）
+return sql.substring(joinStr.length());
+// 返回: "dept_id IN ( 103,104,105 ) OR create_by = 1"</code></pre>
+
+<div class="tip"><strong>为什么用 Set 而非 List 存 conditions？</strong>防止同一个角色+同一个 DataColumn 组合被重复添加。如果两个角色用了完全相同的模板和数据，Set 自动去重。</div>
+
+<div class="warn"><strong>为什么是 OR 不是 AND？</strong>SELECT 场景下，只要<strong>任一</strong>角色的数据权限条件满足，该行数据就可见。这是"权限累加"模型——多角色看到的数据是各角色权限的<strong>并集</strong>。如果改为 AND，意味着某行数据必须同时属于部门 103 <strong>且</strong>由 userId=1 创建——几乎不可能有数据满足。</div>
+
+<!-- ==================== Q2 ==================== -->
+<h2>二、逐行详解 Handler:113-117 + BeanResolver 深度剖析</h2>
+
+<h3>每一行到底在做什么</h3>
+
+<pre><code>// Handler.java:113
+Object defaultValue = "-1";</code></pre>
+
+<p>定义一个<strong>安全兜底值</strong>。当 SpEL 变量或属性为 <code>null</code> 时，返回 <code>"-1"</code> 而不是 <code>null</code>。为什么是 <code>"-1"</code>？因为：</p>
+<ul>
+  <li><code>dept_id IN (-1)</code>：语法正确，不报错，且不匹配任何真实数据（部门ID从1开始）</li>
+  <li><code>dept_id IN (null)</code>：SQL 语法错误</li>
+  <li><code>dept_id IN ()</code>：SQL 语法错误（空 IN 列表）</li>
+</ul>
+
+<pre><code>// Handler.java:114
+NullSafeStandardEvaluationContext context =
+    new NullSafeStandardEvaluationContext(defaultValue);</code></pre>
+
+<p>创建<strong>自定义 SpEL 上下文</strong>。看它的实现（Handler:336-358）：</p>
+
+<pre><code>private static class NullSafeStandardEvaluationContext extends StandardEvaluationContext {
+    private final Object defaultValue;
+
+    @Override
+    public Object lookupVariable(String name) {
+        Object obj = super.lookupVariable(name);
+        if (obj == null) {
+            return defaultValue;  // 变量为 null → 返回 "-1"
+        }
+        return obj;
+    }
+}</code></pre>
+
+<p><strong>作用：</strong>当 SpEL 表达式引用 <code>#someVar</code> 但这个变量在上下文中不存在或值为 null 时，返回 <code>"-1"</code> 而非抛异常或返回 null。</p>
+
+<pre><code>// Handler.java:115
+context.addPropertyAccessor(
+    new NullSafePropertyAccessor(
+        context.getPropertyAccessors().getFirst(), defaultValue));</code></pre>
+
+<p>注册<strong>自定义属性访问器</strong>。看实现（Handler:365-447）：</p>
+
+<pre><code>private static class NullSafePropertyAccessor implements PropertyAccessor {
+    private final PropertyAccessor delegate;  // 原始的 PropertyAccessor
+    private final Object defaultValue;        // 兜底值 "-1"
+
+    @Override
+    public TypedValue read(EvaluationContext context, Object target, String name)
+            throws AccessException {
+        TypedValue value = delegate.read(context, target, name);
+        if (value.getValue() == null) {
+            return new TypedValue(defaultValue);  // 属性为 null → 返回 "-1"
+        }
+        return value;
+    }
+    // canRead/canWrite/write 全部委托给 delegate
+}</code></pre>
+
+<p><strong>装饰器模式（Decorator Pattern）：</strong><code>NullSafePropertyAccessor</code> 包装了 SpEL 默认的 <code>ReflectivePropertyAccessor</code>。当 SpEL 访问对象属性（如 <code>#user.deptId</code>）时，先由原始访问器读取属性值，如果读到 null，返回 <code>"-1"</code>。</p>
+
+<p><strong>两层 NullSafe 防护对比：</strong></p>
+
+<table>
+<tr><th>层次</th><th>覆盖场景</th><th>示例</th></tr>
+<tr>
+  <td>NullSafeStandardEvaluationContext.lookupVariable()</td>
+  <td>变量本身不存在或为 null</td>
+  <td><code>#unknownVar</code> → "-1"</td>
+</tr>
+<tr>
+  <td>NullSafePropertyAccessor.read()</td>
+  <td>变量存在，但其属性为 null</td>
+  <td><code>#user.deptId</code> 但 user.getDeptId()==null → "-1"</td>
+</tr>
+</table>
+
+<pre><code>// Handler.java:116
+context.setBeanResolver(beanResolver);</code></pre>
+
+<p>注入 <strong>Bean 解析器</strong>。这里的 <code>beanResolver</code> 在 Handler:63 初始化：</p>
+
+<pre><code>private final BeanResolver beanResolver =
+    new BeanFactoryResolver(SpringUtils.getBeanFactory());</code></pre>
+
+<p><strong>BeanResolver 是什么？</strong></p>
+
+<p><code>BeanResolver</code> 是 Spring SpEL 的一个接口：</p>
+
+<pre><code>// org.springframework.expression.BeanResolver
+public interface BeanResolver {
+    BeanInstance resolve(EvaluationContext context, String beanName);
+}</code></pre>
+
+<p><code>BeanFactoryResolver</code> 是 Spring 提供的唯一实现：</p>
+
+<pre><code>// org.springframework.context.expression.BeanFactoryResolver
+public class BeanFactoryResolver implements BeanResolver {
+    private final BeanFactory beanFactory;
+
+    public BeanFactoryResolver(BeanFactory beanFactory) {
+        this.beanFactory = beanFactory;
+    }
+
+    @Override
+    public BeanInstance resolve(EvaluationContext context, String beanName) {
+        return new BeanInstance(beanFactory.getBean(beanName));
+    }
+}</code></pre>
+
+<p><strong>解析流程：</strong>当 SpEL 解析器遇到 <code>@beanName</code> 语法时：</p>
+<ol>
+  <li>SpEL 识别 <code>@</code> 前缀 → 这是一个 Bean 引用</li>
+  <li>调用 <code>context.getBeanResolver().resolve(context, "beanName")</code></li>
+  <li><code>BeanFactoryResolver</code> 调用 <code>beanFactory.getBean("beanName")</code></li>
+  <li>从 Spring 容器获取该名称的 Bean 实例</li>
+  <li>返回 <code>BeanInstance</code> 包装对象</li>
+  <li>SpEL 继续解析后面的方法调用 <code>.methodName(args)</code></li>
+</ol>
+
+<pre><code>// Handler.java:117
+DataPermissionHelper.getContext().forEach(context::setVariable);</code></pre>
+
+<p>将 <code>DataPermissionHelper</code> 中通过 <code>setVariable()</code> 存入的<strong>自定义扩展变量</strong>注入 SpEL 上下文。这些变量来自 <code>DataPermissionHelper</code> 内部的 ThreadLocal 存储（本质是 Sa-Token 的 Storage）。这样业务代码可以通过 <code>DataPermissionHelper.setVariable("myKey", myValue)</code> 向数据权限模板注入自定义变量。</p>
+
+<h3>完整的 SpEL 求值链路（以 @sdss 为例）</h3>
+
+<pre><code>表达式: #{@sdss.getDeptAndChild(#user.deptId)}
+
+1. TemplateParserContext 提取 #{ 和 } 之间的内容
+   → "@sdss.getDeptAndChild(#user.deptId)"
+
+2. SpelExpressionParser 解析为 AST（抽象语法树）
+   → MethodReference(BeanReference("sdss"), "getDeptAndChild", [VariableReference("user.deptId")])
+
+3. Expression.getValue(context) 递归求值:
+   3a. BeanReference("sdss")
+       → context.getBeanResolver().resolve(context, "sdss")
+       → BeanFactoryResolver.resolve("sdss")
+       → beanFactory.getBean("sdss")
+       → 返回 SysDataScopeServiceImpl@1234
+
+   3b. VariableReference("user.deptId")
+       → context.lookupVariable("user")
+       → NullSafePropertyAccessor.read(context, loginUser, "deptId")
+       → 返回 103
+
+   3c. MethodReference.getDeptAndChild(103)
+       → 反射调用 SysDataScopeServiceImpl.getDeptAndChild(103)
+       → deptMapper.selectDeptAndChildById(103)
+       → 返回 "103,104,105"
+
+4. 字符串拼接："" + "103,104,105" → "103,104,105"
+   返回给 TemplateParserContext 做最终字符串拼接</code></pre>
+
+<!-- ==================== Q3 ==================== -->
+<h2>三、SpEL 深度解析 — 是什么、怎么理解、什么原理</h2>
+
+<h3>SpEL 是什么？</h3>
+
+<p><strong>Spring Expression Language (SpEL)</strong> 是 Spring 框架内置的表达式语言，类似于 JSP 的 EL、JSF 的表达式语言，但功能更强大。它可以在运行时查询和操作对象图。</p>
+
+<h3>核心组件</h3>
+
+<table>
+<tr><th>组件</th><th>接口/类</th><th>职责</th></tr>
+<tr>
+  <td>表达式解析器</td>
+  <td><code>ExpressionParser</code> → <code>SpelExpressionParser</code></td>
+  <td>将字符串解析为可执行的 Expression 对象</td>
+</tr>
+<tr>
+  <td>表达式</td>
+  <td><code>Expression</code> → <code>SpelExpression</code></td>
+  <td>已编译的表达式，可反复求值</td>
+</tr>
+<tr>
+  <td>求值上下文</td>
+  <td><code>EvaluationContext</code> → <code>StandardEvaluationContext</code></td>
+  <td>提供变量、函数、类型转换器、Bean 解析器</td>
+</tr>
+<tr>
+  <td>模板上下文</td>
+  <td><code>ParserContext</code> → <code>TemplateParserContext</code></td>
+  <td>定义模板边界符号（默认 <code>#{</code> 和 <code>}</code>）</td>
+</tr>
+<tr>
+  <td>属性访问器</td>
+  <td><code>PropertyAccessor</code> → <code>ReflectivePropertyAccessor</code></td>
+  <td>读写 Java 对象的属性（通过 getter/setter 或直接字段访问）</td>
+</tr>
+<tr>
+  <td>Bean 解析器</td>
+  <td><code>BeanResolver</code> → <code>BeanFactoryResolver</code></td>
+  <td>将 <code>@beanName</code> 解析为 Spring 容器中的 Bean</td>
+</tr>
+</table>
+
+<h3>SpEL 语法全貌</h3>
+
+<pre><code>// 1. 字面量
+"hello"           // 字符串
+123               // 数字
+true              // 布尔
+
+// 2. 变量引用（#变量名）
+#user             // 从 EvaluationContext 中查找变量 "user"
+#user.deptId      // 访问属性（通过 PropertyAccessor）
+#user.getName()   // 调用方法
+
+// 3. Bean 引用（@bean名）
+@sdss             // 通过 BeanResolver 从 Spring 容器获取 Bean
+@sdss.getRoleCustom(#roleId)  // 调用 Bean 的方法
+
+// 4. 运算符
+#a + #b           // 算术
+#a > #b           // 比较
+#a and #b         // 逻辑
+#a ?: 'default'   // Elvis 运算符（null 时取默认值）
+
+// 5. 集合
+{1, 2, 3}         // 列表
+{a: 1, b: 2}      // Map
+
+// 6. 模板字符串（TemplateParserContext）
+"hello #{#name}"  // #{...} 内是表达式，外是字面量</code></pre>
+
+<h3>SpEL 解析原理（源码级）</h3>
+
+<p>以数据权限的模板 <code>" #{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )"</code> 为例：</p>
+
+<pre><code>// 步骤1: 词法分析（Lexer/Tokenizer）
+// 输入字符串被切分为 token 序列
+Tokens: " ", "#{", "#deptName", "}", " IN ( ", "#{", "@sdss", ".", "getDeptAndChild",
+        "(", "#user", ".", "deptId", ")", " ", "}", " )"
+
+// 步骤2: 模板解析（TemplateParserContext）
+// TemplateParserContext 识别 #{ ... } 边界
+// 将 #{ } 内部的内容提取为表达式，外部的为字面量
+[literal: " "]
+[expression: "#deptName"]
+[literal: " IN ( "]
+[expression: "@sdss.getDeptAndChild( #user.deptId )"]
+[literal: " )"]
+
+// 步骤3: 表达式解析（SpelExpressionParser）
+// 每个表达式字符串被解析为 AST
+Expression 1: VariableReference("deptName")
+Expression 2: MethodReference(
+    BeanReference("sdss"),
+    "getDeptAndChild",
+    [PropertyOrFieldReference(VariableReference("user"), "deptId")]
+)
+
+// 步骤4: 求值（Expression.getValue(context)）
+// 遍历 AST 节点，递归求值
+// - VariableReference    → context.lookupVariable()
+// - BeanReference        → context.getBeanResolver().resolve()
+// - PropertyOrFieldRef   → context.getPropertyAccessors().read()
+// - MethodReference      → 反射 invoke()
+
+// 步骤5: 结果拼接
+// 将所有表达式求值结果插回字面量位置
+" " + "dept_id" + " IN ( " + "103,104,105" + " )"
+→ " dept_id IN ( 103,104,105 )"</code></pre>
+
+<h3>Handler 中的解析器初始化</h3>
+
+<pre><code>// Handler:53
+private final ExpressionParser parser = new SpelExpressionParser();
+
+// Handler:57-58
+// 定义模板格式 —— #{ 开头、} 结尾
+private final ParserContext parserContext = new TemplateParserContext();
+
+// 使用:
+parser.parseExpression(type.getSqlTemplate(), parserContext)
+      .getValue(context, String.class);
+//     ↑                    ↑
+//     编译为 Expression     在指定上下文中求值，结果转为 String</code></pre>
+
+<p><strong>为什么用 TemplateParserContext？</strong>模板中既有字面量（<code>IN (</code>、<code>=</code>）又有表达式（<code>#deptName</code>、<code>@sdss.xxx</code>）。不用模板上下文的话，整个字符串都会被当作一个表达式来解析，字面量会导致解析失败。</p>
+
+<div class="tip"><strong>有无 TemplateParserContext 的区别：</strong><br>
+<em>有：</em><code>"hello #{#name}"</code> → 字面量 "hello " + SpEL 求值 #name → "hello world"<br>
+<em>无：</em><code>"hello #{#name}"</code> → 整个作为 SpEL 表达式解析 → 语法错误（"hello " 不是合法 SpEL）</div>
+
+<!-- ==================== Q4 ==================== -->
+<h2>四、<code>@sdss</code> 到底是什么？</h2>
+
+<h3>本质：Spring Bean 的名称引用</h3>
+
+<p><code>@sdss</code> 中的 <strong><code>sdss</code></strong> 是 Spring 容器中一个 Bean 的<strong>名称</strong>。对应的 Bean 定义：</p>
+
+<pre><code>// SysDataScopeServiceImpl.java:28
+@Service("sdss")                          // ← Bean 名称就是 "sdss"
+public class SysDataScopeServiceImpl implements ISysDataScopeService {
+    ...
+}</code></pre>
+
+<p><strong>解析链路：</strong></p>
+
+<pre><code>SpEL 模板: "#{@sdss.getRoleCustom(#roleId)}"
+
+1. SpEL 解析器看到 @sdss
+   → 这是一个 Bean 引用，beanName = "sdss"
+
+2. 调用 BeanResolver.resolve(context, "sdss")
+   → BeanFactoryResolver.resolve("sdss")
+   → beanFactory.getBean("sdss")
+
+3. Spring 容器查找名为 "sdss" 的 Bean
+   → 找到 @Service("sdss") 标注的 SysDataScopeServiceImpl
+
+4. 返回 Bean 实例 → SpEL 继续调用 .getRoleCustom(roleId)
+   → 反射: Method.invoke(beanInstance, roleId)
+   → 执行业务逻辑</code></pre>
+
+<h3>sdss 提供的两个方法</h3>
+
+<p><strong>方法1：<code>getRoleCustom(Long roleId)</code></strong>（SysDataScopeServiceImpl:41-52）</p>
+
+<pre><code>@Cacheable(cacheNames = CacheNames.SYS_ROLE_CUSTOM, key = "#roleId")
+public String getRoleCustom(Long roleId) {
+    if (ObjectUtil.isNull(roleId)) {
+        return "-1";
+    }
+    List&lt;SysRoleDept&gt; list = roleDeptMapper.lambda()
+        .select(SysRoleDept::getDeptId)
+        .eq(SysRoleDept::getRoleId, roleId)
+        .list();
+    if (CollUtil.isNotEmpty(list)) {
+        return StreamUtils.join(list, rd -> Convert.toStr(rd.getDeptId()));
+    }
+    return "-1";
+}</code></pre>
+
+<p>查询 <code>sys_role_dept</code> 表，获取角色自定义授权的部门 ID 列表。结果如 <code>"101,102,103"</code>。有 Redis 缓存。未配置或 roleId 为 null 返回 <code>"-1"</code>。</p>
+
+<p><strong>方法2：<code>getDeptAndChild(Long deptId)</code></strong>（SysDataScopeServiceImpl:60-71）</p>
+
+<pre><code>@Cacheable(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, key = "#deptId")
+public String getDeptAndChild(Long deptId) {
+    if (ObjectUtil.isNull(deptId)) {
+        return "-1";
+    }
+    List&lt;Long&gt; deptIds = deptMapper.selectDeptAndChildById(deptId);
+    return CollUtil.isNotEmpty(deptIds) ?
+        StreamUtils.join(deptIds, Convert::toStr) : "-1";
+}</code></pre>
+
+<p>查询部门树，返回当前部门及其所有子部门的 ID 串。如 deptId=103，子部门有 104、105，返回 <code>"103,104,105"</code>。有 Redis 缓存。同样 null-safe 返回 <code>"-1"</code>。</p>
+
+<h3>为什么方法名是 @sdss 而不是 @sysDataScopeService？</h3>
+
+<p>这是 Spring 的 Bean 命名：<code>@Service("sdss")</code> 显式指定了 Bean 名称为 <code>"sdss"</code>。这样做的好处：</p>
+<ul>
+  <li>SpEL 模板中的引用<strong>简短</strong>：<code>@sdss</code> vs <code>@sysDataScopeServiceImpl</code></li>
+  <li><strong>解耦</strong>：模板不依赖具体的类名，只依赖 Bean 名称</li>
+  <li><strong>可替换</strong>：换一个实现了相同接口的 Bean 并注册为 "sdss"，模板无需改动</li>
+</ul>
+
+<!-- ==================== Q5 ==================== -->
+<h2>五、<code>computeIfAbsent</code> 语法详解</h2>
+
+<h3>语法</h3>
+
+<pre><code>dataScopeRoleMap.computeIfAbsent(perm, k -> new ArrayList&lt;&gt;()).add(role.getRoleId());</code></pre>
+
+<h3>拆解</h3>
+
+<p>这行代码分三部分理解：</p>
+
+<table>
+<tr><th>部分</th><th>代码</th><th>含义</th></tr>
+<tr>
+  <td>Map 方法</td>
+  <td><code>dataScopeRoleMap.computeIfAbsent(perm, ...)</code></td>
+  <td>如果 key=perm 不存在，用 lambda 计算一个 value 放入 Map；<strong>总是返回该 key 关联的 value</strong>（原有或新创建的）</td>
+</tr>
+<tr>
+  <td>Lambda 工厂</td>
+  <td><code>k -> new ArrayList&lt;&gt;()</code></td>
+  <td>当 key 不存在时，创建一个空的 ArrayList 作为初始 value</td>
+</tr>
+<tr>
+  <td>链式调用</td>
+  <td><code>.add(role.getRoleId())</code></td>
+  <td>在返回的 List 上添加当前角色 ID</td>
+</tr>
+</table>
+
+<h3>等价传统写法</h3>
+
+<pre><code>// computeIfAbsent 一行代码
+dataScopeRoleMap.computeIfAbsent(perm, k -> new ArrayList&lt;&gt;()).add(role.getRoleId());
+
+// 等价传统写法（5行）
+List&lt;Long&gt; roleIdList = dataScopeRoleMap.get(perm);
+if (roleIdList == null) {
+    roleIdList = new ArrayList&lt;&gt;();
+    dataScopeRoleMap.put(perm, roleIdList);
+}
+roleIdList.add(role.getRoleId());</code></pre>
+
+<h3>完整业务上下文</h3>
+
+<p>这段代码出自 <code>SysPermissionServiceImpl.getDataScopeRoleMap()</code>（PermissionServiceImpl:67-77）：</p>
+
+<pre><code>public Map&lt;String, List&lt;Long&gt;&gt; getDataScopeRoleMap(List&lt;RoleDTO&gt; roles) {
+    List&lt;Long&gt; roleIds = StreamUtils.toList(roles, RoleDTO::getRoleId);
+    // DB 查询：返回 Map&lt;roleId, Set&lt;权限码&gt;&gt;
+    // 例: {101: ["system:user:list", "system:user:query"], 102: ["system:user:list"]}
+    Map&lt;Long, Set&lt;String&gt;&gt; permsRoleIds =
+        menuService.selectMenuPermsByRoleIds(roleIds);
+
+    Map&lt;String, List&lt;Long&gt;&gt; rolePermsMap = new LinkedHashMap&lt;&gt;();
+    // 反转 Map：从 "角色→权限列表" 变成 "权限→角色列表"
+    permsRoleIds.forEach((roleId, perms) ->
+        perms.forEach(perm ->
+            rolePermsMap.computeIfAbsent(perm, key -> new ArrayList&lt;&gt;())
+                        .add(roleId)
+        )
+    );
+    return rolePermsMap;
+}</code></pre>
+
+<h3>数据转换示意</h3>
+
+<pre><code>// 输入 (从DB查出):
+permsRoleIds = {
+    101 (roleId): ["system:user:list", "system:user:query"],
+    102 (roleId): ["system:user:list"]
+}
+
+// 输出 (computeIfAbsent 构建):
+dataScopeRoleMap = {
+    "system:user:list":  [101, 102],   // 两个角色都有此权限
+    "system:user:query": [101]         // 只有角色101有此权限
+}</code></pre>
+
+<p><strong>业务意义：</strong>当用户访问 <code>/system/user/list</code> 接口（权限码 <code>system:user:list</code>），Handler 的 <code>scopeRoles()</code> 方法用这个 Map 反查出只有角色 101 和 102 参与数据权限计算，而不是用户的全部角色。这就是<a href="0006.html">第6课</a>讲的"接口约束"机制。</p>
+
+<div class="tip"><strong>computeIfAbsent vs putIfAbsent：</strong><br>
+<code>putIfAbsent(key, value)</code>：key 不存在时放入 value，返回旧值（可能 null）<br>
+<code>computeIfAbsent(key, function)</code>：key 不存在时才执行 function 生成 value，<strong>总是返回该 key 关联的 value</strong>（永不为 null）。适合链式调用。</div>
+
+<!-- ==================== Q6 ==================== -->
+<h2>六、登录全链路 — 用户登入的完整方法调用与 LoginUser 数据构成</h2>
+
+<h3>完整调用链（从上到下）</h3>
+
+<pre><code>┌─────────────────────────────────────────────────────────────────┐
+│ 1. HTTP POST /auth/login                                        │
+│    AuthController.login(@RequestBody String body)                │
+│    ├─ JsonUtils.parseObject(body, LoginBody.class)              │
+│    ├─ clientService.queryByClientId(clientId)                   │
+│    └─ IAuthStrategy.login(body, client, grantType)              │
+├─────────────────────────────────────────────────────────────────┤
+│ 2. IAuthStrategy.login() 静态方法                                │
+│    ├─ SpringUtils.getBean(grantType + "AuthStrategy")           │
+│    │  → "passwordAuthStrategy" → PasswordAuthStrategy           │
+│    └─ instance.login(body, client)                              │
+├─────────────────────────────────────────────────────────────────┤
+│ 3. PasswordAuthStrategy.login()                                  │
+│    ├─ JsonUtils.parseObject(body, PasswordLoginBody.class)      │
+│    ├─ validateCaptcha(username, code, uuid)  // 验证码校验      │
+│    ├─ loadUserByUsername(username)            // ★ 步骤A        │
+│    │   └─ userMapper.lambda()                                   │
+│    │       .eq(SysUser::getUserName, username).voOne()          │
+│    ├─ loginService.checkLogin(LoginType.PASSWORD,               │
+│    │       username, () -> !BCrypt.checkpw(...))                 │
+│    │   └─ Redis 错误次数校验 + 锁定逻辑                         │
+│    ├─ loginService.buildLoginUser(user)       // ★ 步骤B        │
+│    ├─ loginUser.setClientKey / setDeviceType                    │
+│    ├─ LoginHelper.login(loginUser, model)     // ★ 步骤C        │
+│    └─ 构建 LoginVo 返回 (accessToken, expireIn, clientId)      │
+├─────────────────────────────────────────────────────────────────┤
+│ 4. UserLoginSuccessListener.handleLoginSuccess() [异步事件]     │
+│    └─ 记录在线用户信息、登录日志、更新最近登录IP和时间          │
+└─────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3>★ 步骤B 详解：buildLoginUser — LoginUser 的构建</h3>
+
+<p>这是最核心的一步（<code>SysLoginService.java:126-147</code>）：</p>
+
+<pre><code>public LoginUser buildLoginUser(SysUserVo user) {
+    LoginUser loginUser = new LoginUser();
+    Long userId = user.getUserId();
+
+    // === 第一组：基础身份信息（同步设置）===
+    loginUser.setUserId(userId);              // 用户ID
+    loginUser.setDeptId(user.getDeptId());    // 部门ID
+    loginUser.setUsername(user.getUserName());// 用户名
+    loginUser.setNickname(user.getNickName());// 昵称
+    loginUser.setUserType(user.getUserType());// 用户类型 (sys_user / app_user)
+
+    // 部门名称和类别（通过 deptService 查询）
+    if (ObjectUtil.isNotNull(user.getDeptId())) {
+        Opt&lt;SysDeptVo&gt; deptOpt = Opt.of(user.getDeptId())
+            .map(deptService::selectDeptById);
+        loginUser.setDeptName(deptOpt.map(SysDeptVo::getDeptName).orElse(""));
+        loginUser.setDeptCategory(deptOpt.map(SysDeptVo::getDeptCategory).orElse(""));
+    }
+
+    // === 第二组：权限与角色（4个虚拟线程并行加载）===
+    ThreadUtils.virtualInvokeAll(
+        () -> {
+            // 任务1：获取菜单权限码集合
+            loginUser.setMenuPermission(
+                permissionService.getMenuPermission(userId));
+        },
+        () -> {
+            // 任务2：获取角色标识集合
+            loginUser.setRolePermission(
+                permissionService.getRolePermission(userId));
+        },
+        () -> {
+            // 任务3：获取角色列表 + 数据权限角色映射
+            List&lt;SysRoleVo&gt; roles = roleService.selectRolesByUserId(userId);
+            List&lt;RoleDTO&gt; roleDtos = BeanUtil.copyToList(roles, RoleDTO.class);
+            loginUser.setRoles(roleDtos);
+            loginUser.setDataScopeRoleMap(
+                permissionService.getDataScopeRoleMap(roleDtos));
+        },
+        () -> {
+            // 任务4：获取岗位列表
+            List&lt;SysPostVo&gt; posts = postService.selectPostsByUserId(userId);
+            loginUser.setPosts(BeanUtil.copyToList(posts, PostDTO.class));
+        }
+    );
+    return loginUser;
+}</code></pre>
+
+<p><strong>并行加载示意：</strong></p>
+
+<pre><code>ThreadUtils.virtualInvokeAll
+ ├─ 虚拟线程1: menuPermission    = getMenuPermission(userId)
+ │              ├─ 超管 → {"*:*:*"}
+ │              └─ 普通用户 → DB查询菜单权限码 → {"system:user:list", "system:user:add", ...}
+ │
+ ├─ 虚拟线程2: rolePermission    = getRolePermission(userId)
+ │              ├─ 超管 → {"super_admin"}
+ │              └─ 普通用户 → DB查询角色标识 → {"admin", "common"}
+ │
+ ├─ 虚拟线程3: roles             = selectRolesByUserId(userId)
+ │              └─ DB查询 sys_user_role JOIN sys_role
+ │                 → [RoleDTO(roleId=101, dataScope="4", ...), RoleDTO(roleId=102, dataScope="5", ...)]
+ │              dataScopeRoleMap = getDataScopeRoleMap(roles)
+ │              └─ selectMenuPermsByRoleIds([101, 102])
+ │                 → 反转 Map → {"system:user:list": [101,102], ...}
+ │
+ └─ 虚拟线程4: posts             = selectPostsByUserId(userId)
+                └─ DB查询 sys_user_post JOIN sys_post
+                   → [PostDTO(postId=1, postName="CEO"), ...]</code></pre>
+
+<h3>★ 步骤C 详解：LoginHelper.login — Token 生成与会话存储</h3>
+
+<pre><code>// LoginHelper.java:54-65
+public static void login(LoginUser loginUser, SaLoginParameter model) {
+    // 1. 补充请求上下文信息（IP、浏览器、操作系统）
+    fillRequestContext(loginUser, model);
+
+    // 2. 调用 Sa-Token 登录
+    StpUtil.login(
+        loginUser.getLoginId(),              // "sys_user:1"
+        model
+            .setExtra(USER_KEY, loginUser.getUserId())        // userId
+            .setExtra(USER_NAME_KEY, loginUser.getUsername()) // userName
+            .setExtra(DEPT_KEY, loginUser.getDeptId())        // deptId
+            .setExtra(DEPT_NAME_KEY, loginUser.getDeptName()) // deptName
+            .setExtra(DEPT_CATEGORY_KEY, loginUser.getDeptCategory()) // deptCategory
+    );
+
+    // 3. 将完整的 LoginUser 对象存入 Token 专属 Session
+    StpUtil.getTokenSession().set(LOGIN_USER_KEY, loginUser);
+    //      ↑ Sa-Token 按 token 隔离的 Session → 存入 Redis
+}</code></pre>
+
+<h3>LoginUser 最终数据结构全景</h3>
+
+<table>
+<tr><th>分类</th><th>字段</th><th>类型</th><th>来源</th><th>示例值</th></tr>
+
+<tr><td rowspan="5">身份标识</td>
+<td>userId</td><td>Long</td><td>sys_user.user_id</td><td>1</td></tr>
+<tr><td>username</td><td>String</td><td>sys_user.user_name</td><td>"admin"</td></tr>
+<tr><td>nickname</td><td>String</td><td>sys_user.nick_name</td><td>"管理员"</td></tr>
+<tr><td>userType</td><td>String</td><td>sys_user.user_type</td><td>"sys_user"</td></tr>
+<tr><td>getLoginId()</td><td>String</td><td>userType + ":" + userId</td><td>"sys_user:1"</td></tr>
+
+<tr><td rowspan="3">部门信息</td>
+<td>deptId</td><td>Long</td><td>sys_user.dept_id</td><td>103</td></tr>
+<tr><td>deptName</td><td>String</td><td>sys_dept.dept_name</td><td>"研发部"</td></tr>
+<tr><td>deptCategory</td><td>String</td><td>sys_dept.dept_category</td><td>"DEPT"</td></tr>
+
+<tr><td rowspan="3">权限</td>
+<td>menuPermission</td><td>Set&lt;String&gt;</td><td>sys_role_menu JOIN sys_menu</td><td>{"system:user:list", "system:role:add", ...}</td></tr>
+<tr><td>rolePermission</td><td>Set&lt;String&gt;</td><td>sys_user_role JOIN sys_role</td><td>{"admin", "common"}</td></tr>
+<tr><td>dataScopeRoleMap</td><td>Map&lt;String, List&lt;Long&gt;&gt;</td><td>反转 roleId→perms</td><td>{"system:user:list": [101,102], ...}</td></tr>
+
+<tr><td rowspan="2">角色与岗位</td>
+<td>roles</td><td>List&lt;RoleDTO&gt;</td><td>sys_user_role JOIN sys_role</td><td>[{roleId:101, dataScope:"4"}, ...]</td></tr>
+<tr><td>posts</td><td>List&lt;PostDTO&gt;</td><td>sys_user_post JOIN sys_post</td><td>[{postId:1, postName:"CEO"}]</td></tr>
+
+<tr><td rowspan="5">会话与设备</td>
+<td>token</td><td>String</td><td>Sa-Token 生成</td><td>"a1b2c3d4..."</td></tr>
+<tr><td>loginTime</td><td>Long</td><td>Sa-Token 记录</td><td>1720000000000</td></tr>
+<tr><td>expireTime</td><td>Long</td><td>客户端配置</td><td>1720086400000</td></tr>
+<tr><td>ipaddr</td><td>String</td><td>request.getRemoteAddr()</td><td>"192.168.1.100"</td></tr>
+<tr><td>loginLocation</td><td>String</td><td>IP 地址库查询</td><td>"北京市"</td></tr>
+
+<tr><td rowspan="3">客户端</td>
+<td>browser</td><td>String</td><td>User-Agent 解析</td><td>"Chrome"</td></tr>
+<tr><td>os</td><td>String</td><td>User-Agent 解析</td><td>"Mac OS X"</td></tr>
+<tr><td>deviceType</td><td>String</td><td>客户端配置</td><td>"pc"</td></tr>
+
+<tr><td rowspan="2">其他</td>
+<td>clientKey</td><td>String</td><td>客户端配置</td><td>"ecommerce"</td></tr>
+<tr><td>roleId</td><td>Long</td><td>业务设置（可选）</td><td>当前操作角色ID</td></tr>
+</table>
+
+<h3>数据权限视角：哪些字段参与 SQL 过滤？</h3>
+
+<p>当后续请求触发数据权限过滤时，Handler 从 LoginUser 中使用以下字段：</p>
+
+<pre><code>// Handler.currentUser() → 从 LoginUser 提取
+#user.userId        → loginUser.getUserId()        → 用于 SELF 模板
+#user.deptId        → loginUser.getDeptId()        → 用于 DEPT / DEPT_AND_CHILD 模板
+
+// Handler.buildDataFilter() → 遍历角色
+#roleId             → role.getRoleId()              → 用于 CUSTOM 模板
+role.getDataScope() → DataScopeType.findCode(...)   → 选择模板
+
+// Handler.scopeRoles() → 接口约束筛选
+user.getRoles()              → 用户的全部角色
+user.getDataScopeRoleMap()   → 权限码→角色ID 的反查映射
+access.perms()               → 当前接口所需的权限码</code></pre>
+
+<div class="tip"><strong>关键理解：</strong>LoginUser 的 <code>dataScopeRoleMap</code> 不直接参与 SQL 生成，而是用于 <code>scopeRoles()</code> 方法从用户的所有角色中<strong>筛选出当前接口真正需要的角色子集</strong>。这一步避免了"用户在接口A拥有角色B(全部数据)的权限"的越权问题。</div>
+
+<h2>七、总结：六个问题的关联</h2>
+
+<pre><code>   登录流程                         数据权限运行时
+   ────────                         ──────────────
+   LoginUser                        PlusDataPermissionHandler
+   ├─ userId, deptId ───────────→   #user.userId, #user.deptId
+   ├─ roles (List&lt;RoleDTO&gt;) ────→   遍历角色，取 dataScope
+   ├─ dataScopeRoleMap ─────────→   scopeRoles() 接口约束
+   │   (computeIfAbsent 构建)       (查找当前接口关联的角色)
+   │        ↑
+   │   SysPermissionServiceImpl
+   │   .getDataScopeRoleMap()
+   │
+   └─ menuPermission, rolePermission (用于 Sa-Token 鉴权，非数据权限)
+
+   SpEL 引擎（贯穿始终）
+   ├─ ExpressionParser       →  解析模板字符串
+   ├─ EvaluationContext      →  持有 #变量 和 @bean 的解析器
+   ├─ BeanResolver           →  @sdss → SysDataScopeServiceImpl
+   ├─ NullSafeStandardEvaluationContext → 变量为null → "-1"
+   ├─ NullSafePropertyAccessor          → 属性为null → "-1"
+   └─ TemplateParserContext  →  处理 #{ } 模板边界
+
+   SQL 拼接（最终产物）
+   ├─ joinStr = " OR " (SELECT) / " AND " (UPDATE/DELETE)
+   ├─ 每个角色渲染模板 → conditions 集合
+   └─ join + substring → "dept_id IN (103,104,105) OR create_by = 1"</code></pre>
+
+<div class="cite">📖 推荐一手资料：<br>
+源码 <code>PlusDataPermissionHandler.java:107-179</code> — buildDataFilter 完整实现（对照本课第1-2问）<br>
+源码 <code>DataScopeType.java:26-56</code> — 六种模板与兜底 SQL（对照本课第4问）<br>
+源码 <code>SysLoginService.java:126-147</code> — buildLoginUser 的并行加载（对照本课第6问）<br>
+源码 <code>SysPermissionServiceImpl.java:67-77</code> — getDataScopeRoleMap 的 computeIfAbsent（对照本课第5问）<br>
+Spring 官方：<a href="https://docs.spring.io/spring-framework/reference/core/expressions.html">Spring Expression Language (SpEL)</a>（对照本课第3问）</div>
+
+<div class="reminder">💡 试试问我："如果我要在自定义 DataScopeType 模板中使用一个新的 Spring Bean（比如 @myService），需要改哪些地方？","如果用户有三个角色，两个 DEPT_AND_CHILD 不同部门，一个 SELF，最终 SQL 会是什么样子？","NullSafePropertyAccessor 的委托模式有什么优点？为什么不直接在原类上修改？"</div>
+
+</body>
+</html>

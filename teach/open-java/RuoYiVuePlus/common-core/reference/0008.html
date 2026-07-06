@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 08 · 实战整合 — 使用模式与扩展指南</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 08 · 实战整合 — 使用模式与扩展指南</h1>
+<p class="a">配套课程：<code>lessons/0008.html</code> · core 模块使用模式与扩展指南</p>
+
+<h2>一句话定位</h2>
+<div class="chain">前 7 课学完了所有零件，本课把它们<b>拼回去</b>：一个 CRUD 接口如何串联 core 的 11+ 个类；以及添加新工具类、新枚举、新异常、新校验注解的<b>标准步骤清单</b>。</div>
+
+<h2>CRUD 链路中 core 的参与</h2>
+<div class="chain">POST /system/user/add:
+  ① @Validated(AddGroup.class)  → @Xss/@DictPattern/@EnumPattern (第4课)
+                                   ValidatorConfig.failFast (第6课)
+  ② ServiceException("用户{}已存在", name)           → 异常体系 (第1课)
+  ③ MapstructUtils.convert(user, SysUserVo.class)    → 对象转换 (第2课)
+  ④ dictService.getDictLabel(type, val)              → 字典接口 (第4课)
+  ⑤ DateUtils.formatFriendlyTime(time)               → 友好时间 (第2课)
+  ⑥ StringUtils.toCamelCase(col)                     → 命名转换 (第2课)
+  ⑦ StreamUtils.groupByKey(list, keyFn)              → 列表分组 (第2课)
+  ⑧ return R.ok(vo)                                  → 统一响应 (第1课)
+  ⑨ @Log → @EnableAsync → ThreadPoolConfig           → 异步日志 (第6课)
+  ⑩ AddressUtils.getRealAddressByIP(ip)              → IP归属地 (第7课)</div>
+
+<h2>扩展指南一：添加工具类</h2>
+<table>
+<tr><th>步骤</th><th>操作</th><th>检查点</th></tr>
+<tr><td>1</td><td>创建 <code>utils/XxxUtils.java</code></td><td>放在 core 模块 utils 包下</td></tr>
+<tr><td>2</td><td>@NoArgsConstructor(access=PRIVATE)</td><td>私有构造，防实例化</td></tr>
+<tr><td>3</td><td>所有方法 public static</td><td>纯工具类，不持有状态</td></tr>
+<tr><td>4</td><td>有 Hutool 同名类则 extends</td><td>继承优先，扩展其次</td></tr>
+<tr><td>5</td><td>加 @Slf4j，异常用 ServiceException</td><td>统一日志和异常风格</td></tr>
+<tr><td>6</td><td>不 import 业务实体类</td><td>保持 core 的纯技术性</td></tr>
+</table>
+
+<h2>扩展指南二：添加枚举</h2>
+<div class="chain">模板A (90%): 双字段 code+desc
+  @Getter @AllArgsConstructor
+  enum XxxEnum { A("0","描述1"), B("1","描述2"); }
+
+模板B: 反向查找
+  public static XxxEnum getByCode(String code) {
+      for (XxxEnum e : values()) if(e.getCode().equals(code)) return e;
+      throw new ServiceException("无效值: {}", code);
+  }
+
+模板C: 状态机 (参考 BusinessStatusEnum)
+  仅在状态流转需校验时使用，含 checkXxxStatus() + runningStatus() 等方法</div>
+
+<h2>扩展指南三：添加异常</h2>
+<div class="chain">90% 场景 → 直接用 ServiceException:
+  throw new ServiceException("消息{}", arg);
+  throw new ServiceException("消息", errorCode);
+
+10% 场景 → extends BaseException (需 i18n + 按类型捕获):
+  class PayException extends BaseException {
+      public PayException(String code, Object... args) { super("pay", code, args); }
+  }
+  然后在 i18n 文件中配: pay.xxx=支付异常: {0}
+
+不需要给每种错误建异常类！ServiceException + message 已覆盖绝大多数场景。</div>
+
+<h2>扩展指南四：添加校验注解</h2>
+<div class="chain">5 步创建 @Phone 注解:
+
+Step1: Phone.java — @Constraint(validatedBy={PhoneValidator.class})
+       包含 message(), groups(), payload() 三个标准属性
+
+Step2: PhoneValidator.java — implements ConstraintValidator&lt;Phone, String&gt;
+       isValid() 中: if (blank) return true;  (空值放行约定!)
+
+Step3: DTO 使用: @Phone(message="手机号格式不正确")
+Step4: Controller: @Validated @RequestBody DTO dto
+Step5: 手动触发: ValidatorUtils.validate(dto)
+
+如需查 Spring Bean → SpringUtils.getBean(Xxx.class)  (桥接模式)</div>
+
+<h2>8 课知识地图总览</h2>
+<table>
+<tr><th>#</th><th>主题</th><th>文件数</th><th>关键类</th></tr>
+<tr><td>01</td><td>核心全景</td><td>~15</td><td>R, PageResult, BaseException, ServiceException</td></tr>
+<tr><td>02</td><td>工具类上篇</td><td>4</td><td>StringUtils, DateUtils, StreamUtils, MapstructUtils</td></tr>
+<tr><td>03</td><td>工具类下篇</td><td>5</td><td>SpringUtils, ServletUtils, MessageUtils, TreeBuildUtils</td></tr>
+<tr><td>04</td><td>自定义校验</td><td>9</td><td>@Xss, @DictPattern, @EnumPattern, AddGroup</td></tr>
+<tr><td>05</td><td>枚举体系</td><td>7</td><td>DeviceType, LoginType, BusinessStatusEnum</td></tr>
+<tr><td>06</td><td>配置线程池</td><td>5</td><td>ThreadPoolConfig, ApplicationConfig, ValidatorConfig</td></tr>
+<tr><td>07</td><td>IP 与区域</td><td>3</td><td>AddressUtils, RegionUtils, NetUtils</td></tr>
+<tr><td>08</td><td>实战整合</td><td>全部65</td><td>(贯穿全部类的协作关系)</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>core 是被依赖方</b> — 永远不依赖业务模块，只定义接口契约（如 DictService）。</li>
+<li><b>工具类三要素</b> — 私有构造 + 纯静态方法 + @Slf4j。</li>
+<li><b>异常选型</b> — ServiceException 覆盖 90%，BaseException 覆盖需 i18n 的 10%。</li>
+<li><b>校验注解约定</b> — 空值放行 + message/groups/payload 三个标准属性。</li>
+<li><b>枚举模板</b> — @Getter + @AllArgsConstructor + private final 字段，90% 用双字段模式。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：全部 18 个核心术语；课程索引见 <code>mission.md</code></p>
+</body>
+</html>

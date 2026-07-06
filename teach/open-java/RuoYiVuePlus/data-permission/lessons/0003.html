@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>03 六种数据范围 — DataScopeType 枚举与 SpEL 模板</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>03 六种数据范围 — DataScopeType 枚举与 SpEL 模板</h1>
+
+<blockquote><strong>本节目标：</strong>你能背出六种数据范围的含义、知道每种最终生成什么样的 SQL 片段、能从 SpEL 模板直接推断出渲染结果。</blockquote>
+
+<h2>枚举全貌</h2>
+
+<p><code>DataScopeType.java:26-56</code> 定义了完整的规则引擎。每个枚举值由三个字段构成：code（前端传的 1-6）、sqlTemplate（SpEL 模板）、elseSql（兜底 SQL）。</p>
+
+<table>
+<tr><th>code</th><th>枚举</th><th>标签</th><th>SpEL 模板</th><th>elseSql</th></tr>
+<tr><td>1</td><td>ALL</td><td>全部数据权限</td><td><code>""</code> 空字符串</td><td><code>""</code></td></tr>
+<tr><td>2</td><td>CUSTOM</td><td>自定数据权限</td><td><code>#{#deptName} IN ( #{@sdss.getRoleCustom( #roleId )} )</code></td><td><code>1 = 0</code></td></tr>
+<tr><td>3</td><td>DEPT</td><td>本部门数据权限</td><td><code>#{#deptName} = #{#user.deptId}</code></td><td><code>1 = 0</code></td></tr>
+<tr><td>4</td><td>DEPT_AND_CHILD</td><td>本部门及以下</td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )</code></td><td><code>1 = 0</code></td></tr>
+<tr><td>5</td><td>SELF</td><td>仅本人数据权限</td><td><code>#{#userName} = #{#user.userId}</code></td><td><code>1 = 0</code></td></tr>
+<tr><td>6</td><td>DEPT_AND_CHILD_OR_SELF</td><td>部门及以下或本人</td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} ) OR #{#userName} = #{#user.userId}</code></td><td><code>1 = 0</code></td></tr>
+</table>
+
+<h2>SpEL 模板语法逐字解析</h2>
+
+<p>模板用 <code>#{...}</code> 作为表达式分隔符（不是 Spring 默认的 <code>#{}</code>，而是 <code>TemplateParserContext</code> 配合 <code>SpelExpressionParser</code> 解析的）。</p>
+
+<p>模板里的三个"变量来源"：</p>
+
+<table>
+<tr><th>写法</th><th>来源</th><th>示例</th><th>渲染结果（假设值）</th></tr>
+<tr><td><code>#deptName</code></td><td>注解 key→value 映射</td><td>注解 key="deptName" value="d.dept_id"</td><td><code>d.dept_id</code>（一个列名字符串）</td></tr>
+<tr><td><code>#userName</code></td><td>同上</td><td>注解 key="userName" value="create_by"</td><td><code>create_by</code></td></tr>
+<tr><td><code>#user.deptId</code></td><td>LoginUser 对象属性</td><td>当前用户 deptId=103</td><td><code>103</code></td></tr>
+<tr><td><code>#user.userId</code></td><td>同上</td><td>当前用户 userId=1</td><td><code>1</code></td></tr>
+<tr><td><code>#roleId</code></td><td>Handler 循环注入</td><td>当前遍历的角色 roleId=100</td><td><code>100</code></td></tr>
+<tr><td><code>@sdss.getRoleCustom(#roleId)</code></td><td>Spring Bean 方法调用</td><td>角色100勾了部门 101,102</td><td><code>101,102</code></td></tr>
+<tr><td><code>@sdss.getDeptAndChild(#user.deptId)</code></td><td>同上</td><td>deptId=103 及其子部门</td><td><code>103,104,105</code></td></tr>
+</table>
+
+<h2>逐一理解每种范围</h2>
+
+<h3>code=1 ALL — 全部数据</h3>
+<p>模板为空字符串。在 Handler 中遇到 ALL 直接 <code>return StringUtils.EMPTY</code>（Handler:148-149），即<strong>不加任何过滤条件</strong>。实际效果等同于超管。</p>
+
+<h3>code=2 CUSTOM — 自定义数据</h3>
+<pre><code>模板: #{#deptName} IN ( #{@sdss.getRoleCustom( #roleId )} )
+渲染: dept_id IN ( 101, 102 )</code></pre>
+<p><code>@sdss.getRoleCustom(roleId)</code> 查 <code>sys_role_dept</code> 表，返回逗号分隔的部门 id 串（<code>SysDataScopeServiceImpl:42-54</code>）。这是唯一需要前端勾选部门树的数据范围。</p>
+
+<h3>code=3 DEPT — 仅本部门</h3>
+<pre><code>模板: #{#deptName} = #{#user.deptId}
+渲染: dept_id = 103</code></pre>
+<p>最简单直接：用等值比较，只看当前用户所属部门的记录。</p>
+
+<h3>code=4 DEPT_AND_CHILD — 本部门及以下</h3>
+<pre><code>模板: #{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )
+渲染: dept_id IN ( 103, 104, 105 )</code></pre>
+<p><code>@sdss.getDeptAndChild(deptId)</code>（<code>SysDataScopeServiceImpl:64-69</code>）通过 <code>deptMapper.selectDeptAndChildById</code> 用 <code>findInSet</code> 递归查出所有子部门 id。</p>
+
+<h3>code=5 SELF — 仅本人</h3>
+<pre><code>模板: #{#userName} = #{#user.userId}
+渲染: create_by = 1</code></pre>
+<p>注意这里用的是 <code>#userName</code>（注解 key="userName" → 列名）和 <code>#user.userId</code>（当前用户 ID）。如果注解没声明 <code>key="userName"</code>，这个条件就不会生成。</p>
+
+<h3>code=6 DEPT_AND_CHILD_OR_SELF — 部门及以下或本人</h3>
+<pre><code>模板: #{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} ) OR #{#userName} = #{#user.userId}
+渲染: dept_id IN ( 103, 104, 105 ) OR create_by = 1</code></pre>
+<p>组合 4+5：能看到自己部门的及其子部门的数据，<strong>或者</strong>自己创建的记录。</p>
+
+<h2>elseSql 的作用：模板匹配失败时的兜底</h2>
+
+<p>当模型的模板里不包含某个注解 key 时，渲染失败。此时 <code>elseSql</code> 生效。ALL 以外所有类型都设了 <code>" 1 = 0 "</code>，即「查不到任何数据」。这是一种安全兜底：宁可少查，不要越权。</p>
+
+<div class="tip"><strong>核心认知：</strong>DataScopeType 是用 SpEL 模板实现的规则引擎。新增数据范围 = 加一个枚举值 + 写一条 SpEL 模板 +（如果需要新数据源）在 <code>@Service("sdss")</code> 里加方法。模板里的变量由 Handler 的 <code>StandardEvaluationContext</code> 注入。</div>
+
+<div class="cite">📖 推荐一手资料：源码 <code>DataScopeType.java:26-56</code> — 六行模板就是全部"业务规则"，直接看源码比任何文档都准确。</div>
+<div class="reminder">💡 试试问"如果我想新增一种数据范围'本部门上级部门及本部门'，需要改哪些代码？"</div>
+
+</body>
+</html>

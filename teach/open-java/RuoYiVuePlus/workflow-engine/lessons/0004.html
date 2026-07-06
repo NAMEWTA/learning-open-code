@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 办理流转：completeTask 驳回终止作废与四种任务操作</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 办理流转：completeTask + 驳回/终止/作废 + 四种任务操作 <span class="tag">核心方法</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：学完你能讲清 completeTask 的 FlowParams 装配与 taskService.skip() 流转机制，区分驳回/终止/作废的状态差异，以及委派/转办/加签/减签四种运行时操作如何统一在 taskOperation 方法里分发。
+</div>
+
+<h2>一、completeTask — 审批通过的核心</h2>
+
+<p><span class="where">FlwTaskServiceImpl.java:207-258</span></p>
+
+<pre><code>public boolean completeTask(CompleteTaskBo completeTaskBo) {
+    Long taskId = completeTaskBo.getTaskId();
+    // 从入参取 消息类型、通知内容、抄送人列表
+    List&lt;String&gt; messageType = completeTaskBo.getMessageType();
+    String notice = completeTaskBo.getNotice();
+    List&lt;FlowCopyBo&gt; flowCopyList = completeTaskBo.getFlowCopyList();
+
+    Map&lt;String, Object&gt; variables = completeTaskBo.getVariables();
+    variables.put(FLOW_COPY_LIST, flowCopyList);   // 抄送人
+    variables.put(MESSAGE_TYPE, messageType);       // 消息类型
+    variables.put(MESSAGE_NOTICE, notice);           // 通知内容
+
+    // 1. 查 task 与 instance，校验存在性
+    FlowTask flowTask = flowTaskMapper.selectById(taskId);
+    Instance ins = insService.getById(flowTask.getInstanceId());
+
+    // 2. 如果是 草稿/已撤销/已退回 → 标记 SUBMIT=true（触发申请人提交事件）
+    if (BusinessStatusEnum.isDraftOrCancelOrBack(ins.getFlowStatus())) {
+        variables.put(SUBMIT, true);
+    }
+
+    // 3. 弹窗选人 → 追加带状态前缀的处理人变量
+    Map&lt;String, Object&gt; assigneeMap = setPopAssigneeMap(completeTaskBo.getAssigneeMap(), insVariableMap);
+    variables.putAll(assigneeMap);
+
+    // 4. 构建 FlowParams
+    FlowParams flowParams = FlowParams.build()
+        .handler(completeTaskBo.getHandler())
+        .variable(variables)
+        .ignore(...)          // ignore/ignoreDepute/ignoreCooperate
+        .skipType(SkipType.PASS.getKey())              // 审批通过
+        .message(completeTaskBo.getMessage())           // 审批意见
+        .flowStatus(BusinessStatusEnum.WAITING.getStatus())  // 实例→待审核
+        .hisStatus(TaskStatusEnum.PASS.getStatus())     // 历史→通过
+        .hisTaskExt(completeTaskBo.getFileId());        // 附件
+
+    // 5. 执行流转
+    Boolean autoPass = Convert.toBool(insVariableMap.getOrDefault(AUTO_PASS, false));
+    skipTask(taskId, flowParams, flowTask.getInstanceId(), autoPass);
+    return true;
+}</code></pre>
+
+<h3>核心：skipTask 递归自动审批 (:269-296)</h3>
+
+<pre><code>private void skipTask(Long taskId, FlowParams flowParams, Long instanceId, Boolean autoPass) {
+    taskService.skip(taskId, flowParams);              // 引擎流转当前节点
+    List&lt;FlowTask&gt; flowTaskList = selectByInstId(instanceId);
+
+    for (FlowTask task : flowTaskList) {
+        if (!task.getId().equals(taskId) && autoPass) {
+            // 查办理人：如果下一个节点也是当前登录用户 → 自动审批
+            List&lt;User&gt; users = StreamUtils.filter(userList, e ->
+                task.getId().equals(e.getAssociated())
+                && LoginHelper.getUserIdStr().equals(e.getProcessedBy()));
+            if (CollUtil.isEmpty(users)) continue;
+
+            flowParams.message("流程引擎自动审批！")
+                .variable(Map.of(SUBMIT, false, FLOW_COPY_LIST, Collections.emptyList(), ...));
+            skipTask(task.getId(), flowParams, instanceId, true);  // ← 递归！
+        }
+    }
+}</code></pre>
+
+<div class="side">
+💡 <b>autoPass 的时机</b>：autoPass 是流程定义扩展属性，在发起时从 definition.getExt() 解析（第3课已讲）。如果开了，同一个人兼任多个审批节点时，第一个审批通过后引擎自动审批后续同人的节点——减少无意义操作。
+</div>
+
+<h3>弹窗选人的变量名约定</h3>
+
+<p>前端审批弹窗里让用户选的「下一步审批人」，后端通过 <code>setPopAssigneeMap</code> (:305-330) 把选中的人追加到变量里，key 为 <code>"pass:nodeCode"</code> 和 <code>"back:nodeCode"</code> 两种前缀。这个变量在 <code>WorkflowGlobalListener.assignment()</code> 里被消费，把指定办理人写入 <code>flowTask.permissionList</code>。pass 前缀的变量只消费一次就删除；back 前缀的保留给后续可能反复驳回。</p>
+
+<h2>二、驳回 backProcess</h2>
+
+<p><span class="where">FlwTaskServiceImpl.java:490-525</span></p>
+
+<p>与 completeTask 类似但关键差异：</p>
+<ul>
+<li><code>SkipType.REJECT</code>（不是 PASS）</li>
+<li><code>flowStatus</code>：如果驳回到申请节点 → <code>BACK</code>；否则保持 <code>WAITING</code></li>
+<li>判驳回的目标节点通过 <code>flwCommonService.applyNodeCode(definitionId)</code> 找到流程定义里的申请节点编码，与 bo.nodeCode 比对决定状态</li>
+</ul>
+
+<p>可驳回节点列表由 <code>getBackTaskNode()</code> (:534-591) 通过 BFS 遍历前置节点得出，优先用节点配置的 <code>anyNodeSkip</code>（固定驳回目标），否则从历史任务中筛出中间节点。</p>
+
+<h2>三、终止与作废</h2>
+
+<table>
+<tr><th>操作</th><th>方法</th><th>行号</th><th>关键差异</th></tr>
+<tr><td>终止</td><td><code>terminationTask</code></td><td>:668-685</td><td><code>taskService.termination()</code>，实例状态→TERMINATION，任务状态→TERMINATION</td></tr>
+<tr><td>作废</td><td><code>FlwInstanceServiceImpl.processInvalid()</code></td><td>instance service</td><td>在实例层面作废，与终止不同：作废可以批量操作已完成实例</td></tr>
+<tr><td>撤销</td><td><code>FlwInstanceServiceImpl.cancelProcessApply()</code></td><td>instance service</td><td>仅申请人可以撤销自己发起、还在审批中的单据</td></tr>
+</table>
+
+<h2>四、四种运行时任务操作：taskOperation 统一分发</h2>
+
+<p><span class="where">FlwTaskServiceImpl.taskOperation():864-950</span></p>
+
+<p>前端 URL 是 <code>POST /workflow/task/taskOperation/{taskOperation}</code>，path variable 取值自 <code>TaskOperationEnum</code>：</p>
+
+<table>
+<tr><th>操作</th><th>code</th><th>引擎 API</th><th>结果</th></tr>
+<tr><td>委派</td><td>delegateTask</td><td><code>taskService.depute()</code></td><td>把任务委派给另一个人审批（原审批人不再参与）</td></tr>
+<tr><td>转办</td><td>transferTask</td><td><code>taskService.transfer()</code></td><td>把任务转给另一个人（原审批人退出当前任务）</td></tr>
+<tr><td>加签</td><td>addSignature</td><td><code>taskService.addSignature()</code></td><td>在当前节点增加审批人（必须是会签/票签节点，nodeRatio>0）</td></tr>
+<tr><td>减签</td><td>reductionSignature</td><td><code>taskService.reductionSignature()</code></td><td>在当前节点删除审批人（会签/票签节点）</td></tr>
+</table>
+
+<p>统一分发逻辑：switch 匹配 TaskOperationEnum → 校验参数（委派/转办需单人选、加签/减签需多人选）→ 校验节点类型（加减签必须是会签票签）→ 调引擎 API → 发消息通知。</p>
+
+<div class="side">
+💡 <b>委派 vs 转办</b>：委派后任务仍保留在原审批人名下（委托给别人代理审批），完成后记录在 his_task 里标记 DEPUTE。转办后任务彻底交给新人，原审批人不再参与。这是审批责任归属的区别。
+</div>
+
+<h2>五、办理人修改（updateAssignee）</h2>
+
+<p><span class="where">FlwTaskServiceImpl.java:960-978</span> — 管理员权限，批量删除旧办理人记录然后重新写入。直接操作 <code>FlowEngine.userService()</code> 的办理人关联表。</p>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. 驳回到申请节点时，流程实例的状态会变成什么？</p>
+<span class="opt">A. WAITING</span>
+<span class="opt">B. BACK</span>
+<span class="opt">C. FINISH</span>
+<details><summary>看答案</summary><b>B</b>。代码 520 行：<code>flowStatus(applyNodeCode.equals(bo.getNodeCode()) ? TaskStatusEnum.BACK.getStatus() : TaskStatusEnum.WAITING.getStatus())</code>。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. completeTask 时前端传了 nextAssignee（下一步办理人），这个值是怎么到达引擎的？</p>
+<span class="opt">A. 存在请求头里</span>
+<span class="opt">B. 通过 variables 里的 "pass:nodeCode" 前缀变量，在 WorkflowGlobalListener.assignment() 里写入 permissionList</span>
+<span class="opt">C. 直接写在 task 表里</span>
+<details><summary>看答案</summary><b>B</b>。setPopAssigneeMap 把选中人追加到 variables，assignment 回调从 variables 取并写入 task.permissionList。pass 前缀的用一次就删；back 前缀保留。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么加签/减签必须要求会签票签节点？</p>
+<span class="opt">A. 审批评审节点没有「多人审批」概念，加减签无意义</span>
+<span class="opt">B. 引擎 bug</span>
+<span class="opt">C. 性能考虑</span>
+<details><summary>看答案</summary><b>A</b>。会签和票签节点是 Warm-Flow 里专门处理多人审批的节点类型，nodeRatio>0 表示是合议节点。普通审批节点只有一个人，不存在加减签。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="http://warm-flow.cn/#/warm-flow/core/task" target="_blank">Warm-Flow 文档 · 任务操作</a>——看 taskService.skip/depute/transfer/addSignature/reductionSignature 的契约与差异。</div>
+<div class="reminder">💡 有疑问？直接问我——比如「SkipType 除了 PASS 和 REJECT 还有哪些值？」「autoPass 在并联分支上也适用吗？」下一课讲事件驱动：引擎回调→发事件→业务回写。</div>
+<div class="nav">课程 0004 / 使命：读懂 ruoyi-workflow · 下一课预告：事件驱动解耦—监听器到业务回写</div>
+
+</body>
+</html>

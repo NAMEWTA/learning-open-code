@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第8课：Controller 设计规范 — 注解驱动的横切关注点</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🎛️ 第8课：Controller 设计规范 — 注解驱动的横切关注点</h1>
+
+<p><strong>胜利目标：</strong>能独立写出一个符合 ruoyi 规范的 Controller 方法，正确使用所有横切注解。</p>
+
+<h2>1. Controller 注解全景</h2>
+
+<p>以一个典型的用户修改方法为例，解码所有注解的职责：</p>
+
+<pre><code>@Validated                          // ① 开启方法参数校验
+@RequiredArgsConstructor             // ② Lombok：生成 final 字段的构造函数注入
+@RestController                      // ③ REST 控制器 = @Controller + @ResponseBody
+@RequestMapping("/system/user")      // ④ 统一 URL 前缀
+public class SysUserController extends BaseController {  // ⑤ 继承基类
+
+    /**
+     * 修改用户。
+     */
+    @SaCheckPermission("system:user:edit")  // ⑥ 功能权限校验
+    @Log(title = "用户管理",                  // ⑦ 操作日志
+         businessType = BusinessType.UPDATE)
+    @RepeatSubmit()                          // ⑧ 防重复提交
+    @PutMapping                              // ⑨ RESTful PUT 方法
+    public R&lt;Void&gt; edit(
+        @Validated                            // ⑩ 参数校验
+        @RequestBody SysUserBo user) {        // ⑪ 请求体自动绑定
+
+        userService.checkUserAllowed(user.getUserId());    // ⑫ 业务校验
+        userService.checkUserDataScope(user.getUserId());  // ⑬ 数据权限校验
+        deptService.checkDeptDataScope(user.getDeptId());
+
+        // ⑭ 业务唯一性校验
+        if (!userService.checkUserNameUnique(user)) {
+            return R.fail("修改用户失败，登录账号已存在");
+        }
+
+        return toAjax(userService.updateUser(user));  // ⑮ 操作结果转 R
+    }
+}</code></pre>
+
+<h2>2. 每个注解的深度解析</h2>
+
+<h3>⑥ @SaCheckPermission — 功能权限</h3>
+
+<pre><code>// 单一权限 — 拥有 system:user:list 即可
+@SaCheckPermission("system:user:list")
+
+// 多权限 OR — 拥有任一即可
+@SaCheckPermission(value = {"system:user:add", "system:user:edit"}, mode = SaMode.OR)
+
+// 多权限 AND — 必须全部拥有
+@SaCheckPermission(value = {"system:user:add", "system:user:edit"}, mode = SaMode.AND)</code></pre>
+
+<h3>⑥ @SaCheckRole — 角色校验</h3>
+
+<pre><code>// 菜单管理只允许超管操作
+@SaCheckRole(SystemConstants.SUPER_ADMIN_ROLE_KEY)  // "super_admin"
+
+// 多角色 OR
+@SaCheckRole(value = {"super_admin", "common"}, mode = SaMode.OR)</code></pre>
+
+<div class="highlight">
+  <strong>权限 vs 角色的使用区分：</strong>
+  <ul>
+    <li><code>@SaCheckPermission</code> — 细粒度控制（增删改查导出导入），大多数方法使用</li>
+    <li><code>@SaCheckRole</code> — 粗粒度控制（只允许超管），仅菜单管理使用</li>
+  </ul>
+</div>
+
+<h3>⑦ @Log — 操作日志</h3>
+
+<pre><code>@Log(title = "用户管理", businessType = BusinessType.UPDATE)
+// businessType 枚举值：
+//   INSERT(新增), UPDATE(修改), DELETE(删除),
+//   EXPORT(导出), IMPORT(导入), GRANT(授权),
+//   OTHER(其他), CLEAN(清理)
+
+// 实现机制：AOP 切面拦截，自动记录：
+//   - 操作人、操作时间
+//   - 请求 URL、方法名、参数
+//   - 返回结果、耗时
+//   → 写入 sys_oper_log 表</code></pre>
+
+<h3>⑧ @RepeatSubmit — 防重复提交</h3>
+
+<pre><code>@RepeatSubmit()  // 默认间隔 5000ms，基于 Redis 分布式锁
+// 原理：将 "URL + 参数 + 用户" 的 hash 作为 Redis key
+// 如果在间隔时间内重复请求，返回"不允许重复提交"错误
+// 只用于写操作（POST/PUT/DELETE），读操作不需要</code></pre>
+
+<h3>⑮ BaseController.toAjax() — 结果转换</h3>
+
+<pre><code>// BaseController 提供的工具方法
+protected R&lt;Void&gt; toAjax(int rows) {
+    return rows > 0 ? R.ok() : R.fail("操作失败");
+}
+// 将 Service 返回的影响行数转为统一响应格式</code></pre>
+
+<h2>3. Controller 中常见的安全校验模式</h2>
+
+<pre><code>// 模式1：不允许操作超管
+userService.checkUserAllowed(user.getUserId());
+// → if (userId == 1) throw ServiceException("不允许操作超级管理员用户")
+
+// 模式2：不允许删除自己
+if (ArrayUtil.contains(userIds, LoginHelper.getUserId())) {
+    return R.fail("当前用户不能删除");
+}
+
+// 模式3：数据权限校验
+userService.checkUserDataScope(userId);
+// → 通过 SQL 查询验证当前用户是否有权限看到目标用户
+
+// 模式4：唯一性校验
+if (!userService.checkUserNameUnique(user)) {
+    return R.fail("登录账号已存在");
+}</code></pre>
+
+<h2>4. 特殊的注解组合</h2>
+
+<h3>密码加密：@ApiEncrypt</h3>
+
+<pre><code>@ApiEncrypt  // 标记接口需要加解密处理
+@PutMapping("/resetPwd")
+public R&lt;Void&gt; resetPwd(@RequestBody SysUserBo user) {
+    // 前端传来的密码是加密的，通过 @ApiEncrypt 切面自动解密
+    // 然后再 BCrypt 哈希存入数据库
+    user.setPassword(BCrypt.hashpw(user.getPassword()));
+    return toAjax(userService.resetUserPwd(user.getUserId(), user.getPassword()));
+}</code></pre>
+
+<h3>Excel 导入：@RequestPart</h3>
+
+<pre><code>@PostMapping(value = "/importData", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+public R&lt;Void&gt; importData(
+    @RequestPart("file") MultipartFile file,   // 文件上传
+    boolean updateSupport                       // 是否覆盖已有数据
+) throws Exception {
+    ExcelResult&lt;SysUserImportVo&gt; result = ExcelBuilder
+        .read(file.getInputStream(), SysUserImportVo.class)
+        .listener(new SysUserImportListener(updateSupport))  // 自定义监听器
+        .doRead();
+    return R.ok(result.getAnalysis());
+}</code></pre>
+
+<h3>忽略数据权限：DataPermissionHelper.ignore()</h3>
+
+<pre><code>// 个人中心查看自己的信息时，不应该受数据权限限制
+SysUserVo user = DataPermissionHelper.ignore(() ->
+    userService.selectUserById(LoginHelper.getUserId())
+);</code></pre>
+
+<h2>5. Controller 代码规范清单</h2>
+
+<table>
+  <thead><tr><th>规范项</th><th>要求</th><th>示例</th></tr></thead>
+  <tbody>
+    <tr><td>类注解</td><td>@Validated + @RequiredArgsConstructor + @RestController + @RequestMapping</td><td>标准模板</td></tr>
+    <tr><td>依赖注入</td><td>private final + @RequiredArgsConstructor（构造器注入）</td><td>不用 @Autowired</td></tr>
+    <tr><td>读方法</td><td>只加 @SaCheckPermission，不加 @Log/@RepeatSubmit</td><td>list(), getInfo()</td></tr>
+    <tr><td>写方法</td><td>@SaCheckPermission + @Log + @RepeatSubmit（完整三件套）</td><td>add(), edit(), remove()</td></tr>
+    <tr><td>返回类型</td><td>统一返回 <code>R&lt;T&gt;</code></td><td>R&lt;Void&gt;, R&lt;PageResult&gt;, R&lt;List&gt;</td></tr>
+    <tr><td>参数校验</td><td>方法参数加 @Validated 触发 JSR303 校验</td><td>配合 Bo 中的 @NotBlank 等注解</td></tr>
+    <tr><td>安全校验顺序</td><td>注解校验 → 业务校验 → 操作</td><td>不可跳过任何一环</td></tr>
+  </tbody>
+</table>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>写一个完整的 Controller 方法（新增岗位），包含所有必要的注解和校验</li>
+  <li>解释 @Log 注解的实现原理（AOP 切面）</li>
+  <li>解释 @RepeatSubmit 基于 Redis 的防重复提交机制</li>
+  <li>为什么 ruoyi 使用构造器注入（@RequiredArgsConstructor）而不是 @Autowired</li>
+  <li>区分什么场景需要用 DataPermissionHelper.ignore()</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>BaseController.java</code> — 查看基类提供的通用方法；<code>SysUserController.java</code> — 作为最完整的 Controller 参考范例</div>
+<div class="reminder">💡 有疑问？直接问我。例如："@RepeatSubmit 的间隔时间怎么配置？" 或 "如果我想在 Controller 层增加一个新的校验注解，步骤是什么？"</div>
+
+</body>
+</html>

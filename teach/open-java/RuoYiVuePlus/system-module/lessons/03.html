@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第3课：RBAC 权限模型 — 从登录到权限校验的完整链路</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+  .info { background: #d1ecf1; padding: 0.5rem 1rem; border-left: 4px solid #17a2b8; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🔐 第3课：RBAC 权限模型 — 完整链路</h1>
+
+<p><strong>胜利目标：</strong>能口述从用户登录到每次请求权限校验的完整链路，理解角色权限和菜单权限的区别。</p>
+
+<h2>1. RBAC 模型在 ruoyi-system 中的映射</h2>
+
+<pre><code>
+   User（用户）──── M:N ──── Role（角色）──── M:N ──── Menu（菜单/权限）
+      │                      │
+      │                      ├── role_key ──→ Sa-Token @SaCheckRole
+      │                      └── data_scope → DataScope 插件
+      │
+      └── 最终拥有的权限 = 所有角色的菜单权限的并集
+</code></pre>
+
+<div class="info">
+  <strong>RBAC 核心公式：</strong>一个用户的最终权限 = Σ(其所有角色的 menu 权限) ∪ (超级管理员特殊处理)
+</div>
+
+<h2>2. 权限的两层含义</h2>
+
+<p>ruoyi-system 中"权限"分为两个独立维度：</p>
+
+<table>
+  <thead><tr><th>维度</th><th>存储位置</th><th>校验方式</th><th>示例</th></tr></thead>
+  <tbody>
+    <tr><td><strong>角色权限</strong></td><td>sys_role.role_key</td><td>@SaCheckRole("super_admin")</td><td>是否可以访问某功能模块</td></tr>
+    <tr><td><strong>菜单权限</strong></td><td>sys_menu.perms</td><td>@SaCheckPermission("system:user:list")</td><td>是否可以执行某具体操作</td></tr>
+  </tbody>
+</table>
+
+<h2>3. 登录时 — 权限加载</h2>
+
+<p>当用户登录成功后，系统会将权限信息加载到 <code>LoginUser</code> 对象中并存入 Redis：</p>
+
+<pre><code>// 登录时调用 SysPermissionServiceImpl
+LoginUser loginUser = new LoginUser();
+
+// 1. 加载角色权限（role_key 集合）
+Set&lt;String&gt; rolePermission = permissionService.getRolePermission(userId);
+// → 超管: {"super_admin"}
+// → 普通用户: {"common", "xxx"}
+
+// 2. 加载菜单权限（perms 集合）
+Set&lt;String&gt; menuPermission = permissionService.getMenuPermission(userId);
+// → 超管: {"*:*:*"}
+// → 普通用户: {"system:user:list", "system:user:add", ...}
+
+loginUser.setRolePermission(rolePermission);
+loginUser.setMenuPermission(menuPermission);
+
+// 存入 Redis (Sa-Token Session)
+StpUtil.getTokenSession().set("loginUser", loginUser);</code></pre>
+
+<h3>关键源码：SysPermissionServiceImpl</h3>
+
+<pre><code>@Service
+public class SysPermissionServiceImpl implements ISysPermissionService {
+    // 获取角色权限：超管返回 super_admin，否则查 sys_role 表
+    public Set&lt;String&gt; getRolePermission(Long userId) {
+        if (LoginHelper.isSuperAdmin(userId)) {
+            return Set.of("super_admin");
+        }
+        return roleService.selectRolePermissionByUserId(userId);
+    }
+
+    // 获取菜单权限：超管返回 *:*:*，否则查 sys_menu 表
+    public Set&lt;String&gt; getMenuPermission(Long userId) {
+        if (LoginHelper.isSuperAdmin(userId)) {
+            return Set.of("*:*:*");  // 通配符，匹配所有权限
+        }
+        return menuService.selectMenuPermsByUserId(userId);
+    }
+}</code></pre>
+
+<div class="highlight">
+  <strong>超级管理员的特殊处理：</strong>
+  <ul>
+    <li>角色权限 → 直接返回 <code>super_admin</code></li>
+    <li>菜单权限 → 直接返回 <code>*:*:*</code>（万能通配符）</li>
+    <li>数据权限 → 跳过所有数据过滤</li>
+    <li>这样避免了为超管分配海量菜单的麻烦，也提升了校验性能</li>
+  </ul>
+</div>
+
+<h2>4. 每次请求 — 权限校验</h2>
+
+<p>Sa-Token 拦截请求，执行注解校验：</p>
+
+<pre><code>// Controller 层 — 两种校验方式
+
+// 方式1：按角色校验
+@SaCheckRole(value = {"super_admin"}, mode = SaMode.OR)
+@GetMapping("/list")
+public R&lt;...&gt; list() { ... }
+
+// 方式2：按权限字符串校验
+@SaCheckPermission("system:user:list")
+@GetMapping("/list")
+public R&lt;...&gt; list() { ... }
+
+// 方式3：组合校验（OR 模式）
+@SaCheckPermission(
+    value = {"system:user:add", "system:user:edit"},
+    mode = SaMode.OR
+)
+@PostMapping
+public R&lt;...&gt; add() { ... }</code></pre>
+
+<h2>5. 权限查询的 SQL 路径</h2>
+
+<p>以普通用户为例，查询其菜单权限的完整 SQL 链路：</p>
+
+<pre><code>
+SysPermissionServiceImpl.getMenuPermission(userId)
+  │
+  ▼
+SysMenuServiceImpl.selectMenuPermsByUserId(userId)
+  │
+  ▼
+SysMenuMapper.selectMenuPermsByUserId(userId)
+  │  └── XML SQL:
+  │      SELECT DISTINCT m.perms
+  │      FROM sys_menu m
+  │      LEFT JOIN sys_role_menu rm ON m.menu_id = rm.menu_id
+  │      LEFT JOIN sys_user_role ur ON rm.role_id = ur.role_id
+  │      WHERE ur.user_id = #{userId} AND m.status = '0'
+  │
+  ▼
+返回: {"system:user:list", "system:user:add", "system:role:list", ...}
+</code></pre>
+
+<h2>6. 权限字符串的命名规范</h2>
+
+<p>ruoyi-system 遵循 <code>模块:实体:操作</code> 的命名规范：</p>
+
+<table>
+  <thead><tr><th>模块</th><th>权限标识示例</th><th>操作</th></tr></thead>
+  <tbody>
+    <tr><td>用户管理</td><td><code>system:user:list</code></td><td>查询</td></tr>
+    <tr><td>用户管理</td><td><code>system:user:add</code></td><td>新增</td></tr>
+    <tr><td>用户管理</td><td><code>system:user:edit</code></td><td>修改</td></tr>
+    <tr><td>用户管理</td><td><code>system:user:remove</code></td><td>删除</td></tr>
+    <tr><td>用户管理</td><td><code>system:user:export</code></td><td>导出</td></tr>
+    <tr><td>用户管理</td><td><code>system:user:import</code></td><td>导入</td></tr>
+    <tr><td>角色管理</td><td><code>system:role:list</code></td><td>查询</td></tr>
+    <tr><td>菜单管理</td><td><code>system:menu:add</code></td><td>新增</td></tr>
+  </tbody>
+</table>
+
+<div class="highlight">
+  <strong>为什么菜单管理只允许超管操作？</strong>观察 SysMenuController 的代码：<code>@SaCheckRole(SystemConstants.SUPER_ADMIN_ROLE_KEY)</code> 出现在新增/修改/删除方法上。菜单是权限的基础设施，只允许超级管理员修改，防止权限体系被破坏。
+</div>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>口述用户登录后权限加载的完整过程</li>
+  <li>区分 @SaCheckRole 和 @SaCheckPermission 的使用场景</li>
+  <li>解释为什么超管的菜单权限返回 <code>*:*:*</code> 而不是查询数据库</li>
+  <li>追踪 <code>selectMenuPermsByUserId</code> 涉及的三张表 JOIN 关系</li>
+  <li>说出 ruoyi 权限命名规范（模块:实体:操作）并自己设计一个权限标识</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://sa-token.cc/doc.html#/use/at-check">Sa-Token 权限校验文档</a></div>
+<div class="reminder">💡 有疑问？直接问我。例如："@SaCheckPermission 的 mode = SaMode.OR 和 SaMode.AND 有什么区别？" 或 "如果我想增加一个部门级别的权限控制该怎么办？"</div>
+
+</body>
+</html>

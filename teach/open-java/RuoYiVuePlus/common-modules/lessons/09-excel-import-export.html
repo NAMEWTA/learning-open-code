@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>09 · ruoyi-common-excel：动态导入导出引擎</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>09 · ruoyi-common-excel：动态导入导出引擎</h1>
+
+<p><strong>核心问题：</strong>如何在 10 行代码内实现带数据校验、字典翻译、下拉选项、批注、单元格合并的 Excel 导入导出？</p>
+
+<div class="info">
+<strong>模块定位：</strong>21 个 Java 文件。基于 <strong>Apache Fesod Sheet</strong>（EasyExcel 替代方案，Apache 基金会项目）。提供统一的 Builder API，链式调用一行代码完成导出/导入/模板填充。
+</div>
+
+<h2>1. ExcelBuilder — 统一入口</h2>
+
+<h3>四种构造方式</h3>
+<pre><code>// ① 普通导出
+ExcelBuilder.of(dataList, EntityClass.class)
+    .sheetName("用户列表")
+    .toResponse(response);
+
+// ② 自定义写出（不预设数据，在回调中分批写）
+ExcelBuilder.writer(EntityClass.class)
+    .toStream(os, wrapper -> {
+        wrapper.write(dataPage1);
+        wrapper.write(dataPage2);
+    });
+
+// ③ 模板导出
+ExcelBuilder.template("templates/user_template.xlsx")
+    .data(dataList)
+    .toResponse(response);
+
+// ④ 导入读取
+ExcelResult&lt;EntityClass&gt; result = ExcelBuilder.read(inputStream, EntityClass.class)
+    .validate(true).failFast(true)       // 启用校验 + 快速失败（默认已开启）
+    .headRowNumber(1)
+    .doRead();                   // 返回含成功列表+错误列表的结果
+</code></pre>
+
+<h2>2. 大数据分批 ZIP 导出</h2>
+
+<pre><code>// 每 999 条一个 Excel 文件，打包成 ZIP 下载
+ExcelBuilder.of(largeData, Entity.class)
+    .sheetName("导出数据")
+    .zip(999)  // 每个Excel最多999条，超量自动分文件
+    .toResponse(response);
+
+// 内部实现：ListUtil.partition(data, pageSize) → 每个分页独立 .xlsx → ZipOutputStream
+// 只有 1 页时自动退化为普通导出
+</code></pre>
+
+<h2>3. 三种模板模式</h2>
+
+<table>
+<tr><th>模式</th><th>模板占位符</th><th>适用场景</th></tr>
+<tr><td>LIST</td><td><code>{.属性名}</code></td><td>单表多数据（如用户列表）</td></tr>
+<tr><td>MULTI_LIST</td><td><code>{key.属性名}</code></td><td>多表多数据（用户+日志）</td></tr>
+<tr><td>MULTI_SHEET</td><td>每 sheet 独立</td><td>多 sheet 报表</td></tr>
+</table>
+
+<h2>4. 导入校验与错误处理</h2>
+
+<pre><code>// DefaultExcelListener — 默认导入监听器
+//   - 自动启用 Bean Validation
+//   - 快速失败：failFast=true（第一条错误即停止）
+//   - 错误格式："第{行}行-第{列}列-表头{header}: 解析异常"
+//   - DefaultExcelResult.getAnalysis() → "共X条，成功导入X条，错误X条"
+</code></pre>
+
+<h2>5. 自动注册的组件</h2>
+
+<p><code>toResponse()</code> 和 <code>toStream()</code> 自动注册以下组件，无需手动配置：</p>
+<ul>
+<li><strong>ExcelBigNumberConvert</strong> — Long 超 15 位转字符串（防 Excel 精度丢失）</li>
+<li><strong>DataWriteHandler</strong> — 批注 + 必填标记（红色表头）</li>
+<li><strong>LongestMatchColumnWidthStyleStrategy</strong> — 自适应列宽</li>
+<li><strong>ExcelDownHandler</strong> — 下拉选项生成</li>
+</ul>
+
+<h2>6. 链式配置总览</h2>
+
+<pre><code>ExcelBuilder.of(data, Entity.class)
+    .sheetName("导出数据")        // Sheet 名称
+    .merge()                     // 启用单元格合并
+    .options()                   // 启用下拉选项
+    .password("123456")          // 工作簿密码保护
+    .columnWidth(20)             // 固定列宽（不设时自动适配）
+    .rowHeight(25)               // 行高
+    .includeFields("id", "name") // 仅包含指定列
+    .excludeFields("password")   // 排除指定列
+    .toResponse(response);       // 输出到 HTTP 响应
+</code></pre>
+
+<p><strong>前端下载方式</strong>：后端 <code>toResponse(response)</code> 设置 Content-Disposition 头，前端调用 <code>request.ts</code> 的通用 <code>download()</code> 方法（POST + responseType: 'blob'）。</p>
+
+<h2>7. 验证要点</h2>
+<ol>
+<li>找一个使用 ExcelBuilder 导出数据的 Controller（如 SysUserController 的 export 方法），理解参数构建过程</li>
+<li>故意在导入 Excel 中输入非法数据（如超出字典范围的值），观察错误报表的格式</li>
+<li>设置 zip(100) 导出 500 条数据，验证是否生成了 5 个 Excel 文件打包在 ZIP 中</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://github.com/apache/fesod-sheet">Apache Fesod Sheet GitHub</a></div>
+<div class="reminder"> 想知道如何添加自定义的 Excel 转换器（如日期格式转换）？直接问我。</div>
+
+</body>
+</html>

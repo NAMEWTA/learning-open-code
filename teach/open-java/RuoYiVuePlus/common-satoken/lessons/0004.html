@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 异常处理与登录工具 — SaTokenExceptionHandler 与 LoginHelper</title>
+<style>
+  body { max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.75; color: #2c2c2c; background: #fcfcfc; }
+  h1 { border-bottom: 3px solid #1a56db; padding-bottom: .5rem; margin-top: 0; font-size: 1.75rem; }
+  h2 { margin-top: 2.5rem; color: #1e3a5f; font-size: 1.3rem; }
+  h3 { margin-top: 1.8rem; font-size: 1.05rem; color: #333; }
+  code { background: #eee; padding: .1em .35em; border-radius: 3px; font-size: .9em; }
+  pre code { display: block; background: #1e2127; color: #abb2bf; padding: 1rem 1.2rem; border-radius: 6px; overflow-x: auto; line-height: 1.6; font-size: .88em; }
+  .mission { background: linear-gradient(135deg, #e8f0fe 0%, #d4e4fc 100%); border-left: 5px solid #1a56db; padding: 1rem 1.3rem; border-radius: 6px; margin: 1.2rem 0; }
+  .flow { font-family: "SF Mono", "Fira Code", monospace; background: #f0f4f8; border: 1px dashed #94a3b8; padding: 1rem 1.3rem; border-radius: 5px; white-space: pre; line-height: 1.8; font-size: .88em; overflow-x: auto; }
+  .side { background: #fff9e6; border-left: 4px solid #f0b400; padding: .8rem 1.2rem; border-radius: 4px; margin: 1rem 0; font-size: .95em; }
+  .step { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.3rem; margin: .8rem 0; display: flex; gap: 1rem; align-items: flex-start; }
+  .step .num { background: #1a56db; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .85em; flex-shrink: 0; }
+  .step .where { color: #64748b; font-size: .8em; margin-top: .2rem; }
+  .quiz { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.2rem; margin: .8rem 0; }
+  .quiz .opt { display: block; margin: .3rem 0; padding: .3rem .6rem; border-radius: 4px; }
+  details { margin: 1rem 0; }
+  summary { cursor: pointer; color: #1a56db; font-weight: 600; }
+  .cite { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: .8rem 1.1rem; margin: 1.5rem 0; font-size: .9em; }
+  .reminder { background: #f1f5f9; border-radius: 6px; padding: .8rem 1.2rem; margin: 1rem 0; font-size: .95em; color: #475569; }
+  .nav { color: #94a3b8; font-size: .85em; margin-top: 2rem; text-align: center; }
+  .tag { display: inline-block; background: #ef4444; color: #fff; padding: .15em .7em; border-radius: 12px; font-size: .8em; margin-left: .5rem; vertical-align: middle; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; }
+  th, td { border: 1px solid #e2e8f0; padding: .5rem .7rem; text-align: left; font-size: .93em; }
+  th { background: #f1f5f9; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 异常处理与登录工具 <span class="tag">工具与边界</span></h1>
+
+<div class="mission">
+<strong>本节目标</strong>：掌握 SaTokenExceptionHandler 对五类 NotLoginException 的区分处理逻辑，熟练使用 LoginHelper 进行登录、用户信息获取、租户切换等日常操作。
+</div>
+
+<p>在认证系统中，异常处理不是可有可无的配角——它决定了用户看到的是"系统异常，请联系管理员"还是一句<strong>能指导下一步行动</strong>的提示。同时，开发者在日常业务代码中几乎不会直接调用 <code>StpUtil</code>，而是通过 <code>LoginHelper</code> 这个门面工具完成所有登录态操作。本节把这两块一起讲透。</p>
+
+<h2>一、SaTokenExceptionHandler：认证异常的翻译官</h2>
+
+<p><code>SaTokenExceptionHandler</code> 是一个标注了 <code>@RestControllerAdvice</code> 的全局异常处理器。它的职责非常单一：<strong>把 Sa-Token 框架抛出的英文异常类型翻译成用户能看懂的中文消息</strong>。</p>
+
+<p>类中只有两个处理方法：</p>
+
+<div class="step">
+  <div class="num">1</div>
+  <div>
+    <strong>handleNotPermissionException</strong> — 权限不足异常<br>
+    捕获 <code>NotPermissionException</code> 和 <code>NotRoleException</code>，统一返回 <strong>403</strong>，消息为"<code>没有访问权限，请联系管理员授权</code>"。<br>
+    <div class="where">来源：SaTokenExceptionHandler.java</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">2</div>
+  <div>
+    <strong>handleNotLoginException</strong> — 未登录异常（区分五种场景）<br>
+    捕获 <code>NotLoginException</code>，根据 <code>exception.getType()</code> 做 switch 分支，返回 <strong>401</strong>，不同场景返回不同消息。<br>
+    <div class="where">来源：SaTokenExceptionHandler.java</div>
+  </div>
+</div>
+
+<p>五种 <code>NotLoginException</code> 子类型的对照表：</p>
+
+<table>
+<tr><th>异常类型</th><th>触发场景</th><th>返回给用户的消息</th><th>用户应做的操作</th></tr>
+<tr><td><code>TOKEN_TIMEOUT</code></td><td>Token 超过有效期（如 30 分钟无操作）</td><td>"登录已过期，请重新登录"</td><td>跳转登录页，重新输入密码</td></tr>
+<tr><td><code>BE_REPLACED</code></td><td>同一账号在另一设备登录，当前 Token 被顶替</td><td>"当前账号已在其他设备登录，您已被强制下线"</td><td>确认是否本人操作，重新登录</td></tr>
+<tr><td><code>KICK_OUT</code></td><td>管理员在后台将用户踢下线</td><td>"账号已被管理员强制下线"</td><td>联系管理员了解原因</td></tr>
+<tr><td><code>TOKEN_FREEZE</code></td><td>管理员冻结了该账号</td><td>"账号已被冻结，请联系管理员处理"</td><td>联系管理员申请解冻</td></tr>
+<tr><td><code>default</code></td><td>其他未知登录异常（如 Token 格式非法、已被删除等）</td><td>"登录状态异常，请重新登录"</td><td>重新登录</td></tr>
+</table>
+
+<p>所有异常处理方法最终都调用 <code>R.fail(HttpStatus.HTTP_UNAUTHORIZED, message)</code> 返回统一响应格式。<code>R</code> 是 RuoYi 平台的响应包装类，<code>HttpStatus.HTTP_UNAUTHORIZED</code> 对应 HTTP 401 状态码。</p>
+
+<div class="side">
+<strong>设计要点</strong>：为什么不像大部分项目那样写一个笼统的 <code>ExceptionHandler</code>？因为不同的"未登录"需要用户采取<strong>不同的行动</strong>。Token 过期只需重新登录；被顶替需要确认安全性；被冻结需要联系管理员。前端根据不同消息可以展示不同的 UI（如弹窗提示 vs 跳转登录页 vs 展示客服联系方式）。
+</div>
+
+<h2>二、LoginHelper：登录操作的门面工具</h2>
+
+<p><code>LoginHelper</code> 是一个工具类，标注了 <code>@NoArgsConstructor(access = AccessLevel.PRIVATE)</code>，表示<strong>不对外暴露构造器，所有方法都是静态方法</strong>。它是开发者日常编码中使用频率最高的认证工具类。</p>
+
+<p>类中定义的关键常量（对应 TokenSession 中存储数据的 key）：</p>
+
+<table>
+<tr><th>常量名</th><th>实际值</th><th>用途</th></tr>
+<tr><td><code>LOGIN_USER_KEY</code></td><td>"loginUser"</td><td>TokenSession 中存储完整 LoginUser 对象的 key</td></tr>
+<tr><td><code>USER_KEY</code></td><td>"userId"</td><td>TokenSession extra 数据中存储 userId 的 key</td></tr>
+<tr><td><code>USER_NAME_KEY</code></td><td>"userName"</td><td>TokenSession extra 数据中存储 userName 的 key</td></tr>
+<tr><td><code>DEPT_KEY</code></td><td>"deptId"</td><td>TokenSession extra 数据中存储部门 ID 的 key</td></tr>
+<tr><td><code>DEPT_NAME_KEY</code></td><td>"deptName"</td><td>TokenSession extra 数据中存储部门名称的 key</td></tr>
+<tr><td><code>DEPT_CATEGORY_KEY</code></td><td>"deptCategory"</td><td>TokenSession extra 数据中存储部门类别的 key</td></tr>
+<tr><td><code>CLIENT_KEY</code></td><td>"clientKey"</td><td>客户端标识（如 PC、APP、H5）</td></tr>
+<tr><td><code>CLIENT_ACCESS_PATH_KEY</code></td><td>"clientAccessPath"</td><td>客户端访问路径</td></tr>
+<tr><td><code>CLIENT_IP_WHITELIST_KEY</code></td><td>"clientIpWhitelist"</td><td>IP 白名单</td></tr>
+</table>
+
+<h2>三、login() 方法详解</h2>
+
+<p><code>LoginHelper</code> 提供了两个重载的 <code>login()</code> 方法：<code>login(LoginUser loginUser)</code> 和 <code>login(LoginUser loginUser, SaLoginParameter parameter)</code>。后者允许配置额外参数（如是否允许并发登录、Token 过期时间等）。</p>
+
+<p>一次 <code>login()</code> 调用内部做了以下四件事：</p>
+
+<div class="step">
+  <div class="num">1</div>
+  <div>
+    <strong>fillRequestContext(loginUser)</strong> — 自动补全登录终端信息<br>
+    填充当前请求的 IP 地址、登录地点（通过 IP 地理定位）、浏览器类型（User-Agent 解析）、操作系统、设备类型（手机/桌面/平板）。这些信息写入 <code>LoginUser</code> 对象的属性中，用于审计追溯。
+    <div class="where">LoginHelper.fillRequestContext()</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">2</div>
+  <div>
+    <strong>StpUtil.login(loginUser.getLoginId(), parameter)</strong> — 执行 Sa-Token 登录<br>
+    调用 Sa-Token 的登录 API，生成 Token 并在服务端记录会话。这一步完成后，用户即处于"已登录"状态。
+    <div class="where">Sa-Token StpUtil.login()</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">3</div>
+  <div>
+    <strong>设置 TokenSession extra 数据</strong> — 写入常用字段<br>
+    调用 <code>StpUtil.getTokenSession().set(key, value)</code> 将 userId、userName、deptId、deptName、deptCategory 写入 TokenSession 的 extra data。这些字段被高频访问，存为 extra 数据可以<strong>避免每次都需要反序列化整个 LoginUser 对象</strong>。
+    <div class="where">TokenSession.set()</div>
+  </div>
+</div>
+
+<div class="step">
+  <div class="num">4</div>
+  <div>
+    <strong>存储完整 LoginUser 对象</strong><br>
+    调用 <code>StpUtil.getTokenSession().setObject(LOGIN_USER_KEY, loginUser)</code> 将整个 LoginUser 对象（含权限列表、角色列表等）存入 TokenSession。当需要完整用户信息时（如鉴权），再从 TokenSession 中取出。
+    <div class="where">TokenSession.setObject(LOGIN_USER_KEY, loginUser)</div>
+  </div>
+</div>
+
+<div class="side">
+<strong>为什么同时存 extra 数据和 LoginUser 对象？</strong>extra 数据存的是常用标量字段（userId、userName 等），读取时零反序列化开销；LoginUser 对象存的是完整用户信息（含权限列表、部门树等），只在需要时反序列化。这是典型的<strong>热数据分离</strong>策略——高频访问的字段直接取，低频访问的完整对象按需加载。
+</div>
+
+<h2>四、用户信息获取方法</h2>
+
+<p><code>LoginHelper</code> 提供了丰富的静态方法来获取当前登录用户的各种信息：</p>
+
+<table>
+<tr><th>方法签名</th><th>返回类型</th><th>说明</th></tr>
+<tr><td><code>getLoginUser()</code></td><td><code>LoginUser</code></td><td>从 TokenSession 中通过 <code>LOGIN_USER_KEY</code> 反序列化获取完整 LoginUser 对象</td></tr>
+<tr><td><code>getLoginUser(String token)</code></td><td><code>LoginUser</code></td><td>根据指定 Token 获取对应用户的 LoginUser（不限于当前请求用户）</td></tr>
+<tr><td><code>getUserId()</code></td><td><code>Long</code></td><td>从 TokenSession extra 数据中通过 <code>USER_KEY</code> 获取 userId</td></tr>
+<tr><td><code>getUserIdStr()</code></td><td><code>String</code></td><td>同 getUserId()，但返回字符串类型</td></tr>
+<tr><td><code>getUsername()</code></td><td><code>String</code></td><td>从 TokenSession extra 数据中通过 <code>USER_NAME_KEY</code> 获取用户名</td></tr>
+<tr><td><code>getDeptId()</code></td><td><code>Long</code></td><td>从 TokenSession extra 数据中通过 <code>DEPT_KEY</code> 获取部门 ID</td></tr>
+<tr><td><code>getDeptName()</code></td><td><code>String</code></td><td>从 TokenSession extra 数据中通过 <code>DEPT_NAME_KEY</code> 获取部门名称</td></tr>
+<tr><td><code>getDeptCategory()</code></td><td><code>String</code></td><td>从 TokenSession extra 数据中通过 <code>DEPT_CATEGORY_KEY</code> 获取部门类别</td></tr>
+<tr><td><code>getUserType()</code></td><td><code>String</code></td><td>获取当前登录的用户类型（如 sys_user、app_user 等多用户体系）</td></tr>
+<tr><td><code>isSuperAdmin()</code></td><td><code>boolean</code></td><td>判断当前用户是否为超级管理员。检查 userId 是否在超级管理员列表中（默认 userId=1）</td></tr>
+<tr><td><code>isLogin()</code></td><td><code>boolean</code></td><td>判断当前会话是否已登录（调用 <code>StpUtil.isLogin()</code>）</td></tr>
+</table>
+
+<p><code>isSuperAdmin()</code> 的实现原理：平台通常会定义一个超级管理员 ID 列表（如配置文件中指定 <code>super-admin-ids: [1]</code>），该方法获取当前 userId 后判断是否在列表中。超级管理员绕过所有权限校验，拥有全部接口的访问权。</p>
+
+<h2>五、fillRequestContext：登录终端的自动补全</h2>
+
+<p><code>fillRequestContext(LoginUser loginUser)</code> 是 <code>login()</code> 调用的第一个步骤，它在用户登录时<strong>自动捕获并记录当前请求的终端环境信息</strong>：</p>
+
+<table>
+<tr><th>填充字段</th><th>数据来源</th><th>示例值</th></tr>
+<tr><td>IP 地址</td><td><code>HttpServletRequest.getRemoteAddr()</code> 或 X-Forwarded-For 头</td><td><code>192.168.1.100</code></td></tr>
+<tr><td>登录地点</td><td>IP 地理定位服务（如 IP2Region 或在线 API）</td><td><code>北京市 联通</code></td></tr>
+<tr><td>浏览器类型</td><td>User-Agent 请求头解析</td><td><code>Chrome 120</code></td></tr>
+<tr><td>操作系统</td><td>User-Agent 请求头解析</td><td><code>Windows 10</code> / <code>macOS 14</code></td></tr>
+<tr><td>设备类型</td><td>User-Agent 请求头解析</td><td><code>Desktop</code> / <code>Mobile</code> / <code>Tablet</code></td></tr>
+</table>
+
+<p>这些信息最终写入 <code>LoginUser</code> 对象并随 TokenSession 持久化到 Redis。它们的核心价值在于<strong>审计追溯</strong>——管理员可以在后台看到每个登录会话的来源 IP、地点、设备，当出现安全事件时能快速定位异常登录。</p>
+
+<div class="flow">登录时自动采集终端信息：
+
+  HttpServletRequest
+       │
+       ├──→ getRemoteAddr()       ──→ IP: 192.168.1.100
+       ├──→ IP 地理定位服务        ──→ 地点: 北京市·联通
+       └──→ User-Agent 解析        ──→ 浏览器: Chrome 120
+                                   ──→ 操作系统: macOS 14
+                                   ──→ 设备类型: Desktop
+
+  写入 LoginUser 对象 → TokenSession → Redis 持久化 → 后台审计可查</div>
+
+<h2>🤔 想一想</h2>
+
+<details>
+<summary>为什么 NotLoginException 要分五种类型，而不统一返回"未登录"？</summary>
+<p><strong>不同的"未登录"需要不同的用户行动</strong>：Token 过期只需重新登录；被顶替（BE_REPLACED）说明账号在别处登录，用户需要确认是否本人操作；被踢下线（KICK_OUT）和被冻结（TOKEN_FREEZE）是管理员主动操作，用户需要联系管理员。如果统一返回"未登录"，用户反复登录失败却不知道原因，体验极差。<br>
+<strong>前端可以根据异常类型做差异化处理</strong>：Token 过期 → 静默跳转登录页；被顶替 → 弹窗提示"您的账号在其他设备登录"；被冻结 → 展示管理员联系方式。这比笼统的错误处理要专业得多。</p>
+</details>
+
+<details>
+<summary>LoginHelper.login() 为什么把 userId/deptName 同时存为 TokenSession 的 extra 数据和 LoginUser 对象的属性？</summary>
+<p><strong>性能优化——热数据分离</strong>：extra 数据（userId、userName、deptId 等）是标量字段，读取时不需要反序列化，O(1) 直接取出。LoginUser 对象包含权限列表、角色列表等复杂结构，反序列化成本高。<br>
+<strong>访问频率不同</strong>：获取当前用户 ID 或部门 ID 是极高频率操作（几乎每个接口都会调用），每次都反序列化整个 LoginUser 对象会造成不必要的 CPU 开销。extra 数据就是为这些高频字段设计的快速通道。<br>
+<strong>两者互补</strong>：extra 数据覆盖 90% 的日常查询场景；需要完整用户信息（如鉴权时需要权限列表）时，再从 TokenSession 取出 LoginUser 对象。</p>
+</details>
+
+<h2>提取练习</h2>
+
+<div class="quiz">
+<strong>Q1. 当用户账号在另一设备登录，当前 Token 被顶替时，SaTokenExceptionHandler 返回的提示是什么？异常类型是？</strong>
+<div class="opt">A. "登录已过期，请重新登录" — TOKEN_TIMEOUT</div>
+<div class="opt">B. "当前账号已在其他设备登录，您已被强制下线" — BE_REPLACED</div>
+<div class="opt">C. "账号已被管理员强制下线" — KICK_OUT</div>
+<div class="opt">D. "账号已被冻结，请联系管理员处理" — TOKEN_FREEZE</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。BE_REPLACED 是 Sa-Token 的顶替登录机制——当同一账号在新设备登录时，旧设备的 Token 会被标记为"被替换"。A 是 Token 过期，C 是管理员踢人，D 是账号冻结。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q2. fillRequestContext() 在登录时自动填充以下哪些信息？</strong>
+<div class="opt">A. 用户密码的哈希值</div>
+<div class="opt">B. IP 地址、登录地点、浏览器类型、操作系统、设备类型</div>
+<div class="opt">C. 用户的权限码列表</div>
+<div class="opt">D. JWT Token 的过期时间</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。fillRequestContext 专门负责从 HttpServletRequest 和 User-Agent 中提取终端环境信息，用于审计追溯。权限码在登录之前就已加载到 LoginUser 中，Token 过期时间由 Sa-Token 的 SaLoginParameter 控制。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q3. LoginUser 完整对象在 TokenSession 中通过哪个常量 key 存储？</strong>
+<div class="opt">A. USER_KEY ("userId")</div>
+<div class="opt">B. USER_NAME_KEY ("userName")</div>
+<div class="opt">C. LOGIN_USER_KEY ("loginUser")</div>
+<div class="opt">D. DEPT_KEY ("deptId")</div>
+<details><summary>看答案</summary>
+<strong>C</strong>。LOGIN_USER_KEY（值为 "loginUser"）存储完整的 LoginUser 对象。A、B、D 都是存储到 TokenSession extra 数据中的标量字段 key。
+</details>
+</div>
+
+<div class="quiz">
+<strong>Q4. isSuperAdmin() 方法的判断逻辑是什么？</strong>
+<div class="opt">A. 检查用户是否拥有 "admin" 角色</div>
+<div class="opt">B. 检查 userId 是否在超级管理员 ID 列表中（默认 userId=1）</div>
+<div class="opt">C. 检查用户名是否为 "admin"</div>
+<div class="opt">D. 检查用户是否拥有所有权限码</div>
+<details><summary>看答案</summary>
+<strong>B</strong>。isSuperAdmin() 通过判断当前登录用户的 userId 是否在配置的超级管理员 ID 列表中来决定。默认情况下只有 userId=1（即系统初始管理员账号）是超级管理员。超级管理员绕过所有权限校验，而非通过角色或权限码来判断。
+</details>
+</div>
+
+<div class="cite">
+<strong>推荐读物</strong><br>
+· <code>SaTokenExceptionHandler.java</code> — 查看两个异常处理方法的完整源码<br>
+· <code>LoginHelper.java</code> — 阅读所有静态方法的实现细节<br>
+· <a href="https://sa-token.cc/doc.html#/fun/not-login-scene">Sa-Token 官方文档 — 未登录场景值</a> — 了解五种 NotLoginException 的设计意图
+</div>
+
+<div class="reminder">
+📌 本节覆盖了认证系统的"翻译官"和"门面工具"。下一节（最后一课）将串联 SaTokenConfig、PlusSaTokenDao、SaPermissionImpl、SaTokenExceptionHandler、LoginHelper 所有五个类，完成一次从用户登录到接口鉴权的完整链路追踪。
+</div>
+
+<div class="nav">第 4 课 / 共 5 课 · 下一课：完整链路追踪 — 五类串联实战</div>
+
+</body>
+</html>

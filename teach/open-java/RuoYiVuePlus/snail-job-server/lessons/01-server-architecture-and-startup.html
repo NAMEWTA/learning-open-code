@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第1课：SnailJob 服务端架构与启动原理</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .nav { display: flex; justify-content: space-between; align-items: center; margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .nav .next { font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 1.2rem; margin: 1rem 0; font-family: monospace; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; color: #333; }
+</style>
+</head>
+<body>
+
+<h1>第1课：SnailJob 服务端架构与启动原理</h1>
+
+<blockquote>
+<strong>本课目标：</strong>说清 <code>ruoyi-snailjob-server</code> 模块的整体定位、依赖结构，以及 <code>SnailJobServerApplication</code> 跨包引导的巧妙设计。学完本课，你能回答"这个服务端是怎么跑起来的"。
+</blockquote>
+
+<h2>1. 模块定位：它在哪里</h2>
+
+<p><code>ruoyi-snailjob-server</code> 位于 RuoYi-Vue-Plus 的 <span class="keyword">扩展层</span>（<code>ruoyi-extend</code>）下，与监控中心（<code>ruoyi-monitor-admin</code>）、AI 服务（<code>ruoyi-snailai-server</code>）平级。它是一个<strong>独立部署的 Spring Boot 应用</strong>，不与主应用 ruoyi-admin 共享进程。</p>
+
+<div class="arch-diagram">RuoYi-Vue-Plus/
+├── ruoyi-admin/           ← 主应用（Web 后端）
+├── ruoyi-common/           ← 公共组件层
+│   └── ruoyi-common-job/   ← SnailJob 客户端配置（@EnableSnailJob）
+├── ruoyi-extend/           ← 可独立部署的扩展模块
+│   ├── ruoyi-snailjob-server/  ← ★ 本模块：SnailJob 服务端
+│   ├── ruoyi-monitor-admin/
+│   └── ruoyi-snailai-server/
+└── ruoyi-modules/</div>
+
+<h2>2. pom.xml：三块积木</h2>
+
+<p>打开 <code>pom.xml</code>，只引入了 <strong>3 个关键依赖</strong>，设计极其精简：</p>
+
+<table>
+  <tr><th>依赖</th><th>作用</th></tr>
+  <tr>
+    <td><code>snail-job-server-starter</code> (2.0.0)</td>
+    <td>SnailJob 服务端核心引擎，包含 Akka Actor 调度、Netty 通信、Dashboard API、持久化层</td>
+  </tr>
+  <tr>
+    <td><code>scala-library</code> (2.13.9)</td>
+    <td>Scala 运行时，支撑 Akka Actor 模型（SnailJob 底层调度引擎基于 Akka/Pekko）</td>
+  </tr>
+  <tr>
+    <td><code>spring-boot-admin-starter-client</code></td>
+    <td>将本服务注册到 Spring Boot Admin 监控中心</td>
+  </tr>
+</table>
+
+<div class="tip">
+<strong>关键细节：</strong>pom.xml 中排除了 <code>snail-job-server-starter</code> 自带的 <code>scala-library</code>，然后显式声明了 2.13.9 版本。这是为了统一管理 Scala 版本，避免传递依赖冲突。
+</div>
+
+<p>模块本身只写了 <strong>5 个 Java/配置源码文件</strong>（启动类、安全过滤器 x2、3 个 yml），其余全部由 <code>snail-job-server-starter</code> 自动配置提供。这就是"薄封装 + 重框架"的设计哲学。</p>
+
+<h2>3. 启动入口：跨包引导的精妙设计</h2>
+
+<p>这是整个模块最关键的一段代码：</p>
+
+<pre>package org.dromara.snailjob;  <span style="color:#5c6370;">← 对外声明的包</span>
+
+@SpringBootApplication
+public class SnailJobServerApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(
+            com.aizuda.snailjob.server.SnailJobServerApplication.class,  <span style="color:#5c6370;">← 实际运行的类!</span>
+            args
+        );
+    }
+}</pre>
+
+<p>注意这个 <strong>"声东击西"</strong> 的写法：</p>
+<ul>
+  <li>启动类声明在 <code>org.dromara.snailjob</code> 包下</li>
+  <li>但 <code>SpringApplication.run()</code> 传入的是 <code>com.aizuda.snailjob.server.SnailJobServerApplication.class</code></li>
+</ul>
+
+<h3>为什么这样设计？</h3>
+
+<p>核心原因是 <strong>Spring Boot 自动配置的包扫描机制</strong>。SnailJob 框架的自动配置类、组件扫描注解都声明在 <code>com.aizuda.snailjob.server</code> 包及子包下。如果直接使用 <code>org.dromara.snailjob</code> 下的启动类作为 Spring Boot 入口，框架内部的 <code>@ComponentScan</code>、<code>@EntityScan</code> 等就<strong>扫描不到</strong>框架自身的 Bean。</p>
+
+<p>通过传入 <code>com.aizuda.snailjob.server.SnailJobServerApplication.class</code>，Spring Boot 以该包为基准进行自动配置扫描，从而正确加载 SnailJob 框架的全部内部组件。</p>
+
+<div class="warn">
+<strong>常见误解：</strong>这里 <code>org.dromara.snailjob.SnailJobServerApplication</code> 并不是"包装类"或"代理类"——它仅仅是一个 <strong>启动引导器</strong>。真正的 Spring Boot 应用上下文由 <code>com.aizuda.snailjob.server.SnailJobServerApplication</code> 驱动。你可以把前者理解为"点火开关"，后者才是"发动机"。
+</div>
+
+<h3>启动流程追踪</h3>
+
+<div class="arch-diagram">1. org.dromara.snailjob.SnailJobServerApplication.main()
+   │  （JVM 入口，@SpringBootApplication 声明让 IDE 识别为 Spring Boot 应用）
+   │
+2. SpringApplication.run(com.aizuda.snailjob.server.SnailJobServerApplication.class)
+   │  （以框架包为基准，开始 Spring Boot 启动流程）
+   │
+3. 自动配置扫描 com.aizuda.snailjob.server.*
+   ├── 加载 Akka Actor 系统（调度引擎核心）
+   ├── 启动 Netty Server（17888 端口，客户端通信）
+   ├── 初始化 MyBatis-Plus（连接 MySQL，管理调度元数据）
+   ├── 启动 Dashboard HTTP Server（8800 端口，管理界面）
+   └── 启动 HTTP 重试/定时/工作流调度器
+   │
+4. ApplicationReadyEvent → 服务端就绪，等待客户端注册</div>
+
+<h2>4. 自我检测</h2>
+
+<p>学完本课，尝试口头回答以下问题：</p>
+<ol>
+  <li><code>ruoyi-snailjob-server</code> 属于 RuoYi-Vue-Plus 的哪一层？它依赖哪三个核心 JAR？</li>
+  <li>为什么启动类的包是 <code>org.dromara.snailjob</code>，但 run 方法传入的是 <code>com.aizuda.snailjob.server.SnailJobServerApplication.class</code>？</li>
+  <li>Sketch 出服务端的启动链路（从 main 到 ApplicationReadyEvent）。</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：
+  <a href="https://github.com/aizuda/snail-job/tree/main/snail-job-server/snail-job-server-starter" target="_blank">SnailJob Server Starter 源码</a> ·
+  <a href="https://snailjob.io/docs/" target="_blank">SnailJob 官方文档 - 服务端部署</a>
+</div>
+
+<div class="nav">
+  <span></span>
+  <a class="next" href="02-config-and-communication.html">下一课：配置体系与通信模型 →</a>
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师，可以深入讲解启动原理、自动配置机制或 Akka Actor 模型。</div>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>13 · ruoyi-common-security + sensitive：安全拦截与数据脱敏</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>13 · ruoyi-common-security + sensitive：安全拦截与数据脱敏</h1>
+
+<p><strong>核心问题：</strong>如何在请求层面控制接口访问权限（IP白名单、客户端校验），同时在响应层面自动脱敏敏感数据（手机号、身份证、银行卡）？</p>
+
+<h2>Part A: ruoyi-common-security — 请求级安全拦截</h2>
+
+<div class="info">
+<strong>关键发现：</strong>这个模块虽然叫"security"，但<strong>并不依赖 Spring Security</strong>。它是基于 Sa-Token 的拦截器配置层，负责在请求进入 Controller 之前的三层校验。
+</div>
+
+<h3>三层拦截校验</h3>
+<pre><code>// SecurityConfig 注册的 SaInterceptor
+SaRouter.match(allUrlHandler.getUrls()).check(() -> {
+    StpUtil.checkLogin();  // 第一层：登录态检查
+
+    // 第二层：clientId 一致性校验
+    // Header 或参数中的 clientId 必须与 Token 中存储的一致
+    // 防止 Token 在不同客户端之间被盗用
+
+    // 第三层：客户端访问规则
+    // 路径白名单校验 → 按客户端配置限制可访问的接口
+    // IP白名单校验   → 按客户端配置限制来源 IP
+});
+</code></pre>
+
+<h3>AllUrlHandler — 全量 URL 收集</h3>
+<pre><code>// 实现 InitializingBean，容器初始化后自动执行
+1. 获取 RequestMappingHandlerMapping Bean
+2. 遍历所有 @RequestMapping 注册的路径
+3. 路径变量 {xxx} → 通配符 *
+4. 收集到的 URL 列表供 SaInterceptor 使用
+// 鉴权覆盖所有已注册接口，而非硬编码路径列表
+</code></pre>
+
+<h3>与 satoken 的分工</h3>
+<table>
+<tr><th>维度</th><th>ruoyi-common-satoken</th><th>ruoyi-common-security</th></tr>
+<tr><td>关注点</td><td>Token 生成/销毁/持久化、权限数据</td><td>请求拦截/路由匹配、客户端/IP校验</td></tr>
+<tr><td>层级</td><td>底层基础设施</td><td>上层拦截配置</td></tr>
+</table>
+
+<p><strong>前端对应：</strong><code>src/directive/permission/index.ts</code> 的 v-hasPermi / v-hasRoles 指令做前端按钮级控制，后端 security 做接口级控制，双重保障。</p>
+
+<h2>Part B: ruoyi-common-sensitive — JSON 序列化脱敏</h2>
+
+<h3>@Sensitive 注解</h3>
+<pre><code>@Sensitive(strategy = SensitiveStrategy.PHONE)
+private String phone;  // 138****1234
+
+@Sensitive(strategy = SensitiveStrategy.ID_CARD)
+private String idCard; // 前3后4可见
+
+@Sensitive(strategy = SensitiveStrategy.EMAIL, roleKey = {"admin"})
+private String email;  // admin 角色不脱敏，其他人看到 t***@example.com
+</code></pre>
+
+<h3>17 种内置脱敏策略</h3>
+<table>
+<tr><th>策略</th><th>效果示例</th></tr>
+<tr><td>PHONE</td><td>138****1234</td></tr>
+<tr><td>ID_CARD</td><td>320***********1234</td></tr>
+<tr><td>EMAIL</td><td>t***@example.com</td></tr>
+<tr><td>BANK_CARD</td><td>6222****1234</td></tr>
+<tr><td>CHINESE_NAME</td><td>张**</td></tr>
+<tr><td>ADDRESS</td><td>北京市海淀区********</td></tr>
+<tr><td>IPV4</td><td>192.168.*.*</td></tr>
+<tr><td>STRING_MASK</td><td>前4后4可见，中间4个*</td></tr>
+<tr><td>MASK_HIGH_SECURITY</td><td>前2后2可见，中间全掩</td></tr>
+<tr><td>CLEAR</td><td>清空为 ""</td></tr>
+<tr><td>CLEAR_TO_NULL</td><td>清空为 null</td></tr>
+</table>
+
+<h3>角色级脱敏豁免</h3>
+<pre><code>// SensitiveService 接口
+public interface SensitiveService {
+    boolean isSensitive(String[] roleKey, String[] perms);
+}
+// 默认：管理员不过滤（不脱敏），其他人脱敏
+// 业务方可自定义实现
+</code></pre>
+
+<h3>脱敏执行流程</h3>
+<pre>
+Controller 返回 UserVO
+    ↓
+ResponseEnhancementAdvice.beforeBodyWrite()
+    ↓
+JsonValueEnhancer.enhance(body)
+    ↓
+SensitiveJsonFieldProcessor.process(fieldContext, value)
+    ├ 检查字段是否有 @Sensitive 注解
+    ├ 调用 SensitiveService.isSensitive() 判断是否需要脱敏
+    └ 执行 strategy.desensitizer.apply(text)
+    ↓
+Jackson 序列化为 JSON → 返回前端
+</pre>
+
+<h2>验证要点</h2>
+<ol>
+<li>在用户列表 API 响应中查看手机号字段是否为脱敏格式</li>
+<li>用 admin 角色和普通角色分别登录，查看同一用户的邮箱字段，对比脱敏效果</li>
+<li>在 SecurityConfig 中打断点，观察 SaInterceptor 的 check 回调中的三层校验过程</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://github.com/FasterXML/jackson-docs">Jackson 序列化自定义</a></div>
+<div class="reminder"> 想添加一个「只显示姓氏」的中文姓名脱敏策略？或想了解如何按 IP 白名单限制接口访问？直接问我。</div>
+
+</body>
+</html>

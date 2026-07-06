@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 04 · 消息通信全景</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.6rem; margin-top: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; padding-bottom: 0.25rem; border-bottom: 2px solid #f0f0f0; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.8rem 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .quick { background: #f3f8ff; border: 1px solid #d6e4ff; padding: 0.6rem 0.9rem; border-radius: 6px; font-size: 0.85rem; margin: 0.8rem 0; }
+  .navback { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .card { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; font-size: 0.84rem; }
+  .card h4 { margin: 0 0 0.4rem 0; }
+  .warnem { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; margin: 0.8rem 0; font-size: 0.84rem; border-radius: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+
+<h1>速查 04 · 消息通信全景 <span class="tag">消息通道</span></h1>
+
+<div class="quick">对应课程 第 4 课：Redis Pub/Sub / WebSocket / MQTT / 优先级队列 — 四种消息通信方式的差异与选型</div>
+
+<h2>一、Redis Pub/Sub — 最轻量发布订阅</h2>
+<pre><code>// 发布
+RedisUtils.publish("channel", "message", consumer -> log.info("published"));
+// 订阅
+RedisUtils.subscribe("channel", String.class, msg -> log.info("received: {}", msg));</code></pre>
+<div class="card">
+<h4>特点</h4>
+<p>零依赖（Redis 自带）| 毫秒级延迟 | 不持久化（离线消息丢失）| 无 Ack（fire-and-forget）</p>
+<p><b>场景：</b>缓存失效通知、配置刷新广播 — 允许偶尔丢失但要求极低延迟。</p>
+</div>
+
+<h2>二、WebSocket — 点对点 + 全服广播</h2>
+<pre><code>PushPayloadDTO payload = PushPayloadDTO.of(PushTypeEnum.MESSAGE, PushSourceEnum.BACKEND, msg, null);
+// 点对点
+messageService.publishMessage(List.of(userId), payload);
+// 全服广播
+messageService.publishAll(payload);</code></pre>
+<div class="card">
+<h4>特点</h4>
+<p>全双工长连接 | 支持点对点和广播 | 低延迟 | 需维护连接状态（心跳/重连）| 仅在线用户 | 无持久化</p>
+<p><b>场景：</b>站内信、实时通知、在线用户踢出。</p>
+</div>
+
+<h3>PushPayloadDTO.of() 四参数</h3>
+<table>
+  <tr><th>参数</th><th>类型</th><th>含义</th></tr>
+  <tr><td>pushType</td><td><code>PushTypeEnum</code></td><td>消息类型：MESSAGE / NOTICE / WARNING</td></tr>
+  <tr><td>pushSource</td><td><code>PushSourceEnum</code></td><td>来源：BACKEND（后端推送）/ FRONTEND（前端触发）</td></tr>
+  <tr><td>message</td><td><code>String</code></td><td>消息内容</td></tr>
+  <tr><td>extend</td><td><code>Object</code></td><td>扩展参数（携带业务数据）</td></tr>
+</table>
+
+<h2>三、MQTT — IoT 场景标准协议</h2>
+<pre><code>// 发布
+client.publish("/test/client", "hello".getBytes(StandardCharsets.UTF_8));
+
+// 订阅 QoS 1 + 通配符
+@MqttClientSubscribe(value = "/qos1/#", qos = MqttQoS.QOS1)
+public void subQos1(String topic, byte[] payload) { ... }
+
+// 占位符主题：${productKey} → +（单层通配符）
+@MqttClientSubscribe("/sys/${productKey}/${deviceName}/thing/sub/register")
+public void thingSubRegister(String topic, byte[] payload) { ... }
+
+// JSON 自动反序列化
+@MqttClientSubscribe(value = "/test/json", deserialize = MqttJsonDeserializer.class)
+public void testJson(String topic, MqttPublishMessage message, TestDemo data) { ... }</code></pre>
+
+<h3>参数自动映射规则 (mica-mqtt 2.4.5+)</h3>
+<table>
+  <tr><th>参数类型</th><th>映射内容</th></tr>
+  <tr><td><code>String</code>（第一个）</td><td>Topic（主题名）</td></tr>
+  <tr><td><code>MqttPublishMessage</code></td><td>原始消息（含 MQTT5 props）</td></tr>
+  <tr><td><code>byte[]</code> / <code>ByteBuffer</code></td><td>Payload 原始字节</td></tr>
+  <tr><td>其他自定义类型</td><td>JSON 反序列化后的业务对象</td></tr>
+</table>
+
+<div class="card">
+<h4>特点</h4>
+<p>QoS 三级保证（0/1/2）| 主题通配符（# 多层 / + 单层）| 自动反序列化 | 离线消息（Broker 持久化）| 需外部 Broker（EMQX/Mosquitto）</p>
+<p><b>场景：</b>IoT 设备通信、车联网、智能家居 — 需可靠送达、离线补收。</p>
+</div>
+
+<h2>四、优先级队列 — 轻量级 MQ 替代</h2>
+<pre><code>QueueUtils.addPriorityQueueObject("queueName", data);      // 入队（按 orderNum 排序）
+PriorityDemo data = QueueUtils.getPriorityQueueObject("queueName");  // 出队（按优先级）
+QueueUtils.removePriorityQueueObject("queueName", data);   // 删除指定元素
+QueueUtils.destroyPriorityQueue("queueName");              // 销毁队列</code></pre>
+<div class="card">
+<h4>特点</h4>
+<p>零外部依赖（Redis Sorted Set）| 支持优先级排序 | 集群安全（同一条只消费一次）| 无 Ack（消费即删除）| 无死信队列</p>
+<p><b>场景：</b>订单按优先级处理、延迟任务调度 — 不想引入 RabbitMQ/RocketMQ 等重量级 MQ。</p>
+</div>
+
+<div class="warnem"><b>集群提醒：</b>优先队列消费即删除无 Ack，如果业务处理失败消息就丢了。源码注释明确提醒：<b>做好事务补偿</b>。重要业务建议使用真正的 MQ。</div>
+
+<h2>五种通道选型决策表</h2>
+<table>
+  <tr><th>通道</th><th>可靠性</th><th>延迟</th><th>外部依赖</th><th>一句话选型</th></tr>
+  <tr><td><b>Redis Pub/Sub</b></td><td>低</td><td>极低</td><td>无</td><td>丢得起的通知</td></tr>
+  <tr><td><b>WebSocket</b></td><td>中</td><td>低</td><td>无</td><td>给在线用户推送</td></tr>
+  <tr><td><b>MQTT</b></td><td>高</td><td>中</td><td>MQTT Broker</td><td>IoT/设备通信</td></tr>
+  <tr><td><b>优先级队列</b></td><td>中</td><td>低</td><td>无</td><td>要排序不想装 MQ</td></tr>
+  <tr><td><b>RabbitMQ/RocketMQ</b></td><td>最高</td><td>中</td><td>MQ Broker</td><td>以上都不满足时</td></tr>
+</table>
+
+<h2>ruoyi-demo 20 个 Controller 全景地图</h2>
+<table>
+  <tr><th>类别</th><th>Controller</th><th>课程</th></tr>
+  <tr><td rowspan="3">数据 CRUD</td><td>TestDemoController</td><td>第 1 课</td></tr>
+  <tr><td>TestTreeController</td><td>第 1 课</td></tr>
+  <tr><td>TestBatchController</td><td>第 2 课</td></tr>
+  <tr><td rowspan="4">缓存与并发</td><td>RedisCacheController</td><td>第 2 课</td></tr>
+  <tr><td>RedisLockController</td><td>第 2 课</td></tr>
+  <tr><td>RedisRateLimiterController</td><td>第 2 课</td></tr>
+  <tr><td>（TestDemoController 中的 @RepeatSubmit）</td><td>第 1 课</td></tr>
+  <tr><td rowspan="3">数据安全</td><td>TestSensitiveController</td><td>第 3 课</td></tr>
+  <tr><td>TestEncryptController</td><td>第 3 课</td></tr>
+  <tr><td>TestI18nController</td><td>第 3 课</td></tr>
+  <tr><td rowspan="4">消息通信</td><td>RedisPubSubController</td><td>第 4 课</td></tr>
+  <tr><td>WebSocketController</td><td>第 4 课</td></tr>
+  <tr><td>MqttController</td><td>第 4 课</td></tr>
+  <tr><td>PriorityQueueController</td><td>第 4 课</td></tr>
+  <tr><td rowspan="2">外部集成</td><td>EsCrudController</td><td>进阶</td></tr>
+  <tr><td>McpDemoController / McpDemoServerTool / McpDemoClientService</td><td>进阶</td></tr>
+  <tr><td rowspan="4">其他</td><td>SaTokenTestController</td><td>进阶</td></tr>
+  <tr><td>TestExcelController</td><td>进阶</td></tr>
+  <tr><td>SmsController</td><td>进阶</td></tr>
+  <tr><td>MailSendController</td><td>进阶</td></tr>
+</table>
+
+<div class="navback">← 返回课程：<a href="../lessons/04.html">第 4 课 · 消息通信全景</a></div>
+</body>
+</html>

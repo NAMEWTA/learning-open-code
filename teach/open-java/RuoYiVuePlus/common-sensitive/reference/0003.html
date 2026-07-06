@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · 处理器管线与自定义扩展指南</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · SensitiveJsonFieldProcessor 管线与自定义扩展</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code></p>
+
+<h2>SensitiveJsonFieldProcessor 核心逻辑</h2>
+<div class="chain">实现 JsonFieldProcessor，在 Jackson 序列化时拦截带 @Sensitive 注解的 String 字段，按策略执行脱敏替换。</div>
+
+<h2>关键方法</h2>
+<table>
+<tr><th>方法</th><th>逻辑</th><th>备注</th></tr>
+<tr><td><code>supports(JsonFieldContext)</code></td><td><code>fieldContext.getAnnotation(Sensitive.class) != null</code></td><td>有 @Sensitive 注解的字段才进入 process</td></tr>
+<tr><td><code>process(fieldContext, value, context)</code></td><td>1. 取注解 2. 检查 String 类型 3. 检查 SensitiveService 条件 4. 执行 <code>strategy.desensitizer().apply(text)</code></td><td>非 String 字段直接返回原值</td></tr>
+</table>
+
+<h2>SensitiveService 的三种状态</h2>
+<table>
+<tr><th>sensitiveService 状态</th><th>@Sensitive 上的 roleKey/perms</th><th>脱敏结果</th></tr>
+<tr><td>null（默认，未注入）</td><td>随意（写了也忽略）</td><td><b>始终脱敏</b></td></tr>
+<tr><td>有值，isSensitive 返回 true</td><td>写了且匹配</td><td><b>脱敏</b></td></tr>
+<tr><td>有值，isSensitive 返回 false</td><td>写了但用户不匹配</td><td><b>不脱敏</b>（返回明文）</td></tr>
+</table>
+
+<h2>SensitiveService 实现模板</h2>
+<div class="chain">@Component
+public class DefaultSensitiveService implements SensitiveService {
+    @Override
+    public boolean isSensitive(String[] roleKey, String[] perms) {
+        // 无 roleKey 和 perms → 无条件脱敏
+        if (roleKey.length == 0 && perms.length == 0) return true;
+
+        // 角色检查（OR 关系）
+        for (String role : roleKey) {
+            if (StpUtil.hasRole(role)) return true;
+        }
+
+        // 权限检查（OR 关系）
+        for (String perm : perms) {
+            if (StpUtil.hasPermission(perm)) return true;
+        }
+
+        return false;  // 都不满足 → 不脱敏
+    }
+}</div>
+
+<h2>新增自定义脱敏策略（2 步）</h2>
+<table>
+<tr><th>步骤</th><th>操作</th></tr>
+<tr><td>1. 在 SensitiveStrategy 枚举中加一项</td><td><code>CUSTOM_SAFETY_CODE(s -> DesensitizedUtils.maskHighSecurity(s, 3, 2)),</code></td></tr>
+<tr><td>2. 在 VO 字段上使用</td><td><code>@Sensitive(strategy = SensitiveStrategy.CUSTOM_SAFETY_CODE)</code></td></tr>
+</table>
+
+<h2>JsonFieldProcessor 三阶段生命周期</h2>
+<div class="chain">collect(每个字段一次) → prepare(全局一次) → process(每个字段一次)
+                            ↑
+              脱敏处理器只用了 process 阶段</div>
+
+<table>
+<tr><th>阶段</th><th>脱敏处理器的行为</th></tr>
+<tr><td><code>collect</code></td><td>未重写 —— 脱敏不需要批量预处理，每个字段独立处理即可</td></tr>
+<tr><td><code>prepare</code></td><td>未重写 —— 脱敏不需要批量 IO 查询</td></tr>
+<tr><td><code>process</code></td><td>重写 —— 检查注解 + 条件判断 + 执行脱敏</td></tr>
+</table>
+
+<h2>排障速查表</h2>
+<table>
+<tr><th>症状</th><th>最可能原因</th><th>检查点</th></tr>
+<tr><td>加了注解不脱敏</td><td>注解在 Entity 上而非 VO 上</td><td>确认：注解所在类是否通过 Controller 返回</td></tr>
+<tr><td>同上</td><td>字段不是 String 类型</td><td>Integer/Long 类型不处理，改用 String</td></tr>
+<tr><td>同上</td><td>提供了 SensitiveService 但 isSensitive 返回 false</td><td>检查角色/权限匹配逻辑</td></tr>
+<tr><td>roleKey 不生效</td><td>没有提供 SensitiveService 实现类</td><td>确认 @Component 实现类存在</td></tr>
+<tr><td>脱敏格式不对</td><td>hutool 版本差异</td><td>查看 hutool DesensitizedUtil 对应版本源码</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>处理器通过 <code>@Order(100)</code> 保证在其他处理器（字典翻译等）<b>之后</b>执行。</li>
+<li><code>@Autowired(required = false)</code> 让 SensitiveService 成为可选依赖——不提供也能正常运行。</li>
+<li>处理器只重写 <code>supports()</code> 和 <code>process()</code>，不参与 collect/prepare 阶段。</li>
+<li>新增策略 = 枚举加一项 + VO 字段上使用，不动处理器和配置。</li>
+<li>SensitiveConfig 无任何条件注解，引入依赖即生效。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SensitiveJsonFieldProcessor、SensitiveService、SensitiveConfig、JsonFieldProcessor、JsonFieldContext</p>
+</body>
+</html>

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 04 · 异步与流式处理</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 04 · 异步与流式处理</h1>
+<p class="a">配套课程：<code>lessons/0004.html</code> · 使命：读懂 ruoyi-common-oss 对象存储模块</p>
+
+<h2>一句话定位</h2>
+<div class="chain">异步体系 = <b>配置层（OssAsyncExecutorConfig）→ 执行层（doCustomUpload + handleAsync）→ 结果层（HandleAsyncResult）→ 消费层（OutputStreamDownloadSubscriber）</b>，四层协作实现非阻塞 OSS 上传下载。</div>
+
+<h2>异步执行器配置：两种模式</h2>
+<table>
+<tr><th>字段</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>enabledVirtualThread</code></td><td>boolean</td><td>true</td><td>启用则用 <code>Executors.newVirtualThreadPerTaskExecutor()</code>，否则用线程池</td></tr>
+<tr><td><code>corePoolSize</code></td><td>int</td><td><code>Runtime.availableProcessors()</code></td><td>虚拟线程模式下失效</td></tr>
+</table>
+
+<h2>HandleAsyncResult&lt;T&gt; API</h2>
+<table>
+<tr><th>方法</th><th>返回</th><th>说明</th></tr>
+<tr><td><code>getResult()</code></td><td><code>Optional&lt;T&gt;</code></td><td>获取成功结果，失败时为空</td></tr>
+<tr><td><code>getError()</code></td><td><code>Optional&lt;Throwable&gt;</code></td><td>获取异常，成功时为空</td></tr>
+<tr><td><code>isSuccess()</code></td><td>boolean</td><td><code>getError().isEmpty()</code></td></tr>
+<tr><td><code>isFailure()</code></td><td>boolean</td><td><code>getError().isPresent()</code></td></tr>
+<tr><td><code>of(T, Throwable)</code></td><td><code>HandleAsyncResult&lt;T&gt;</code></td><td>通用构造（静态工厂）</td></tr>
+<tr><td><code>success(T)</code></td><td><code>HandleAsyncResult&lt;T&gt;</code></td><td>成功构造，error = null</td></tr>
+<tr><td><code>failure(Throwable)</code></td><td><code>HandleAsyncResult&lt;T&gt;</code></td><td>失败构造，result = null</td></tr>
+</table>
+
+<h2>OutputStreamDownloadSubscriber 方法一览</h2>
+<table>
+<tr><th>方法</th><th>入参</th><th>说明</th></tr>
+<tr><td><code>accept(ByteBuffer)</code></td><td>字节缓冲区</td><td>实现 <code>Consumer&lt;ByteBuffer&gt;</code>，写入 channel</td></tr>
+<tr><td><code>close()</code></td><td>—</td><td>实现 <code>AutoCloseable</code>，仅在 <code>allowAutoClose=true</code> 时关闭 channel</td></tr>
+<tr><td><code>create(OutputStream)</code></td><td>输出流</td><td>默认 <code>allowAutoClose=false</code></td></tr>
+<tr><td><code>create(OutputStream, boolean)</code></td><td>输出流 + 关闭标志</td><td>指定是否自动关闭</td></tr>
+<tr><td><code>create(WritableByteChannel)</code></td><td>可写通道</td><td>默认 <code>allowAutoClose=false</code></td></tr>
+<tr><td><code>create(WritableByteChannel, boolean)</code></td><td>可写通道 + 关闭标志</td><td>指定是否自动关闭</td></tr>
+</table>
+
+<h2>doCustomUpload 四个重载</h2>
+<table>
+<tr><th>重载</th><th>返回类型</th><th>transferListeners</th><th>自定义 handler</th></tr>
+<tr><td>1（完整版）</td><td><code>T</code>（泛型）</td><td>有</td><td>有（BiFunction）</td></tr>
+<tr><td>2</td><td><code>T</code>（泛型）</td><td>无（传 null）</td><td>有（BiFunction）</td></tr>
+<tr><td>3</td><td><code>HandleAsyncResult&lt;PutObjectResponse&gt;</code></td><td>有</td><td>内置（返回 HandleAsyncResult）</td></tr>
+<tr><td>4</td><td><code>HandleAsyncResult&lt;PutObjectResponse&gt;</code></td><td>无（传 null）</td><td>内置（返回 HandleAsyncResult）</td></tr>
+</table>
+
+<h2>上传异步流水线</h2>
+<div class="chain">
+Options (length, md5Digest, contentType, metadata, transferListeners)
+  │
+  └─► bucketUpload(bucket, key, body, options)
+        │
+        └─► doCustomUpload(body, builderConsumer, transferListeners)
+              │
+              └─► S3TransferManager.upload(uploadRequestBuilder)
+                    │ .requestBody(body)
+                    │ .putObjectRequest(builderConsumer)
+                    │ .transferListeners(transferListeners)
+                    │
+                    └─► .completionFuture()          ← CompletableFuture&lt;CompletedUpload&gt;
+                          │
+                          └─► .handleAsync(
+                                (completedUpload, throwable) → {
+                                  if (err != null) return HandleAsyncResult.failure(err)
+                                  return HandleAsyncResult.success(response)
+                                },
+                                asyncExecutor          ← 虚拟线程或线程池
+                              )
+                                │
+                                └─► .join()           ← 阻塞等待
+                                      │
+                                      ├─ isFailure() → throw toStorageException
+                                      └─ isSuccess() → build PutObjectResult
+</div>
+
+<h2>下载两条路径</h2>
+<table>
+<tr><th>路径</th><th>下载方法</th><th>核心 API</th><th>使用场景</th></tr>
+<tr>
+  <td>响应式流</td>
+  <td><code>bucketDownload(bucket, key, OutputStreamDownloadSubscriber)</code></td>
+  <td><code>AsyncResponseTransformer.toPublisher()</code> → <code>publisher.subscribe(subscriber)</code></td>
+  <td>大文件、流式处理、File/Path 输出</td>
+</tr>
+<tr>
+  <td>阻塞式流</td>
+  <td><code>bucketDownload(bucket, key, BiFunction)</code></td>
+  <td><code>AsyncResponseTransformer.toBlockingInputStream()</code> → try-with-resources</td>
+  <td>小文件、需内存解析、自定义转换</td>
+</tr>
+</table>
+
+<h2>下载响应式流流水线</h2>
+<div class="chain">
+bucketDownload(bucket, key, OutputStreamDownloadSubscriber)
+  │
+  └─► doCustomDownload(builderConsumer, toPublisher(), null)
+        │
+        └─► S3TransferManager.download(DownloadRequest)
+              │ .getObjectRequest(builderConsumer)
+              │ .responseTransformer(AsyncResponseTransformer.toPublisher())
+              │
+              └─► .completionFuture().join().result()
+                    │ 返回 ResponsePublisher&lt;GetObjectResponse&gt;
+                    │
+                    ├─ publisher.response() → buildGetObjectResult(key, response)
+                    │
+                    └─ publisher.subscribe(OutputStreamDownloadSubscriber)
+                          │ .join()  ← 阻塞直到所有数据消费完毕
+                          │
+                          └─ 每个 ByteBuffer → accept(byteBuffer)
+                                │
+                                └─ while (hasRemaining) → channel.write(byteBuffer)
+</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>handleAsync</b> 而不是 thenApply：一个回调处理成功+失败，且用独立 Executor 避免占用 Netty I/O 线程。</li>
+<li><b>虚拟线程默认开启</b>：<code>DEFAULT.enabledVirtualThread = true</code>，拥抱 Java 21，I/O 密集场景用轻量虚拟线程。</li>
+<li><b>HandleAsyncResult</b> 是轻量 Either：零依赖，不用引入 Vavr，只做成功/失败两路分发。</li>
+<li><b>OutputStreamDownloadSubscriber</b> 只管写不管关：<code>allowAutoClose=false</code> 默认，调用方用 try-with-resources 管理 OutputStream 生命周期。</li>
+<li><b>FileOutputStream 优化路径</b>：如果是 FileOutputStream 直接拿 FileChannel，跳过 Channels.newChannel() 包装层。</li>
+<li><b>Options 链式构建</b>：<code>@Accessors(chain=true)</code> + 懒初始化 Map/List，流畅收集上传参数。</li>
+<li><b>下载两种策略</b>：响应式流（Publisher + Subscriber）适合大文件/流式，阻塞 InputStream 适合小文件/内存解析。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：OssAsyncExecutorConfig、HandleAsyncResult、OutputStreamDownloadSubscriber、CompletableFuture、虚拟线程、Options、S3TransferManager</p>
+</body>
+</html>

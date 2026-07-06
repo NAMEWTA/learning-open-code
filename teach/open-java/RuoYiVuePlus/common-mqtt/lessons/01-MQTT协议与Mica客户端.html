@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MQTT 协议与 Mica 客户端</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>01 - MQTT 协议与 Mica 客户端</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 MQTT 发布订阅模型的核心概念（Broker/Topic/QoS），能说清 ruoyi-common-mqtt 模块与 Mica MQTT 的关系，并能画出 MQTT 网络的拓扑结构图。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>MQTT（Message Queuing Telemetry Transport）是 OASIS 标准的轻量级物联网消息协议，专为低带宽、不可靠网络设计。它不叫"消息队列"——核心是<strong>发布订阅模型</strong>，而非 RabbitMQ/Kafka 那样的队列。</p>
+
+<p>一张图看清 MQTT 的角色关系：</p>
+<pre>
+┌──────────┐     publish "sensor/temp"     ┌────────────┐
+│ 设备 A   │ ─────────────────────────────▶│            │
+│Publisher │                               │   Broker   │
+└──────────┘                               │  (EMQX /   │
+                                           │  Mosquitto)│
+┌──────────┐     subscribe "sensor/#"      │            │
+│ 后端服务  │ ◀─────────────────────────────│            │
+│Subscriber│                               └────────────┘
+└──────────┘
+</pre>
+<p><strong>ruoyi-common-mqtt 的角色是什么？</strong>它是 MQTT 体系中的 <strong>Client</strong>——连接到 Broker，既可以发布消息也可以订阅消息。模块本身只有 3 个 Java 文件，所有 MQTT 通信能力来自 <strong>Mica MQTT</strong>（Dromara 社区出品，基于 t-io 网络框架）。本模块做的事情是"项目化适配"——用 Spring Boot 自动配置把 Mica MQTT 包装成即插即用的 Bean。</p>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 MQTT 协议的三个关键概念</h3>
+<table>
+  <tr><th>概念</th><th>含义</th><th>示例</th></tr>
+  <tr><td><strong>Topic</strong></td><td>消息路由标签，UTF-8 字符串，用 <code>/</code> 分层</td><td><code>sensor/temperature/room1</code></td></tr>
+  <tr><td><strong>QoS</strong></td><td>交付质量保证：0=至多一次、1=至少一次、2=恰好一次</td><td>温度上报用 QoS 0，告警用 QoS 1</td></tr>
+  <tr><td><strong>Wildcard</strong></td><td>订阅通配符：<code>+</code> 单层、<code>#</code> 多层</td><td><code>sensor/+/room1</code>、<code>sensor/#</code></td></tr>
+</table>
+
+<blockquote><strong>关键区别：</strong>Topic 不需要预先创建，发布消息时自动创建。这和 Kafka 的 Topic 或 RabbitMQ 的 Queue 不同——MQTT 的 Topic 更像一个「动态路由标签」，而非预先声明的存储结构。</blockquote>
+
+<h3>2.2 模块三剑客</h3>
+<p>打开 <code>config/</code> 目录，核心只有三个文件：</p>
+
+<table>
+  <tr><th>文件</th><th>职责</th></tr>
+  <tr><td><code>MqttAutoConfiguration.java</code></td><td>自动配置入口，用 <code>@ConditionalOnProperty(value="mqtt.client.enabled", havingValue="true")</code> 控制开关，注册两个监听器和一个定制器 Bean</td></tr>
+  <tr><td><code>MqttClientConnectListener.java</code></td><td>实现 <code>IMqttClientConnectListener</code>，处理连接/断连事件，断连时可动态更换 clientId/username/password</td></tr>
+  <tr><td><code>MqttClientGlobalMessageListener.java</code></td><td>实现 <code>IMqttClientGlobalMessageListener</code>，接收所有已订阅主题的消息，是消息的统一入口</td></tr>
+</table>
+
+<p>注意还有一个隐形的第四位——<code>MqttClientCustomizer</code>，它是 Mica MQTT 的扩展点，通过 Lambda 表达式在自动配置中以内联 Bean 形式创建，负责用虚拟线程替换默认线程池。下一课详细讲。</p>
+
+<h3>2.3 配置驱动：application.yml</h3>
+<pre>
+mqtt:
+  client:
+    enabled: true
+    ip: 127.0.0.1
+    port: 1883
+    client-id: "000001"
+    username: admin
+    password: public
+    version: mqtt_5              # 支持 mqtt_3_1 / mqtt_3_1_1 / mqtt_5
+    keep-alive-secs: 60
+    session-expiry-interval-secs: 300
+</pre>
+<p><code>client-id</code> 是 MQTT 协议层面的唯一标识，与 Mica MQTT 层面的 <code>name</code>（客户端名称）是不同的两个概念。MQTT 5 相比 3.1.1 增加了会话过期时间、主题别名等新特性，本模块配置支持版本切换。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> MQTT 发布订阅模型与 RabbitMQ 队列模型的本质区别是什么？</p>
+<p><strong>参考:</strong> MQTT 是 Topic 广播——发布者和订阅者空间解耦，互不知晓；RabbitMQ 是 Queue 点对点——生产者发到队列、消费者从队列取。MQTT 不保证消息被消费（除非 QoS &gt; 0），队列模型保证至少一次投递。</p>
+<p><strong>Q2:</strong> <code>sensor/+/temperature</code> 和 <code>sensor/#</code> 分别能匹配哪些 Topic？</p>
+<p><strong>参考:</strong> <code>+</code> 匹配单层：<code>sensor/room1/temperature</code>、<code>sensor/room2/temperature</code>；<code>#</code> 匹配多层：<code>sensor/room1/temperature</code>、<code>sensor/room1/humidity</code>、<code>sensor/room1/device/status</code> 等所有子孙节点。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<p>从应用启动到消息接收的完整路径：</p>
+<pre>
+Spring Boot 扫描 AutoConfiguration.imports
+  → MqttAutoConfiguration 被激活（因为 mqtt.client.enabled=true）
+    → 注册 MqttClientCustomizer（定制 MqttClientCreator）
+    → 注册 MqttClientConnectListener（连接监听器）
+    → 注册 MqttClientGlobalMessageListener（消息监听器）
+    → Mica MQTT 自动创建 MqttClient，连接到 Broker
+      → 连接成功 → onConnected() 回调
+      → 收到消息 → onMessage(topic, payload) 回调
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>Mica MQTT 的 Java 版 MQTT 实现与 Mosquitto/EMQX 等 C/C++ Broker 在协议上完全互通——只要有 S3 级别的标准协议兜底，语言和具体实现从来不重要。本模块通过标准 MQTT 5 协议连接到任意兼容 Broker，实现了厂商无关性。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html">MQTT 5.0 OASIS 标准</a> · <a href="https://gitee.com/dromara/mica-mqtt">Mica MQTT 源码仓库</a></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课我们将深入 Virtual Thread 和监听器的实战细节。</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-虚拟线程定制与监听器.html">下一课 →</a></div>
+</body>
+</html>

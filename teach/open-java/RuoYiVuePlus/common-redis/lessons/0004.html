@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 防重提交：@RepeatSubmit 与幂等</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 防重提交：<code>@RepeatSubmit</code> 与幂等 <span class="tag">切面区</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：学完你能讲清 <code>@RepeatSubmit</code> 的链路，以及它的核心设计——「<strong>setIfAbsent 占位 + 成功留键 / 失败删键</strong>」这套幂等手法，并能说清它和上一课 <code>@RateLimiter</code> 在意图上的根本区别。
+</div>
+
+<p>典型场景：用户手抖双击「提交订单」，或网络慢时反复点。防重提交要保证<strong>短时间内的重复请求只有第一次生效</strong>。代码注释说它参考了「美团 GTIS 防重系统」。</p>
+
+<h2>一、注解很简单</h2>
+<span class="step where">annotation/RepeatSubmit.java</span>
+<pre><code>@RepeatSubmit(
+    interval = 5000,                  // 间隔(ms)，小于此视为重复，默认 5 秒
+    timeUnit = TimeUnit.MILLISECONDS,
+    message = "{repeat.submit.message}"  // 国际化提示
+)
+public R&lt;Void&gt; addOrder(@RequestBody OrderBo bo) { ... }</code></pre>
+
+<h2>二、三个切面方法：前、后、异常</h2>
+
+<p>和限流只有 <code>@Before</code> 不同，防重提交切面有<strong>三个通知</strong>，构成一个完整的「占位—确认—回滚」闭环：</p>
+
+<div class="flow">@Before        doBefore()          请求进来 → 抢占 key
+@AfterReturning doAfterReturning()  正常返回 → 看返回码决定留键还是删键
+@AfterThrowing  doAfterThrowing()   抛异常   → 删键（允许重试）</div>
+
+<h2>三、doBefore：怎么抢占、key 怎么生成</h2>
+<span class="step where">aspectj/RepeatSubmitAspect.java:49</span>
+
+<div class="step"><span class="num">1</span><b>校验间隔</b><br>
+<code>interval</code> 换算成毫秒，<strong>小于 1000ms 直接报错</strong>（"重复提交间隔不能小于 1 秒"）。</div>
+
+<div class="step"><span class="num">2</span><b>生成唯一 key</b><br>
+取请求参数拼成字符串 <code>nowParams</code>，取请求头里的 token（<code>SaManager.getConfig().getTokenName()</code> 读 token 名），两者拼起来做 <strong>MD5</strong>：<br>
+<code>submitKey = md5(token + ":" + nowParams)</code><br>
+最终 key = <code>REPEAT_SUBMIT_KEY + url + submitKey</code>。</div>
+
+<div class="step"><span class="num">3</span><b>原子抢占</b><br>
+<code>RedisUtils.setObjectIfAbsent(cacheRepeatKey, "", Duration.ofMillis(interval))</code>：
+<ul>
+<li>抢到（之前没有这个 key）→ 把 key 存进 <code>ThreadLocal</code>，<strong>放行</strong>。</li>
+<li>没抢到（已存在）→ 翻译 message → <strong>抛 ServiceException（重复提交）</strong>。</li>
+</ul></div>
+
+<div class="why"><b>key 为什么要拼 token + 参数 + URL？</b>三者共同定义「同一个人对同一个接口提交同样的数据」。换了用户（token 不同）、换了接口（url 不同）、改了参数（MD5 不同）都算不同操作，不会误伤。用 MD5 是为了把任意长的参数压成定长 key。</div>
+
+<h2>四、最精妙处：成功留键、失败删键</h2>
+<span class="step where">aspectj/RepeatSubmitAspect.java:85</span>
+
+<pre><code>@AfterReturning(..., returning = "jsonResult")
+public void doAfterReturning(..., Object jsonResult) {
+    if (jsonResult instanceof R&lt;?&gt; r) {
+        if (r.getCode() == HttpStatus.SUCCESS) {
+            return;            // ★ 成功：不删 key，间隔内无法再提交
+        }
+        deleteRepeatKey();     // 业务失败：删 key，允许马上重试
+    }
+}
+@AfterThrowing(...)
+public void doAfterThrowing(...) {
+    deleteRepeatKey();         // 异常：删 key，允许重试
+}</code></pre>
+
+<div class="why">
+<b>这套设计的精髓</b>：<br>
+- <strong>成功</strong>了就该「锁住」一段时间——用户双击的第二下会撞上还没过期的 key，被拦下。<br>
+- <strong>失败/异常</strong>了说明这次没成，应该让用户能<strong>立刻重试</strong>，所以主动删 key，不必等过期。<br>
+如果不分情况一律靠过期，用户提交失败后还得干等 5 秒才能再试，体验很差。
+</div>
+
+<div class="side">💡 <code>KEY_CACHE</code> 是 <code>ThreadLocal&lt;String&gt;</code>：<code>doBefore</code> 存入、后置方法取用并在 <code>finally</code> 里 <code>remove()</code>。用 ThreadLocal 是因为「这次请求抢到的 key」要在同一线程的前置和后置之间传递，又不能串到别的请求。</div>
+
+<h2>五、参数拼装的细节：过滤不可序列化对象</h2>
+<p><code>argsArrayToString</code> 把参数转 JSON 拼接，但 <code>isFilterObject</code> 会跳过 <code>MultipartFile</code>（文件）、<code>HttpServletRequest/Response</code>、<code>BindingResult</code> 这些——它们无法或不该参与 JSON 序列化，且对「是否重复」没有判定意义。数组、集合、Map 会递归检查。</p>
+
+<h2>六、和 @RateLimiter 的根本区别</h2>
+<table>
+<tr><th></th><th>@RateLimiter</th><th>@RepeatSubmit</th></tr>
+<tr><td>保护什么</td><td>系统（别被刷爆）</td><td>数据（别重复落库）</td></tr>
+<tr><td>控制维度</td><td>频率（N 次/时间窗）</td><td>同一操作的重复（一次只生效一次）</td></tr>
+<tr><td>底层</td><td>令牌桶 RRateLimiter</td><td>setIfAbsent 占位 + 过期</td></tr>
+<tr><td>成功后</td><td>令牌随时间恢复</td><td>留键锁定到过期</td></tr>
+<tr><td>失败后</td><td>不影响</td><td>删键，可立即重试</td></tr>
+</table>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 防重提交在请求成功（返回码 SUCCESS）后为什么不删除 Redis 里的 key？</p>
+<span class="opt">A. 删除操作太慢，影响性能</span>
+<span class="opt">B. 故意保留到过期，让间隔内的重复提交（如双击）撞上 key 被拦下</span>
+<span class="opt">C. 因为成功的 key 不能被删除，是 Redis 的限制</span>
+<span class="opt">D. 留着做日志统计用</span>
+<details><summary>看答案</summary><b>B</b>。成功就该锁定一段时间防重复；只有失败/异常才删 key 以允许用户立即重试。这是"成功留键、失败删键"的核心。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 防重 key 由 token + 请求参数 MD5 + URL 组成，这样设计是为了？</p>
+<span class="opt">A. 让 key 尽量短，节省 Redis 内存空间</span>
+<span class="opt">B. 精确定义"同一个人对同一接口提交同样数据"，换人/换接口/改参数都算不同操作</span>
+<span class="opt">C. 加密用户信息，防止泄露</span>
+<span class="opt">D. 兼容不同的 HTTP 方法</span>
+<details><summary>看答案</summary><b>B</b>。token 区分人、url 区分接口、参数 MD5 区分内容，三者共同界定"重复"的边界，避免误伤不同请求。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>setObjectIfAbsent</code> 在防重里扮演什么角色？</p>
+<span class="opt">A. 设置缓存的过期时间</span>
+<span class="opt">B. 原子地"占位"：不存在才写入并返回 true（抢到），已存在返回 false（判定重复）</span>
+<span class="opt">C. 删除已存在的重复 key</span>
+<span class="opt">D. 读取上一次提交的内容</span>
+<details><summary>看答案</summary><b>B</b>。它底层是 SETNX + 过期的原子操作。返回 true 表示首次抢到放行；false 表示 key 已在（重复），抛异常拦截。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://plus-doc.dromara.org/" target="_blank">RuoYi-Vue-Plus 官方文档 · 防重提交</a>——对照官方的使用说明，验证你对 interval 语义与适用接口的理解。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「分布式多实例下这个 key 会冲突吗？」「为什么用 MD5 而不是直接拼 JSON 当 key？」下一课进入 <strong>manager 区</strong>，讲二级缓存：Caffeine 本地 + Redis 分布式。</div>
+
+<div class="nav">课程 0004 / 使命：全面读懂 ruoyi-common-redis · 上一课：@RateLimiter 限流 · 下一课：二级缓存</div>
+
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SSE 与 WebSocket 双传输</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>01 - SSE 与 WebSocket 双传输</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>理解 SSE 和 WebSocket 的协议差异与适用场景，掌握 @ConditionalOnMessageTransport + MessageTransportCondition 的条件装配机制，能讲清两个通道各自的连接建立与生命周期管理流程。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p><code>ruoyi-common-push</code> 包含 17 个 Java 文件，同时支持 SSE 和 WebSocket 两种消息推送协议。模块的核心设计哲学：<strong>双通道并存、配置二选一、接口统一抽象</strong>。</p>
+
+<p>模块分层结构：</p>
+<pre>
+common-push/
+├── annotation/  → @ConditionalOnMessageTransport（条件注解）
+├── condition/   → MessageTransportCondition（条件判断逻辑）
+├── config/      → MessageAutoConfiguration + 两个通道配置类
+├── constant/    → MessageConstants（Redis Topic、心跳标识等）
+├── core/        → PushSessionManager 接口 + 两个通道管理器
+├── dto/         → PushDTO / PushPayloadDTO（数据传输对象）
+├── helper/      → PushHelper（业务调用入口）
+├── handler/     → PlusWebSocketHandler（WebSocket 事件处理）
+├── interceptor/ → PlusWebSocketInterceptor（WS 握手拦截器）
+├── listener/    → MessageTopicListener（Redis 消息监听）
+├── properties/  → MessageProperties（配置属性类）
+└── web/         → SseController（SSE 连接端点）
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 SSE vs WebSocket：协议差异</h3>
+<table>
+  <tr><th>维度</th><th>SSE</th><th>WebSocket</th></tr>
+  <tr><td>协议</td><td>HTTP 长连接（text/event-stream）</td><td>独立 ws:// 协议（RFC 6455）</td></tr>
+  <tr><td>通信方向</td><td>单向（服务端→客户端）</td><td>全双工（双向）</td></tr>
+  <tr><td>数据格式</td><td>仅文本</td><td>文本 + 二进制</td></tr>
+  <tr><td>自动重连</td><td>浏览器内置（EventSource API）</td><td>需手动实现</td></tr>
+  <tr><td>穿透代理</td><td>天然支持（基于 HTTP）</td><td>需 WebSocket Upgrade 支持</td></tr>
+  <tr><td>Spring 实现</td><td>SseEmitter</td><td>WebSocketHandler 体系</td></tr>
+</table>
+
+<blockquote><strong>怎么选？</strong>如果只有服务端推送通知（如审批提醒、系统公告），SSE 更轻量——复用 HTTP 端口、无需额外协议处理。如果需要双向通信（如在线聊天、协作编辑），必须用 WebSocket。默认配置建议 SSE（大部分管理系统的推送需求是单向的）。</blockquote>
+
+<h3>2.2 条件装配机制：二选一如何实现？</h3>
+<p>三个组件的协作：</p>
+<pre>
+@ConditionalOnMessageTransport("sse")
+  ↓ 标注在 MessageSseConfiguration 上
+  ↓
+MessageTransportCondition.matches()
+  ↓ 读取 message.enabled 和 message.transport 配置
+  ↓ 与注解 value() 比对
+  ↓
+message.transport = "sse"  → 激活 MessageSseConfiguration
+message.transport = "websocket" → 激活 MessageWebSocketConfiguration
+</pre>
+
+<p><strong>公共层不受影响：</strong><code>MessageAutoConfiguration</code> 本身不标注条件——它只管总开关（<code>message.enabled</code>）和配置绑定，无论哪个通道生效都需要它。两个特定通道配置类用 <code>@AutoConfigureAfter(MessageAutoConfiguration.class)</code> 保证顺序。</p>
+
+<pre>
+application.yml:
+message:
+  enabled: true
+  transport: sse           # ← 改成 "websocket" 就切换通道
+  path: /message
+  sseTimeout: 86400        # SSE 超时（秒）
+  heartbeatInterval: 60    # 心跳间隔（秒）
+</pre>
+
+<h3>2.3 SSE 通道：SseEmitterSessionManager</h3>
+<p>核心数据结构：<code>Map&lt;userId, Map&lt;token, SseEmitter&gt;&gt;</code></p>
+
+<p><strong>连接建立流程：</strong></p>
+<pre>
+SseController.connect()
+  → LoginHelper.getLoginUser() → 获取当前用户
+  → SseEmitter emitter = new SseEmitter(sseTimeout)
+  → USER_TOKEN_EMITTERS.computeIfAbsent(userId, k → new ConcurrentHashMap<>())
+  → 检查同 token 是否存在旧连接 → 有则 emitter.complete() 关闭旧连接
+  → put(token, emitter)
+  → emitter.onCompletion(() → 清理)
+  → emitter.onTimeout(() → 清理)
+  → emitter.onError(e → 清理)
+  → 发送连接成功事件
+  → 返回 emitter 给 Spring MVC 管理
+</pre>
+
+<p><strong>心跳保活机制：</strong><code>@Scheduled(fixedDelay = heartbeatInterval)</code> 定时任务 <code>sseMonitor()</code> 遍历所有连接，发送空注释行（<code>:</code>）作为心跳。Timeout/Error 的 emitter 自动从 Map 中移除。</p>
+
+<p><strong>消息发送：</strong><code>sendMessage(userId, dto)</code> → 遍历该 userId 下的所有 token emitter → <code>emitter.send(SseEmitter.event().data(dto).name("message"))</code>。如果发送失败（连接已断），自动移除该 token。</p>
+
+<h3>2.4 WebSocket 通道：WebSocketSessionManager</h3>
+<p>核心数据结构：<code>Map&lt;userId, Map&lt;token, WebSocketSession&gt;&gt;</code>，接口与 SSE 管理器几乎对称。</p>
+
+<p><strong>连接建立流程：</strong></p>
+<pre>
+1. HTTP Upgrade 握手 → PlusWebSocketInterceptor.beforeHandshake()
+   → 从请求中提取 token（URL 参数或 Header）
+   → 验证登录状态 → 提取 userId
+   → 将 LoginUser 和 token 存入 WebSocketSession attributes
+
+2. 连接建立 → PlusWebSocketHandler.afterConnectionEstablished()
+   → 从 session attributes 获取 userId 和 token
+   → WebSocketSessionManager.connect(userId, token, session)
+   → 驱逐同 token 旧连接 → 发送 KICKED 消息
+
+3. 消息处理 → handleTextMessage(session, message)
+   → 检查是否为心跳 PING → 回复 PONG
+   → 否则为自定义消息 → 业务处理
+
+4. 连接关闭 → afterConnectionClosed(session, status)
+   → WebSocketSessionManager.disconnect(session)
+</pre>
+
+<blockquote><strong>WebSocket 的心跳设计：</strong>客户端定时发送 PING 文本消息，服务端回复 PONG。<code>MessageConstants.PING = "PING"</code>、<code>MessageConstants.PONG = "PONG"</code>。这不是 WebSocket 协议的 Ping/Pong 帧（协议层的控制帧是二进制的），而是应用层的心跳——可以携带额外信息（如连接状态）。</blockquote>
+
+<h3>2.5 PushSessionManager 统一接口</h3>
+<pre>
+public interface PushSessionManager {
+    void subscribeMessage(Consumer&lt;PushDTO&gt; consumer);  // 订阅 Redis 消息
+    void sendMessage(Long userId, PushDTO dto);          // 发送给指定用户
+    void publishMessage(PushDTO dto);                    // 发布到 Redis
+    void publishAll(PushDTO dto);                        // 广播
+}
+</pre>
+<p>SSE 和 WebSocket 管理器都实现这个接口，<code>PushHelper</code> 通过 <code>SpringUtils.getBean(PushSessionManager.class)</code> 获取当前激活的实例，对业务代码透明。</p>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么 SSE 需要心跳保活，而 HTTP 本身就有 keep-alive？</p>
+<p><strong>参考:</strong> HTTP keep-alive 是 TCP 层面的连接复用，不解决应用层的问题。SSE 是长时间无数据流动的连接——客户端和代理服务器可能会因为长时间无数据而关闭连接（典型超时 60-120 秒）。心跳定期发送数据，告诉整条链路「我还活着」，防止被中间代理或负载均衡器断开。</p>
+<p><strong>Q2:</strong> 同 token 的旧连接被驱逐时为什么要发 KICKED 消息？</p>
+<p><strong>参考:</strong> KICKED 消息让旧连接的前端知道「你被顶替了」，可以展示友好提示（如"您的账号在其他设备登录"），而不是默默地断连让用户困惑。这是一种用户体验设计——技术上是关闭连接，产品上是告知原因。</p>
+<p><strong>Q3:</strong> 如果 message.transport 配置既不是 "sse" 也不是 "websocket"，会发生什么？</p>
+<p><strong>参考:</strong> MessageTransportCondition.matches() 比对不通过，两个通道配置类都不会被激活。但由于 PushHelper 通过 SpringUtils.getBean(PushSessionManager.class) 获取管理器，如果没有任何管理器 Bean 注册，容器启动时就会报 NoSuchBeanDefinitionException。这是一种 fail-fast 设计——配错就启动不了，而不是运行时才发现推送功能不工作。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+应用启动:
+1. AutoConfiguration.imports → MessageAutoConfiguration
+2. message.enabled=true → 继续
+3. 检查 message.transport
+   ├─ "sse" → MessageSseConfiguration 激活
+   │           → @Bean SseEmitterSessionManager
+   │           → @Bean SseController
+   └─ "websocket" → MessageWebSocketConfiguration 激活
+                     → @Bean WebSocketSessionManager
+                     → @Bean PlusWebSocketHandler
+                     → @Bean PlusWebSocketInterceptor
+4. MessageTopicListener (ApplicationRunner, Ordered=-1)
+   → pushSessionManager.subscribeMessage(consumer)
+     → RedisUtils.subscribe(MESSAGE_TOPIC, consumer)
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>条件装配是 Spring Boot 最强大的扩展机制之一。模块用它实现了「改一行配置就能切换推送协议」的效果——不是简单的 if-else 判断，而是整个 Bean 注册的有无。配合 PushSessionManager 接口，两个通道管理器对外暴露完全相同的 API，业务代码（PushHelper）无需关心底层是 SSE 还是 WebSocket。这是开闭原则（对扩展开放、对修改关闭）在 Spring 自动配置中的经典应用。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-async.html#mvc-ann-async-sse">Spring MVC SSE 文档</a> · <a href="https://docs.spring.io/spring-framework/reference/web/websocket.html">Spring WebSocket 文档</a> · 入口文件：<code>annotation/ConditionalOnMessageTransport.java</code> · <code>condition/MessageTransportCondition.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课讲解 Redis 集群分发与前端消费。</div>
+<div class="nav"><a href="../">← 模块首页</a><a href="02-Redis集群分发与前端消费.html">下一课 →</a></div>
+</body>
+</html>

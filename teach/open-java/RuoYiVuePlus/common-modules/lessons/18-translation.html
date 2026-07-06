@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>18 · ruoyi-common-translation：翻译器框架</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>18 · ruoyi-common-translation：翻译器框架</h1>
+
+<p><strong>核心问题：</strong>数据库里存的都是 ID（userId=123, deptId=5, status=0），但前端需要展示的是名称（用户名、部门名、状态文本）。如何在 JSON 序列化时自动把 ID 翻译成对应的名称，而无需在 Controller 中手动查询和拼接？</p>
+
+<div class="info">
+<strong>模块定位：</strong>11 个 Java 文件。创新的<strong>三阶段自动翻译流水线</strong>（collect-prepare-process），基于 JsonFieldProcessor SPI（common-json 的响应增强框架）。N+1 查询问题通过批量预处理解决。
+</div>
+
+<h2>1. 核心注解</h2>
+
+<pre><code>// @Translation — 标注在 VO 类的字段上
+public class SysUserVo {
+    private Long userId;
+
+    @Translation(type = "user_id_to_name", mapper = "userId")
+    private String userName;  // 自动翻译为用户名
+
+    @Translation(type = "dept_id_to_name", mapper = "deptId")
+    private String deptName;  // 自动翻译为部门名
+
+    private Long deptId;
+}
+
+// @TranslationType — 标注在翻译器实现类上
+@TranslationType(type = "user_id_to_name")
+public class UserNameTranslationImpl implements TranslationInterface&lt;String&gt; {
+    // ...
+}
+</code></pre>
+
+<p><strong>前端对应：</strong>前端直接展示 <code>userName</code> 和 <code>deptName</code>，无需额外请求。后端在序列化 JSON 时自动完成翻译。</p>
+
+<h2>2. 五种内置翻译器</h2>
+
+<table>
+<tr><th>翻译器</th><th>类型常量</th><th>翻译逻辑</th><th>数据源</th></tr>
+<tr><td>UserNameTranslationImpl</td><td>user_id_to_name</td><td>用户ID → 用户名</td><td>UserService.selectListByIds()</td></tr>
+<tr><td>NicknameTranslationImpl</td><td>user_id_to_nickname</td><td>用户ID → 昵称</td><td>UserService.selectUserNicksByIds()</td></tr>
+<tr><td>DeptNameTranslationImpl</td><td>dept_id_to_name</td><td>部门ID → 部门名</td><td>DeptService.selectDeptNamesByIds()</td></tr>
+<tr><td>DictTypeTranslationImpl</td><td>dict_type_to_label</td><td>字典值 → 字典标签</td><td>DictService.getDictLabel()</td></tr>
+<tr><td>OssUrlTranslationImpl</td><td>oss_id_to_url</td><td>OSS ID → 访问URL</td><td>OssService.selectByIds()</td></tr>
+</table>
+
+<h2>3. 三阶段处理流水线（解决 N+1 问题）</h2>
+
+<pre>
+假设返回一个用户列表（90 个用户），每个需要翻译 userName 和 deptName
+
+传统做法（N+1 问题）:
+  遍历 90 个用户 → 每个用户查一次用户表 → 90 次 SQL
+
+翻译器框架（collect-prepare-process）:
+  ① collect: 扫描所有字段，收集需要翻译的 userId 集合 {1,2,3,...,90}
+  ② prepare: 批量调用 UserNameTranslationImpl.translationBatch(Set.of(1..90))
+            → 一次 SQL: SELECT * FROM sys_user WHERE user_id IN (1..90)
+            → 构建 Map: {1→"张三", 2→"李四", ...}
+            → 缓存到 JsonEnhancementContext
+  ③ process: 对每个字段，从缓存取翻译值
+</pre>
+
+<h2>4. 自定义翻译器的扩展点</h2>
+
+<pre><code>// 三步实现自定义翻译器
+
+// 1. 实现 TranslationInterface
+@Component
+@TranslationType(type = "order_status_to_text")
+public class OrderStatusTranslationImpl implements TranslationInterface&lt;String&gt; {
+
+    // 2. 单条翻译
+    @Override
+    public String translation(Object key, String other) {
+        return switch((String) key) {
+            case "0" -> "待付款";
+            case "1" -> "已付款";
+            case "2" -> "已发货";
+            default -> "未知";
+        };
+    }
+
+    // 3. 批量翻译（覆盖父类默认的逐条退化行为）
+    @Override
+    public Map&lt;Object, String&gt; translationBatch(Set&lt;Object&gt; keys, String other) {
+        return keys.stream().collect(Collectors.toMap(
+            k -> k, k -> translation(k, other)
+        ));
+    }
+}
+</code></pre>
+
+<h2>5. TranslationJsonFieldProcessor — 核心处理器</h2>
+<pre><code>// 实现 JsonFieldProcessor（来自 common-json）
+@Order(0)  // 在脱敏处理器 (@Order(100)) 之前执行
+public class TranslationJsonFieldProcessor implements JsonFieldProcessor {
+
+    // supports: 检查字段是否有 @Translation 注解
+    // collect:  收集需要翻译的源值 → 按 (type, other) 分组
+    // prepare:  批量调用 translationBatch() → 缓存结果
+    // process:  字段值替换为翻译后的值
+}
+</code></pre>
+
+<h2>6. 验证要点</h2>
+<ol>
+<li>在 SysUserVo 中找到 @Translation 注解，观察 mapper 属性如何指向源字段</li>
+<li>在返回用户列表的 API 响应中，确认 userName 和 deptName 字段已被翻译</li>
+<li>在 TranslationJsonFieldProcessor.prepare() 打断点，观察批量查询的 SQL</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://www.baeldung.com/jackson-custom-serialization">Jackson 自定义序列化 Baeldung 教程</a></div>
+<div class="reminder"> 想为自定义实体（如订单状态）添加 @Translation 翻译？或想了解如何处理多值字段（如 "1,2,3" → "张三,李四,王五"）？直接问我。</div>
+
+</body>
+</html>

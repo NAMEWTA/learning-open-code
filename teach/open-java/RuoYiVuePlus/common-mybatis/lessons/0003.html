@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 - 数据权限体系（上）：注解、切面、拦截器</title>
+<style>
+body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+p, li { font-size: 0.97rem; }
+code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+pre code { background: none; color: inherit; padding: 0; }
+.mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+.mission b { color: #1d6fd6; }
+blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+.flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+.region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+.region h3 { margin-top: 0.9rem; }
+.where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+.side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+.why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+.why b { color: #1f9d4d; }
+details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+details[open] summary { margin-bottom: 0.6rem; }
+.quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+.quiz p { font-weight: 600; margin: 0.6rem 0; }
+.opt { display: block; padding: 0.35rem 0; color: #333; }
+table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: #f4f6f8; }
+.cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+.cite a, .reminder a { color: #1d6fd6; }
+.reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+.nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+.tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>0003 - 数据权限体系（上）：注解、切面、拦截器 <span class="tag">核心机制</span></h1>
+
+<div class="mission">
+<b>学习目标：</b>掌握数据权限三层架构的前半部分——从 <code>@DataPermission</code> 注解声明，到 AOP 切面上下文注入，再到 MyBatis 拦截器 SQL 改写，理解每一层如何协作。
+</div>
+
+<h2>一、全链路概览</h2>
+
+<p>数据权限体系由 <b>三层协作</b> 完成。以下是完整链路：</p>
+
+<div class="flow">
+ 用户代码：SysUserMapper.selectList()
+        │
+        ▼  [第一层：注解 + 切面]
+ @DataPermission  ──→  DataPermissionPointcut.matches()
+        │                    │ 匹配成功
+        ▼                    ▼
+ DataPermissionAdvice.invoke()
+   ├─ DataPermissionHelper.setPermission(注解)
+   ├─ DataPermissionHelper.setVariable(方法参数)   ← ThreadLocal + SaStorage
+   ├─ invocation.proceed()
+   │     │
+   │     ▼  [第二层：MyBatis 拦截器]
+   │   PlusDataPermissionInterceptor.beforeQuery() / beforePrepare()
+   │     ├─ InterceptorIgnoreHelper 检查是否忽略
+   │     ├─ DataPermissionHandler.invalid() 检查权限是否有效
+   │     └─ JSqlParser 解析原始 SQL
+   │           │
+   │           ▼  [第三层：Handler 条件生成]
+   │         PlusDataPermissionHandler.getSqlSegment()
+   │           ├─ LoginHelper.isSuperAdmin() → 超级管理员跳过
+   │           ├─ buildDataFilter() → 遍历角色 DataScopeType
+   │           ├─ SpEL 模板解析 → SQL WHERE 片段
+   │           └─ AND 拼接返回
+   │
+   └─ finally: DataPermissionHelper.removePermission()  ← 清理上下文
+</div>
+
+<p>三层各自职责：<b>注解层</b>声明"谁需要数据权限"；<b>切面层</b>建立上下文（当前注解、方法参数）；<b>拦截器层</b>根据上下文改写 SQL。</p>
+
+<h2>二、<code>@DataPermission</code> 与 <code>@DataColumn</code></h2>
+
+<div class="region">
+<h3>2.1 @DataPermission — 方法/类的标记</h3>
+<p class="where">org.dromara.common.mybatis.annotation.DataPermission</p>
+
+<table>
+<tr><th>属性</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>value()</code></td><td><code>DataColumn[]</code></td><td>数据列映射数组，定义 SQL 中哪些列参与权限过滤</td></tr>
+<tr><td><code>joinStr()</code></td><td><code>String</code></td><td>连接符，默认 <code>""</code>；SELECT 语句使用 OR 连接，UPDATE/DELETE 使用 AND 连接</td></tr>
+<tr><td><code>@Target</code></td><td><code>{METHOD, TYPE}</code></td><td>支持方法级和类级注解</td></tr>
+</table>
+
+<div class="why">
+<b>设计要点：</b><code>joinStr</code> 为空的默认行为——SELECT 查询中多个角色权限用 OR 拼接（任一部门可见即可），而 UPDATE/DELETE 操作用 AND 拼接（必须同时满足所有条件），保证写操作的安全性。
+</div>
+</div>
+
+<div class="region">
+<h3>2.2 @DataColumn — key-value 列映射</h3>
+<p class="where">org.dromara.common.mybatis.annotation.DataColumn</p>
+
+<table>
+<tr><th>属性</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>key()</code></td><td><code>String</code></td><td><code>"deptName"</code></td><td>SpEL 模板中的占位键，对应 DataScopeType 模板里的 <code>#{#deptName}</code></td></tr>
+<tr><td><code>value()</code></td><td><code>String</code></td><td><code>"dept_id"</code></td><td>真实数据库列名，最终注入 SQL 的列名</td></tr>
+</table>
+
+<p>通过 <code>@DataColumn</code> 将 SpEL 占位符（<code>#{#deptName}</code>）与真实数据库列（<code>dept_id</code>）解耦。同一张表在不同场景下可用不同的列名，只需修改注解即可。</p>
+
+<div class="side">
+<b>使用示例：</b><code>@DataPermission(value = {@DataColumn(key = "deptName", value = "dept_id"), @DataColumn(key = "userName", value = "user_id")})</code> — 同时声明部门列和用户列，支持 <code>DEPT_AND_CHILD</code> 和 <code>SELF</code> 两种数据范围混合使用。
+</div>
+</div>
+
+<h2>三、切面匹配与上下文建立</h2>
+
+<div class="region">
+<h3>3.1 DataPermissionPointcut — 静态方法匹配</h3>
+<p class="where">org.dromara.common.mybatis.aspect.DataPermissionPointcut</p>
+
+<p>继承 <code>StaticMethodMatcherPointcut</code>，<code>matches(Method, Class)</code> 逻辑：</p>
+
+<ol>
+<li>优先检查方法本身是否有 <code>@DataPermission</code> 注解</li>
+<li>若无，检查声明类（<code>targetClass</code>）是否有注解</li>
+<li>若类也没有，且 targetClass 是 JDK 动态代理（接口以 <code>$Proxy</code> 开头），则遍历接口方法查找对应方法上的注解</li>
+</ol>
+
+<div class="why">
+<b>为什么处理 JDK 代理：</b>MyBatis Mapper 接口默认使用 JDK 动态代理，注解在接口方法上，但代理对象的方法上无法直接读取到注解。此处通过接口反射兼容了这种场景。
+</div>
+</div>
+
+<div class="region">
+<h3>3.2 DataPermissionAdvice — 环绕通知上下文注入</h3>
+<p class="where">org.dromara.common.mybatis.aspect.DataPermissionAdvice</p>
+
+<p>实现 <code>MethodInterceptor</code>，<code>invoke()</code> 的核心流程：</p>
+
+<pre><code>public Object invoke(MethodInvocation invocation) throws Throwable {
+    DataPermission dataPermission = findAnnotation(invocation);
+    // 1. 获取当前请求的 DataPermissionAccess 对象
+    DataPermissionAccess access = DataPermissionHelper.getAccess();
+    // 2. 无权限约束则跳过（无 @SaCheckPermission 或 @SaCheckRole）
+    if (!access.constrained()) {
+        return invocation.proceed();
+    }
+    // 3. 设置注解到 ThreadLocal，同时注入方法参数到 SaStorage
+    DataPermissionHelper.setPermission(dataPermission, invocation.getArguments());
+    try {
+        return invocation.proceed();  // 执行目标方法 → 触发拦截器
+    } finally {
+        DataPermissionHelper.removePermission();  // 清理 ThreadLocal
+    }
+}</code></pre>
+
+<div class="why">
+<b>为什么用 ThreadLocal：</b>Advice 和 Interceptor 运行在同一线程的不同调用栈层级。ThreadLocal 是最轻量的跨层级上下文传递方案，无需修改方法签名或添加额外参数。配合 finally 块保证清理，防止内存泄漏和上下文污染。
+</div>
+</div>
+
+<h2>四、MyBatis 拦截器 — SQL 改写入口</h2>
+
+<div class="region">
+<h3>4.1 PlusDataPermissionInterceptor</h3>
+<p class="where">org.dromara.common.mybatis.interceptor.PlusDataPermissionInterceptor</p>
+
+<p>继承 <code>BaseMultiTableInnerInterceptor</code>，是 MyBatis Plus 分页插件的内部拦截器。核心方法：</p>
+
+<table>
+<tr><th>方法</th><th>触发时机</th><th>核心逻辑</th></tr>
+<tr>
+<td><code>beforeQuery()</code></td>
+<td>SELECT 查询前</td>
+<td>
+① 调用 <code>InterceptorIgnoreHelper</code> 检查是否标记为忽略<br>
+② 调用 <code>dataPermissionHandler.invalid()</code> 检查是否有有效权限上下文<br>
+③ 通过 JSqlParser 解析 SQL 为 Statement 对象
+</td>
+</tr>
+<tr>
+<td><code>beforePrepare()</code></td>
+<td>UPDATE/DELETE 前</td>
+<td>
+① 同样检查忽略和有效性<br>
+② 使用 <code>parserMulti()</code> 解析（支持多语句）
+</td>
+</tr>
+<tr>
+<td><code>processSelect()</code></td>
+<td>改写 SELECT</td>
+<td>遍历 FROM 后的表，为每张表调用 <code>handler.getSqlSegment()</code> 获取权限 WHERE 片段，注入 SQL</td>
+</tr>
+<tr>
+<td><code>processUpdate()</code></td>
+<td>改写 UPDATE</td>
+<td>获取权限 WHERE 片段，追加到原有 WHERE 条件后（AND 连接）</td>
+</tr>
+<tr>
+<td><code>processDelete()</code></td>
+<td>改写 DELETE</td>
+<td>同上，为 DELETE 语句注入数据权限条件</td>
+</tr>
+</table>
+
+<div class="side">
+<b>SELECT 与 UPDATE/DELETE 差异：</b>SELECT 使用 OR 拼接多个角色的权限条件（用户有任一角色即可查看对应数据），UPDATE/DELETE 使用 AND 拼接（确保写操作的数据范围是各角色权限的交集，更严格）。
+</div>
+</div>
+
+<h2>五、防无限递归：<code>DataPermissionHelper.ignore()</code></h2>
+
+<p>当 SpEL 模板中调用 <code>@sdss.getDeptAndChild(#user.deptId)</code> 时，该方法内部会执行 SQL 查询（如查询部门树）。如果这些内部 SQL 再次触发数据权限拦截器，就会形成无限递归。</p>
+
+<div class="region">
+<h3>5.1 ignore 机制</h3>
+<p class="where">org.dromara.common.mybatis.helper.DataPermissionHelper</p>
+
+<p><code>ignore(Runnable)</code> 和 <code>ignore(Supplier&lt;T&gt;)</code> 两个重载方法：</p>
+
+<pre><code>public static void ignore(Runnable runnable) {
+    // 通过 DataPermissionIgnoreContext 入栈当前状态
+    DataPermissionIgnoreContext.ignore(runnable);
+}
+// DataPermissionIgnoreContext 内部：
+// 1. enable(): 将当前 InterceptorIgnoreHelper 状态入栈，设置忽略=true
+// 2. 执行 runnable
+// 3. disable(): 出栈恢复之前的状态</code></pre>
+
+<p>在 <code>SysDataScopeServiceImpl.getDeptAndChild()</code> 等 SpEL 调用的方法内部，均使用 <code>DataPermissionHelper.ignore(() -> { ... })</code> 包裹查询逻辑，确保这些"辅助查询"不触发数据权限过滤。</p>
+
+<div class="why">
+<b>设计精髓：</b>使用双端队列（Deque）实现栈式管理，支持嵌套调用。外层业务查询开启数据权限 → 内层辅助查询入栈忽略 → 辅助查询完成出栈恢复 → 外层继续使用数据权限。完美解决"自己调用自己"的递归困境。
+</div>
+</div>
+
+<h2>小节测验</h2>
+
+<div class="quiz">
+<p>Q1: <code>@DataPermission</code> 的 <code>joinStr</code> 默认值为空字符串时，SELECT 语句中各角色权限条件用什么逻辑连接？</p>
+<label class="opt"><input type="radio" name="q1"> A. AND — 求交集，确保数据最严格</label>
+<label class="opt"><input type="radio" name="q1"> B. OR — 求并集，任一角色可见的数据都返回</label>
+<label class="opt"><input type="radio" name="q1"> C. NOT — 取反</label>
+<label class="opt"><input type="radio" name="q1"> D. 不拼接，只取第一个角色的条件</label>
+<details><summary>查看答案</summary><p><b>B</b>。SELECT 场景下，用户拥有多个角色时，任一角色能看的数据都应可见，所以用 OR 拼接。UPDATE/DELETE 则使用 AND。</p></details>
+</div>
+
+<div class="quiz">
+<p>Q2: <code>DataPermissionAdvice.invoke()</code> 中为什么要在 <code>finally</code> 块中调用 <code>removePermission()</code>？</p>
+<label class="opt"><input type="radio" name="q2"> A. 释放数据库连接</label>
+<label class="opt"><input type="radio" name="q2"> B. 清理 ThreadLocal 防止内存泄漏和上下文污染</label>
+<label class="opt"><input type="radio" name="q2"> C. 关闭文件流</label>
+<label class="opt"><input type="radio" name="q2"> D. 重置 Spring 事务</label>
+<details><summary>查看答案</summary><p><b>B</b>。ThreadLocal 在线程池复用时如果不清理，会导致下次请求读到上次遗留的权限上下文，造成数据泄漏。finally 块保证即使方法抛出异常也能清理。</p></details>
+</div>
+
+<div class="quiz">
+<p>Q3: <code>DataPermissionHelper.ignore()</code> 使用什么数据结构来支持嵌套的忽略/恢复？</p>
+<label class="opt"><input type="radio" name="q3"> A. HashMap — 键值对存储</label>
+<label class="opt"><input type="radio" name="q3"> B. ArrayList — 顺序追加</label>
+<label class="opt"><input type="radio" name="q3"> C. Deque（双端队列）— 栈式入栈出栈</label>
+<label class="opt"><input type="radio" name="q3"> D. HashSet — 去重集合</label>
+<details><summary>查看答案</summary><p><b>C</b>。<code>DataPermissionIgnoreContext</code> 使用 <code>ThreadLocal&lt;Deque&lt;Boolean&gt;&gt;</code>，每次 <code>enable()</code> 入栈当前状态，<code>disable()</code> 出栈恢复。这支持了嵌套调用场景。</p></details>
+</div>
+
+<div class="reminder">
+<b>核心要点回顾：</b><br>
+1. <code>@DataPermission</code> 是声明式注解，<code>@DataColumn</code> 做占位符到真实列名的映射<br>
+2. 切面负责建立 ThreadLocal 上下文，拦截器负责 SQL 改写，两者通过 ThreadLocal 跨层通信<br>
+3. SELECT 用 OR 拼接角色条件，UPDATE/DELETE 用 AND<br>
+4. <code>ignore()</code> 使用栈机制防止 SpEL 辅助查询触发递归数据权限过滤
+</div>
+
+<div class="cite">
+<p><b>源文件索引：</b></p>
+<p>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/annotation/DataPermission.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/annotation/DataColumn.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/aspect/DataPermissionPointcut.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/aspect/DataPermissionAdvice.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/aspect/DataPermissionPointcutAdvisor.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/interceptor/PlusDataPermissionInterceptor.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataPermissionHelper.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/helper/DataPermissionIgnoreContext.java</code><br>
+<code>ruoyi-common-mybatis/src/main/java/org/dromara/common/mybatis/config/MybatisPlusConfig.java</code>
+</p>
+</div>
+
+<div class="nav">上一课：0002 表结构映射 | 下一课：0004 数据权限体系（下）</div>
+
+</body>
+</html>

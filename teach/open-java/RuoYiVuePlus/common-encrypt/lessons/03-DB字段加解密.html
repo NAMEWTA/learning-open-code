@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · DB 字段加解密：拦截器与快照恢复机制</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; line-height: 1.3; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #2c3e50; }
+  p, li { font-size: 0.95rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · DB 字段加解密：拦截器与快照恢复机制</h1>
+
+<div class="mission"><strong>本课任务：</strong>完整追踪 DB 字段加密通道的全链路——从 <code>@EncryptField</code> 注解的字段标注、到 MybatisEncryptInterceptor 的入参加密、MybatisDecryptInterceptor 的出参解密、EncryptedFieldProcessor 的递归处理算法、FieldSnapshot 的恢复机制、以及 <code>ENCRYPT_HEADER</code> 前缀防重复加密设计。同时掌握 EncryptUtils 工具类的静态方法体系。</div>
+
+<h2>1. @EncryptField 注解 —— 字段级加密的标记</h2>
+
+<p><code>org.dromara.common.encrypt.annotation.EncryptField</code> 标注在实体类 String 字段上。五个可配置属性：</p>
+
+<table>
+  <tr><th>属性</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>algorithm</code></td><td><code>AlgorithmType</code></td><td><code>DEFAULT</code></td><td>加密算法。DEFAULT 表示使用 yml 全局默认</td></tr>
+  <tr><td><code>password</code></td><td><code>String</code></td><td><code>""</code></td><td>AES/SM4 对称加密密钥</td></tr>
+  <tr><td><code>publicKey</code></td><td><code>String</code></td><td><code>""</code></td><td>RSA/SM2 非对称加密公钥</td></tr>
+  <tr><td><code>privateKey</code></td><td><code>String</code></td><td><code>""</code></td><td>RSA/SM2 非对称加密私钥</td></tr>
+  <tr><td><code>encode</code></td><td><code>EncodeType</code></td><td><code>DEFAULT</code></td><td>加密结果编码方式（BASE64 或 HEX）</td></tr>
+</table>
+
+<p><code>@Inherited</code> 元注解使子类实体自动继承父类的字段加密配置。注解优先于 yml 全局配置——当 <code>algorithm=DEFAULT</code> 或 <code>password=""</code> 时回退到 yml 默认值。</p>
+
+<pre>public class User {
+    @EncryptField                          // 使用全局默认算法和密钥
+    private String phone;
+
+    @EncryptField(algorithm = AlgorithmType.SM4, password = "myCustomSm4Key01")
+    private String idCard;                 // 指定 SM4 + 自定义密钥
+
+    @EncryptField(algorithm = AlgorithmType.RSA,
+                  publicKey = "MIGfMA0G...", privateKey = "MIICdgIB...")
+    private String bankAccount;            // 指定 RSA + 独立密钥对
+
+    private String nickname;               // 不加密
+}</pre>
+
+<blockquote><b>注意：</b>@EncryptField 只支持 <code>String</code> 类型字段。EncryptorManager 扫描时过滤 <code>field.getType() == String.class</code>，Integer/Long/Date 等类型即使标注了注解也会被忽略。加密后字段是 Base64 或 Hex 文本，数据库列需为 VARCHAR 且长度充足。</blockquote>
+
+<h2>2. EncodeType 编码类型</h2>
+
+<p><code>org.dromara.common.encrypt.enums.EncodeType</code> 控制加密后字节数据的编码方式：</p>
+
+<table>
+  <tr><th>枚举值</th><th>输出格式</th><th>适用场景</th></tr>
+  <tr><td><code>DEFAULT</code></td><td>使用 yml 全局配置（默认 BASE64）</td><td>大部分字段无需单独指定</td></tr>
+  <tr><td><code>BASE64</code></td><td>A-Za-z0-9+/=，比 HEX 短约 25%</td><td>数据库存储空间敏感</td></tr>
+  <tr><td><code>HEX</code></td><td>0-9A-F，纯数字字母</td><td>需要人工查看或字符级比对</td></tr>
+</table>
+
+<p>对 <code>Base64Encryptor</code> 而言 EncodeType 不生效——编码结果本身就是 Base64，不存在二次编码。</p>
+
+<h2>3. MybatisEncryptInterceptor —— 入参加密拦截器</h2>
+
+<p><code>org.dromara.common.encrypt.interceptor.MybatisEncryptInterceptor</code> 是 MyBatis Plugin，拦截 <code>ParameterHandler.setParameters(PreparedStatement)</code>：</p>
+
+<pre>@Intercepts({@Signature(
+    type = ParameterHandler.class,
+    method = "setParameters",
+    args = {PreparedStatement.class}
+)})</pre>
+
+<p>拦截逻辑（简化）：</p>
+
+<pre>// 1. 获取参数对象
+Object parameterObject = boundSql.getParameterObject();
+if (parameterObject == null || parameterObject instanceof String)
+    return invocation.proceed();  // null 或裸String 跳过
+
+// 2. 加密字段，生成快照
+List&lt;FieldSnapshot&gt; snapshots = processor.encrypt(parameterObject);
+
+// 3. 执行 SQL（此时参数值已是密文）
+invocation.proceed();
+
+// 4. finally 中恢复原始值（无论 SQL 成功或失败）
+finally {
+    snapshots.forEach(FieldSnapshot::restore);
+}</pre>
+
+<p>关键设计：</p>
+<ul>
+  <li><b>裸 String 跳过：</b>如果 Mapper 方法是 <code>insert(@Param("phone") String phone)</code> 而非实体对象，参数无法按字段反射处理</li>
+  <li><b>finally 恢复：</b>即使 SQL 抛异常，也必须恢复原始值——保证业务对象不受污染</li>
+</ul>
+
+<h2>4. MybatisDecryptInterceptor —— 出参解密拦截器</h2>
+
+<p><code>org.dromara.common.encrypt.interceptor.MybatisDecryptInterceptor</code> 拦截 <code>ResultSetHandler.handleResultSets(Statement)</code>：</p>
+
+<pre>@Intercepts({@Signature(
+    type = ResultSetHandler.class,
+    method = "handleResultSets",
+    args = {Statement.class}
+)})</pre>
+
+<pre>// 1. 先执行查询（获取密文结果）
+Object result = invocation.proceed();
+if (result == null) return null;
+
+// 2. 解密字段
+processor.decrypt(result);
+
+// 3. 返回明文结果（无需恢复——明文就是要给业务的）
+return result;</pre>
+
+<table>
+  <tr><th>对比维度</th><th>MybatisEncryptInterceptor</th><th>MybatisDecryptInterceptor</th></tr>
+  <tr><td>拦截接口</td><td><code>ParameterHandler</code></td><td><code>ResultSetHandler</code></td></tr>
+  <tr><td>拦截方法</td><td><code>setParameters</code></td><td><code>handleResultSets</code></td></tr>
+  <tr><td>proceed 时机</td><td>加密后 → proceed</td><td>proceed → 解密</td></tr>
+  <tr><td>是否恢复原值</td><td><b>是</b>（finally 中）</td><td>否</td></tr>
+  <tr><td>null 处理</td><td>跳过</td><td>返回 null</td></tr>
+</table>
+
+<h2>5. EncryptedFieldProcessor —— 递归字段处理引擎</h2>
+
+<p><code>org.dromara.common.encrypt.core.EncryptedFieldProcessor</code> 是 DB 通道最复杂的组件，负责递归遍历对象树并对 @EncryptField 字段执行加解密。</p>
+
+<h3>5.1 encrypt(sourceObject) 流程</h3>
+
+<pre>encrypt(sourceObject):
+  visited = new IdentityHashMap<>()
+  snapshots = new ArrayList<>()
+  handle(sourceObject, visited, (target, field, value) -> {
+      // 加密回调
+      EncryptContext ctx = contextFactory.create(field);
+      String encrypted = encryptorManager.encrypt(value, ctx);
+      field.set(target, encrypted);
+      snapshots.add(new FieldSnapshot(target, field, value));
+  })
+  return snapshots;
+
+handle(obj, visited, handler):
+  if obj == null || obj instanceof String → return
+  if visited.containsKey(obj) → return        // 循环引用检测
+  visited.put(obj, null)
+
+  if obj instanceof Map → 遍历 values 递归
+  else if obj instanceof Collection → 遍历 items 递归
+  else:
+      从 fieldCache 获取 @EncryptField 字段
+      for each field:
+          value = field.get(obj)
+          if value != null → handler.handle(obj, field, value)
+          if isComplexType(field.getType()) → handle(value, ...) 继续递归</pre>
+
+<h3>5.2 decrypt(sourceObject) 流程</h3>
+<p>与 encrypt 对称，但回调不同——decrypt 回调直接 <code>encryptorManager.decrypt(value, ctx)</code> → <code>field.set(target, 明文)</code>，不产生快照。</p>
+
+<blockquote><b>IdentityHashMap 为什么不用普通 HashMap？</b>IdentityHashMap 使用 <code>==</code> 比较对象身份而非 <code>equals()</code>。两个不同对象即使 equals 相等也应独立处理，只有真正的同一引用（A→B→A 循环）才需跳过以避免栈溢出。</blockquote>
+
+<h2>6. FieldSnapshot —— 原始值的"时空胶囊"</h2>
+
+<p>FieldSnapshot 记录三个信息：<code>target</code>（所属对象）、<code>field</code>（哪个字段）、<code>originalValue</code>（原始值）。<code>restore()</code> 方法将字段值设回原始值。</p>
+
+<table>
+  <tr><th>阶段</th><th>操作</th><th>时机</th></tr>
+  <tr><td><b>创建</b></td><td><code>new FieldSnapshot(target, field, value)</code></td><td>encrypt() 中加密后保存原始值</td></tr>
+  <tr><td><b>SQL 执行</b></td><td>field 值是密文</td><td>ParameterHandler 使用加密后的值</td></tr>
+  <tr><td><b>恢复</b></td><td><code>snapshot.restore()</code></td><td><b>finally 块中</b>——无论 SQL 成败都执行</td></tr>
+  <tr><td><b>恢复后</b></td><td>field 值 = 原始明文</td><td>业务代码看到的仍是原始值</td></tr>
+</table>
+
+<div class="insight"><strong>设计洞察：透明加密的本质</strong><br>DB 字段加密通道的目标是"业务代码完全无感知"——开发者写 <code>user.setPhone("13800138000")</code>，数据库自动存密文；写 <code>user.getPhone()</code>，自动返回明文。这由三个机制协同实现：(1) MyBatis 拦截器在 SQL 执行前后介入；(2) FieldSnapshot 在 SQL 后恢复原始值；(3) ENCRYPT_HEADER 前缀保证幂等性。三个缺一不可。</div>
+
+<h2>7. ENCRYPT_HEADER 前缀 —— 防重复加密标记</h2>
+
+<p>定义在 <code>ruoyi-common-core</code> 的 <code>Constants.ENCRYPT_HEADER = "ENC_"</code>。EncryptorManager 的 encrypt/decrypt 方法使用它：</p>
+
+<pre>// 加密时：先检查前缀，再加密，再拼接前缀
+encrypt(value, ctx):
+  if (value.startsWith("ENC_")) return value;  // 已是密文，跳过
+  encrypted = encryptor.encrypt(value, ctx.getEncode());
+  return "ENC_" + encrypted;
+
+// 解密时：先检查前缀，去除前缀，再解密
+decrypt(value, ctx):
+  if (!value.startsWith("ENC_")) return value; // 不是密文，跳过
+  stripped = value.substring(4);
+  return encryptor.decrypt(stripped);</pre>
+
+<p>解决的核心场景：</p>
+<ul>
+  <li><b>多次 save：</b>同一实体被多次 save，第二次 save 时字段值已是 "ENC_xxx"，自动跳过加密</li>
+  <li><b>非加密字段：</b>没有 "ENC_" 前缀的字段自动跳过解密</li>
+  <li><b>外部直接 INSERT 的数据：</b>明文数据没有前缀，不会误解密</li>
+</ul>
+
+<blockquote><b>双重防线的必要性：</b>FieldSnapshot 恢复 + ENCRYPT_HEADER 前缀构成双重保障。Snapshot 恢复确保业务代码操作的是明文；前缀确保即使 Snapshot 恢复失败，底层也不会对已加密值重复加密。如果双重防线都失效，密文会被当作明文再次加密——双重加密的数据无法通过一次解密还原，数据永久损坏。</blockquote>
+
+<h2>8. EncryptUtils 工具类 —— 加解密的最终执行者</h2>
+
+<p><code>org.dromara.common.encrypt.utils.EncryptUtils</code> 是纯静态工具类，封装 Hutool SecureUtil 和 SmUtil。所有五种加密器的方法最终都委托到这里。</p>
+
+<h3>8.1 加解密方法</h3>
+<table>
+  <tr><th>分类</th><th>方法签名</th><th>底层实现</th><th>密钥要求</th></tr>
+  <tr><td>Base64 编码</td><td><code>encryptByBase64(String data)</code></td><td><code>Base64.encode(data, UTF_8)</code></td><td>无</td></tr>
+  <tr><td>Base64 解码</td><td><code>decryptByBase64(String data)</code></td><td><code>Base64.decodeStr(data, UTF_8)</code></td><td>—</td></tr>
+  <tr><td>AES 加密</td><td><code>encryptByAes(data, password)</code></td><td><code>SecureUtil.aes(key).encryptBase64()</code></td><td>16/24/32 字节</td></tr>
+  <tr><td>AES 加密(Hex)</td><td><code>encryptByAesHex(data, password)</code></td><td><code>SecureUtil.aes(key).encryptHex()</code></td><td>16/24/32 字节</td></tr>
+  <tr><td>AES 解密</td><td><code>decryptByAes(data, password)</code></td><td><code>SecureUtil.aes(key).decryptStr()</code></td><td>—</td></tr>
+  <tr><td>RSA 公加</td><td><code>encryptByRsa(data, publicKey)</code></td><td><code>SecureUtil.rsa(null, pk).encryptBase64()</code></td><td>>=1024 bit</td></tr>
+  <tr><td>RSA 公加(Hex)</td><td><code>encryptByRsaHex(data, publicKey)</code></td><td><code>SecureUtil.rsa(null, pk).encryptHex()</code></td><td>>=1024 bit</td></tr>
+  <tr><td>RSA 私解</td><td><code>decryptByRsa(data, privateKey)</code></td><td><code>SecureUtil.rsa(sk, null).decryptStr()</code></td><td>—</td></tr>
+  <tr><td>SM2 公加</td><td><code>encryptBySm2(data, publicKey)</code></td><td><code>SmUtil.sm2(null, pk).encryptBase64()</code></td><td>需 BouncyCastle</td></tr>
+  <tr><td>SM2 私解</td><td><code>decryptBySm2(data, privateKey)</code></td><td><code>SmUtil.sm2(sk, null).decryptStr()</code></td><td>—</td></tr>
+  <tr><td>SM4 加密</td><td><code>encryptBySm4(data, password)</code></td><td><code>SmUtil.sm4(key).encryptBase64()</code></td><td>恰好 16 字节</td></tr>
+  <tr><td>SM4 解密</td><td><code>decryptBySm4(data, password)</code></td><td><code>SmUtil.sm4(key).decryptStr()</code></td><td>—</td></tr>
+</table>
+
+<h3>8.2 密钥生成与校验</h3>
+<table>
+  <tr><th>方法</th><th>说明</th></tr>
+  <tr><td><code>generateRsaKey()</code></td><td>生成 RSA 1024 位密钥对，返回 Map{"publicKey","privateKey"}</td></tr>
+  <tr><td><code>generateSm2Key()</code></td><td>生成 SM2 密钥对</td></tr>
+  <tr><td><code>validateRsaPublicKey(String key)</code></td><td>校验 RSA 公钥格式 + 最低 1024 位</td></tr>
+  <tr><td><code>validateRsaPrivateKey(String key)</code></td><td>校验 RSA 私钥格式 + 最低 1024 位</td></tr>
+</table>
+
+<h3>8.3 哈希方法（额外提供）</h3>
+<table>
+  <tr><th>方法</th><th>说明</th></tr>
+  <tr><td><code>encryptByMd5(String data)</code></td><td>MD5 哈希</td></tr>
+  <tr><td><code>encryptBySha256(String data)</code></td><td>SHA-256 哈希</td></tr>
+  <tr><td><code>encryptBySm3(String data)</code></td><td>SM3 国密哈希</td></tr>
+  <tr><td><code>verifySm2Sign(data, sign, pk)</code></td><td>SM2 验签</td></tr>
+</table>
+
+<h2>9. 课后练习</h2>
+
+<details class="quiz"><summary>练习 1 · 单选题 · FieldSnapshot 恢复时机（点击展开）</summary>
+<p><strong>Q:</strong> MybatisEncryptInterceptor 中 FieldSnapshot.restore() 在 finally 块中执行。以下哪个场景最能体现这个设计的必要性？</p>
+<p>A. Controller 需要读取加密后的值进行二次处理<br>
+B. SQL 执行失败时，保证业务代码中的对象不被污染为密文状态<br>
+C. 为了满足 MyBatis Plugin 接口的规范要求<br>
+D. 提高加密性能，减少反射开销</p>
+<p><strong>答案：B。</strong>如果 SQL 抛异常，try 块中 proceed() 后的 restore() 不会执行，对象字段保留密文。操作同一对象的后续业务代码可能将密文当明文处理。finally 块保证无论 SQL 成败都恢复。</p>
+</details>
+
+<details class="quiz"><summary>练习 2 · 单选题 · ENCRYPT_HEADER 行为（点击展开）</summary>
+<p><strong>Q:</strong> 数据库中某字段存储为 "ENC_aGVsbG8="，应用层执行 <code>userService.getById()</code> 查询后，<code>user.getPhone()</code> 的值是什么？</p>
+<p>A. "ENC_aGVsbG8="（原始数据库值）<br>
+B. "aGVsbG8="（去除前缀后的值）<br>
+C. "hello"（解密后的明文）<br>
+D. null</p>
+<p><strong>答案：C。</strong>MybatisDecryptInterceptor → EncryptorManager.decrypt() 检查 "ENC_" 前缀 → 去除 → 加密器解密 → 返回明文。不带前缀的值（如直接 INSERT 的明文）会直接返回不解密。</p>
+</details>
+
+<details class="quiz"><summary>练习 3 · 判断题 · 递归范围（点击展开）</summary>
+<p><strong>Q:</strong> EncryptedFieldProcessor 的递归处理能处理哪些类型？（多选逻辑）</p>
+<p>A. 只处理实体顶层字段<br>
+B. 嵌套对象、Collection、Map<br>
+C. 用 IdentityHashMap 防循环引用<br>
+D. String 类型的 parameterObject 也能按字段加密</p>
+<p><strong>答案：B 和 C 正确。</strong>handle() 通过 instanceof 分支处理 Map（遍历 values）、Collection（遍历 items）、普通对象（反射字段），对复杂类型继续递归。IdentityHashMap 追踪已访问对象。D 错误——String 入口即被跳过。</p>
+</details>
+
+<details class="quiz"><summary>练习 4 · 简答题 · Snapshot vs 深拷贝（点击展开）</summary>
+<p><strong>Q:</strong> 如果不用 FieldSnapshot，改用"加密前深拷贝 → 加密原始对象 → SQL 执行 → 深拷贝覆盖回"方案，有什么优缺点？</p>
+<p><strong>参考：</strong>优点：实现直观。缺点：(1) 性能差——每次加密深拷贝整个实体；(2) 内存浪费，GC 压力大；(3) 语义不正确——深拷贝覆盖会丢失 SQL 执行后 MyBatis 可能回填的自增 ID 等值。Snapshot 只恢复被加密字段，是最小侵入性设计。</p>
+</details>
+
+<div class="reminder"><strong>学习提示：</strong>EncryptedFieldProcessor 的递归遍历是模块最精妙的部分。建议在 IDE 中打开源码，重点关注: Map 处理、Collection 处理、普通对象处理三个分支，以及 IdentityHashMap 的选择理由。</div>
+
+<div class="cite">源码路径：<br>
+<code>org.dromara.common.encrypt.annotation.EncryptField</code> — 字段加密注解<br>
+<code>org.dromara.common.encrypt.enums.EncodeType</code> — 编码类型枚举<br>
+<code>org.dromara.common.encrypt.interceptor.MybatisEncryptInterceptor</code> — 入参加密拦截器<br>
+<code>org.dromara.common.encrypt.interceptor.MybatisDecryptInterceptor</code> — 出参解密拦截器<br>
+<code>org.dromara.common.encrypt.core.EncryptedFieldProcessor</code> — 递归字段处理器<br>
+<code>org.dromara.common.encrypt.utils.EncryptUtils</code> — 加解密工具类<br>
+<code>ruoyi-common-core: Constants.ENCRYPT_HEADER</code> — 加密前缀常量<br>
+底层依赖：hutool-crypto (SecureUtil) + bouncycastle bcpkix-jdk18on (SmUtil)</div>
+
+<div class="nav"><a href="02-API加解密通道.html">上一课：API 加解密通道</a><a href="01-双通道架构概览.html">第 1 课：双通道架构概览</a></div>
+
+</body>
+</html>

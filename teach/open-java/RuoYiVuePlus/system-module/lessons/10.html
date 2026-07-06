@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第10课：综合实战 — 从零实现一个新功能模块</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🚀 第10课：综合实战 — 从零实现一个新功能模块</h1>
+
+<p><strong>胜利目标：</strong>应用前 9 课知识，独立设计并实现一个完整的"会议室管理"模块。</p>
+
+<h2>需求描述</h2>
+
+<blockquote>
+  实现一个会议室管理功能：会议室归属于部门，管理员可以增删改查会议室，普通用户只能查看自己部门及子部门的会议室。支持 Excel 导入导出。
+</blockquote>
+
+<h2>Step 1：数据库设计</h2>
+
+<pre><code>-- 会议室表
+CREATE TABLE sys_room (
+    room_id     BIGINT PRIMARY KEY AUTO_INCREMENT,
+    dept_id     BIGINT NOT NULL COMMENT '所属部门',
+    room_name   VARCHAR(100) NOT NULL COMMENT '会议室名称',
+    capacity    INT DEFAULT 10 COMMENT '容纳人数',
+    equipment   VARCHAR(200) COMMENT '设备配置',
+    status      CHAR(1) DEFAULT '0' COMMENT '状态（0正常 1停用）',
+    del_flag    CHAR(1) DEFAULT '0' COMMENT '删除标志',
+    create_by   BIGINT,
+    create_time DATETIME,
+    update_by   BIGINT,
+    update_time DATETIME,
+    remark      VARCHAR(500)
+);
+
+-- 菜单权限
+INSERT INTO sys_menu VALUES
+(NULL, 0, '会议室管理', 5, 'room', NULL, '', 'N', 'N', 'M', '0', '0', 'system:room:list', '#', '', NULL, NULL, NULL, NULL);
+-- 再插入子菜单（查询、新增、修改、删除）权限...</code></pre>
+
+<h2>Step 2：创建文件清单（按 ruoyi 规范）</h2>
+
+<pre><code>ruoyi-system/src/main/java/org/dromara/system/
+├── domain/
+│   ├── SysRoom.java           # 实体（继承 BaseEntity, @TableName）
+│   ├── bo/SysRoomBo.java      # 入参 DTO（继承 BaseEntity）
+│   └── vo/SysRoomVo.java      # 出参 DTO
+├── mapper/
+│   └── SysRoomMapper.java     # MyBatis-Plus Mapper 接口
+├── service/
+│   ├── ISysRoomService.java   # Service 接口
+│   └── impl/SysRoomServiceImpl.java  # Service 实现
+└── controller/system/
+    └── SysRoomController.java # REST Controller
+
+ruoyi-system/src/main/resources/mapper/system/
+└── SysRoomMapper.xml          # 复杂 SQL（分页查询用）</code></pre>
+
+<h2>Step 3：关键代码骨架</h2>
+
+<h3>3.1 实体 — SysRoom.java</h3>
+
+<pre><code>@Data
+@EqualsAndHashCode(callSuper = true)
+@TableName("sys_room")
+public class SysRoom extends BaseEntity {
+    @TableId(value = "room_id")
+    private Long roomId;
+    private Long deptId;
+    private String roomName;
+    private Integer capacity;
+    private String equipment;
+    private String status;
+    @TableLogic
+    private String delFlag;
+    private String remark;
+}</code></pre>
+
+<h3>3.2 Service — 遵循标准模式</h3>
+
+<pre><code>@Service
+public class SysRoomServiceImpl implements ISysRoomService {
+
+    // 分页查询 — 套用 QueryBuilder 模式
+    public PageResult&lt;SysRoomVo&gt; selectPageRoomList(SysRoomBo room, PageQuery pageQuery) {
+        Page&lt;SysRoomVo&gt; page = roomMapper.selectPageRoomList(pageQuery.build(), room);
+        return PageResult.build(page.getRecords(), page.getTotal());
+    }
+
+    // 唯一性校验 — 套用标准模式
+    public boolean checkRoomNameUnique(SysRoomBo room) {
+        boolean exist = roomMapper.lambda()
+            .eq(SysRoom::getRoomName, room.getRoomName())
+            .eq(SysRoom::getDeptId, room.getDeptId())
+            .neIfPresent(SysRoom::getRoomId, room.getRoomId())
+            .exists();
+        return !exist;
+    }
+
+    // 新增 — 套用事务 + 权限检查
+    @Transactional(rollbackFor = Exception.class)
+    public int insertRoom(SysRoomBo bo) {
+        SysRoom room = MapstructUtils.convert(bo, SysRoom.class);
+        return roomMapper.insert(room);
+    }
+}</code></pre>
+
+<h3>3.3 Controller — 套用注解三件套</h3>
+
+<pre><code>@Validated
+@RequiredArgsConstructor
+@RestController
+@RequestMapping("/system/room")
+public class SysRoomController extends BaseController {
+
+    private final ISysRoomService roomService;
+    private final ISysDeptService deptService;
+
+    @SaCheckPermission("system:room:list")
+    @GetMapping("/list")
+    public R&lt;PageResult&lt;SysRoomVo&gt;&gt; list(SysRoomBo room, PageQuery pageQuery) {
+        return R.ok(roomService.selectPageRoomList(room, pageQuery));
+    }
+
+    @SaCheckPermission("system:room:add")
+    @Log(title = "会议室管理", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
+    @PostMapping
+    public R&lt;Void&gt; add(@Validated @RequestBody SysRoomBo room) {
+        deptService.checkDeptDataScope(room.getDeptId());  // 部门权限检查
+        if (!roomService.checkRoomNameUnique(room)) {
+            return R.fail("新增会议室失败，会议室名称已存在");
+        }
+        return toAjax(roomService.insertRoom(room));
+    }
+}</code></pre>
+
+<h3>3.4 Mapper XML — 分页查询</h3>
+
+<pre><code>&lt;select id="selectPageRoomList" resultType="SysRoomVo"&gt;
+    SELECT r.*, d.dept_name
+    FROM sys_room r
+    LEFT JOIN sys_dept d ON r.dept_id = d.dept_id
+    ${ew.customSqlSegment}
+&lt;/select&gt;
+&lt;!-- ${ew.customSqlSegment} 是 MyBatis-Plus 自动拼接的 WHERE 条件 --&gt;</code></pre>
+
+<h2>Step 4：集成数据权限</h2>
+
+<pre><code>// 在 Mapper 方法上加 @DataScope 注解（来自 common-mybatis）
+public interface SysRoomMapper extends BaseMapperPlus&lt;SysRoom, SysRoomVo&gt; {
+
+    @DataScope(deptAlias = "r")  // 🔑 自动为 r.dept_id 注入数据权限条件
+    Page&lt;SysRoomVo&gt; selectPageRoomList(@Param("page") Page&lt;SysRoom&gt; page,
+                                        @Param("room") SysRoomBo room);
+}
+
+// 效果：普通用户查询时 SQL 自动变成：
+// SELECT r.*, d.dept_name FROM sys_room r LEFT JOIN ...
+// WHERE r.del_flag = '0'
+//   AND (r.dept_id = 100 OR r.dept_id IN (200, 201))  ← 数据权限注入
+// ORDER BY r.room_id</code></pre>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>完整实现"会议室管理"模块的所有文件并确保编译通过</li>
+  <li>为新模块添加 Excel 导出功能（参考 SysUserController.export()）</li>
+  <li>为新模块添加缓存支持（会议室详情缓存 + 修改时失效）</li>
+  <li>思考：如何让会议室支持跨部门共享？（提示：参考数据权限的自定义模式）</li>
+</ol>
+
+<div class="highlight">
+  <strong>本课程总结：</strong>恭喜你完成了 ruoyi-system 模块的深度学习！回顾你掌握的核心技能：
+  <ol>
+    <li>✅ 模块分层架构（Controller → Service → Mapper + Domain）</li>
+    <li>✅ 核心领域模型（User-Role-Menu-Dept + 关联表）</li>
+    <li>✅ RBAC 权限模型（角色权限 + 菜单权限 + Sa-Token 注解）</li>
+    <li>✅ 数据权限（6种 Data Scope + SQL 拦截注入）</li>
+    <li>✅ 动态路由生成（SysMenu → RouterVo 转换）</li>
+    <li>✅ 部门树（ancestors 路径枚举 + 移动更新）</li>
+    <li>✅ 缓存策略（@Cacheable/@CacheEvict + AopProxy）</li>
+    <li>✅ Controller 规范（注解三件套 + 安全校验链）</li>
+    <li>✅ Service 模式（事务管理 + 先清后建 + 事件驱动 + 远程调用）</li>
+    <li>✅ 实战能力（从零搭建新模块）</li>
+  </ol>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://gitee.com/dromara/RuoYi-Vue-Plus">RuoYi-Vue-Plus 完整项目源码</a> — 用 ruoyi-gen 代码生成器快速生成 CRUD 代码</div>
+<div class="reminder">💡 课程到此结束。你可以继续问我任何深入问题，例如："如何在 ruoyi-system 中集成工作流引擎？" 或 "如何为特定业务表实现行级数据权限？"</div>
+
+</body>
+</html>

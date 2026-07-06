@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 | sms4j 收编与 PlusSmsDao：三个类的项目化适配</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>01 | sms4j 收编与 PlusSmsDao：三个类的项目化适配</h1>
+
+<div class="insight">
+<strong>学习目标：</strong>理解 ruoyi-common-sms 仅用 3 个 Java 类就完成了一个 SMS 聚合框架的项目化收编 —— 从缓存接管、自动装配到异常兜底，每一行代码都有其不可替代的理由。
+</div>
+
+<h2>1. 全景鸟瞰：3 个类的模块</h2>
+
+<p>ruoyi-common-sms 是整个项目中规模最小的业务模块之一，仅包含 3 个 Java 源文件。但它承担的功能却不可或缺 —— 没有它，短信验证码登录、营销短信推送等场景都无法运作。</p>
+
+<p>理解这个模块的关键在于看清三层关系：</p>
+
+<blockquote>
+<strong>sms4j（框架层）</strong> → 提供通用的多厂商 SMS 抽象，与任何具体项目无关<br>
+<strong>ruoyi-common-sms（适配层）</strong> → 将 sms4j 接入 RuoYi 项目，解决缓存、配置、异常处理等工程问题<br>
+<strong>业务层（Controller / Strategy）</strong> → 通过 sms4j 的标准 API 收发短信，不感知底层适配细节
+</blockquote>
+
+<p>三个核心类的职责划分：</p>
+
+<table>
+  <tr><th>类名</th><th>包路径</th><th>职责</th></tr>
+  <tr>
+    <td><code>PlusSmsDao</code></td>
+    <td><code>core/dao/PlusSmsDao.java</code></td>
+    <td>替换 sms4j 默认的 ConcurrentHashMap 缓存为 Redis，实现集群共享</td>
+  </tr>
+  <tr>
+    <td><code>SmsAutoConfiguration</code></td>
+    <td><code>config/SmsAutoConfiguration.java</code></td>
+    <td>自动装配控制：确保 Redis 先初始化，用 @Primary 覆盖默认 Bean</td>
+  </tr>
+  <tr>
+    <td><code>SmsExceptionHandler</code></td>
+    <td><code>handler/SmsExceptionHandler.java</code></td>
+    <td>全局异常兜底：内部记日志，外部返回统一友好提示</td>
+  </tr>
+</table>
+
+<div class="mission">
+<strong>工程哲学：</strong>一个好的适配层不是"把事情做了"，而是"把事情做对"。PlusSmsDao 只有 40 行代码，但它处理的 Redis key 前缀设计、集群一致性、过期策略，每一个细节都直接影响生产环境的可靠性。
+</div>
+
+<h2>2. sms4j 框架速览：多厂商统一 API</h2>
+
+<p>sms4j 是 Dromara 开源社区推出的 SMS 聚合框架（当前版本 v3.3.5），核心价值在于：<strong>一套 API 对接阿里云、腾讯云、华为云等数十家短信厂商</strong>。</p>
+
+<p>在 sms4j 的世界里，你需要理解以下关键概念：</p>
+
+<table>
+  <tr><th>概念</th><th>类型</th><th>说明</th></tr>
+  <tr>
+    <td><code>SmsBlend</code></td>
+    <td>接口</td>
+    <td>短信发送的统一入口，封装了 <code>sendMessage()</code>、<code>massTexting()</code> 等方法。每个厂商有自己的实现类。</td>
+  </tr>
+  <tr>
+    <td><code>SmsFactory</code></td>
+    <td>工厂类</td>
+    <td>通过 <code>getSmsBlend(configId)</code> 获取对应厂商的 SmsBlend 实例。configId 对应 yml 配置中的自定义 ID（如 "config1"）。</td>
+  </tr>
+  <tr>
+    <td><code>SmsResponse</code></td>
+    <td>返回对象</td>
+    <td>封装发送结果，包含 <code>success</code>（布尔）、<code>data</code>（厂商原始响应）、<code>configId</code>（来源配置标识）。</td>
+  </tr>
+  <tr>
+    <td><code>SmsBlendException</code></td>
+    <td>运行时异常</td>
+    <td>统一的异常类型，屏蔽各厂商错误码差异。发送失败、配置错误、网络超时都归一到此异常。</td>
+  </tr>
+  <tr>
+    <td><code>SmsDao</code></td>
+    <td>接口</td>
+    <td>缓存抽象，定义了 <code>set</code>、<code>get</code>、<code>remove</code>、<code>clean</code> 四个方法。默认实现 <code>SmsDaoDefaultImpl</code> 基于 ConcurrentHashMap。</td>
+  </tr>
+</table>
+
+<p>sms4j 做了两件好事：<strong>统一入口</strong>（SmsBlend）屏蔽厂商差异，<strong>工厂模式</strong>（SmsFactory）解耦配置与调用。但它和 RuoYi 项目之间还有一道鸿沟 —— 缓存默认是内存级的，不适合集群环境。</p>
+
+<div class="insight">
+<strong>对比理解：</strong>sms4j 之于 SMS 厂商，就像 SLF4J 之于日志框架。你写 <code>logger.info("xxx")</code> 时不需要关心底层是 Logback 还是 Log4j2；同样，你调 <code>smsBlend.sendMessage()</code> 时不需要关心底层是阿里云还是腾讯云。
+</div>
+
+<h2>3. PlusSmsDao：Redis 缓存接管</h2>
+
+<h3>3.1 为什么需要替换 ConcurrentHashMap？</h3>
+
+<p>sms4j 的默认缓存实现 <code>SmsDaoDefaultImpl</code> 使用 ConcurrentHashMap 作为存储。这对于单机应用没问题，但在 RuoYi 的微服务集群环境下存在致命缺陷：</p>
+
+<ul>
+  <li><strong>缓存不共享：</strong>Node A 设置的验证码，Node B 无法读取，导致用户在新节点上验证失败。</li>
+  <li><strong>防刷失效：</strong>sms4j 内置的发送频率控制依赖 SmsDao。如果缓存垮节点不共享，同一手机号可以打向不同节点突破频率限制。</li>
+  <li><strong>无过期机制：</strong>ConcurrentHashMap 不会自动清理过期数据，内存会持续增长。</li>
+</ul>
+
+<h3>3.2 实现剖析</h3>
+
+<p><code>PlusSmsDao</code> 实现非常简单 —— 实现 <code>SmsDao</code> 接口，所有方法委托给 <code>RedisUtils</code>：</p>
+
+<pre>
+public class PlusSmsDao implements SmsDao {
+
+    @Override
+    public void set(String key, Object value, long time, TimeUnit unit) {
+        if (time > 0) {
+            RedisUtils.setCacheObject(key, value, time, unit);
+        } else {
+            RedisUtils.setCacheObject(key, value);
+        }
+    }
+
+    @Override
+    public Object get(String key) {
+        return RedisUtils.getCacheObject(key);
+    }
+
+    @Override
+    public void remove(String key) {
+        RedisUtils.deleteObject(key);
+    }
+
+    @Override
+    public void clean() {
+        // 原则上不提供全量清理，避免误删其他业务数据
+    }
+}
+</pre>
+
+<p>核心设计决策体现在两个细节上：</p>
+
+<p><strong>1. Key 前缀隔离 —— <code>GLOBAL_REDIS_KEY</code></strong></p>
+
+<p>sms4j 传入的 key 会以 <code>"global:"</code> 为前缀存入 Redis。这个前缀来自 <code>GlobalConstants.GLOBAL_REDIS_KEY</code>，实际存储的完整 key 形如：</p>
+
+<pre>
+global:captcha_codes:13800138000
+</pre>
+
+<p>前缀 <code>"global:"</code> 将短信相关的缓存与租户数据、业务数据隔离，避免 key 冲突，也方便运维时按前缀批量查看或清理。</p>
+
+<p><strong>2. 过期时间控制</strong></p>
+
+<p><code>set</code> 方法中有条件判断：当 <code>time > 0</code> 时才会设置过期时间。sms4j 框架在存储验证码时会传入 5 分钟的 TTL（通过 yml 配置的 <code>cache-expire-time</code>），保证了验证码自动失效，无需手动清理。</p>
+
+<div class="mission">
+<strong>设计原则：</strong>适配层不应该"发明"新逻辑，而应该"翻译"框架概念到项目基础设施。PlusSmsDao 做的就是把 sms4j 的 SmsDao 调用"翻译"成 RedisUtils 调用，不增加、不删减、不扭曲原有语义。
+</div>
+
+<h2>4. SmsAutoConfiguration：自动装配与依赖顺序</h2>
+
+<h3>4.1 after = DataRedisAutoConfiguration 的意义</h3>
+
+<p>SmsAutoConfiguration 上标注了：</p>
+
+<pre>
+@AutoConfiguration(after = DataRedisAutoConfiguration.class)
+</pre>
+
+<p>这是 Spring Boot 的 <code>@AutoConfiguration</code> 注解（注意不是 <code>@Configuration</code>），<code>after</code> 参数指定了加载顺序约束：<strong>必须在 DataRedis 自动配置完成之后才初始化本模块</strong>。</p>
+
+<p>原因很直接：PlusSmsDao 的每一个方法都依赖 <code>RedisUtils</code>，而 RedisUtils 依赖 Redis 连接。如果 SmsAutoConfiguration 在 Redis 就绪之前初始化，PlusSmsDao 被注入到 sms4j 时，Redis 模板可能还是 null，后续调用就会 NPE。</p>
+
+<h3>4.2 @Primary 覆盖默认实现</h3>
+
+<pre>
+@Bean
+@Primary
+public PlusSmsDao plusSmsDao() {
+    return new PlusSmsDao();
+}
+</pre>
+
+<p>sms4j 框架内部会通过 Spring 容器查找 <code>SmsDao</code> 类型的 Bean。由于 sms4j 自己也注册了一个 <code>SmsDaoDefaultImpl</code>，容器中会存在两个 <code>SmsDao</code> 实例。加上 <code>@Primary</code> 后，框架优先获取 PlusSmsDao，实现了对默认实现的静默替换。</p>
+
+<p>这是一种比"排除自动配置"更优雅的做法 —— 不破坏 sms4j 的自动配置逻辑，仅通过优先级覆盖行为。</p>
+
+<h3>4.3 SmsExceptionHandler 的注册</h3>
+
+<p>配置类还通过 <code>@Bean</code> 将 <code>SmsExceptionHandler</code> 注册到容器。虽然异常处理器本身有 <code>@RestControllerAdvice</code> 注解，但显式注册可以确保：即使组件扫描路径未覆盖 handler 包，Bean 依然能被创建。</p>
+
+<h3>4.4 AutoConfiguration.imports 发现机制</h3>
+
+<p>Spring Boot 不扫描外部 jar 的组件。要让框架发现 SmsAutoConfiguration，需要在 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件中注册全限定类名：</p>
+
+<pre>
+com.ruoyi.sms.config.SmsAutoConfiguration
+</pre>
+
+<p>这是 Spring Boot 3.x 的新机制（替代了旧版的 spring.factories）。</p>
+
+<h2>5. SmsExceptionHandler：全局异常兜底与"内外有别"</h2>
+
+<p>SmsExceptionHandler 的代码非常精简，却体现了服务端开发的一个重要原则 —— <strong>内部信息与外部信息分离</strong>：</p>
+
+<pre>
+@RestControllerAdvice
+public class SmsExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(SmsExceptionHandler.class);
+
+    @ExceptionHandler(SmsBlendException.class)
+    public R&lt;Void&gt; handleSmsBlendException(SmsBlendException e) {
+        log.error("SMS发送异常 - URI: {}, Message: {}",
+                  ServletUtils.getRequest().getRequestURI(),
+                  e.getMessage(), e);
+        return R.fail("短信发送失败，请稍后再试");
+    }
+}
+</pre>
+
+<p>这里有两个层次的响应：</p>
+
+<table>
+  <tr><th>层次</th><th>对象</th><th>内容</th></tr>
+  <tr>
+    <td><strong>内部</strong>（log.error）</td>
+    <td>开发/运维人员</td>
+    <td>请求 URI、异常消息、完整堆栈 trace —— 足够定位问题根因</td>
+  </tr>
+  <tr>
+    <td><strong>外部</strong>（R.fail）</td>
+    <td>终端用户</td>
+    <td>"短信发送失败，请稍后再试" —— 友好、不暴露技术细节</td>
+  </tr>
+</table>
+
+<div class="insight">
+<strong>安全必备：</strong>永远不要把异常堆栈或厂商错误码直接返回给前端。攻击者可以通过错误信息推断出你用的是哪个 SMS 厂商、什么版本、甚至配置状态。"内外有别"不是可选项，是安全基线。
+</div>
+
+<p>注意异常捕获的类型是 <code>SmsBlendException</code>，而不是更宽泛的 <code>Exception</code>。这样其他类型的异常不会被这个处理器吞掉，依然会走 Spring 的默认异常处理流程。</p>
+
+<h2>6. 总结：三个类的协同</h2>
+
+<p>把这三个类串起来看，整个适配层的工作流程是：</p>
+
+<ol>
+  <li><strong>SmsAutoConfiguration</strong> 在 Redis 就绪后初始化，创建 PlusSmsDao（@Primary）和 SmsExceptionHandler 两个 Bean</li>
+  <li>sms4j 框架通过 Spring 容器获取 SmsDao，因为 @Primary 拿到 PlusSmsDao，所有的缓存操作透传到 Redis</li>
+  <li>业务代码通过 SmsFactory.getSmsBlend() 获取发送器，正常发送短信</li>
+  <li>一旦发送过程中抛出 SmsBlendException，被 SmsExceptionHandler 捕获，返回统一错误信息</li>
+</ol>
+
+<p>三个类、三个文件、不到 100 行核心代码，构成了一个完整的框架适配层。这就是"小而美"的模块设计。</p>
+
+<div class="quiz">
+<details>
+<summary>📝 自测题（点击展开）</summary>
+
+<p><strong>Q1：</strong>为什么 sms4j 的默认 SmsDaoDefaultImpl（基于 ConcurrentHashMap）不适合 RuoYi 的集群部署？至少列出两个具体问题。</p>
+
+<p style="color:#888;font-size:0.85em;">参考答案：1) 缓存不共享 —— Node A 存的验证码 Node B 读不到，导致用户跨节点验证失败；2) 防刷失效 —— 同一手机号请求分发到不同节点，每个节点各自计数，突破频率限制；3) 无自动过期 —— ConcurrentHashMap 不会清理过期数据，内存持续增长。</p>
+
+<p><strong>Q2：</strong>SmsAutoConfiguration 上标注 <code>after = DataRedisAutoConfiguration.class</code> 的作用是什么？如果去掉会有什么风险？</p>
+
+<p style="color:#888;font-size:0.85em;">参考答案：确保 DataRedis 在 SmsAutoConfiguration 之前初始化，因为 PlusSmsDao 依赖 RedisUtils（底层依赖 Redis 连接池）。如果去掉，可能在 Redis 未就绪时 PlusSmsDao 已被注入，后续调用触发 NPE。</p>
+
+<p><strong>Q3：</strong>SmsExceptionHandler 为什么只捕获 <code>SmsBlendException</code> 而不捕获 <code>Exception</code>？</p>
+
+<p style="color:#888;font-size:0.85em;">参考答案：职责单一。如果捕获 Exception 会吞掉其他类型的异常（如业务异常、参数校验异常），干扰 Spring 默认异常处理流程。只捕获 SmsBlendException 保证了精准兜底而不越界。</p>
+
+</details>
+</div>
+
+<div class="cite">
+<strong>参考来源：</strong>PlusSmsDao.java（ruoyi-common-sms/core/dao/）、SmsAutoConfiguration.java（ruoyi-common-sms/config/）、SmsExceptionHandler.java（ruoyi-common-sms/handler/）、sms4j 官方文档（https://sms4j.com）、GlobalConstants.java（GLOBAL_REDIS_KEY 定义）、Dromara/sms4j GitHub 仓库。
+</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav">
+  <span></span>
+  <span><a href="02-发码校验完整链路.html">下一课：02 | 发码校验完整链路 →</a></span>
+</div>
+
+</body>
+</html>

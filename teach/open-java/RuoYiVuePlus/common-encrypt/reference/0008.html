@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 08 · 完整加密链路速查</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>速查 08 · 完整加密链路速查</h1>
+
+<p class="a">对应课程：<a href="../lessons/0008.html">第 8 课 · 实战追踪：完整加解密链路的追踪与调试</a></p>
+
+<h2>四阶段流程图</h2>
+<div class="chain">Phase 1 — 请求解密 (API 入向)
+  POST /api/user + header:encrypt-key
+  → CryptoFilter.doFilter()
+  → method=POST/ PUT ? check headerFlag
+  → DecryptRequestBodyWrapper(request, privateKey, headerFlag)
+    → headerRSA → RSA解密 → Base64解码 → AES密钥
+    → 读请求体 → AES解密 → 明文JSON字节
+  → Controller 收到明文
+
+Phase 2 — 入参加密 (DB 入向)
+  userService.save(user)
+  → ParameterHandler.setParameters()
+  → MybatisEncryptInterceptor.intercept()
+    → encryptedFieldProcessor.encrypt(parameterObject)
+      → getFieldCache() 获取 @EncryptField 字段
+      → contextFactory.create(field) 组装 EncryptContext
+      → encryptorManager.encrypt(value, context)
+        → check ENC_前缀 → 否
+        → registAndGetEncryptor → 实例化加密器
+        → encryptor.encrypt() → 拼接 "ENC_" + 密文
+      → 创建 FieldSnapshot(原值)
+      → field.set(target, 密文)
+    → invocation.proceed() → SQL INSERT 密文
+    → finally: snapshot.restore() → 恢复原值
+
+Phase 3 — 出参解密 (DB 出向)
+  userService.getById(id)
+  → ResultSetHandler.handleResultSets()
+  → MybatisDecryptInterceptor.intercept()
+    → invocation.proceed() → ResultSet → Java对象(密文)
+    → encryptedFieldProcessor.decrypt(result)
+      → getFieldCache() 获取 @EncryptField 字段
+      → encryptorManager.decrypt(value, context)
+        → check ENC_前缀 → 是
+        → 去除 "ENC_" 前缀
+        → registAndGetEncryptor → 缓存命中
+        → encryptor.decrypt() → 明文
+      → field.set(result, 明文)
+  → Controller 拿到明文
+
+Phase 4 — 响应加密 (API 出向)
+  @ApiEncrypt(response=true)
+  → CryptoFilter: responseFlag=true
+  → EncryptResponseBodyWrapper(response)
+    → 内建 ByteArrayOutputStream 捕获输出
+  → chain.doFilter() → Spring MVC 写JSON到缓存
+  → getEncryptContent(response, publicKey, headerFlag)
+    → generateAesPassword() 随机24字节
+    → Base64编码 → RSA公钥加密 → 放响应头encrypt-key
+    → getContent() 读缓存 → AES加密
+    → 设置Content-Length
+  → response.getWriter().write(加密内容)
+  → 前端解密</div>
+
+<h2>每阶段关键类</h2>
+<table>
+  <tr><th>阶段</th><th>入口类</th><th>核心执行类</th><th>工具/辅助类</th></tr>
+  <tr>
+    <td>Phase 1<br>请求解密</td>
+    <td><code>CryptoFilter</code></td>
+    <td><code>DecryptRequestBodyWrapper</code></td>
+    <td><code>EncryptUtils.decryptByRsa()<br>EncryptUtils.decryptByBase64()<br>EncryptUtils.decryptByAes()</code></td>
+  </tr>
+  <tr>
+    <td>Phase 2<br>入参加密</td>
+    <td><code>MybatisEncryptInterceptor</code></td>
+    <td><code>EncryptedFieldProcessor<br>EncryptorManager<br>EncryptContextFactory<br>AesEncryptor / RsaEncryptor / ...</code></td>
+    <td><code>FieldSnapshot (record)</code></td>
+  </tr>
+  <tr>
+    <td>Phase 3<br>出参解密</td>
+    <td><code>MybatisDecryptInterceptor</code></td>
+    <td><code>EncryptedFieldProcessor<br>EncryptorManager<br>EncryptContextFactory<br>AesEncryptor / RsaEncryptor / ...</code></td>
+    <td><code>Constants.ENCRYPT_HEADER</code></td>
+  </tr>
+  <tr>
+    <td>Phase 4<br>响应加密</td>
+    <td><code>CryptoFilter</code></td>
+    <td><code>EncryptResponseBodyWrapper</code></td>
+    <td><code>EncryptUtils.encryptByRsa()<br>EncryptUtils.encryptByBase64()<br>EncryptUtils.encryptByAes()<br>SecureRandom</code></td>
+  </tr>
+</table>
+
+<h2>ENCRYPT_HEADER 生命周期</h2>
+<div class="chain">添加:  EncryptorManager.encrypt()
+        → Constants.ENCRYPT_HEADER + encryptResult
+        → 写入数据库的值 = "ENC_xxxx"
+
+检查:  EncryptorManager.encrypt() 入口
+        → if (startsWith("ENC_")) return value; (防重复加密)
+
+检查:  EncryptorManager.decrypt() 入口
+        → if (!startsWith("ENC_")) return value; (非加密值跳过)
+
+去除:  EncryptorManager.decrypt() 解密前
+        → StringUtils.removeStart(value, "ENC_")</div>
+
+<h2>调试检查清单</h2>
+<table>
+  <tr><th>检查点</th><th>方法/位置</th><th>关键观察</th></tr>
+  <tr><td>1. Filter 入口</td><td><code>CryptoFilter.doFilter()</code></td><td>apiEncrypt 注解 != null? responseFlag?</td></tr>
+  <tr><td>2. 请求解密</td><td><code>DecryptRequestBodyWrapper</code> 构造</td><td>headerRsa 非空? decryptBody 是合法 JSON?</td></tr>
+  <tr><td>3. 入参加密参数</td><td><code>MybatisEncryptInterceptor.intercept()</code></td><td>parameterObject 非空? 非String? snapshots 非空?</td></tr>
+  <tr><td>4. 加密器缓存</td><td><code>EncryptorManager.registAndGetEncryptor()</code></td><td>缓存命中? 新实例类型?</td></tr>
+  <tr><td>5. ENC_前缀</td><td><code>EncryptorManager.encrypt/decrypt</code> 入口</td><td>值是否已有前缀? 是否该跳过?</td></tr>
+  <tr><td>6. 恢复执行</td><td><code>FieldSnapshot.restore()</code></td><td>finally 执行? 值变回明文?</td></tr>
+  <tr><td>7. 出参解密</td><td><code>MybatisDecryptInterceptor.intercept()</code></td><td>result 类型? 解密后字段值?</td></tr>
+  <tr><td>8. 响应加密</td><td><code>EncryptResponseBodyWrapper.getEncryptContent()</code></td><td>originalBody 正确? 加密后长度?</td></tr>
+</table>
+
+<h2>常见错误速查</h2>
+<table>
+  <tr><th>现象</th><th>原因</th><th>修复</th></tr>
+  <tr><td>403 "没有访问权限"</td><td>有 @ApiEncrypt 但无 encrypt-key 请求头</td><td>前端添加 encrypt-key 头；或去掉 @ApiEncrypt 注解</td></tr>
+  <tr><td>请求体解密乱码</td><td>前后端 RSA/AES 密钥不匹配</td><td>确认前后端使用同一对 RSA 密钥；AES 密钥长度正确</td></tr>
+  <tr><td>DB 字段未加密（无 ENC_ 前缀）</td><td>拦截器未注册 / 实体类未扫描到</td><td>检查 enable=true；检查 typeAliasesPackage 路径</td></tr>
+  <tr><td>DB 字段双重加密（ENC_ENC_）</td><td>Snapshot 恢复失败，实体被多次 save</td><td>检查 finally 块执行；避免同一实体复用</td></tr>
+  <tr><td>查询结果仍是密文</td><td>解密拦截器未生效 / ENC_ 前缀不匹配</td><td>检查 enable=true；确认数据库值是 ENC_ 开头</td></tr>
+  <tr><td>响应体为空</td><td>Wrapper 未缓存 / 加密后未写回</td><td>检查 doFilter 后的 write 调用；检查 flushBuffer</td></tr>
+  <tr><td>前端解密响应失败</td><td>前后端 RSA 密钥对不匹配</td><td>后端公钥加密 → 前端需对应私钥解密</td></tr>
+  <tr><td>启动抛 IllegalArgumentException</td><td>全局算法所需密钥缺失</td><td>补全 password 或 publicKey+privateKey；或用 BASE64</td></tr>
+</table>
+
+<h2>yml 配置检查清单</h2>
+<div class="chain"># 最小化配置 - 仅 API 加密
+api-decrypt:
+  enabled: true
+  public-key: <RSA公钥Base64>
+  private-key: <RSA私钥Base64>
+
+# 最小化配置 - 仅 DB 加密 (AES)
+mybatis-encryptor:
+  enable: true
+  algorithm: AES
+  password: <16/24/32位密钥>
+
+# 完整配置 - 双通道启用
+api-decrypt:
+  enabled: true
+  header-flag: encrypt-key        # 可选，默认 encrypt-key
+  public-key: <RSA公钥Base64>
+  private-key: <RSA私钥Base64>
+
+mybatis-encryptor:
+  enable: true
+  algorithm: AES                   # BASE64/AES/RSA/SM2/SM4
+  password: <AES密钥>              # AES/SM4 必填
+  # public-key: <RSA公钥>          # RSA/SM2 必填
+  # private-key: <RSA私钥>         # RSA/SM2 必填
+  encode: BASE64                   # 可选，默认 BASE64</div>
+
+<h2>拦截器签名速查</h2>
+<div class="chain">MybatisEncryptInterceptor
+  @Intercepts(@Signature(
+    type = ParameterHandler.class,
+    method = "setParameters",
+    args = {PreparedStatement.class}
+  ))
+  流程: encrypt(parameterObject) → proceed() → finally restore()
+
+MybatisDecryptInterceptor
+  @Intercepts(@Signature(
+    type = ResultSetHandler.class,
+    method = "handleResultSets",
+    args = {Statement.class}
+  ))
+  流程: proceed() → decrypt(result)</div>
+
+</body>
+</html>

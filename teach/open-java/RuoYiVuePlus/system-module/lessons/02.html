@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第2课：核心领域模型 — 用户-角色-菜单-部门</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>🏗️ 第2课：核心领域模型 — 用户-角色-菜单-部门</h1>
+
+<p><strong>胜利目标：</strong>能画出 ER 图，说出 4 张核心表 + 5 张关联表的关系，理解实体继承 BaseEntity 的设计意图。</p>
+
+<h2>1. 核心表全景</h2>
+
+<pre><code>
+                    ┌──────────────┐
+                    │   sys_dept   │  部门（树形结构）
+                    │   dept_id    │
+                    │   parent_id  │
+                    │   ancestors  │  ← 祖级列表，实现无限级树
+                    └──────┬───────┘
+                           │ 1:N
+                           ▼
+              ┌────────────────────────┐
+              │       sys_user         │  用户
+              │       user_id          │
+              │       dept_id ─────────────→ FK → sys_dept
+              │       user_name        │
+              │       password         │  (BCrypt 加密)
+              │       status           │  0=正常 1=停用
+              │       del_flag         │  0=存在 1=删除（逻辑删除）
+              └────┬─────────┬─────────┘
+                   │         │
+            M:N    │         │    M:N
+      ┌────────────┘         └──────────────┐
+      ▼                                     ▼
+┌──────────────┐                    ┌──────────────┐
+│ sys_user_role│                    │ sys_user_post│
+│  user_id     │                    │  user_id     │
+│  role_id ────┼──┐                 │  post_id ────┼──┐
+└──────────────┘  │                 └──────────────┘  │
+                  │                                   │
+                  ▼                                   ▼
+         ┌──────────────┐                    ┌──────────────┐
+         │   sys_role   │                    │   sys_post   │
+         │   role_id    │                    │   post_id    │
+         │   role_name  │                    │   post_name  │
+         │   role_key   │  ← 权限字符        │   post_sort  │
+         │   data_scope │  ← 数据范围        └──────────────┘
+         │   status     │
+         └──────┬───────┘
+                │ M:N                    ┌──────────────┐
+       ┌────────┴────────┐              │  sys_config  │  系统配置
+       ▼                 ▼              └──────────────┘
+┌──────────────┐  ┌──────────────┐
+│ sys_role_menu│  │ sys_role_dept│      ┌──────────────┐
+│  role_id     │  │  role_id     │      │ sys_dict_type│  字典类型
+│  menu_id ────┼┐ │  dept_id ────┼┐     └──────┬───────┘
+└──────────────┘│ └──────────────┘│            │ 1:N
+                │                 │            ▼
+                ▼                 ▼     ┌──────────────┐
+         ┌──────────────┐  ┌──────────┐│ sys_dict_data│  字典数据
+         │   sys_menu   │  │ sys_dept │└──────────────┘
+         │   menu_id    │  └──────────┘
+         │   parent_id  │  ← 树形结构
+         │   menu_type  │  M=目录 C=菜单 F=按钮
+         │   perms      │  ← 权限标识 system:user:list
+         │   path       │  ← 路由地址
+         │   component  │  ← 前端组件路径
+         └──────────────┘
+</code></pre>
+
+<h2>2. BaseEntity — 审计字段的统一抽象</h2>
+
+<p>所有核心实体都继承 <code>BaseEntity</code>，MyBatis-Plus 的自动填充机制会在插入/更新时自动设置这些字段：</p>
+
+<pre><code>// 所有实体共有的审计字段（通过继承获得）
+public class BaseEntity implements Serializable {
+    private Long createBy;      // 创建者
+    private LocalDateTime createTime;  // 创建时间
+    private Long updateBy;      // 更新者
+    private LocalDateTime updateTime;  // 更新时间
+}</code></pre>
+
+<div class="highlight">
+  <strong>设计意图：</strong>避免在每个实体中重复定义审计字段。配合 MyBatis-Plus 的 <code>MetaObjectHandler</code> 自动从登录上下文获取当前用户 ID 填充 createBy/updateBy。
+</div>
+
+<h2>3. 四大核心实体详解</h2>
+
+<h3>3.1 SysUser — 用户</h3>
+
+<table>
+  <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>user_id</td><td>Long</td><td>主键，@TableId</td></tr>
+    <tr><td>dept_id</td><td>Long</td><td>所属部门</td></tr>
+    <tr><td>user_name</td><td>String</td><td>登录账号</td></tr>
+    <tr><td>nick_name</td><td>String</td><td>显示昵称</td></tr>
+    <tr><td>password</td><td>String</td><td>BCrypt 加密，NOT_EMPTY 策略（不更新时不设值）</td></tr>
+    <tr><td>status</td><td>String</td><td>0=正常 1=停用</td></tr>
+    <tr><td>del_flag</td><td>String</td><td>@TableLogic 逻辑删除</td></tr>
+    <tr><td>login_ip/login_date</td><td>String/DateTime</td><td>最后登录信息</td></tr>
+    <tr><td colspan="3"><strong>核心方法：</strong><code>isSuperAdmin()</code> — 判断是否为超级管理员（userId=1）</td></tr>
+  </tbody>
+</table>
+
+<h3>3.2 SysRole — 角色</h3>
+
+<table>
+  <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>role_id</td><td>Long</td><td>主键</td></tr>
+    <tr><td>role_name</td><td>String</td><td>角色名称（如"超级管理员"）</td></tr>
+    <tr><td>role_key</td><td>String</td><td>权限字符（如"super_admin"），用于 Sa-Token 角色校验</td></tr>
+    <tr><td>data_scope</td><td>String</td><td><strong>数据范围</strong>：1=全部 2=自定义 3=本部门 4=本部门及以下 5=仅本人 6=部门及以下或本人</td></tr>
+    <tr><td>menu_check_strictly</td><td>Boolean</td><td>菜单树是否父子联动</td></tr>
+    <tr><td>dept_check_strictly</td><td>Boolean</td><td>部门树是否父子联动</td></tr>
+    <tr><td>role_sort</td><td>Integer</td><td>排序字段</td></tr>
+  </tbody>
+</table>
+
+<div class="highlight">
+  <strong>关键字段 data_scope：</strong>这是数据权限的核心！角色通过此字段决定用户能看到哪些部门的数据。具体实现在第4课详讲。
+</div>
+
+<h3>3.3 SysMenu — 菜单/权限</h3>
+
+<table>
+  <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>menu_id</td><td>Long</td><td>主键</td></tr>
+    <tr><td>parent_id</td><td>Long</td><td>父菜单ID（0=根节点）</td></tr>
+    <tr><td>menu_type</td><td>String</td><td><strong>M=目录 C=菜单 F=按钮</strong>（三种类型对应不同前端渲染方式）</td></tr>
+    <tr><td>perms</td><td>String</td><td>权限标识，如 <code>system:user:list</code></td></tr>
+    <tr><td>path</td><td>String</td><td>路由地址，如 <code>system/user</code></td></tr>
+    <tr><td>component</td><td>String</td><td>前端组件路径，如 <code>system/user/index</code></td></tr>
+    <tr><td>is_frame</td><td>String</td><td>是否外链（Y/N）</td></tr>
+    <tr><td>is_cache</td><td>String</td><td>是否缓存（Y/N）</td></tr>
+    <tr><td>visible</td><td>String</td><td>是否显示（0=显示 1=隐藏）</td></tr>
+  </tbody>
+</table>
+
+<p><strong>SysMenu 的三个核心计算方法（前端路由生成的关键！）：</strong></p>
+<ul>
+  <li><code>getRouteName()</code> — 生成路由 name：path 首字母大写 + menuId</li>
+  <li><code>getRouterPath()</code> — 计算实际路由路径（处理内链、外链、顶级目录等场景）</li>
+  <li><code>getComponentInfo()</code> — 确定前端组件（Layout / InnerLink / ParentView / 自定义组件）</li>
+</ul>
+
+<h3>3.4 SysDept — 部门</h3>
+
+<table>
+  <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>dept_id</td><td>Long</td><td>主键</td></tr>
+    <tr><td>parent_id</td><td>Long</td><td>父部门ID</td></tr>
+    <tr><td>ancestors</td><td>String</td><td><strong>祖级列表</strong>，如 "0,100,200" — 无限级树的关键</td></tr>
+    <tr><td>dept_name</td><td>String</td><td>部门名称</td></tr>
+    <tr><td>leader</td><td>Long</td><td>负责人 user_id</td></tr>
+    <tr><td>dept_category</td><td>String</td><td>部门类别编码</td></tr>
+  </tbody>
+</table>
+
+<div class="highlight">
+  <strong>ancestors 字段的作用：</strong>通过 <code>FIND_IN_SET(dept_id, ancestors)</code> 可以一次性查出某部门的所有子部门，避免递归查询。这是"预排序遍历树"的变体实现。
+</div>
+
+<h2>4. 关联表：表达多对多关系</h2>
+
+<table>
+  <thead><tr><th>关联表</th><th>关联关系</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td>sys_user_role</td><td>user_id ↔ role_id</td><td>用户可拥有多个角色</td></tr>
+    <tr><td>sys_user_post</td><td>user_id ↔ post_id</td><td>用户可担任多个岗位</td></tr>
+    <tr><td>sys_role_menu</td><td>role_id ↔ menu_id</td><td>角色拥有多个菜单权限</td></tr>
+    <tr><td>sys_role_dept</td><td>role_id ↔ dept_id</td><td>角色的数据权限部门范围</td></tr>
+  </tbody>
+</table>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>画出 4 张核心表 + 关联表的 ER 图</li>
+  <li>说出 <code>data_scope</code> 字段的 5 种值及其含义</li>
+  <li>解释 SysMenu 的 <code>menu_type</code> 三种类型（M/C/F）的区别</li>
+  <li>解释 SysDept 的 <code>ancestors</code> 字段为什么能实现无限级树</li>
+  <li>说出 <code>@TableLogic</code> 在哪些表上使用了</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://baomidou.com/pages/6b03c5/">MyBatis-Plus @TableLogic 逻辑删除文档</a></div>
+<div class="reminder">💡 有疑问？直接问我。例如："SysMenu 的三种 menu_type 在前端分别对应什么样的 UI 渲染？" 或 "为什么不直接用递归查询子部门而要用 ancestors 字段？"</div>
+
+</body>
+</html>

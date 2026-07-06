@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · 自动配置机制与注册体系</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · 自动配置机制与注册体系</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code> · 使命：读懂 ruoyi-common-elasticsearch 搜索引擎模块</p>
+
+<h2>EasyEsConfiguration 三注解</h2>
+<table>
+<tr><th>注解</th><th>作用</th><th>失效后果</th></tr>
+<tr><td><code>@AutoConfiguration</code></td><td>标记为自动配置类（proxyBeanMethods=false，支持 before/after 排序）</td><td>即使 .imports 文件列出了，Spring 也不把它当配置类处理</td></tr>
+<tr><td><code>@ConditionalOnProperty(value="easy-es.enable", havingValue="true")</code></td><td>条件开关：仅当 easy-es.enable=true 时生效</td><td>类被完全跳过，@EsMapperScan 不执行，EsMapper 不会注册为 Bean</td></tr>
+<tr><td><code>@EsMapperScan("org.dromara.**.esmapper")</code></td><td>扫描指定包下所有 BaseEsMapper 子接口，生成代理并注册 Bean</td><td>EsMapper 接口即使写对了也不会被扫描，注入时报 NoSuchBean</td></tr>
+</table>
+
+<h2>两个注册文件对比</h2>
+<table>
+<tr><th></th><th>AutoConfiguration.imports</th><th>spring.factories</th></tr>
+<tr><td>用途</td><td>注册 @AutoConfiguration 类</td><td>注册 EnvironmentPostProcessor</td></tr>
+<tr><td>加载阶段</td><td>第 2 阶段（准备 ApplicationContext）</td><td>第 1 阶段（准备 Environment）</td></tr>
+<tr><td>注册的类</td><td>EasyEsConfiguration</td><td>ActuatorEnvironmentPostProcessor</td></tr>
+<tr><td>文件路径</td><td><code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code></td><td><code>META-INF/spring.factories</code></td></tr>
+<tr><td>格式</td><td>每行一个全限定类名</td><td>key=value 对（key 是 SPI 接口全名）</td></tr>
+<tr><td>Spring Boot 版本</td><td>2.7+ 新机制</td><td>传统机制（仍兼容）</td></tr>
+</table>
+
+<h2>Spring Boot 启动与 ES 组件的时序</h2>
+<div class="chain">1️⃣ EnvironmentPostProcessor 执行
+   └── ActuatorEnvironmentPostProcessor: easy-es.enable → management.health.elasticsearch.enabled
+
+2️⃣ AutoConfiguration 加载
+   └── .imports → EasyEsConfiguration → 检查 @ConditionalOnProperty
+       ├─ true → @EsMapperScan 扫描 → 代理 Bean 注册
+       └─ false → 跳过，零开销
+
+3️⃣ ApplicationContext 刷新
+   └── 实例化单例 Bean
+       ├── DocumentMapper（代理对象）
+       ├── EsCrudController（注入 DocumentMapper）
+       └── ElasticsearchHealthIndicator（读取 management.health.elasticsearch.enabled）</div>
+
+<h2>Mapper 扫描路径规则</h2>
+<ul>
+<li>扫描模式：<code>org.dromara.**.esmapper</code></li>
+<li><code>**</code> 匹配任意层级目录</li>
+<li>匹配条件：包路径以 <code>org.dromara</code> 开头，以 <code>esmapper</code> 结尾</li>
+<li>被扫描的接口必须 <code>extends BaseEsMapper</code></li>
+</ul>
+
+<h2>常见问题排障</h2>
+<table>
+<tr><th>现象</th><th>最可能的原因</th></tr>
+<tr><td><code>DocumentMapper</code> 注入失败 NoSuchBean</td><td>①Mapper 不在 esmapper 包下 ②easy-es.enable 不是 true ③忘记依赖 ruoyi-common-elasticsearch</td></tr>
+<tr><td>easy-es.enable=true 但 Mapper 仍未被扫描</td><td>检查 @EsMapperScan 的包路径是否正确，确认 Mapper 接口 extends BaseEsMapper</td></tr>
+<tr><td>健康检查报 ES 连接失败（项目不用 ES）</td><td>确认 easy-es.enable=false，并确认 management.health.elasticsearch.enabled 也被同步为 false（检查 ActuatorEnvironmentPostProcessor 是否被加载）</td></tr>
+</table>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：AutoConfiguration、ConditionalOnProperty、EsMapperScan、可插拔模块</p>
+</body>
+</html>

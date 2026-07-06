@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 · ruoyi-common-core 核心基石（上）：异常体系与常量设计</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.2rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #ddd; padding-bottom: 0.5rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; color: #2c3e50; }
+  h3 { font-size: 1.05rem; margin-top: 1.5rem; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15em 0.3em; border-radius: 3px; font-size: 0.92em; }
+  pre code { background: none; padding: 0; }
+  .info { background: #e8f4fd; border-left: 4px solid #2196F3; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fff3cd; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.7rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>01 · ruoyi-common-core 核心基石（上）：异常体系与常量设计</h1>
+
+<p><strong>核心问题：</strong>一个拥有 24 个模块的大型项目中，如何保证所有模块的错误处理一致、常量不重复、状态码统一？答案就在 <code>ruoyi-common-core</code> —— 整个项目的「宪法」模块。</p>
+
+<div class="info">
+<strong>模块定位：</strong>ruoyi-common-core 是依赖树的根。它不依赖任何其他 ruoyi 模块，但被所有 23 个模块传递依赖。65 个 Java 文件，23 个包。Maven 坐标：<code>org.dromara:ruoyi-common-core</code>。
+</div>
+
+<h2>1. 异常体系：三层设计</h2>
+
+<pre>
+RuntimeException
+├── <strong>BaseException</strong> (i18n 异常基类)
+│   ├── FileException (文件异常)
+│   │   ├── FileNameLengthLimitExceededException
+│   │   └── FileSizeLimitExceededException
+│   └── UserException (用户异常)
+│       ├── CaptchaException (验证码错误)
+│       └── CaptchaExpireException (验证码过期)
+├── <strong>ServiceException</strong> (通用业务异常，项目中 42 个文件抛出)
+└── <strong>SseException</strong> (SSE 推送专用异常)</pre>
+
+<h3>BaseException — 支持国际化的异常</h3>
+<pre><code>public class BaseException extends RuntimeException {
+    private String module;        // 模块名
+    private String code;          // i18n 消息键
+    private Object[] args;        // 消息参数
+    private String defaultMessage; // 回退消息
+
+    @Override
+    public String getMessage() {
+        return MessageUtils.message(code, args); // 优先查 i18n
+        // 找不到时回退到 defaultMessage
+    }
+}</code></pre>
+
+<h3>ServiceException — 最常用的业务异常</h3>
+<pre><code>// 链式调用，支持占位符
+throw new ServiceException("用户【{}】不存在", username);
+throw new ServiceException().setMessage("操作失败").setDetailMessage("库存不足");</code></pre>
+<p><strong>被 42 个文件引用</strong>，是项目中最常用的运行时异常。在 <code>GlobalExceptionHandler</code>（common-web 模块）中被统一捕获并返回前端。</p>
+
+<div class="warn">
+<strong>关键设计：</strong>BaseException 和 ServiceException 是两条独立分支，不互相继承。BaseException 走 i18n 翻译，ServiceException 直接返回消息字符串。选择哪一个取决于是否需要国际化支持。<br><br>
+对应前端：<code>request.ts</code> 响应拦截器中 <code>code === 500</code> 分支通过 <code>ElMessage.error(msg)</code> 展示给用户。
+</div>
+
+<h2>2. 常量体系：5 个常量接口</h2>
+
+<table>
+<tr><th>常量类</th><th>职责</th><th>被引用</th></tr>
+<tr><td><code>Constants</code></td><td>全局常量：UTF8、SUCCESS=0、FAIL=1、LOGIN_SUCCESS="Success"、ENCRYPT_HEADER="ENC_"</td><td>13 文件</td></tr>
+<tr><td><code>HttpStatus</code></td><td>HTTP 状态码：SUCCESS=200、BAD_REQUEST=400、UNAUTHORIZED=401、FORBIDDEN=403、ERROR=500、WARN=601</td><td>4</td></tr>
+<tr><td><code>SystemConstants</code></td><td>系统级：SUPER_ADMIN_USER_ID=1761100000000000001L、TYPE_DIR="M"、TYPE_MENU="C"、TYPE_BUTTON="F"</td><td>~32</td></tr>
+<tr><td><code>GlobalConstants</code></td><td>Redis 键前缀：GLOBAL_REDIS_KEY、CAPTCHA_CODE_KEY、REPEAT_SUBMIT_KEY、RATE_LIMIT_KEY、SOCIAL_AUTH_CODE_KEY</td><td>~10</td></tr>
+<tr><td><code>CacheNames</code></td><td>声明式缓存名，内联 TTL/maxSize 策略（19 个缓存名如 SYS_CONFIG、SYS_DICT 等）</td><td>~19</td></tr>
+</table>
+
+<h3>CacheNames 的创新设计</h3>
+<pre><code>// 缓存名内联配置：name#TTL#maxIdleTime#maxSize
+String DEMO_CACHE = "demo:cache#60s#10m#20";  // TTL=60s，空闲最大10min，最多20条
+String SYS_USER_NAME = "sys_user_name#30d";    // TTL=30天
+// 注意：v6 中 SYS_CONFIG 为无后缀的基础缓存名，DEMO_CACHE 是带策略的示例</code></pre>
+
+<h2>3. 领域模型：R&lt;T&gt; 统一响应</h2>
+<pre><code>public class R&lt;T&gt; {
+    int code;     // 200/500/601
+    String msg;
+    T data;
+}
+
+// 使用示例
+R.ok(data);           // code=200
+R.fail("操作失败");    // code=500
+R.warn("请先完善资料"); // code=601
+</code></pre>
+<p>整个项目 55 个文件引用此类。前端 <code>plus-ui-vue/src/utils/request.ts</code> 响应拦截器根据 <code>code</code> 值决定 Promise.resolve 还是 reject。</p>
+
+<h2>4. 枚举设计</h2>
+<table>
+<tr><th>枚举</th><th>值</th><th>用途</th></tr>
+<tr><td><code>UserType</code></td><td>SYS_USER / APP_USER</td><td>多账号体系：后台用户 vs 移动端用户，token 识别</td></tr>
+<tr><td><code>UserStatus</code></td><td>OK("0") / DISABLE("1") / DELETED("2")</td><td>用户状态流转</td></tr>
+<tr><td><code>DeviceType</code></td><td>PC / APP / XCX / SOCIAL</td><td>登录设备识别，登录日志记录</td></tr>
+<tr><td><code>LoginType</code></td><td>PASSWORD / SMS / EMAIL / XCX</td><td>登录方式枚举，内含各方式的重试限制 i18n 键</td></tr>
+<tr><td><code>BusinessStatusEnum</code></td><td>CANCEL→DRAFT→WAITING→FINISH→INVALID→BACK→TERMINATION（7 个状态）</td><td>工作流状态机，被 workflow 模块 25+ 文件引用</td></tr>
+</table>
+
+<h2>5. 被哪些模块调用</h2>
+<p>所有 23 个 common 子模块、ruoyi-admin、ruoyi-modules（system/gen/job/demo/workflow）均传递依赖 common-core。核心引用关系：</p>
+<ul>
+<li><code>StringUtils</code> → 109 个文件使用（所有模块）</li>
+<li><code>R&lt;T&gt;</code> → 55 个文件使用（所有 Controller 层）</li>
+<li><code>SpringUtils</code> → 43 个文件使用（跨模块 Bean 查找）</li>
+<li><code>ServiceException</code> → 42 个文件使用（system、workflow、admin、common-web、common-encrypt）</li>
+</ul>
+
+<h2>6. 验证要点</h2>
+<ol>
+<li>在 IDE 中打开 <code>ServiceException</code>，用 Find Usages 查看 42 处引用分布在哪些模块</li>
+<li>追踪一个登录请求的异常处理链路: <code>/auth/login</code> → Controller → Service → ServiceException → GlobalExceptionHandler → 前端 request.ts 响应拦截器</li>
+<li>检查 <code>CacheNames</code> 中的缓存名被哪些 <code>@Cacheable</code> 注解使用</li>
+</ol>
+
+<div class="cite"> 推荐一手资料：<a href="https://docs.oracle.com/javase/tutorial/essential/exceptions/">Oracle Java 异常最佳实践</a> — 理解受检异常 vs 非受检异常的选择原则</div>
+<div class="reminder"> 想了解 <code>BaseException</code> 的 i18n 消息是怎么配置和加载的？下一课会讲，也可以直接问我。</div>
+
+</body>
+</html>

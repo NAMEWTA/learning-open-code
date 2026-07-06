@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 04 · 导出处理器链</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 04 · 导出处理器链</h1>
+<p class="a">配套课程：<code>lessons/0004.html</code></p>
+
+<h2>三条 WriteHandler 线</h2>
+<table>
+<tr><th>处理器</th><th>行数</th><th>接口</th><th>回调时机</th><th>职责</th></tr>
+<tr><td><code>ExcelDownHandler</code></td><td>445</td><td>SheetWriteHandler</td><td>afterSheetCreate</td><td>4种数据源生成下拉校验</td></tr>
+<tr><td><code>CellMergeStrategy</code></td><td>101</td><td>AbstractMergeStrategy + SheetWriteHandler</td><td>afterSheetCreate + merge</td><td>预占合并区域 / 清空非首行</td></tr>
+<tr><td><code>DataWriteHandler</code></td><td>143</td><td>SheetWriteHandler + CellWriteHandler</td><td>afterCellDispose(仅表头)</td><td>表头标红 + 批注</td></tr>
+</table>
+
+<h2>ExcelDownHandler 四种下拉数据源</h2>
+<div class="chain">① @ExcelDictFormat.dictType    → DictService.getAllDictByDictType()
+② @ExcelDictFormat.readConverterExp → 解析 "0=男,1=女" 取标签
+③ @ExcelEnumFormat.enumClass   → EnumUtil.getFieldValues()
+④ @ExcelDynamicOptions.providerClass → SpringUtils.getBean().getOptions()
+⑤ 外部 DropDownOptions 参数
+
+选项 > 20 或总字符 > 255 → dropDownWithSheet (隐藏Sheet+名称管理器)
+否则 → dropDownWithSimple (内联显式列表约束)</div>
+
+<h2>级联下拉原理（INDIRECT）</h2>
+<div class="chain">1. 隐藏Sheet首行横向写一级选项 → 名称管理器指向该行
+2. 每个一级选项创建一个子名称管理器 → 指向对应列的二级数据
+3. 一级列校验 = 公式约束引用名称管理器
+4. 二级列校验 = INDIRECT(一级列单元格)
+   → 用户选"北京" → INDIRECT("北京") → 找名称管理器"北京" → 展示二级选项</div>
+
+<h2>CellMergeHandler 合并算法</h2>
+<div class="chain">逐字段、逐行扫描：
+  - 空值 → 收口上一段合并区间，当前行不参与
+  - 首次遇到 → 缓存 (值, 起始行)
+  - 值相同 AND mergeBy依赖字段全相同 → 扩展区间
+  - 值不同 OR 依赖不同 → 收口旧区间 + 开始新区间
+  - 最后一行 → 收口最后一段
+
+产出: List&lt;CellRangeAddress&gt; → 交给 CellMergeStrategy 执行</div>
+
+<h2>CellMergeStrategy 两步执行</h2>
+<div class="chain">afterSheetCreate: 提前批量写入所有合并区域 (sheet.addMergedRegion)
+  → 避免 "row already written to disk" 错误
+merge (每格写入后): 若单元格在合并区域内且非首行 → cell.setBlank()
+  → 清空非首行的重复值，让合并区域视觉上干净</div>
+
+<h2>DataWriteHandler 表头处理</h2>
+<div class="chain">仅当 context.getHead()==true 时生效:
+  - 单元格设为文本格式 (format index=49)
+  - 表头字体加粗
+  - @ExcelRequired → 表头字体颜色 = fontColor (默认 RED)
+  - @ExcelNotation → 创建 POI Comment 批注 (XSSFClientAnchor)</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>下拉只在<strong>前 1000 行</strong>生效（FIRST_DATA_ROW_INDEX=1, LAST_DATA_ROW_INDEX=1000）。</li>
+<li>简单下拉（内联）有 <b>255 字符限制</b>，超限自动切换隐藏 Sheet 方案。</li>
+<li>级联下拉依赖 Excel 的 <b>INDIRECT 函数 + 名称管理器</b>，这是 Excel 原生特性，不是 Java 逻辑。</li>
+<li>合并策略的「预占坑」设计是为了兼容 POI 的写入时序限制。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：ExcelDownHandler, DropDownOptions, CellMergeHandler, CellMergeStrategy, DataWriteHandler</p>
+</body>
+</html>

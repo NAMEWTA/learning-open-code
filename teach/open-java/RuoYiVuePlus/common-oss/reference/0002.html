@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · 客户端抽象与工厂模式</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · 客户端抽象与工厂模式</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code> · 使命：读懂 ruoyi-common-oss 对象存储模块</p>
+
+<h2>一句话定位</h2>
+<div class="chain"><code>OssClient</code>（接口，定义契约）→ <code>AbstractOssClientImpl</code>（抽象类，70+ 方法统一实现）→ <code>DefaultOssClientImpl</code>（唯一覆写 <code>doInitialize()</code>）→ <code>OssFactory</code>（工厂，缓存 + 锁 + 热更新）</div>
+
+<h2>OssClient 接口：方法分组</h2>
+<table>
+<tr><th>方法组</th><th>带 bucket 参数</th><th>不带 bucket（默认 bucket）</th><th>重载数</th></tr>
+<tr><td>上传（6 种输入 × 2 Options）</td><td><code>bucketUpload(bucket, key, input, [options])</code></td><td><code>upload(key, input, [options])</code></td><td>24</td></tr>
+<tr><td>下载（6 种输出目标）</td><td><code>bucketDownload(bucket, key, target)</code></td><td><code>download(key, target)</code></td><td>12</td></tr>
+<tr><td>删除</td><td><code>bucketDelete(bucket, key)</code></td><td><code>delete(key)</code></td><td>2</td></tr>
+<tr><td>预签名 GET</td><td><code>bucketPresignGetUrl(bucket, key, duration)</code></td><td><code>presignGetUrl(key, duration)</code></td><td>2</td></tr>
+<tr><td>预签名 PUT</td><td><code>bucketPresignPutUrl(bucket, key, duration)</code></td><td><code>presignPutUrl(key, duration)</code></td><td>2</td></tr>
+<tr><td>自定义上传</td><td colspan="2"><code>doCustomUpload(AsyncRequestBody, builder, [listeners], [handler])</code></td><td>4</td></tr>
+<tr><td>自定义下载</td><td colspan="2"><code>doCustomDownload(builder, transformer, [listeners])</code></td><td>2</td></tr>
+</table>
+
+<h2>上传的 6 种输入类型</h2>
+<table>
+<tr><th>输入类型</th><th>转换为 AsyncRequestBody 的方式</th><th>适用场景</th></tr>
+<tr><td><code>Path</code></td><td><code>AsyncRequestBody.fromFile(path)</code></td><td>NIO 路径，本地文件</td></tr>
+<tr><td><code>File</code></td><td><code>File → RandomAccessFile → ReadableByteChannel</code></td><td>传统 IO 文件</td></tr>
+<tr><td><code>RandomAccessFile</code></td><td><code>getChannel() → AsyncRequestBody</code></td><td>大文件/断点续传</td></tr>
+<tr><td><code>ReadableByteChannel</code></td><td>直接使用，需指定 <code>contentLength</code></td><td>NIO Channel / 零拷贝</td></tr>
+<tr><td><code>InputStream</code></td><td>写临时文件 → 上传 → <code>finally</code> 删除临时文件</td><td>内存流 / 网络流</td></tr>
+<tr><td><code>byte[]</code></td><td><code>AsyncRequestBody.fromBytes(data)</code></td><td>小数据，已在内存</td></tr>
+</table>
+
+<h2>AbstractOssClientImpl：关键私有方法</h2>
+<table>
+<tr><th>方法</th><th>作用</th><th>调用者</th></tr>
+<tr><td><code>bucketUpload(bucket, key, AsyncRequestBody, Options)</code></td><td>核心上传：取 contentLength/contentType → 调 doCustomUpload → 返回 PutObjectResult</td><td>所有 12 个 bucketUpload 重载</td></tr>
+<tr><td><code>doCustomDownload(builder, transformer, listeners)</code></td><td>核心下载：构建 DownloadRequest → s3TransferManager.download() → 返回结果</td><td>所有 download 重载</td></tr>
+<tr><td><code>buildPathKey(businessPrefix, fileName)</code></td><td>构建存储路径：mergePrefix → yyyy/MM/dd → UUID → 扩展名</td><td>所有上传/下载 getPathKey</td></tr>
+<tr><td><code>mergePrefix(a, b)</code></td><td>合并两个前缀为 URL 安全路径（去空格、去首尾斜杠、防重复斜杠）</td><td>buildPathKey</td></tr>
+<tr><td><code>normalizePrefix(prefix)</code></td><td>标准化前缀：trim + strip "/"</td><td>mergePrefix</td></tr>
+<tr><td><code>toStorageException(e)</code></td><td>解包 CompletionException/ExecutionException → 统一 S3StorageException</td><td>所有异步调用 catch 块</td></tr>
+</table>
+
+<h2>DefaultOssClientImpl：doInitialize() 步骤</h2>
+<table>
+<tr><th>步骤</th><th>操作</th><th>关键参数</th></tr>
+<tr><td>1. 校验凭证</td><td>检查 accessKey、secretKey 非空</td><td>—</td></tr>
+<tr><td>2. 解析端点</td><td>endpointUrl（API 调用）、domainUrl（文件访问）、region</td><td>默认 Region.US_EAST_1</td></tr>
+<tr><td>3. 构建凭证</td><td><code>StaticCredentialsProvider.create(AwsBasicCredentials.create(ak, sk))</code></td><td>—</td></tr>
+<tr><td>4. 构建 S3AsyncClient</td><td>凭证 + 端点 + region + 路径风格 + 校验和策略</td><td>见下方详解</td></tr>
+<tr><td>5. 构建 HTTP 客户端</td><td><code>NettyNioAsyncHttpClient</code>：连接超时 60s、获取超时 30s、最大并发 100、等待队列 1000</td><td>—</td></tr>
+<tr><td>6. 校验和策略</td><td><code>WHEN_REQUIRED</code>（请求和响应均仅当服务端要求时）</td><td>省 CPU</td></tr>
+<tr><td>7. 构建 S3TransferManager</td><td>基于 S3AsyncClient</td><td>—</td></tr>
+<tr><td>8. 构建 S3Presigner</td><td>使用 domainUrl（不是 endpointUrl）作为端点</td><td>—</td></tr>
+<tr><td>9. 创建 asyncExecutor</td><td>虚拟线程（Java 21+）或 ScheduledThreadPool（降级）</td><td>由配置决定</td></tr>
+</table>
+
+<h2>OssFactory：instance() 加锁流程</h2>
+<table>
+<tr><th>步骤</th><th>操作</th><th>说明</th></tr>
+<tr><td>1</td><td><code>RedisUtils.getCacheObject(DEFAULT_CONFIG_KEY)</code></td><td>从 Redis 取当前生效的配置 key</td></tr>
+<tr><td>2</td><td><code>CacheUtils.get("sys_oss_config", configKey)</code></td><td>从缓存读配置 JSON</td></tr>
+<tr><td>3</td><td><code>JsonUtils.parseObject(json, OssProperties.class)</code></td><td>JSON → POJO</td></tr>
+<tr><td>4</td><td><code>OssClientConfig.formProperties(properties)</code></td><td>POJO → 客户端配置对象（字段映射 + 策略解析）</td></tr>
+<tr><td>5</td><td><code>getClientLock(configKey).lock()</code></td><td>获取该 configKey 专属的 ReentrantLock</td></tr>
+<tr><td>6</td><td><code>CLIENT_CACHE.get(configKey)</code></td><td>第二次检查缓存（DCL）</td></tr>
+<tr><td>7a</td><td>若存在且 <code>verifyConfig(newConfig) == true</code></td><td>直接返回缓存的客户端实例</td></tr>
+<tr><td>7b</td><td>若存在但 <code>verifyConfig(newConfig) == false</code></td><td>closeClient() 关闭旧实例 → 创建新 DefaultOssClientImpl</td></tr>
+<tr><td>7c</td><td>若不存在</td><td>创建新 DefaultOssClientImpl → 放入 CLIENT_CACHE</td></tr>
+<tr><td>8</td><td><code>lock.unlock()</code>（finally）</td><td>释放锁</td></tr>
+</table>
+
+<h2>关键数据结构</h2>
+<table>
+<tr><th>数据结构</th><th>类型</th><th>用途</th></tr>
+<tr><td><code>CLIENT_CACHE</code></td><td><code>ConcurrentHashMap&lt;String, OssClient&gt;</code></td><td>按 configKey 缓存客户端实例</td></tr>
+<tr><td><code>CLIENT_LOCKS</code></td><td><code>ConcurrentHashMap&lt;String, ReentrantLock&gt;</code></td><td>按 configKey 提供独立锁，避免不同厂商互相阻塞</td></tr>
+<tr><td><code>initialized</code></td><td><code>AtomicBoolean</code></td><td>保证每个客户端只初始化一次（close 后重置可再次初始化）</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>三层继承链</b>：OssClient（接口/契约）→ AbstractOssClientImpl（抽象类/收敛）→ DefaultOssClientImpl（实现类/初始化）。新增厂商只需再写一个 doInitialize()。</li>
+<li><b>两个私有方法收敛 70+ 公开方法</b>：bucketUpload(AsyncRequestBody) + doCustomDownload()。所有上传重载本质都是「把输入转成 AsyncRequestBody，然后调同一个私有方法」。</li>
+<li><b>工厂的 DCL + per-key 锁</b>：并发安全 + 不互相阻塞 + 配置变更自动重建客户端，实现<strong>零停机热更新</strong>。</li>
+<li><b>虚拟线程优先</b>：Java 21+ 用虚拟线程，低版本退到 ScheduledThreadPool。同一套代码适配不同 JDK。</li>
+<li><b>InputStream → 临时文件技巧</b>：S3 传输需要 contentLength，InputStream 不提供 → 先落盘再上传，finally 清理。用空间换确定性。</li>
+<li><b>close() 顺序</b>：先停传输 → 再断连接 → 再关辅件 → 最后收线程。顺序错了可能导致任务丢失或连接泄漏。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：OssClient、S3AsyncClient、S3TransferManager、DCL（双重检查锁）、虚拟线程、AsyncRequestBody、预签名 URL</p>
+</body>
+</html>

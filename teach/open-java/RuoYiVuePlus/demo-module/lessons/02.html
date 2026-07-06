@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 缓存与并发控制：用声明式注解保护你的接口</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.7rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.7rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .filepath { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; color: #666; background: #fafbfc; padding: 0.2rem 0.5rem; border-radius: 3px; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin: 1rem 0; }
+  .compare > div { background: #fff; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.8rem 1rem; font-size: 0.88rem; }
+  .compare > div h4 { margin: 0 0 0.5rem 0; font-size: 0.95rem; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 缓存与并发控制：用声明式注解保护你的接口 <span class="tag">性能 + 安全</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #2）</b>：学完你能独立为任意接口添加 Spring Cache 缓存、@Lock4j 分布式锁、@RateLimiter 限流和 @RepeatSubmit 防重，并说清每种注解的适用场景和关键参数。
+</div>
+
+<p>第 1 课我们搭建了 CRUD 骨架，但真实生产环境还需要解决三个问题：<b>查询太慢</b>（频繁查数据库）、<b>并发冲突</b>（多人同时操作同一条数据）、<b>流量冲击</b>（恶意刷接口）。ruoyi-demo 用四个 Controller 演示了这些问题的标准解法，而且全部是<b>一个注解搞定</b>。</p>
+
+<h2>一、Spring Cache 缓存三件套：10 倍查询加速</h2>
+
+<p>源码 <span class="filepath">controller/RedisCacheController.java</span> 演示了 Spring Cache 最核心的三个注解：</p>
+
+<pre><code>// ===== ① @Cacheable —— 查询时自动缓存 =====
+@Cacheable(cacheNames = "demo:cache#60s#10m#20#1",
+           key = "#key",
+           condition = "#key != null")
+@GetMapping("/test1")
+public R&lt;String&gt; test1(String key, String value) {
+    return R.data(value);  // 第二次调用直接从缓存返回，不执行方法体
+}
+
+// ===== ② @CachePut —— 新增/更新时刷新缓存 =====
+@CachePut(cacheNames = CacheNames.DEMO_CACHE,
+          key = "#key",
+          condition = "#key != null")
+@GetMapping("/test2")
+public R&lt;String&gt; test2(String key, String value) {
+    return R.data(value);  // 方法体始终执行，但返回值会写入缓存
+}
+
+// ===== ③ @CacheEvict —— 删除时清除缓存 =====
+@CacheEvict(cacheNames = CacheNames.DEMO_CACHE,
+            key = "#key",
+            condition = "#key != null")
+@GetMapping("/test3")
+public R&lt;String&gt; test3(String key, String value) {
+    return R.data(value);  // 方法体执行后清除指定缓存
+}</code></pre>
+
+<h3>cacheNames 命名规则（框架扩展）</h3>
+
+<p><code>"demo:cache#60s#10m#20#1"</code> 这种 <code>#</code> 分隔的命名格式是 RuoYi-Vue-Plus 对 Spring Cache 的增强，含义如下：</p>
+
+<table>
+  <thead><tr><th>段</th><th>值</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>名称</td><td><code>demo:cache</code></td><td>缓存名称（必填）</td></tr>
+    <tr><td>ttl</td><td><code>60s</code></td><td>过期时间 60 秒</td></tr>
+    <tr><td>maxSize</td><td><code>10m</code></td><td>最大缓存条目数 10</td></tr>
+    <tr><td>maxIdleTime</td><td><code>20</code></td><td>最大空闲时间 20 秒</td></tr>
+    <tr><td>maxSizePolicy</td><td><code>1</code></td><td>淘汰策略（1=条目数限制）</td></tr>
+  </tbody>
+</table>
+
+<p>也可以使用预定义的常量 <code>CacheNames.DEMO_CACHE</code>，其值同样是 <code>"demo:cache#60s#10m#20#1"</code>。</p>
+
+<div class="warn"><b>重要警告：</b>缓存注解严禁与数据权限等筛选功能一起使用，否则会造成缓存击穿和数据不一致。因为缓存基于 key 存储，但数据权限可能在每次查询时过滤不同的数据子集。</div>
+
+<h3>手动缓存操作：RedisUtils</h3>
+
+<pre><code>// RedisCacheController.test6() —— 手动控制缓存生命周期
+@GetMapping("/test6")
+public R&lt;Boolean&gt; test6(String key, String value) {
+    RedisUtils.setCacheObject(key, value);           // 写入缓存
+    boolean flag = RedisUtils.expire(key, Duration.ofSeconds(10));  // 设置10秒过期
+    ThreadUtil.sleep(11 * 1000);                     // 等待11秒
+    Object obj = RedisUtils.getCacheObject(key);     // 再次读取（应为null）
+    return R.ok(value.equals(obj));                  // 返回 false
+}</code></pre>
+
+<div class="compare">
+<div>
+<h4>@Cacheable 声明式</h4>
+<p>✅ 零侵入，一行注解<br>✅ Spring AOP 自动管理<br>❌ 只能在 Spring Bean 方法上使用<br>❌ 不够灵活</p>
+</div>
+<div>
+<h4>RedisUtils 手动式</h4>
+<p>✅ 任意位置可用<br>✅ 精细控制过期时间<br>✅ 支持所有 Redis 数据结构<br>❌ 需要手动管理缓存一致性</p>
+</div>
+</div>
+
+<h2>二、分布式锁：注解式 vs 编程式</h2>
+
+<p>源码 <span class="filepath">controller/RedisLockController.java</span> 演示了 Lock4j 的两种使用方式：</p>
+
+<pre><code>// ===== 方式一：@Lock4j 注解（声明式）=====
+@Lock4j(keys = {"#key"})          // 基于方法参数 key 的值加锁
+@GetMapping("/testLock4j")
+public R&lt;String&gt; testLock4j(String key, String value) {
+    System.out.println("start:" + key + ",time:" + LocalTime.now());
+    ThreadUtil.sleep(10000);       // 模拟 10 秒业务处理
+    System.out.println("end :" + key + ",time:" + LocalTime.now());
+    return R.data(value);
+}
+
+// ===== 方式二：LockTemplate（编程式）=====
+@GetMapping("/testLock4jLockTemplate")
+public R&lt;String&gt; testLock4jLockTemplate(String key, String value) {
+    // 参数：锁key, 锁超时30秒, 获取锁超时5秒, 执行器类型
+    final LockInfo lockInfo = lockTemplate.lock(
+        key, 30000L, 5000L, RedissonLockExecutor.class
+    );
+    if (null == lockInfo) {
+        throw new RuntimeException("业务处理中,请稍后再试");
+    }
+    try {
+        ThreadUtil.sleep(8000);    // 业务处理
+    } finally {
+        lockTemplate.releaseLock(lockInfo);  // 必须手动释放！
+    }
+    return R.data(value);
+}</code></pre>
+
+<table>
+  <thead><tr><th>对比维度</th><th>@Lock4j 注解</th><th>LockTemplate 编程</th></tr></thead>
+  <tbody>
+    <tr><td>代码量</td><td>1 行注解</td><td>~10 行 try-finally</td></tr>
+    <tr><td>锁释放</td><td>自动（方法结束即释放）</td><td>必须手动 releaseLock</td></tr>
+    <tr><td>获取失败处理</td><td>抛异常，全局异常处理器接管</td><td>返回 null，可自定义降级逻辑</td></tr>
+    <tr><td>适用场景</td><td>简单互斥，标准 CRUD</td><td>需要自定义超时、降级、重试等复杂逻辑</td></tr>
+    <tr><td>底层实现</td><td colspan="2">Redisson 分布式锁（看门狗自动续期）</td></tr>
+  </tbody>
+</table>
+
+<div class="tip"><b>选型口诀：</b>能用注解就用注解，代码最少、不会忘释放锁；需要自定义降级逻辑（如返回"请稍后重试"而非抛异常）时再用 LockTemplate。</div>
+
+<h2>三、分布式限流：三种粒度的流量保护</h2>
+
+<p>源码 <span class="filepath">controller/RedisRateLimiterController.java</span> 演示了 <code>@RateLimiter</code> 的三种限流模式：</p>
+
+<pre><code>// ===== ① 全局限流：所有请求共享配额 =====
+@RateLimiter(count = 2, time = 10)     // 10秒内最多2次请求
+@GetMapping("/test")
+public R&lt;String&gt; test(String value) {
+    return R.data(value);
+}
+
+// ===== ② IP 限流：同一 IP 独享配额 =====
+@RateLimiter(count = 2, time = 10, limitType = LimitType.IP)
+@GetMapping("/testip")
+public R&lt;String&gt; testip(String value) {
+    return R.data(value);               // 每个 IP 每10秒2次
+}
+
+// ===== ③ 集群实例限流：每个服务实例独享配额 =====
+@RateLimiter(count = 2, time = 10, limitType = LimitType.CLUSTER)
+@GetMapping("/testcluster")
+public R&lt;String&gt; testcluster(String value) {
+    return R.data(value);               // 每个实例每10秒2次
+}
+
+// ===== ④ 基于参数的 IP 限流（SpEL 表达式）=====
+@RateLimiter(count = 2, time = 10, limitType = LimitType.IP, key = "#value")
+@GetMapping("/testObj")
+public R&lt;String&gt; testObj(String value) {
+    return R.data(value);
+    // key 支持简单变量 #value 和复杂表达式 #{#value != 1 ? 1 : 0}
+}</code></pre>
+
+<table>
+  <thead><tr><th>limitType</th><th>计数维度</th><th>适用场景</th></tr></thead>
+  <tbody>
+    <tr><td>默认（全局限流）</td><td>接口全局</td><td>保护数据库，防止整体过载</td></tr>
+    <tr><td><code>LimitType.IP</code></td><td>请求 IP</td><td>防爬虫、防单用户恶意刷接口</td></tr>
+    <tr><td><code>LimitType.CLUSTER</code></td><td>服务实例</td><td>多实例部署时各自限流，互不影响</td></tr>
+  </tbody>
+</table>
+
+<div class="warn"><b>注意：</b><code>key</code> 属性支持 SpEL 表达式。<code>#变量</code> 获取简单变量值，<code>#{复杂表达式}</code> 计算后取值。例如 <code>#{#value != 1 ? 1 : 0}</code> 会在 value=1 时使用 key=0，否则 key=1。</div>
+
+<h2>四、批量操作：insertBatch 万级数据秒插入</h2>
+
+<p>源码 <span class="filepath">controller/TestBatchController.java</span> 演示了高性能批量操作：</p>
+
+<pre><code>// 批量插入：1000 条数据一次提交，秒级完成
+@PostMapping("/add")
+public R&lt;Void&gt; add() {
+    List&lt;TestDemo&gt; list = new ArrayList&lt;&gt;();
+    for (int i = 0; i &lt; 1000; i++) {
+        TestDemo testDemo = new TestDemo();
+        testDemo.setTestKey("批量新增");
+        testDemo.setValue("测试新增");
+        list.add(testDemo);
+    }
+    return toAjax(testDemoMapper.insertBatch(list));  // 核心方法
+}
+
+// 批量新增或更新：有 ID 则更新，无 ID 则插入
+testDemoMapper.insertOrUpdateBatch(list);
+
+// 批量删除：Lambda 条件删除
+testDemoMapper.lambda()
+    .eq(TestDemo::getOrderNum, -1L)
+    .deleteCount();
+</code></pre>
+
+<div class="tip"><b>性能提示：</b>在 JDBC 连接 URL 中添加 <code>rewriteBatchedStatements=true</code> 参数，可将多条 INSERT 合并为一条批量 SQL，性能提升 10-50 倍。MyBatis-Plus 3.5.0+ 原生批处理配合该参数可达到与 <code>insertBatch</code> 相同的速度。</div>
+
+<h2>五、防重提交 @RepeatSubmit</h2>
+
+<p>这个注解在第 1 课已经见过，这里补充完整参数说明：</p>
+
+<pre><code>@RepeatSubmit(interval = 2, timeUnit = TimeUnit.SECONDS, message = "{repeat.submit.message}")
+// interval: 间隔时间
+// timeUnit: 时间单位（默认秒）
+// message: 超出间隔时的提示信息（支持国际化 {key}）</code></pre>
+
+<p>底层基于 Redis 实现，以"用户 ID + 请求 URL + 参数"为 key 记录最近一次提交时间。</p>
+
+<h2>本节小结</h2>
+
+<table>
+  <thead><tr><th>注解</th><th>解决什么问题</th><th>一句话说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>@Cacheable</code></td><td>查询慢</td><td>第一次查库后缓存结果，后续命中缓存不再查库</td></tr>
+    <tr><td><code>@CachePut</code></td><td>缓存更新</td><td>写入数据库后同步刷新缓存</td></tr>
+    <tr><td><code>@CacheEvict</code></td><td>缓存清理</td><td>删除数据后同步清除缓存</td></tr>
+    <tr><td><code>@Lock4j</code></td><td>并发冲突</td><td>同一 key 同时只能一个线程执行</td></tr>
+    <tr><td><code>@RateLimiter</code></td><td>流量过载</td><td>限制单位时间内的请求次数</td></tr>
+    <tr><td><code>@RepeatSubmit</code></td><td>重复提交</td><td>同一用户短时间内不能提交相同请求</td></tr>
+  </tbody>
+</table>
+
+<blockquote>五个注解，覆盖了从「查询加速」到「写入保护」到「流量控制」的全部场景。在新业务模块中，这五个注解就是你的标准工具箱。</blockquote>
+
+<div class="nav">📚 相关课程：<br>
+• <a href="01.html">第 1 课 · 标准 CRUD 模板</a> — @RepeatSubmit 的完整使用上下文<br>
+• ruoyi-common-redis 模块课程（计划中）— QueueUtils 优先队列、Redisson 底层原理</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+• 源码：<code>ruoyi-demo/controller/RedisCacheController.java</code> — Spring Cache 三件套<br>
+• 源码：<code>ruoyi-demo/controller/RedisLockController.java</code> — 分布式锁两种方式<br>
+• 源码：<code>ruoyi-demo/controller/RedisRateLimiterController.java</code> — 限流三种模式<br>
+• 源码：<code>ruoyi-demo/controller/TestBatchController.java</code> — 批量操作<br>
+• 文档：<a href="https://baomidou.com/reference/lock4j/">Lock4j 官方文档</a><br>
+• 文档：<a href="https://docs.spring.io/spring-framework/reference/integration/cache.html">Spring Cache 官方文档</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。下一课我们学习数据安全：脱敏、加密和国际化。</div>
+</body>
+</html>

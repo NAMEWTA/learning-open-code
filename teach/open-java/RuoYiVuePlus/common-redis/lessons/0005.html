@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 二级缓存：Caffeine（本地）+ Redis（分布式）</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .warn { background: #fff2f0; border-left: 3px solid #e8503a; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn b { color: #c0341d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 二级缓存：Caffeine（本地）+ Redis（分布式） <span class="tag">manager 区</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5）</b>：学完你能讲清为什么需要两级缓存、<code>PlusSpringCacheManager</code> 的 <code>cacheName#ttl#maxIdle#maxSize#local</code> 约定怎么来的、<code>CaffeineCacheDecorator</code> 装饰器如何把本地和远端串起来，并判断什么数据适合开二级缓存。
+</div>
+
+<p>纯 Redis 缓存每次都是网络往返（即使 < 1ms，高并发下也是瓶颈）。对那些"读极其频繁、写很少、能忍几秒陈旧"的数据，加一层 JVM 本地内存缓存能直接砍掉大部分 Redis 调用。</p>
+
+<h2>一、三件套：Config → Manager → Decorator</h2>
+
+<div class="flow">CacheConfig                     PlusSpringCacheManager            CaffeineCacheDecorator
+─────────────────                ──────────────────────────         ──────────────────────
+@EnableCaching                   实现 CacheManager 接口              实现 Cache 接口
+开启 @Cacheable/@CacheEvict      接管所有 Spring Cache 操作          装饰一个 Redis Cache
+                                                                   给它包一层 Caffeine
+@Bean caffeine()                 解析 # 语法
+→ Caffeine.newBuilder()          → RMap 或 RMapCache
+  expireAfterWrite(30s)          → ± CaffeineCacheDecorator
+  maximumSize(1000)              → ± TransactionAwareCacheDecorator</div>
+
+<h2>二、CacheConfig：两条 bean 启动二级缓存</h2>
+<span class="where">config/CacheConfig.java</span>
+
+<pre><code>@AutoConfiguration
+@EnableCaching                                          // ★ 打开 Spring Cache 注解
+public class CacheConfig {
+
+    @Bean
+    public Cache&lt;Object, Object&gt; caffeine() {           // ★ 本地缓存实例
+        return Caffeine.newBuilder()
+            .expireAfterWrite(30, TimeUnit.SECONDS)     // 写后 30 秒自动过期
+            .initialCapacity(100)
+            .maximumSize(1000)                          // 最多 1000 条
+            .build();
+    }
+
+    @Bean
+    public CacheManager cacheManager() {
+        return new PlusSpringCacheManager();            // 没传 caffeine? 见下面
+    }
+}</code></pre>
+
+<div class="side">
+💡 注意 <code>cacheManager()</code> 创建时<strong>没传 caffeine</strong>！那么 <code>PlusSpringCacheManager</code> 的 <code>caffeine</code> 字段是怎么填上的？——它会在构造后通过 Spring 注入。实际上看代码，构造函数允许 <code>caffeine</code> 为 null，不为 null 时才启用本地一级缓存。这意味着如果你明确不要两级缓存，传 null 就够了。
+</div>
+
+<div class="warn">
+<b>暂未启用</b>：当前 <code>CacheConfig.cacheManager()</code> 创建的 <code>PlusSpringCacheManager</code> 不传 caffeine 参数，这意味着<strong>默认未启用 Caffeine 本地缓存</strong>。真正要用两级缓存，需要把 <code>caffeine()</code> bean 作为参数传入 <code>cacheManager(caffeine)</code>。
+</div>
+
+<h2>三、PlusSpringCacheManager · 缓存名里塞参数</h2>
+<span class="where">manager/PlusSpringCacheManager.java:148</span>
+
+<p><code>getCache(String name)</code> 是核心方法。它把缓存名按 <code>#</code> 拆分，支持 5 个位置：</p>
+
+<div class="flow">"dict#1h#30m#200#1"
+  │    │   │    │   │
+  │    │   │    │   └─ positional[4]: local  (1=开启本地缓存，0=关闭)
+  │    │   │    └───── positional[3]: maxSize (最大条数)
+  │    │   └────────── positional[2]: maxIdleTime (最长空闲)
+  │    └────────────── positional[1]: ttl (存活时间)
+  └─────────────────── positional[0]: 真正的 cacheName</code></pre>
+
+<p>解析逻辑：<code>StringUtils.delimitedListToStringArray(name, "#")</code> 拆出数组 → <code>array[0]</code> 是真名 → <code>array[1~4]</code> 按位置覆盖配置 → <code>DurationStyle.detectAndParse</code> 把 <code>1h</code> / <code>30s</code> / <code>500ms</code> 这种格式转成毫秒。</p>
+
+<div class="why"><b>为什么要这么设计？</b>Spring Cache 的 <code>@Cacheable(cacheNames="xxx")</code> 只能声明缓存名，不能传 TTL。你当然可以新写一个注解，但那太重了。把参数偷偷藏在缓存名里，用 <code>#</code> 分隔，是用最小改动实现最大灵活性的讨巧方案——不改 Spring 接口，不改注解定义，就能在注解里声明缓存策略。</div>
+
+<h2>四、CaffeineCacheDecorator · 怎么把两层串起来</h2>
+<span class="where">manager/CaffeineCacheDecorator.java</span>
+
+<pre><code>@Override
+public ValueWrapper get(Object key) {
+    // getuniqueKey = "cacheName:key"
+    Object o = caffeine.get(getUniqueKey(key), k -> cache.get(key));
+    //          ^^^^^^^^ 先查本地  查不到则      ^^^^^^^^ 回源查 Redis
+    return (ValueWrapper) o;
+}
+
+@Override
+public void put(Object key, Object value) {
+    caffeine.invalidate(getUniqueKey(key));  // 先让本地副本失效
+    cache.put(key, value);                  // 再写 Redis
+}</code></pre>
+
+<div class="why">
+<b>读取</b>：<code>caffeine.get(key, loader)</code> 是 Caffeine 的原子读——如果 key 存在（本地命中），直接返回；不存在则调 loader（回源 Redis），结果<strong>自动写入本地缓存</strong>。Caffeine 自己加了 30 秒过期。<br><br>
+<b>写入</b>：先 <code>invalidate</code> 清本地、再写 Redis。如果反过来（先写 Redis 再清本地），中间有一瞬间别的线程可能读到旧本地值；先清本地再写 Redis 更安全。极端并发下仍有短暂不一致窗口，但对非强一致性场景（字典/配置）可接受。<br><br>
+<b>删除/清空</b>：先干 Redis 再干本地。如果只干 Redis 不干本地，后续本地缓存命中会把旧值还回来。
+</div>
+
+<h2>五、两种 Redis 对象的选择</h2>
+
+<p><code>PlusSpringCacheManager</code> 根据是否有 TTL/maxIdle/maxSize 决定用哪种 Redisson 对象：</p>
+<table>
+<tr><th>条件</th><th>用</th><th>特点</th></tr>
+<tr><td>TTL=0, maxIdle=0, maxSize=0</td><td><code>RMap</code></td><td>普通 Map，不过期</td></tr>
+<tr><td>三者任一非 0</td><td><code>RMapCache</code></td><td>带 TTL / maxIdle / maxSize 的 Map</td></tr>
+</table>
+
+<p>两种都会再包一层 <code>TransactionAwareCacheDecorator</code>（当 <code>transactionAware=true</code> 时），保证在 Spring 事务提交后才真正写入缓存。</p>
+
+<h2>六、适合 / 不适合两级缓存的数据</h2>
+<table>
+<tr><th>适合</th><th>不适合</th></tr>
+<tr><td>字典表（如 sys_dict_data）</td><td>实时性要求 < 30s 的数据</td></tr>
+<tr><td>系统配置项（参数表）</td><td>频繁写入的数据</td></tr>
+<tr><td>读多写少、改动不频繁的列表</td><td>登录态等与单机无关的会话数据</td></tr>
+<tr><td>能容忍 30s 内陈旧的数据</td><td>集群下需要即时一致性的计数器</td></tr>
+</table>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>CaffeineCacheDecorator.get()</code> 的读取流程是？</p>
+<span class="opt">A. 先查 Redis，再查本地</span>
+<span class="opt">B. 先用 caffeine.get(key, loader) 查本地，查不到时 loader 回源 Redis 并自动填入本地</span>
+<span class="opt">C. 本地和 Redis 同时查，取最快的</span>
+<span class="opt">D. 只查本地，本地没有就直接返回 null</span>
+<details><summary>看答案</summary><b>B</b>。<code>caffeine.get(key, loader)</code> 的 loader 就是回源读 Redis；命中本地直接返回，不碰 Redis。结果自动缓存到本地，受 Caffeine 的 30s 过期控制。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么要先在缓存名里塞参数（<code>dict#1h#200#1</code>）这种设计？</p>
+<span class="opt">A. 为了炫技，证明框架能力强</span>
+<span class="opt">B. 因为 Spring Cache 的注解只能传缓存名不能传 TTL；把参数藏在缓存名里是最小改动的妥协方案</span>
+<span class="opt">C. 因为 Redis 不支持中文 key，用 # 做转义</span>
+<span class="opt">D. 这是 Redisson 原生的功能，PlusSpringCacheManager 只是透传</span>
+<details><summary>看答案</summary><b>B</b>。<code>@Cacheable(cacheNames="xxx")</code> 不等价于"带 TTL 的缓存"。本模块用 <code>#</code> 分隔把 TTL 等参数藏在缓存名里，不改 Spring 接口、不改注解定义，就实现了注解级别的缓存策略声明。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 写入时为什么 <code>caffeine.invalidate</code>（清本地）要在 <code>cache.put</code>（写 Redis）<strong>之前</strong>？</p>
+<span class="opt">A. Caffeine 和 Redis 的写入速度不同，先清本地更快</span>
+<span class="opt">B. 先清本地再写 Redis，避免写 Redis 后、清本地前这一瞬间别的线程读到旧本地值</span>
+<span class="opt">C. Redis 要求必须先清本地缓存</span>
+<span class="opt">D. 其实先写 Redis 再清本地才是对的，代码写反了</span>
+<details><summary>看答案</summary><b>B</b>。先清本地再写 Redis：如果反过来，写入 Redis 后清本地前，另一个线程会从本地读到旧值。先清本地保证写入后的下一次读一定回源 Redis。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/ben-manes/caffeine/wiki" target="_blank">Caffeine Wiki</a>——本课的 <code>get(key, loader)</code> 和 <code>expireAfterWrite</code> 语义在这里有完整说明。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「集群多实例各自有本地 Caffeine，改一条数据后别的实例还能读到旧值吗？」「TransactionAwareCacheDecorator 具体怎么延迟写入？」下一课进入 <strong>utils 区第一位</strong>：<code>RedisUtils</code> 全能工具实战。</div>
+
+<div class="nav">课程 0005 / 使命：全面读懂 ruoyi-common-redis · 上一课：@RepeatSubmit · 下一课：RedisUtils 实战</div>
+
+</body>
+</html>

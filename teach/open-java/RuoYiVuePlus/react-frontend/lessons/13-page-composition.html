@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>13 · 页面组成：ProTable CRUD 全流程解剖</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; color: #444; }
+  blockquote { border-left: 3px solid #ffb74d; margin-left: 0; padding-left: 1rem; color: #555; background: #fff8e1; padding: 0.6rem 1rem; border-radius: 0 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.88em; }
+  pre code { background: none; padding: 0; }
+  .file-ref { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; color: #666; background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.87rem; }
+  th, td { border: 1px solid #e1e4e8; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.8rem; }
+  .reminder { background: #e8f5e9; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; border-left: 3px solid #4caf50; }
+  .nav { font-size: 0.85rem; color: #888; margin-bottom: 1.5rem; }
+  .nav a { color: #1976d2; }
+  .diagram { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.2rem; margin: 1.2rem 0; font-size: 0.82rem; line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<div class="nav">📚 <a href="../../mission.md">Mission</a> · <a href="../../resources.md">Resources</a> · ← <a href="./12-dynamic-routes-2.html">12 动态路由下</a> · → <a href="./14-add-crud-page.html">14 新增CRUD</a></div>
+
+<h1>13 · 页面组成：ProTable CRUD 全流程解剖</h1>
+
+<p><strong>胜利条件：</strong>能以用户管理页面为例，逐行解释一个标准 CRUD 页面的 6 个组成部分（ProTable、搜索栏、工具栏、弹窗表单、字典渲染、API 调用）；能看懂 ProTable columns 的 render 函数。</p>
+
+<h2>一、一个标准 CRUD 页面的 6 层结构</h2>
+
+<p>以 <span class="file-ref">src/pages/system/user/index.tsx</span> 为范本：</p>
+
+<div class="diagram"><code>
+&lt;PageContainer&gt;                         ← ① 页面容器（面包屑 + 标题）
+  &lt;ProTable                              ← ② 核心表格
+    headerTitle="用户列表"
+    rowKey="userId"
+    columns={columns}                     ← ③ 列定义（含搜索、渲染）
+    request={fetchUserList}               ← ④ 数据源（自动分页）
+    toolBarRender={...}                   ← ⑤ 工具栏（新增、导出）
+    rowSelection={...}                    ←   多选
+  /&gt;
+  &lt;EditModal /&gt;                           ← ⑥ 编辑弹窗（新增/编辑共用）
+  &lt;DetailDrawer /&gt;                        ←   详情抽屉
+&lt;/PageContainer&gt;</code></div>
+
+<h2>二、columns：一列包含什么？</h2>
+
+<p>ProTable 的 columns 定义<strong>最值得细读</strong>——它不仅定义表格显示，还定义搜索表单：</p>
+
+<pre><code>const columns: ProColumns&lt;User&gt;[] = [
+  {
+    title: '用户名称',
+    dataIndex: 'userName',
+    // --- 搜索配置 ---
+    valueType: 'text',
+    fieldProps: { placeholder: '请输入用户名称' },
+    // --- 表格渲染 ---
+    render: (_, record) => (
+      &lt;a onClick={() => handleDetail(record.userId)}&gt;{record.userName}&lt;/a&gt;
+    ),
+  },
+  {
+    title: '状态',
+    dataIndex: 'status',
+    // --- 搜索（下拉选择）---
+    valueType: 'select',
+    valueEnum: {               // ← 枚举值映射
+      0: { text: '正常', status: 'Success' },
+      1: { text: '停用', status: 'Error' },
+    },
+    // --- 表格渲染 ---
+    render: (_, record) => (
+      &lt;Switch
+        checked={record.status === '0'}
+        onChange={(val) => handleChangeStatus(record.userId, val ? '0' : '1')}
+      /&gt;
+    ),
+  },
+  {
+    title: '创建时间',
+    dataIndex: 'createTime',
+    valueType: 'dateRange',   // ← 搜索时是日期范围选择器
+    hideInSearch: false,      // ← 显示在搜索栏
+    hideInTable: false,       // ← 显示在表格
+    render: (_, record) => &lt;span&gt;{record.createTime}&lt;/span&gt;,
+  },
+  {
+    title: '操作',
+    valueType: 'option',      // ← 操作列（不参与搜索）
+    render: (_, record) => [
+      &lt;Button key="edit" onClick={() => handleEdit(record)}&gt;编辑&lt;/Button&gt;,
+      &lt;Button key="delete" danger onClick={() => handleDelete(record.userId)}&gt;删除&lt;/Button&gt;,
+    ],
+  },
+];</code></pre>
+
+<h3>valueType 决定了搜索控件类型</h3>
+
+<table>
+<tr><th>valueType</th><th>搜索表单渲染为</th><th>ruoyi-react 使用场景</th></tr>
+<tr><td><code>text</code></td><td>Input 文本框</td><td>用户名、手机号搜索</td></tr>
+<tr><td><code>select</code></td><td>Select 下拉框</td><td>状态、性别等枚举搜索</td></tr>
+<tr><td><code>dateRange</code></td><td>DatePicker.RangePicker</td><td>创建时间范围搜索</td></tr>
+<tr><td><code>date</code></td><td>DatePicker</td><td>单个日期搜索</td></tr>
+<tr><td><code>treeSelect</code></td><td>TreeSelect 树形选择</td><td>部门选择</td></tr>
+<tr><td><code>option</code></td><td>不参与搜索</td><td>操作列</td></tr>
+<tr><td><code>money</code></td><td>数字输入框</td><td>金额搜索</td></tr>
+</table>
+
+<h2>三、request：ProTable 的数据源</h2>
+
+<p><code>request</code> 是 ProTable 最强大的能力——你只需传一个<strong>返回约定格式的异步函数</strong>，ProTable 自动处理分页、排序、搜索：</p>
+
+<pre><code>// ProTable 约定的函数签名
+const fetchUserList = async (params: {
+  current?: number;     // ProTable 传入当前页码
+  pageSize?: number;     // ProTable 传入每页条数
+  userName?: string;     // 搜索栏的值自动合并进来！
+  status?: string;
+  createTime?: [string, string];
+  // ... 所有 column 中 hideInSearch !== true 的 dataIndex 都会出现在这里
+}) => {
+  const res = await getUserList({
+    pageNum: params.current!,
+    pageSize: params.pageSize!,
+    ...params,          // 搜索条件直接展开
+  });
+
+  return {
+    data: res.data.rows,       // 表格数据
+    total: res.data.total,     // 总条数（ProTable 自动算分页）
+    success: res.code === 200, // 是否成功
+  };
+};
+
+// 使用
+&lt;ProTable
+  request={fetchUserList}
+  // ProTable 自动：
+  // - 首次加载 → request({ current: 1, pageSize: 20 })
+  // - 点击搜索 → request({ current: 1, pageSize: 20, userName: '张三' })
+  // - 翻页     → request({ current: 2, pageSize: 20, userName: '张三' })
+/&gt;</code></pre>
+
+<h2>四、弹窗表单：新增/编辑共用模式</h2>
+
+<pre><code>const EditModal: React.FC&lt;{
+  visible: boolean;
+  record?: User;                        // 编辑时有值，新增时 undefined
+  onClose: () => void;
+  onSuccess: () => void;
+}&gt; = ({ visible, record, onClose, onSuccess }) => {
+  const [form] = Form.useForm();
+  const isEdit = !!record;
+
+  // 编辑时回填表单
+  useEffect(() => {
+    if (visible && record) {
+      form.setFieldsValue(record);
+    }
+    if (visible && !record) {
+      form.resetFields();              // 新增时重置
+    }
+  }, [visible, record]);
+
+  const handleSubmit = async () => {
+    const values = await form.validateFields();
+    if (isEdit) {
+      await updateUser(record.userId, values);  // 更新
+    } else {
+      await addUser(values);                    // 新增
+    }
+    message.success(isEdit ? '修改成功' : '新增成功');
+    onSuccess();  // 通知父组件刷新列表
+  };
+
+  return (
+    &lt;Modal
+      open={visible}
+      title={isEdit ? '编辑用户' : '新增用户'}
+      onCancel={onClose}
+      onOk={handleSubmit}
+    &gt;
+      &lt;Form form={form} layout="vertical"&gt;
+        &lt;Form.Item name="userName" label="用户名称" rules={[{ required: true }]}&gt;
+          &lt;Input /&gt;
+        &lt;/Form.Item&gt;
+        &lt;Form.Item name="status" label="状态"&gt;
+          &lt;Radio.Group&gt;
+            &lt;Radio value="0"&gt;正常&lt;/Radio&gt;
+            &lt;Radio value="1"&gt;停用&lt;/Radio&gt;
+          &lt;/Radio.Group&gt;
+        &lt;/Form.Item&gt;
+        {/* 新增时不显示密码字段 */}
+        {!isEdit && (
+          &lt;Form.Item name="password" label="密码" rules={[{ required: true }]}&gt;
+            &lt;Input.Password /&gt;
+          &lt;/Form.Item&gt;
+        )}
+      &lt;/Form&gt;
+    &lt;/Modal&gt;
+  );
+};</code></pre>
+
+<h2>五、字典数据如何在表格中使用</h2>
+
+<p>字典是 ruoyi-react 最常用的数据模式——把 <code>{ code: '0', label: '正常' }</code> 这种枚举数据存后端，前端通过 <code>useDict</code> 获取并在表格中渲染：</p>
+
+<pre><code>const UserPage = () => {
+  // 获取字典
+  const { data: statusDict } = useDict('sys_normal_disable');
+  const { data: sexDict } = useDict('sys_user_sex');
+
+  const columns = [
+    {
+      title: '状态',
+      dataIndex: 'status',
+      render: (_, record) => {
+        // 把 '0' 映射成 '正常'
+        const item = statusDict?.find(d => d.value === record.status);
+        return &lt;Tag color={item?.color}&gt;{item?.label}&lt;/Tag&gt;;
+      },
+    },
+    // 如果只是简单映射，可用 valueEnum
+    {
+      title: '性别',
+      dataIndex: 'sex',
+      valueEnum: sexDict?.reduce((acc, d) => {
+        acc[d.value] = { text: d.label };
+        return acc;
+      }, {} as Record&lt;string, { text: string }&gt;),
+    },
+  ];
+};</code></pre>
+
+<h2>六、完整数据流图（用户管理 CRUD）</h2>
+
+<div class="diagram"><code>
+页面加载
+  useDict('sys_normal_disable') → 获取字典（cache 10min）
+  ↓
+ProTable mount → request(current:1, pageSize:20)
+  ↓
+getUserList({ pageNum: 1, pageSize: 20 })
+  → request.ts 拦截器附加 token
+  → GET /system/user/list?pageNum=1&pageSize=20
+  ← { code: 200, data: { rows: [...25条], total: 125 } }
+  ↓
+ProTable 渲染 25 行 × N 列
+  - 状态列：render(status) → 从 statusDict 翻译 → &lt;Tag&gt;
+  - 操作列：render → &lt;Button&gt;编辑 &lt;Button&gt;删除
+
+用户点击"新增"
+  → setEditVisible(true); setCurrentRecord(undefined)
+  → EditModal visible=true, record=undefined
+  → form.resetFields()（空表单）
+  ↓
+用户填写 → 点击确定
+  → form.validateFields() → { userName, status, password }
+  → addUser(values)
+  → POST /system/user → 后端保存 → 返回成功
+  → message.success('新增成功')
+  → onSuccess() → setEditVisible(false) + tableRef.reload()
+  → ProTable 自动重新 request → 表格刷新</code></div>
+
+<h2>七、实战检验</h2>
+
+<ol>
+  <li>打开 <span class="file-ref">src/pages/system/user/index.tsx</span>，找到 ProTable 的 <code>columns</code> 数组，数出有多少列</li>
+  <li>找出至少 3 个使用了 <code>render</code> 函数自定义渲染的列，读懂每个 render 的逻辑</li>
+  <li>找出使用了 <code>useDict</code> 的字典调用，在 Network 中查找对应的字典 API 请求</li>
+  <li>在表格的 request 函数中打断点，点击搜索/翻页，观察 params 参数的变化</li>
+  <li>练习：在用户管理页添加一个新列"联系电话"，从 API 返回的数据中渲染</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://procomponents.ant.design/components/table">ProComponents 官方文档 — ProTable</a>（重点看 columns、request、valueType）</div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试着问："ProTable 的 request 和手动调 API + useState 有什么区别？为什么 ProTable 不需要我管理 loading 和 pagination 状态？"</div>
+
+</body>
+</html>

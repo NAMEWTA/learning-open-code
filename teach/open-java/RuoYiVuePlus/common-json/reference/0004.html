@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 04 · JsonValueEnhancer 引擎实现</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 0.9rem; border-radius: 6px; overflow-x: auto; font-size: 0.76rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 04 · JsonValueEnhancer 引擎实现</h1>
+<p class="a">配套课程：<code>lessons/0004.html</code> · 文件：<code>enhance/JsonValueEnhancer.java</code>（约 370 行）</p>
+
+<h2>enhance() 主流程</h2>
+<div class="chain">1. 快速短路：null / JsonNode / 无处理器 → 原样返回
+2. new JsonEnhancementContext → collectValue(body, ctx, visited)
+3. 检查 processingRequired == false？ → 原样返回（短路优化）
+4. processors.forEach(p → p.prepare(ctx))  ← 批量预处理
+5. return renderValue(body, ctx, visited)   ← 构建增强 JSON 树</div>
+
+<h2>递归遍历：collectValue / renderValue 的类型分发</h2>
+<table>
+<tr><th>类型</th><th>collect 行为</th><th>render 行为</th></tr>
+<tr><td><code>null</code></td><td>返回</td><td>返回 <code>nullNode()</code></td></tr>
+<tr><td><code>Map</code></td><td>遍历 values 递归</td><td>创建 ObjectNode，遍历 entry 递归</td></tr>
+<tr><td><code>Iterable</code></td><td>forEach 递归</td><td>创建 ArrayNode，forEach 递归</td></tr>
+<tr><td><code>数组</code></td><td>Array.get() 循环递归</td><td>Array.get() 循环递归</td></tr>
+<tr><td><code>简单值</code></td><td>返回（跳过）</td><td><code>valueToTree(value)</code></td></tr>
+<tr><td><code>POJO</code></td><td>遍历属性 → collectField → 递归</td><td>遍历属性 → process 处理链 → renderValue</td></tr>
+</table>
+
+<h2>关键设计点</h2>
+
+<h3>循环引用保护</h3>
+<pre><code>IdentityHashMap&lt;Object, Boolean&gt; visited  // 引用相等（==）判断
+.put(value, TRUE) != null → 已访问 → 跳过
+finally { visited.remove(value) }          // 退栈清理，允许不同路径重新访问</code></pre>
+<div class="chain">为什么用 IdentityHashMap 而非 HashSet？循环引用关心「同一个内存对象」而非 equals 相等</div>
+
+<h3>属性元数据缓存</h3>
+<pre><code>ConcurrentHashMap&lt;Class&lt;?&gt;, List&lt;PropertyMetadata&gt;&gt; propertyCache
+// 每个 Class 的 PropertyMetadata 只解析一次，线程安全</code></pre>
+
+<h3>属性解析（resolveProperties）</h3>
+<div class="chain">使用 Jackson ClassIntrospector（而非纯反射）→ 尊重 @JsonProperty/@JsonIgnore 等注解<br>
+优先 getter，回退 field → member.fixAccess(true) → 强制可访问</div>
+
+<h3>简单值判定（isSimpleValue）</h3>
+<pre><code>基本类型 / CharSequence / Number / Boolean / Character
+/ Date / Temporal / Enum / UUID / Class
+→ 不递归遍历，直接序列化</code></pre>
+
+<h3>二次增强（enhanceTranslatedValue）</h3>
+<div class="chain">process() 返回的复杂对象 → 重新走 collect-prepare-process 流程<br>
+确保「替换后对象中的嵌套字段」也能被增强</div>
+
+<h3>转换器排除（supports(converterType)）</h3>
+<pre><code>排除 ByteArrayHttpMessageConverter（文件下载-二进制）
+排除 StringHttpMessageConverter（已经是字符串）
+排除 ResourceHttpMessageConverter（静态资源）
+→ 正确性保障，防止增强框架遍历非对象数据</code></pre>
+
+<h2>处理链 process 顺序</h2>
+<div class="chain">processors 按 @Order / Ordered 排序（AnnotationAwareOrderComparator.sort）<br>
+→ 对同一字段，多个 Processor 按排序顺序依次处理</div>
+
+<h2>完整调用链路</h2>
+<div class="chain">Controller 返回 → ResponseBodyAdvice.beforeBodyWrite()
+  → jsonValueEnhancer.enhance(body)
+    → collect(collectValue 递归) → prepare(批量) → render(renderValue 递归)
+      → Spring MVC 用 Jackson 写出增强后的 JsonNode 树</div>
+
+<p class="a">→ 术语：JsonValueEnhancer（见 GLOSSARY.md）</p>
+</body>
+</html>

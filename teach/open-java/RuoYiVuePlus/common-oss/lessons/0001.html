@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 鸟瞰：18 个类如何协作构建 S3 兼容存储层</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · 鸟瞰：18 个类如何协作构建 S3 兼容存储层 <span class="tag">入门地图</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能画出 <code>ruoyi-common-oss</code> 10 个子包的分工图，并说出 <code>OssClient</code> → <code>AbstractOssClientImpl</code> → <code>DefaultOssClientImpl</code> 的继承链中每一层干什么。这是后面所有细节挂靠的骨架——先有地图，再走小路。
+</div>
+
+<p>我们先不抠任何一行实现，只回答一个问题：<strong>打开 <code>ruoyi-common-oss</code> 这个模块，你会看到什么？</strong></p>
+
+<h2>一、整个模块有多大</h2>
+
+<p>如果说 <code>ruoyi-common-sms</code> 是一个「三件套」的精简适配垫片，那 OSS 模块就是一座「轻量级工厂」——拢共 <strong>18 个 Java 文件</strong>，分布在 10 个子包中：</p>
+
+<div class="flow">ruoyi-common-oss/src/main/java/org/dromara/common/oss/
+├── client/                              ← 【契约 + 骨架 + 实现】(3 个)
+│   ├── OssClient.java                   ← 接口：60+ 方法签名，定义全部 OSS 操作
+│   ├── AbstractOssClientImpl.java       ← 抽象类：实现 70+ 方法，子类只覆写 doInitialize()
+│   └── DefaultOssClientImpl.java        ← 实现类：doInitialize() 中组装 S3 三剑客
+├── config/                              ← 【配置对象】(4 个)
+│   ├── Config.java                      ← 泛型接口：Config<T, B>
+│   ├── OssClientConfig.java             ← 核心配置：endpoint/bucket/region/ACL/线程池
+│   ├── AccessControlPolicyConfig.java   ← ACL 策略配置（record）
+│   └── OssAsyncExecutorConfig.java      ← 异步线程池配置（record）
+├── constant/
+│   └── OssConstant.java                 ← 【常量】Redis Key 前缀、默认配置 Key
+├── enums/
+│   └── AccessPolicy.java                ← 【策略枚举】PRIVATE / PUBLIC_READ_WRITE / PUBLIC_READ
+├── exception/
+│   └── S3StorageException.java          ← 【异常】统一 OSS 操作异常
+├── factory/
+│   └── OssFactory.java                  ← 【工厂】单例缓存 / 配置校验 / 客户端生命周期管理
+├── io/
+│   └── OutputStreamDownloadSubscriber.java ← 【适配器】Consumer&lt;ByteBuffer&gt; → WritableByteChannel
+├── model/                               ← 【数据传输对象】(4 个)
+│   ├── Options.java                     ← 上传选项：contentType / metadata / listeners
+│   ├── PutObjectResult.java             ← 上传结果：url / key / eTag / size
+│   ├── GetObjectResult.java             ← 下载结果：contentLength / contentType
+│   └── HandleAsyncResult.java           ← 异步结果包装
+├── properties/
+│   └── OssProperties.java               ← 【配置载体】从 Redis JSON 反序列化
+└── util/
+    └── BucketUrlUtil.java               ← 【工具】拼接 Bucket URL（路径式 / 域名式）</div>
+
+<p>与 <code>ruoyi-common-sms</code> 的 3 个类不同，OSS 模块自己承担了大量上传/下载/预签名逻辑，<strong>直接把 AWS S3 SDK 封装成了一套统一 API</strong>。第三方库只有 <code>software.amazon.awssdk:s3</code>（及其 transfer-manager 扩展），没有引入任何 Dromara 社区的上层框架。</p>
+
+<div class="side">
+💡 <b>一句话定位</b>：<br>
+<code>ruoyi-common-oss</code> 是一层<strong>「S3 兼容存储的轻量封装工厂」</strong>——它把 AWS S3 SDK 的 <code>S3AsyncClient</code> / <code>S3TransferManager</code> / <code>S3Presigner</code> 三剑客组装成一条 <code>OssClient</code> 接口，让业务代码可以透明地切换阿里云 OSS / 腾讯云 COS / 七牛云 / MinIO 等任何 S3 兼容存储，<strong>一套 API，换配置不换代码</strong>。
+</div>
+
+<h2>二、核心设计模式</h2>
+
+<p>18 个类不是乱堆的——它们遵循一套精心设计的分层模式。记住这张表，本课就成功了一半：</p>
+
+<table>
+<tr><th>设计模式</th><th>体现位置</th><th>解决什么问题</th></tr>
+<tr>
+  <td><strong>模板方法模式</strong></td>
+  <td><code>AbstractOssClientImpl</code> 写了 70+ 方法，<code>DefaultOssClientImpl</code> 只覆写一个 <code>doInitialize()</code></td>
+  <td>上传/下载/删除/预签名等通用逻辑一次写完，子类只需实现「如何初始化 SDK 客户端」这一个变化点</td>
+</tr>
+<tr>
+  <td><strong>工厂模式</strong></td>
+  <td><code>OssFactory</code> 管理 <code>CLIENT_CACHE</code>（ConcurrentHashMap）+ <code>CLIENT_LOCKS</code>（ReentrantLock）</td>
+  <td>按 configKey 缓存客户端实例，配置不变则复用，配置变更则销毁重建，避免频繁创建 S3 连接</td>
+</tr>
+<tr>
+  <td><strong>策略模式</strong></td>
+  <td><code>AccessPolicy</code> 枚举封装 PRIVATE / PUBLIC_READ_WRITE / PUBLIC_READ 三种 ACL</td>
+  <td>不同权限策略对应不同的 BucketCannedACL 和 ObjectCannedACL，调用方只传一个 type 字符串即可</td>
+</tr>
+<tr>
+  <td><strong>Builder 模式</strong></td>
+  <td><code>OssClientConfig</code>（@Builder）、<code>Options</code>（@Accessors(chain=true)）、<code>AccessControlPolicyConfig</code>（@Builder）都用链式构建</td>
+  <td>配置对象字段多（11 个），Builder 让构建代码清晰可读，避免冗长构造函数</td>
+</tr>
+<tr>
+  <td><strong>适配器模式</strong></td>
+  <td><code>OutputStreamDownloadSubscriber</code> 实现 <code>Consumer&lt;ByteBuffer&gt;</code>，内部持有 <code>WritableByteChannel</code></td>
+  <td>S3 TransferManager 的异步下载回调需要 Consumer 接口，但业务侧期望写入 OutputStream/FileChannel，适配器桥接两边</td>
+</tr>
+</table>
+
+<details>
+<summary>🤔 想一想：为什么 AbstractOssClientImpl 写 70+ 方法，子类只要覆写 doInitialize()？为什么不在接口里直接写 default 方法？</summary>
+因为需要共享状态——<code>AbstractOssClientImpl</code> 持有 <code>s3AsyncClient</code> / <code>s3TransferManager</code> / <code>s3Presigner</code> / <code>asyncExecutor</code> 这些 protected 字段，所有上传/下载方法都依赖它们。Java 接口的 default 方法无法访问实例字段。抽象类作为「骨架」提供字段 + 方法实现，子类只需填空 <code>doInitialize()</code> 这一个初始化钩子——这就是模板方法模式的核心价值。
+</details>
+
+<h2>三、核心调用链全景</h2>
+
+<p>理解了前两节的结构，现在看一条「一次 OSS 上传」从头到尾经过哪些对象。这条链路是你读懂整个模块的导航线：</p>
+
+<div class="flow">业务代码                              公共层 (ruoyi-common-oss)              第三方 (AWS SDK)
+────────                              ────────────────────────              ────────────────
+SysOssController.upload(file)
+   │
+   ▼
+OssFactory.instance()  ─────────────────────────────────────────────────────  OssConstant.DEFAULT_CONFIG_KEY
+   │  1. 读 Redis: CacheUtils.get(SYS_OSS_CONFIG, configKey)                      ↓
+   │  2. JSON → OssProperties → OssClientConfig.formProperties()              Redis 里的配置 JSON
+   │  3. 拿 ReentrantLock（按 configKey 粒度）
+   │  4. 若缓存命中且 verifyConfig 通过 → 复用
+   │  5. 否则 new DefaultOssClientImpl(configKey, config)
+   ▼
+ossClient.upload(key, file)
+   │  OssClient 接口 → AbstractOssClientImpl 骨架方法
+   ▼
+AbstractOssClientImpl.bucketUpload(bucket, key, AsyncRequestBody body, Options)
+   │  1. 从 body/options 提取 contentLength / contentType / MD5 / metadata / listeners
+   │  2. 构建 PutObjectRequest
+   ▼
+AbstractOssClientImpl.doCustomUpload(body, requestBuilder, listeners)
+   │
+   ▼
+s3TransferManager.upload(UploadRequest) ──────────────────────────────────►  AWS S3 SDK
+   │   S3TransferManager（封装 S3AsyncClient）                                   │
+   │   返回 CompletableFuture&lt;CompletedUpload&gt;                                │
+   ▼                                                                              ▼
+PutObjectResult(url, key, eTag, size)                                       阿里云 OSS / 腾讯云 COS
+   │                                                                         / 七牛云 Kodo / MinIO
+   ▼                                                                         / 任何 S3 兼容存储
+返回给 Controller → 存入 sys_oss 表</div>
+
+<p>这条链路上，<strong>OssFactory</strong> 管「客户端从哪来」，<strong>OssClientConfig</strong> 管「连到哪个厂商」，<strong>AbstractOssClientImpl</strong> 管「怎么上传/下载」，<strong>DefaultOssClientImpl</strong> 管「初始化哪三个 SDK 对象」。四层分工明确，各司其职。</p>
+
+<h2>四、两条关键通路：上传与下载</h2>
+
+<p>上传和下载是 OSS 模块最核心的两条数据流。它们在 <code>AbstractOssClientImpl</code> 内部走的是两条不同的内部管道：</p>
+
+<h3>通路一：上传 (File → OSS)</h3>
+
+<div class="flow">用户文件
+   │
+   ▼
+File / Path / InputStream / byte[] / RandomAccessFile / ReadableByteChannel
+   │  （6 种输入类型，6 个 bucketUpload() 重载）
+   │  统一转换为 ──►
+   ▼
+AsyncRequestBody.fromFile(path) 或 fromChannel(channel, contentLength, executor)
+   │  （AWS SDK 的异步请求体）
+   ▼
+AbstractOssClientImpl.bucketUpload(bucket, key, body, options)
+   │  提取 contentLength / contentType / MD5 / metadata / TransferListeners
+   │  构建 PutObjectRequest.Builder
+   ▼
+AbstractOssClientImpl.doCustomUpload(body, requestBuilder, listeners)
+   │  调用 ──►
+   ▼
+s3TransferManager.upload(UploadRequest)
+   │  返回 CompletableFuture&lt;CompletedUpload&gt;
+   │  .join() 等待完成
+   ▼
+CompletedUpload → 提取 eTag
+   │
+   ▼
+PutObjectResult(url, key, eTag, size)</div>
+
+<p>关键点：所有 6 种输入类型最终都收敛到私有方法 <code>bucketUpload(bucket, key, AsyncRequestBody body, Options options)</code>——这是上传的「唯一漏斗」。</p>
+
+<h3>通路二：下载 (OSS → 本地)</h3>
+
+<div class="flow">GetObjectRequest.Builder（bucket + key）
+   │
+   ▼
+AbstractOssClientImpl.doCustomDownload(requestBuilder, transformer, listeners)
+   │
+   ▼
+s3TransferManager.download(DownloadRequest)
+   │  返回 CompletableFuture&lt;CompletedDownload&gt;
+   │
+   ▼
+AsyncResponseTransformer&lt;GetObjectResponse, T&gt;
+   │  （三种形式：）
+   │  ├── toFile(Path)       → 直接写本地文件
+   │  ├── toFile(File)       → 直接写本地文件
+   │  └── OutputStreamDownloadSubscriber → WritableByteChannel / OutputStream
+   │
+   ▼
+GetObjectResult(contentLength, contentType)</div>
+
+<p>关键点：<code>OutputStreamDownloadSubscriber</code> 作为 <code>Consumer&lt;ByteBuffer&gt;</code>，接收 S3 SDK 推送的每个数据块，通过 <code>WritableByteChannel.write()</code> 写入目标——当目标 OutputStream 是 FileOutputStream 时，会直接提取 FileChannel 以获得更好的写入性能。</p>
+
+<h2>五、与其他 common 模块对比</h2>
+
+<p>把 OSS 模块和之前学过的 SMS 模块放在一起看，能找到 RuoYi common 模块的统一设计基因：</p>
+
+<table>
+<tr><th>维度</th><th>ruoyi-common-sms</th><th>ruoyi-common-oss</th></tr>
+<tr>
+  <td>类文件数</td>
+  <td>3 个 Java 类 + 1 个配置文件</td>
+  <td>18 个 Java 类</td>
+</tr>
+<tr>
+  <td>第三方依赖</td>
+  <td>sms4j（上层封装框架）</td>
+  <td>AWS S3 SDK（底层 SDK，直接封装）</td>
+</tr>
+<tr>
+  <td>装配方式</td>
+  <td>SmsAutoConfiguration（Spring @Bean）</td>
+  <td>OssFactory.instance()（静态工厂，Redis 驱动）</td>
+</tr>
+<tr>
+  <td>缓存策略</td>
+  <td>PlusSmsDao → RedisUtils（覆盖 sms4j 默认缓存）</td>
+  <td>OssFactory.CLIENT_CACHE → ConcurrentHashMap（客户端实例缓存）</td>
+</tr>
+<tr>
+  <td>异常处理</td>
+  <td>SmsExceptionHandler（@RestControllerAdvice 统一兜底）</td>
+  <td>S3StorageException（RuntimeException，调用方自行捕获）</td>
+</tr>
+<tr>
+  <td>配置来源</td>
+  <td>application.yml（sms4j 原生配置格式）</td>
+  <td>Redis JSON → OssProperties → OssClientConfig（数据库驱动配置）</td>
+</tr>
+<tr>
+  <td>设计模式</td>
+  <td>适配器（适配 sms4j 到 RuoYi 技术栈）</td>
+  <td>模板方法 + 工厂 + 策略 + Builder + 适配器</td>
+</tr>
+</table>
+
+<div class="side">
+💡 <b>共同骨架</b>：虽然规模差 6 倍，但两个模块的核心套路完全一致——<strong>依赖一个成熟库（sms4j / AWS SDK），补齐「配置装配 + 客户端缓存 + 异常兜底」三件套</strong>。SMS 把这叫「适配垫片」，OSS 把这叫「工厂封装」——本质上都是在降低业务层的接入门槛。
+</div>
+
+<h2>六、为什么值得学</h2>
+
+<p>读懂 <code>ruoyi-common-oss</code>，你就拿到了读懂 RuoYi 几乎所有 common 模块的密码：</p>
+<ul>
+<li><strong>ruoyi-common-mail</strong>：同样是工厂模式封装第三方库（JavaMail），同样是配置驱动、客户端缓存；</li>
+<li><strong>ruoyi-common-redis</strong>：同样是抽象层 + 多实现（单机 Redis / 集群 Redis），同样是模板方法 + 工厂；</li>
+<li><strong>ruoyi-common-sms</strong>：骨架完全一致，只是规模更小、依赖更上层；</li>
+<li><strong>ruoyi-common-* 的通用范式</strong>：①依赖成熟库 ②工厂/装配管理客户端生命周期 ③配置从 Redis/yml 读取 ④统一异常封装 ⑤对业务层暴露一个「一句话能调」的 API。</li>
+</ul>
+
+<p>OSS 模块是这套范式里<strong>规模最大、模式最全</strong>的一个——学透它，剩下的都是降维打击。</p>
+
+<h2>七、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答——回忆比重读更能形成长期记忆。</p>
+
+<div class="quiz">
+<p>Q1. <code>OssClient</code> → <code>AbstractOssClientImpl</code> → <code>DefaultOssClientImpl</code> 这条继承链体现了什么设计模式？</p>
+<span class="opt">A. 单例模式——保证全局只有一个 OssClient 实例</span>
+<span class="opt">B. 模板方法模式——父类写 70+ 方法的骨架逻辑，子类只覆写 doInitialize() 这一个钩子</span>
+<span class="opt">C. 观察者模式——S3 SDK 事件回调给 OssClient</span>
+<span class="opt">D. 装饰器模式——DefaultOssClientImpl 给 AbstractOssClientImpl 增加新功能</span>
+<details><summary>看答案</summary><b>B</b>。<code>AbstractOssClientImpl</code> 实现了所有上传/下载/删除/预签名的通用逻辑，子类 <code>DefaultOssClientImpl</code> 只需要覆写 <code>doInitialize()</code> 来组装 <code>S3AsyncClient</code> / <code>S3TransferManager</code> / <code>S3Presigner</code>。这是模板方法模式的经典应用——骨架在父类，变化点留给子类填空。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>OssFactory.instance("config1")</code> 被调用两次，配置没有变化，会创建几个 <code>OssClient</code> 实例？</p>
+<span class="opt">A. 2 个——每次调用都创建新实例</span>
+<span class="opt">B. 1 个——第二次命中 CLIENT_CACHE 缓存，verifyConfig 通过则直接复用</span>
+<span class="opt">C. 0 个——OssFactory 只是返回 null</span>
+<span class="opt">D. 取决于 Redis 里有没有配置</span>
+<details><summary>看答案</summary><b>B</b>。<code>OssFactory</code> 内部维护了一个 <code>ConcurrentHashMap</code> 做客户端缓存。第二次调用时，先从缓存取出已有实例，调用 <code>client.verifyConfig(config)</code> 对比新旧配置（基于 <code>OssClientConfig</code> 的 <code>@EqualsAndHashCode</code>），相同则直接返回缓存实例，不重新创建。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 上传文件时，<code>File</code> / <code>Path</code> / <code>InputStream</code> / <code>byte[]</code> 等 6 种输入类型，最终都收敛到哪个方法？</p>
+<span class="opt">A. 各自调用不同的 doCustomUpload() 重载，没有收敛点</span>
+<span class="opt">B. 都收敛到私有方法 bucketUpload(bucket, key, AsyncRequestBody body, Options options)</span>
+<span class="opt">C. 都直接调用 s3TransferManager.upload()</span>
+<span class="opt">D. 都先转成 File 再处理</span>
+<details><summary>看答案</summary><b>B</b>。所有公开的 <code>bucketUpload()</code> 重载先将各自输入类型转换为 <code>AsyncRequestBody</code>（Path → fromPath、InputStream → fromChannel 等），再调用私有方法 <code>bucketUpload(bucket, key, body, options)</code>——这是上传的「唯一漏斗」，所有上传逻辑只写一遍。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/home.html" target="_blank">AWS SDK for Java v2 官方文档</a>——看完本课，去读 S3 Transfer Manager 和 S3 Presigner 的章节，你会发现 <code>upload()</code> / <code>download()</code> / <code>presignGetObject()</code> 正是上面图里调用 AWS SDK 的那几步。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「为什么不直接用 S3AsyncClient 而要用 S3TransferManager？」「如果我要接一个非 S3 兼容的存储（比如 FastDFS），该怎么扩展？」下一课我们放大 <code>AbstractOssClientImpl</code>，讲透<strong>它的 70+ 方法是怎么通过模板方法模式做到「只写一次」的</strong>。</div>
+
+<div class="nav">课程 0001 / 使命：读懂 ruoyi-common-oss 对象存储模块 · 下一课预告：AbstractOssClientImpl —— 模板方法骨架的 70+ 方法全解析</div>
+
+</body>
+</html>

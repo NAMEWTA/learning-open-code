@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 04 · MyBatis 加解密拦截器速查</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } details { display: none; } }
+</style>
+</head>
+<body>
+
+<h1>速查 04 · MyBatis 加解密拦截器速查</h1>
+<p class="a">MybatisEncryptInterceptor（入参加密）| MybatisDecryptInterceptor（出参解密）| EncryptedFieldProcessor（字段处理）</p>
+
+<h2>两个拦截器对比</h2>
+
+<table>
+  <tr><th></th><th>MybatisEncryptInterceptor</th><th>MybatisDecryptInterceptor</th></tr>
+  <tr><td>方向</td><td>写库前加密</td><td>读库后解密</td></tr>
+  <tr><td>拦截接口</td><td><code>ParameterHandler</code></td><td><code>ResultSetHandler</code></td></tr>
+  <tr><td>拦截方法</td><td><code>setParameters</code></td><td><code>handleResultSets</code></td></tr>
+  <tr><td>方法参数</td><td><code>PreparedStatement.class</code></td><td><code>Statement.class</code></td></tr>
+  <tr><td>proceed 时机</td><td>加密后 → proceed</td><td>proceed → 解密</td></tr>
+  <tr><td>是否恢复原始值</td><td><strong>是</strong>（finally 中恢复）</td><td>否（直接覆盖）</td></tr>
+  <tr><td>null 处理</td><td>parameterObject == null 跳过</td><td>result == null 跳过</td></tr>
+  <tr><td>String 处理</td><td>跳过（不能加密 String）</td><td>EncryptedFieldProcessor 自动跳过</td></tr>
+</table>
+
+<h2>@Intercepts 签名速查</h2>
+
+<div class="chain">
+<strong>MybatisEncryptInterceptor</strong>
+@Intercepts({@Signature(
+    type = ParameterHandler.class,
+    method = "setParameters",
+    args = {PreparedStatement.class})
+})
+
+<strong>MybatisDecryptInterceptor</strong>
+@Intercepts({@Signature(
+    type = ResultSetHandler.class,
+    method = "handleResultSets",
+    args = {Statement.class})
+})
+</div>
+
+<h2>EncryptedFieldProcessor 处理流程</h2>
+
+<div class="chain">
+<strong>encrypt(sourceObject) → List&lt;FieldSnapshot&gt;</strong>
+  │
+  └─ handle(sourceObject, visited, fieldHandler)
+       │
+       ├─ null? String? → return（跳过）
+       ├─ 已在 visited？→ return（避免循环引用）
+       ├─ Map? → 遍历 values，递归 handle()
+       ├─ Collection? → 遍历 items，递归 handle()
+       └─ 普通对象? → 获取 @EncryptField 字段缓存
+            │
+            └─ for each field:
+                 value = field.get(target)
+                 if value != null:
+                   fieldHandler.handle(target, field, value)
+                   ├─ encrypt: 加密 value → field.set(target, encrypt)
+                   │            → 记录 FieldSnapshot(target, field, originalValue)
+                   └─ decrypt: 解密 value → field.set(target, decrypt)
+
+<strong>decrypt(sourceObject) → void</strong>
+  │
+  └─ handle() 同上，但回调是直接解密 + field.set()，不产生快照
+</div>
+
+<h2>FieldSnapshot 生命周期</h2>
+
+<table>
+  <tr><th>阶段</th><th>操作</th></tr>
+  <tr><td>创建</td><td><code>new FieldSnapshot(target, field, originalValue)</code> — encrypt() 中录制原始值</td></tr>
+  <tr><td>存储</td><td>加入 <code>List&lt;FieldSnapshot&gt;</code>，由 MybatisEncryptInterceptor 持有</td></tr>
+  <tr><td>使用前</td><td>SQL 执行期间，field 值是密文</td></tr>
+  <tr><td>恢复</td><td><code>snapshot.restore()</code> — 在 <code>finally</code> 块中执行</td></tr>
+  <tr><td>恢复时机</td><td>无论 SQL 是否成功，<code>finally</code> 确保始终恢复</td></tr>
+  <tr><td>恢复后</td><td>field 值 = 原始明文，业务代码透明</td></tr>
+</table>
+
+<h2>常见陷阱</h2>
+
+<ul>
+  <li><strong>加密-恢复时序：</strong> <code>encrypt()</code> 必须在 <code>proceed()</code> 之前，<code>restore()</code> 必须在 <code>finally</code> 中。顺序颠倒会导致数据库存明文或业务代码见密文。</li>
+  <li><strong>String 参数跳过：</strong> MybatisEncryptInterceptor 对 <code>parameterObject instanceof String</code> 直接跳过。如果你的 Mapper 方法是 <code>insert(@Param("phone") String phone)</code> 而没有使用实体对象，参数不会被加密——不管字段有没有 @EncryptField。</li>
+  <li><strong>null 结果检查：</strong> MybatisDecryptInterceptor 在 <code>result == null</code> 时直接 return null，不调用 <code>decrypt()</code>。如果忘记这步检查，EncryptedFieldProcessor 的 <code>handle()</code> 遇到 null 也会跳过，但这是防御性编程。</li>
+  <li><strong>批量操作：</strong> EncryptedFieldProcessor 能处理 List/Collection，批量插入时 List 中每个实体的加密字段都会被处理。</li>
+  <li><strong>循环引用：</strong> 通过 <code>IdentityHashMap</code> 追踪已访问对象，防止 A→B→A 的循环引用导致栈溢出。</li>
+  <li><strong>字段值类型：</strong> <code>EncryptedFieldProcessor</code> 通过 <code>Convert.toStr()</code> 将字段值转为字符串再处理。非字符串类型的字段（如 Integer）也能被加密，但加密后变为密文字符串存入数据库，解密时也是字符串——需要确保数据库字段类型是 VARCHAR 而非数值类型。</li>
+  <li><strong>二次加密风险：</strong> 如果忘了恢复原始值，后续的数据库操作会把密文当原文再次加密，导致数据永久损坏。这不是"多解一次就能恢复"的问题——加密函数是幂等的，但解密不是（解一次得到的是上一次的密文，不是原文）。</li>
+</ul>
+
+<h2>关键源码文件</h2>
+
+<table>
+  <tr><th>文件</th><th>类</th><th>路径</th></tr>
+  <tr><td>MybatisEncryptInterceptor.java</td><td>入参加密拦截器</td><td><code>org.dromara.common.encrypt.interceptor</code></td></tr>
+  <tr><td>MybatisDecryptInterceptor.java</td><td>出参解密拦截器</td><td><code>org.dromara.common.encrypt.interceptor</code></td></tr>
+  <tr><td>EncryptedFieldProcessor.java</td><td>加密字段处理器</td><td><code>org.dromara.common.encrypt.core</code></td></tr>
+  <tr><td>EncryptorManager.java</td><td>加解密管理器（字段缓存 + 加密算法选择）</td><td><code>org.dromara.common.encrypt.core</code></td></tr>
+  <tr><td>EncryptContextFactory.java</td><td>加密上下文工厂</td><td><code>org.dromara.common.encrypt.core</code></td></tr>
+</table>
+
+<p class="a">速查 04 · MyBatis 加解密拦截器 · MybatisEncryptInterceptor / MybatisDecryptInterceptor · 配套课程：<a href="../lessons/0004.html">第 4 课</a></p>
+
+</body>
+</html>

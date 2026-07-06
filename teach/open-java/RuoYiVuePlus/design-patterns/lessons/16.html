@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 16 课 · 前端动态路由工厂 — 后端菜单到 Vue Router 的编译过程</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 16 课 · 前端动态路由工厂 — 后端菜单到 Vue Router 的编译过程 <span class="tag">工厂 + 策略 + 组合</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：理解 <code>filterAsyncRouter()</code> 如何将后端返回的菜单 JSON 编译为 Vue Router 路由表，掌握 Vite <code>import.meta.glob</code> 构建静态视图查找表的原理，能解释三种路由集合（sidebarRoutes、rewriteRoutes、defaultRoutes）各自的服务对象。
+</div>
+
+<p>RuoYi-Vue-Plus 的后端菜单完全由数据库驱动——管理员在后台配置菜单树，前端在用户登录后动态拉取并编译为 Vue Router 路由。整个过程使用了<b>工厂模式</b>（route 对象生产）、<b>策略模式</b>（组件匹配策略）和<b>组合模式</b>（树形递归处理），三者协同工作。</p>
+
+<h2>一、数据流全景图</h2>
+
+<div class="diagram">后端数据库                    前端编译流水线                           前端消费
+
+菜单表 sys_menu               permission.ts                     sidebar / topbar
+┌────────────┐               ┌──────────────────────┐          ┌──────────────┐
+│ id    name │  API 返回     │ ① getRouters()       │          │ sidebarRoutes│
+│ 1    系统  │────────────&gt;  │    获取后端菜单 JSON   │          │  → 侧边栏    │
+│ 2    用户  │   [           │                      │          │              │
+│ 3    角色  │     { path,   │ ② filterAsyncRouter() │          │ rewriteRoutes│
+│ ...        │       name,   │    递归编译为路由对象  │          │  → addRoute  │
+└────────────┘       component, │                      │          │              │
+                     children  │ ③ loadView()         │          │ defaultRoutes│
+                   },          │    viewModuleMap 查找 │          │  → 顶部栏    │
+                   ...         │                      │          └──────────────┘
+                 ]             │ ④ createCustomName    │
+                               │    Component() 包装   │
+                               │                      │
+                               │ ⑤ duplicateRoute     │
+                               │    Checker() 校验     │
+                               └──────────────────────┘</div>
+
+<h2>二、Vite Glob Import：编译时静态分析</h2>
+
+<p>打开 <code>plus-ui-vue/src/store/modules/permission.ts</code> 第 14-21 行：</p>
+
+<pre><code>// 匹配 views 里面所有的 .vue 文件，预建查找表避免每次 O(n) 扫描
+const modules = import.meta.glob('./../../views/**/*.vue');
+const viewModuleMap = new Map&lt;string, () =&gt; Promise&lt;any&gt;&gt;();
+for (const path in modules) {
+  const viewsIndex = path.indexOf('/views/');
+  if (viewsIndex === -1) continue;
+  const dir = path.substring(viewsIndex + 7, path.lastIndexOf('.vue'));
+  viewModuleMap.set(dir, modules[path] as () =&gt; Promise&lt;any&gt;);
+}</code></pre>
+
+<div class="step">
+<span class="num">1</span> <b>编译时扫描</b>：<code>import.meta.glob</code> 是 Vite 的编译时特性，在 <code>vite build</code> 阶段扫描 <code>src/views/</code> 下所有 <code>.vue</code> 文件，生成一个路径→懒加载函数的静态映射。不是运行时 <code>fs.readdir</code>，而是构建工具在打包时替你完成的静态分析。 <span class="where">permission.ts:14</span>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>路径归一化</b>：glob 返回的路径是相对于当前文件的——例如 <code>./../../views/system/user/index.vue</code>。代码裁剪掉 <code>/views/</code> 前缀，得到 <code>system/user/index</code> 作为 Map 的 key。这个 key 必须与后端菜单表中的 <code>component</code> 字段完全一致。 <span class="where">permission.ts:18-20</span>
+</div>
+
+<div class="step">
+<span class="num">3</span> <b>预建查找表</b>：使用 <code>Map&lt;string, loader&gt;</code> 而非每次 O(n) 扫描 <code>modules</code> 对象。Map 的 <code>get()</code> 是 O(1) 哈希查找，在路由量大的场景下有可感知的性能差异。 <span class="where">permission.ts:15</span>
+</div>
+
+<div class="side">
+💡 <b>为什么不用动态 import()？</b> 动态 <code>import(variable)</code> 在 Vite 中会导致打包器无法做静态分析——它不知道你要导入哪些文件，因此无法做 tree-shaking 和代码分割。而 <code>import.meta.glob</code> 在编译时确定了所有可能的导入路径，Vite 可以为每个视图文件生成独立的 chunk，实现按路由懒加载。
+</div>
+
+<h2>三、filterAsyncRouter：递归编译引擎</h2>
+
+<p>这是整个动态路由系统的核心，第 83-109 行：</p>
+
+<pre><code>const filterAsyncRouter = (
+  asyncRouterMap: RouteRecordRaw[],
+  lastRouter?: RouteRecordRaw,
+  type = false
+): RouteRecordRaw[] =&gt; {
+  return asyncRouterMap.filter(route =&gt; {
+    // 步骤 A：重写模式下展平 ParentView 子路由
+    if (type && route.children) {
+      route.children = filterChildren(route.children, undefined);
+    }
+
+    // 步骤 B：组件类型分发（策略模式）
+    if (route.component?.toString() === 'Layout') {
+      route.component = Layout;                        // 布局壳
+    } else if (route.component?.toString() === 'ParentView') {
+      route.component = ParentView;                    // 路由视图包装器
+    } else if (route.component?.toString() === 'InnerLink') {
+      route.component = InnerLink;                     // iframe 内嵌
+    } else {
+      route.component = loadView(route.component, route.name as string);
+    }                                                     // 普通视图
+
+    // 步骤 C：递归处理子路由
+    if (route.children != null && route.children && route.children.length) {
+      route.children = filterAsyncRouter(route.children, route, type);
+    } else {
+      delete route.children;
+      delete route.redirect;
+    }
+    return true;
+  });
+};</code></pre>
+
+<h3>3.1 组件类型分发——策略模式</h3>
+
+<table>
+  <tr><th>后端 component 字段值</th><th>前端映射的组件</th><th>用途</th></tr>
+  <tr><td><code>"Layout"</code></td><td><code>@/layout/index.vue</code></td><td>主布局壳（侧边栏 + 顶栏 + 内容区）</td></tr>
+  <tr><td><code>"ParentView"</code></td><td><code>@/components/ParentView/index.vue</code></td><td>router-view 包装器，用于纯目录菜单</td></tr>
+  <tr><td><code>"InnerLink"</code></td><td><code>@/layout/components/InnerLink/index.vue</code></td><td>iframe 内嵌外部页面</td></tr>
+  <tr><td>其他字符串（如 <code>"system/user/index"</code>）</td><td><code>loadView()</code> 动态导入</td><td>普通业务页面</td></tr>
+</table>
+
+<p>三个特殊组件是<b>编译时静态导入</b>（文件顶部 <code>import Layout from '@/layout/index.vue'</code>），会打进主 bundle。普通业务视图是<b>懒加载</b>，只在访问对应路由时才加载 chunk。</p>
+
+<h3>3.2 loadView：查找表 + HOC 包装</h3>
+
+<pre><code>export const loadView = (view: any, name: string) =&gt; {
+  const loader = viewModuleMap.get(view);    // O(1) 哈希查找
+  if (loader) {
+    return createCustomNameComponent(loader, { name });  // HOC 赋名
+  }
+  return undefined;
+};</code></pre>
+
+<p><code>createCustomNameComponent</code> 是一个高阶组件（HOC）工厂，它的作用是给懒加载的组件<b>显式分配 name</b>——这对 <code>&lt;keep-alive&gt;</code> 缓存至关重要。</p>
+
+<pre><code>// plus-ui-vue/src/utils/createCustomNameComponent.tsx
+export function createCustomNameComponent(loader, options = {}) {
+  const { name } = options;
+  let component = null;
+  let wrappedComponent = null;
+
+  return async () =&gt; {
+    if (!component) {
+      const { default: loadedComponent } = await loader();
+      component = loadedComponent;
+    }
+    if (!wrappedComponent) {
+      wrappedComponent = defineComponent({
+        name,                 // ★ 显式分配组件名，供 keep-alive 的 include 使用
+        render() {
+          return h(component);
+        }
+      });
+    }
+    return Promise.resolve(wrappedComponent);
+  };
+}</code></pre>
+
+<div class="warn">
+⚠️ <b>为什么要这层包装？</b> Vite 使用 <code>import.meta.glob</code> 懒加载的组件，其 <code>name</code> 属性由 SFC 的 <code>&lt;script&gt;</code> 块定义。但动态路由中组件的 <code>name</code> 可能未定义或与路由 <code>name</code> 不一致。而 <code>&lt;keep-alive :include="cachedViews"&gt;</code> 依赖组件 <code>name</code> 做缓存匹配。如果组件没有正确的 name，keep-alive 就无法正常工作。createCustomNameComponent 用一层薄的 HOC 解决了这个问题。
+</div>
+
+<h2>四、三种路由集合：一个 JSON，三种用途</h2>
+
+<p><code>generateRoutes()</code> 方法内部对同一份后端菜单 JSON 做了三次 <code>structuredClone</code>，编译出三套路由：</p>
+
+<pre><code>const generateRoutes = async (): Promise&lt;RouteRecordRaw[]&gt; =&gt; {
+  const res = await getRouters();
+  const data = Array.isArray(res.data) ? res.data : [];
+  const sdata = structuredClone(data);    // 副本 1 → 侧边栏
+  const rdata = structuredClone(data);    // 副本 2 → 路由注册
+  const defaultData = structuredClone(data); // 副本 3 → 顶部栏
+
+  const sidebarRoutes = filterAsyncRouter(sdata);          // 原始树结构
+  const rewriteRoutes = filterAsyncRouter(rdata, undefined, true); // 展平 ParentView
+  const defaultRoutes = filterAsyncRouter(defaultData);    // 原始树结构
+
+  // ...
+  setRoutes(rewriteRoutes);                      // 用于 addRoute() 注册
+  setSidebarRouters(constantRoutes.concat(sidebarRoutes));  // 用于侧边栏渲染
+  setDefaultRoutes(sidebarRoutes);               // 原始路由（可被顶部栏读取）
+  setTopbarRoutes(defaultRoutes);                // 用于顶部栏渲染
+
+  duplicateRouteChecker(asyncRoutes, sidebarRoutes);       // 重复校验
+  return rewriteRoutes;
+};</code></pre>
+
+<div class="diagram">后端 JSON (同一份) ──structuredClone──&gt; 三份独立副本
+
+副本 1 (sdata)  ──filterAsyncRouter(type=false)──&gt; sidebarRoutes  → 侧边栏菜单树
+                                                         │
+副本 2 (rdata)  ──filterAsyncRouter(type=true)───&gt; rewriteRoutes → router.addRoute()
+                                                         │
+副本 3 (default) ──filterAsyncRouter(type=false)──&gt; defaultRoutes  → 顶部栏菜单树</div>
+
+<h3>filterChildren：ParentView 展平</h3>
+
+<p>当 <code>type = true</code>（重写模式）时，<code>filterAsyncRouter</code> 会调用 <code>filterChildren</code> 来展平 ParentView 节点：</p>
+
+<pre><code>const filterChildren = (childrenMap, lastRouter?) =&gt; {
+  let children = [];
+  childrenMap.forEach(el =&gt; {
+    el.path = lastRouter ? lastRouter.path + '/' + el.path : el.path;
+    if (el.children && el.children.length
+        && el.component?.toString() === 'ParentView') {
+      // ParentView 节点被跳过，其子节点上提一级
+      children = children.concat(filterChildren(el.children, el));
+    } else {
+      children.push(el);
+    }
+  });
+  return children;
+};</code></pre>
+
+<p>这是因为 <code>ParentView</code> 只是一个 <code>&lt;router-view&gt;</code> 包装器，在路由注册时不需要作为独立路由注册。展平后，其子路由直接注册到父路由下，避免多一层不必要的路由嵌套。</p>
+
+<div class="side">
+💡 <b>为什么需要 structuredClone？</b> 三套路由在编译过程中会被修改（如 <code>route.component</code> 从字符串变为函数，<code>route.children</code> 被删除或重组）。如果共用一个对象引用，修改会相互污染。使用 <code>structuredClone()</code>（ES2021 标准）而非 <code>JSON.parse(JSON.stringify())</code> 的好处是：(1) 支持更多类型（Date、RegExp、Map、Set）；(2) 性能更好；(3) 语义更清晰。
+</div>
+
+<h2>五、duplicateRouteChecker：防御性校验</h2>
+
+<pre><code>function duplicateRouteChecker(localRoutes, routes) {
+  function flatRoutes(routes) {
+    const res = [];
+    routes.forEach(route =&gt; {
+      if (route.children) {
+        res.push(...flatRoutes(route.children));
+      } else {
+        res.push(route);
+      }
+    });
+    return res;
+  }
+
+  const allRoutes = flatRoutes([...localRoutes, ...routes]);
+  const nameList = [];
+  allRoutes.forEach(route =&gt; {
+    const name = route.name?.toString() ?? '';
+    if (nameList.includes(name)) {
+      console.error(`路由名称: [${name}] 重复, 会造成 404`);
+      ElNotification({ title: '路由名称重复', message: `路由名称: [${name}] 重复`, type: 'error' });
+      return;
+    }
+    nameList.push(name);
+  });
+}</code></pre>
+
+<p>在 Vue Router 中，<b>同一名称的路由后注册的会覆盖先注册的</b>，导致旧路由 404。这个检查器将本地路由和后端路由合并展平，检测重复的 <code>name</code> 字段。一旦发现重复，通过 <code>ElNotification</code> 在界面右上角弹出红色错误通知，开发者在开发阶段就能立即感知。</p>
+
+<h2>六、前后端契约</h2>
+
+<p>这套动态路由系统的关键在于<b>前后端关于 component 字段的契约</b>：</p>
+
+<table>
+  <tr><th>数据库字段</th><th>示例值</th><th>前端解析</th></tr>
+  <tr><td><code>component</code> = <code>"Layout"</code></td><td>最外层菜单</td><td>静态导入 Layout 组件</td></tr>
+  <tr><td><code>component</code> = <code>"ParentView"</code></td><td>纯目录菜单</td><td>静态导入 ParentView 组件</td></tr>
+  <tr><td><code>component</code> = <code>"InnerLink"</code></td><td>外部链接菜单</td><td>静态导入 InnerLink 组件</td></tr>
+  <tr><td><code>component</code> = <code>"system/user/index"</code></td><td>业务页面</td><td>viewModuleMap 查找 → 懒加载</td></tr>
+  <tr><td><code>path</code></td><td><code>"user"</code></td><td>路由路径</td></tr>
+  <tr><td><code>name</code></td><td><code>"SystemUser"</code></td><td>路由名称（同时用作组件 name）</td></tr>
+  <tr><td><code>meta</code></td><td><code>{ title, icon, noCache }</code></td><td>路由元信息</td></tr>
+</table>
+
+<p>后端菜单表的 <code>component</code> 字段值（不含 <code>.vue</code> 后缀）必须与 <code>src/views/</code> 目录下的文件路径一一对应。这是一种<b>约定优于配置</b>的实践——不需要额外的路由映射表，目录结构即路由结构。</p>
+
+<h2>七、自测</h2>
+
+<div class="quiz">
+<p>1. <code>import.meta.glob</code> 是运行时扫描还是编译时扫描？</p>
+<label class="opt"><input type="radio" name="q1"> A. 运行时扫描——在浏览器中遍历 views 目录</label>
+<label class="opt"><input type="radio" name="q1"> B. 编译时扫描——Vite 在构建阶段生成路径→懒加载函数的静态映射</label>
+<label class="opt"><input type="radio" name="q1"> C. 两者都不是，它依赖服务端返回文件列表</label>
+</div>
+
+<div class="quiz">
+<p>2. <code>createCustomNameComponent</code> 包装懒加载组件的主要目的是什么？</p>
+<label class="opt"><input type="radio" name="q2"> A. 提升组件的渲染性能</label>
+<label class="opt"><input type="radio" name="q2"> B. 给组件显式分配 name，确保 keep-alive 缓存机制正常工作</label>
+<label class="opt"><input type="radio" name="q2"> C. 增加 TypeScript 类型安全检查</label>
+</div>
+
+<div class="quiz">
+<p>3. 为什么 <code>generateRoutes()</code> 需要三次 <code>structuredClone</code>？</p>
+<label class="opt"><input type="radio" name="q3"> A. 为了提高执行效率，三次并行操作</label>
+<label class="opt"><input type="radio" name="q3"> B. 侧边栏、路由注册、顶部栏对同一份数据有不同的修改需求，需要独立副本防止相互污染</label>
+<label class="opt"><input type="radio" name="q3"> C. structuredClone 会自动去重路由</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — import.meta.glob 是 Vite 的编译时特性。它在构建阶段扫描指定目录，生成静态的路径→动态导入函数映射，打包进 bundle。浏览器运行时不会也不应该访问文件系统。<br>
+<b>2. B</b> — Vue 的 keep-alive 通过组件 name 做缓存匹配。Vite glob import 的懒加载组件可能没有定义 name，或 name 与路由 name 不一致，导致缓存失效。createCustomNameComponent 用 HOC 显式分配 name。<br>
+<b>3. B</b> — filterAsyncRouter 会修改路由对象（component 从字符串变为函数、children 被删除/重组）。rewriteRoutes 还要经过 filterChildren 展平。三份副本各自独立修改，互不干扰。</p>
+</details>
+
+<div class="nav">← <a href="15.html">第 15 课 · 拦截器与路由守卫</a> | 下一课：<a href="17.html">第 17 课 · 前端加密策略 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://vitejs.dev/guide/features.html#glob-import" target="_blank">Vite Glob Import 文档</a> ·
+<a href="https://router.vuejs.org/guide/advanced/dynamic-routing.html" target="_blank">Vue Router 动态路由</a> ·
+查看源码：<code>plus-ui-vue/src/store/modules/permission.ts</code> 和 <code>plus-ui-vue/src/utils/createCustomNameComponent.tsx</code>
+</div>
+<div class="reminder">💡 有疑问？直接问我。下一课将讲解前端 RSA+AES 混合加密策略的完整设计——密钥生成、请求加密、响应解密的全流程。</div>
+
+</body>
+</html>

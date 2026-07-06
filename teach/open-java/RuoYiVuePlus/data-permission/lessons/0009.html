@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>09 React 前端 — 数据权限配置与 Vue 版对比</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.88rem; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>09 React 前端 — 数据权限配置与 Vue 版对比</h1>
+
+<blockquote><strong>本节目标：</strong>你能读懂 React 版数据权限的 Hook 代码，特别是 <code>getTreeCheckedKeysWithAncestors</code> 手动补全祖先节点的逻辑，并能对比两个前端版本的差异。</blockquote>
+
+<h2>React 版技术栈</h2>
+
+<table>
+<tr><th>维度</th><th>Vue 版</th><th>React 版</th></tr>
+<tr><td>框架</td><td>Vue 3 + Element Plus</td><td>React 19 + Ant Design 6 + ProComponents</td></tr>
+<tr><td>状态管理</td><td>Vue ref/reactive</td><td>Zustand + React Query + ahooks</td></tr>
+<tr><td>树组件</td><td>el-tree（内置 getCheckedKeys/getHalfCheckedKeys）</td><td>antd Tree（checkedKeys 回调结构不同）</td></tr>
+<tr><td>表单</td><td>el-form + el-select</td><td>ProForm + ProFormSelect</td></tr>
+<tr><td>代码组织</td><td>单文件 (~1040行)</td><td>Hook 抽离 (useRolePermission.tsx 417行)</td></tr>
+</table>
+
+<h2>React 版结构差异</h2>
+
+<p><strong>数据权限不在角色编辑表单里。</strong> 角色"添加/修改"的 ModalForm 只含基础字段（名称、权限字符、顺序、状态）。数据权限和菜单权限统一收纳到操作列的「分配权限」按钮 → <code>RolePermissionModal</code> 弹窗组件。</p>
+
+<p>组件层次：<code>role/index.tsx</code> → <code>&lt;RolePermissionModal&gt;</code> → <code>useRolePermission</code> Hook（所有业务逻辑在这里）。</p>
+
+<h2>部门树加载（并发请求）</h2>
+
+<p><code>useRolePermission.tsx:107-139</code>，弹窗打开时 <code>useEffect</code> 触发：</p>
+
+<pre><code>const [roleRes, menuRes, deptRes] = await Promise.all([
+  getRole(roleId),              // 角色详情
+  roleMenuTreeselect(roleId),   // 菜单树 + 已选
+  deptTreeSelect(roleId)        // 部门树 + 已选
+]);
+form.setFieldsValue({ ...defaultRoleForm, ...roleRes.data });
+setDeptConnect(roleRes.data.deptCheckStrictly ?? true);
+setDeptTree(deptRes.data.depts || []);
+setDeptCheckedKeys(deptRes.data.checkedKeys || []);</code></pre>
+
+<p>三个接口并发请求，效率高于 Vue 版的串行。</p>
+
+<h2>UI 渲染：dataScope=2 时才显示部门树</h2>
+
+<p><code>RolePermissionModal.tsx:86-124</code> 使用 <code>&lt;Form.Item shouldUpdate&gt;</code> 监听 dataScope 变化：</p>
+
+<pre><code>&lt;Form.Item shouldUpdate={(prev, current) =&gt; prev.dataScope !== current.dataScope}&gt;
+  {({ getFieldValue }) =&gt;
+    getFieldValue('dataScope') === '2' ? (
+      &lt;Tree checkable checkStrictly={!deptConnect}
+            checkedKeys={deptCheckedKeys} onCheck={handleDeptCheck} /&gt;
+    ) : null
+  }
+&lt;/Form.Item&gt;</code></pre>
+
+<h2>核心难点：父子联动下的祖先补全</h2>
+
+<p>这是 React 版与 Vue 版最大的差异，也是最考验理解的地方。</p>
+
+<p><strong>问题背景：</strong>antd 的 Tree 在 <code>checkStrictly=false</code>（父子联动）时，<code>checkedKeys</code> 回调 <strong>不包含半选状态的父节点</strong>。但后端 <code>updateRolePermission</code> 需要收到完整的被选中节点列表（含祖先），否则下次回显无法还原。</p>
+
+<p>Vue 的 el-tree 有 <code>getHalfCheckedKeys()</code> API，一行搞定。antd Tree 没有这个 API，所以需要手写。</p>
+
+<p><strong>解决方案</strong>（<code>useRolePermission.tsx:379-408</code>）：</p>
+
+<pre><code>// 提交前调用：父子联动时补全祖先
+function getTreeCheckedKeysWithAncestors(checkedKeys, nodes, connect) {
+  if (!connect) return checkedKeys;   // 非联动模式直接用原始checkedKeys
+  return normalizeIds([...checkedKeys, ...collectAncestorKeys(checkedKeys, nodes)]);
+}
+
+// DFS 遍历，找出所有"子节点被勾选"的祖先节点
+function collectAncestorKeys(checkedKeys, nodes) {
+  const checkedKeySet = new Set(checkedKeys.map(String));
+  const ancestors = [];
+
+  const visit = (node, path) => {
+    const ownKey = node.key;
+    let subtreeChecked = checkedKeySet.has(String(ownKey));
+
+    node.children?.forEach(child => {
+      if (visit(child, [...path, ownKey])) {
+        subtreeChecked = true;  // 子树中有被勾选的节点 → 标记当前节点
+      }
+    });
+
+    if (subtreeChecked) {
+      ancestors.push(...path);  // path里是当前节点的所有祖先
+    }
+    return subtreeChecked;
+  };
+
+  nodes.forEach(node => visit(node, []));
+  return normalizeIds(ancestors);  // 去重返回
+}</code></pre>
+
+<div class="tip"><strong>为什么这样做？</strong> DFS 从叶子向上回溯：如果某个节点的子树中有任何被勾选的节点，就把这个节点的所有祖先加入结果。这样后端收到的是"叶子 + 路径上的所有祖先 ID"，下次 <code>deptTreeSelect</code> 返回的 <code>checkedKeys</code> 才能正确还原父子联动状态。</div>
+
+<h2>提交时的 dataScope 判断</h2>
+
+<p><code>useRolePermission.tsx:150-175</code>：</p>
+
+<pre><code>const submitPermission = async () => {
+  // ...
+  const nextDeptIds = getTreeCheckedKeysWithAncestors(deptCheckedKeys, deptTreeData, connect);
+  await updateRolePermission({
+    ...values,
+    menuIds: nextMenuIds,
+    deptIds: values.dataScope === '2' ? nextDeptIds : []   // ★ 只有自定义才传deptIds
+  });
+};</code></pre>
+
+<p>与 Vue 版的一个差异：React 版显式判断 <code>dataScope === '2'</code> 才传 deptIds，否则强制传 <code>[]</code>。Vue 版依赖 <code>dataScopeSelectChange</code> 清空树来间接控制。</p>
+
+<h2>两个前端版本差异总结</h2>
+
+<table>
+<tr><th>对比维度</th><th>Vue (element-plus)</th><th>React (antd)</th></tr>
+<tr><td>半选节点收集</td><td>el-tree 内置 <code>getHalfCheckedKeys()</code></td><td>需手写 DFS 祖先补全</td></tr>
+<tr><td>异步请求</td><td>串行 await (getRole → getRoleMenuTreeselect → deptTreeSelect)</td><td>并发 Promise.all</td></tr>
+<tr><td>部门树显隐</td><td><code>v-show="dataScope==='2'"</code></td><td><code>Form.Item shouldUpdate</code> + 条件渲染</td></tr>
+<tr><td>deptIds 提交</td><td>收集半选+全选，不判断 dataScope</td><td>只 dataScope=2 时提交，否则 <code>[]</code></td></tr>
+<tr><td>表单提交方式</td><td><code>form.deptIds = getDeptAllCheckedKeys()</code> 直接赋值</td><td><code>form.validateFields()</code> + <code>form.getFieldsValue()</code> 合并</td></tr>
+</table>
+
+<div class="cite">📖 推荐一手资料：<code>plus-ui-react/src/pages/system/role/components/useRolePermission.tsx</code> — React 版核心 Hook，415 行精炼代码，值得反复阅读。</div>
+<div class="reminder">💡 试试问"如果我想在 React 版也加上 el-tree 那样的 getHalfCheckedKeys，antd 有什么替代方案？onCheck 回调中的 halfChecked 参数如何使用？"</div>
+
+</body>
+</html>

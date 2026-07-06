@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 安全守护：Spring Security 保护 SBA 管理后台</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn b { color: #b8821e; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .step { counter-increment: step; margin: 0.5rem 0; font-size: 0.93rem; }
+  .step::before { content: "第" counter(step) "处："; font-weight: 700; color: #1d6fd6; }
+  .chain { font-family: Consolas, monospace; font-size: 0.82rem; background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; margin: 0.6rem 0; line-height: 1.6; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 安全守护：SecurityConfig 过滤链逐行解析 <span class="tag">安全</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #3）</b>：学完你能逐行读懂 <code>SecurityConfig.java</code> 的安全过滤链——如何放行静态资源（<code>/assets/**</code>）和登录页、要求其余请求认证、配置表单登录 + HTTP Basic 双认证、以及禁用 CSRF 和 frameOptions 的原因。
+</div>
+
+<p>如果你的 SBA 管理后台没有安全保护，任何人都能通过浏览器看到所有微服务的健康状态、配置信息、甚至日志文件——这在生产环境是不可接受的。这节课我们逐行拆解 SecurityConfig，理解它是如何用最小的配置代价为 SBA 建立安全防线。</p>
+
+<h2>一、全貌：65 行代码 = 一条完整的过滤链</h2>
+
+<div class="region">
+<h3>SecurityConfig.java — 完整源码</h3>
+<span class="where">ruoyi-monitor-admin/src/main/java/org/dromara/monitor/admin/config/SecurityConfig.java</span>
+<pre><code>@EnableWebSecurity
+@Configuration
+public class SecurityConfig {
+
+    private final String adminContextPath;
+
+    public SecurityConfig(AdminServerProperties adminServerProperties) {
+        this.adminContextPath = adminServerProperties.getContextPath();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity httpSecurity) throws Exception {
+        SavedRequestAwareAuthenticationSuccessHandler successHandler =
+            new SavedRequestAwareAuthenticationSuccessHandler();
+        successHandler.setTargetUrlParameter("redirectTo");
+        successHandler.setDefaultTargetUrl(adminContextPath + "/");
+
+        PathPatternRequestMatcher.Builder mvc = PathPatternRequestMatcher.withDefaults();
+
+        return httpSecurity
+            .headers((header) ->
+                header.frameOptions(HeadersConfigurer.FrameOptionsConfig::disable))
+            .authorizeHttpRequests((authorize) ->
+                authorize.requestMatchers(
+                        mvc.matcher(adminContextPath + "/assets/**"),
+                        mvc.matcher(adminContextPath + "/login")
+                    ).permitAll()
+                    .anyRequest().authenticated())
+            .formLogin((formLogin) ->
+                formLogin.loginPage(adminContextPath + "/login")
+                    .successHandler(successHandler))
+            .logout((logout) ->
+                logout.logoutUrl(adminContextPath + "/logout"))
+            .httpBasic(Customizer.withDefaults())
+            .csrf(AbstractHttpConfigurer::disable)
+            .build();
+    }
+}</code></pre>
+</div>
+
+<p>一眼看过去，<code>filterChain</code> 方法就是个链式配置，每行一个安全策略。我们分 6 处逐行拆解。</p>
+
+<h2>二、6 处关键配置逐行读</h2>
+
+<div class="region" style="counter-reset: step;">
+<h3>第0步：获取 context-path</h3>
+<p><code>AdminServerProperties</code> 是 SBA 框架提供的配置 Bean，它自动读取 <code>spring.boot.admin.context-path</code> 的值。在第 2 课我们配的是 <code>/admin</code>，所以 <code>adminContextPath = "/admin"</code>。</p>
+<p>下面所有涉及路径的规则都基于这个前缀，保证了无论你把 SBA 挂载到 <code>/admin</code>、<code>/monitor</code> 还是 <code>/</code>，安全规则自动适配——不需要硬编码路径。</p>
+
+<h3 class="step">禁用 frameOptions — 让 SBA 页面能在 iframe 中渲染</h3>
+<pre><code>.headers((header) ->
+    header.frameOptions(HeadersConfigurer.FrameOptionsConfig::disable))</code></pre>
+<p>SBA 的管理后台 UI 在某些功能中使用了 iframe（例如日志查看器就是在 iframe 中加载的）。Spring Security 默认会设置 <code>X-Frame-Options: DENY</code> 响应头，禁止页面被嵌入 iframe，导致这些功能白屏。</p>
+<div class="warn"><b>安全影响</b>：禁用 frameOptions 意味着你的 SBA 页面<strong>可以</strong>被其他网站用 iframe 嵌入（clickjacking 风险）。但 SBA 是内部运维工具，通常部署在内网，攻击面有限。如果你的 SBA 暴露在公网，考虑用 CSP（Content-Security-Policy）的 <code>frame-ancestors</code> 指令做更精细的控制，而不是一刀切禁用。</div>
+
+<h3 class="step">放行静态资源 + 登录页，其余需认证</h3>
+<pre><code>.authorizeHttpRequests((authorize) ->
+    authorize.requestMatchers(
+            mvc.matcher(adminContextPath + "/assets/**"),
+            mvc.matcher(adminContextPath + "/login")
+        ).permitAll()
+        .anyRequest().authenticated())</code></pre>
+<p>这是安全模型的精要——「除了门口那几样，全锁上」：</p>
+<ul>
+<li><code>/admin/assets/**</code> — SBA UI 的静态资源（CSS、JS、图片、字体）。不放行则登录页连样式都加载不出来。</li>
+<li><code>/admin/login</code> — 登录页本身。不放行则弹出登录框让你登录才能看到登录页——死循环。</li>
+<li><code>anyRequest().authenticated()</code> — 所有其他请求（包括 <code>/admin/</code>、<code>/admin/applications</code>、<code>/admin/instances</code> 等 SBA API）需要认证。</li>
+</ul>
+<div class="why"><b>为什么用 <code>PathPatternRequestMatcher</code> 而不是 <code>AntPathRequestMatcher</code>？</b>这是 Spring Security 6.x（基于 Spring Boot 3.x）的新默认匹配器。<code>PathPattern</code> 比 Ant 风格性能更好，且天然支持 <code>{variable}</code> 路径变量。RuoYi-Vue-Plus 全系统统一使用这个匹配器。</div>
+
+<h3 class="step">表单登录 — 输账号密码，登录后跳回原页面</h3>
+<pre><code>.formLogin((formLogin) ->
+    formLogin.loginPage(adminContextPath + "/login")
+        .successHandler(successHandler))</code></pre>
+<p><code>loginPage("/admin/login")</code> 指定登录页的地址（SBA 自带的登录页，不是自定义的）。<br>
+<code>SavedRequestAwareAuthenticationSuccessHandler</code> 是 Spring Security 提供的智能跳转器：</p>
+<ul>
+<li>如果你直接访问 <code>/admin/login</code> 登录 → 跳到 <code>/admin/</code>（defaultTargetUrl）</li>
+<li>如果你访问 <code>/admin/applications/xxx</code> 被拦截到登录 → 登录成功后<strong>回到这个页面</strong>（SavedRequest）</li>
+<li><code>redirectTo</code> 参数可以覆盖默认跳转目标</li>
+</ul>
+
+<h3 class="step">注销 — 清理会话，回到登录页</h3>
+<pre><code>.logout((logout) ->
+    logout.logoutUrl(adminContextPath + "/logout"))</code></pre>
+<p>简洁的注销配置。POST 到 <code>/admin/logout</code> 即清除 SecurityContext 和 Session。注意默认 SBA UI 的注销按钮发送的是 POST 请求（CSRF 禁用后才不会报 403——见下一步）。</p>
+
+<h3 class="step">HTTP Basic 认证 — 双重认证方式</h3>
+<pre><code>.httpBasic(Customizer.withDefaults())</code></pre>
+<p>除了浏览器登录（表单登录），还支持 HTTP Basic 认证。用 <code>curl -u ruoyi:123456 http://localhost:9090/admin/applications</code> 也能访问。什么场景需要这个？</p>
+<ul>
+<li><strong>SBA Client 注册时</strong> — Client 向 Server 发 POST 注册请求时，用的是 HTTP Basic 认证（账密来自 <code>spring.boot.admin.client.username/password</code>）</li>
+<li><strong>Server 回调 Client</strong> — Server 调用 Client 的 actuator 端点时，同样用 HTTP Basic（凭证来自 metadata）</li>
+</ul>
+<div class="why"><b>为什么需要两种认证方式并存？</b>人（运维人员）用表单登录——浏览器弹出登录页，输账号密码。程序（SBA Client）用 HTTP Basic——没有浏览器界面，只能通过 HTTP 头传递凭证。两者服务于不同类型的「用户」，缺一不可。</div>
+
+<h3 class="step">禁用 CSRF — 让 POST 请求不报 403</h3>
+<pre><code>.csrf(AbstractHttpConfigurer::disable)</code></pre>
+<p>Spring Security 默认开启 CSRF 保护，要求所有 POST/PUT/DELETE 请求携带 CSRF token。但 SBA 管理后台的场景是：</p>
+<ul>
+<li>SBA 的 UI 是内嵌的 Vue.js SPA，它的 AJAX 请求不携带 CSRF token</li>
+<li>SBA Client 通过 HTTP Basic 方式调用 Server API，也没有 CSRF token 机制</li>
+<li>注销操作是 POST 请求，CSRF 不关闭会直接 403</li>
+</ul>
+<p>因此必须禁用 CSRF。这个决策在 SBA 官方文档中明确推荐，不是偷懒。</p>
+</div>
+
+<h2>三、安全链路的完整拼图</h2>
+
+<div class="chain">┌───────────────────────────────────────────────────────┐
+│           SBA 管理后台的安全防御全景                       │
+├───────────────────────────────────────────────────────┤
+│                                                       │
+│  浏览器访问 http://localhost:9090/admin                │
+│  ┌─────────────────────────────────────────┐         │
+│  │  未登录 → 拦截到 /admin/login 登录页       │         │
+│  │  登录成功 → SavedRequest → 回到原页面       │         │
+│  │  /assets/** → permitAll（让样式正常加载）    │         │
+│  │  其他所有 API → 必须认证                    │         │
+│  └─────────────────────────────────────────┘         │
+│                                                       │
+│  SBA Client 注册                                      │
+│  ┌─────────────────────────────────────────┐         │
+│  │  POST /admin/instances                   │         │
+│  │  Authorization: Basic <base64(user:pass)> │         │
+│  │  → httpBasic() 认证通过 → 写入仓库          │         │
+│  └─────────────────────────────────────────┘         │
+│                                                       │
+│  frameOptions: disable（日志查看器 iframe 正常加载）      │
+│  CSRF: disable（SBA UI AJAX 请求不报 403）             │
+└───────────────────────────────────────────────────────┘</div>
+
+<h2>四、跟 Spring Security 7.x 的差异说明</h2>
+
+<p>RuoYi-Vue-Plus 使用的是 Spring Boot 3.x + Spring Security 6.x。代码中使用了 Lambda DSL 风格（<code>authorizeHttpRequests(customizer -> ...)</code>），这是 6.x 标配。如果你看到旧项目用 <code>http.authorizeRequests()</code>（返回 <code>ExpressionInterceptUrlRegistry</code>）的写法，那是 Spring Security 5.x 的风格，在 6.x 已废弃。</p>
+
+<p>关键版本差异对照：</p>
+<table>
+<tr><th>Spring Security 5.x（已废弃）</th><th>Spring Security 6.x（当前）</th></tr>
+<tr><td><code>http.authorizeRequests()</code></td><td><code>http.authorizeHttpRequests()</code></td></tr>
+<tr><td><code>.antMatchers("/path/**")</code></td><td><code>mvc.matcher("/path/**")</code>（PathPattern）</td></tr>
+<tr><td><code>.and()</code> 串联</td><td>Lambda DSL 嵌套，不需要 <code>.and()</code></td></tr>
+<tr><td>默认 <code>X-Frame-Options: DENY</code></td><td>同上（需显式 disable）</td></tr>
+</table>
+
+<h2>五、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. 为什么要禁用 <code>frameOptions</code>？</p>
+<span class="opt">A. 为了支持 HTTPS，因为 frameOptions 会阻止 TLS 握手</span>
+<span class="opt">B. SBA 管理后台的某些功能（如日志查看器）使用 iframe 加载内容，不关闭 frameOptions 会导致白屏</span>
+<span class="opt">C. 为了兼容 IE6 浏览器</span>
+<span class="opt">D. 因为 Spring Security 6.x 默认没有 frameOptions</span>
+<details><summary>看答案</summary><b>B</b>。SBA 的日志查看器等面板在 iframe 中渲染，X-Frame-Options: DENY 会阻止 iframe 加载。禁用它是为了功能可用，但需注意 clickjacking 风险——通常 SBA 部署在内网，风险可控。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>permitAll()</code> 放行的两个路径是什么？为什么是这两个？</p>
+<span class="opt">A. /admin/** 和 /actuator/** — 因为它们是静态资源</span>
+<span class="opt">B. /admin/assets/** 和 /admin/login — 前者是前端静态资源（不放行则登录页白屏），后者是登录页本身（不放行则死循环）</span>
+<span class="opt">C. /admin/logout 和 /admin/applications — 因为它们是公开 API</span>
+<span class="opt">D. / 和 /favicon.ico — 根路径和图标</span>
+<details><summary>看答案</summary><b>B</b>。放行 /assets/** 保证 CSS/JS/图片能加载，否则登录页只有白底黑字。放行 /login 避免「需要登录才能看到登录页」的死循环。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么需要 HTTP Basic 和表单登录两种认证方式并存？</p>
+<span class="opt">A. 为了向后兼容 Spring Security 4.x 的用户</span>
+<span class="opt">B. 表单登录给人用（浏览器），HTTP Basic 给程序用（SBA Client 注册、Server 回调 actuator）</span>
+<span class="opt">C. HTTP Basic 是主认证，表单登录是备用的</span>
+<span class="opt">D. 两种认证方式让人可以选择难度</span>
+<details><summary>看答案</summary><b>B</b>。运维人员在浏览器中通过表单登录；SBA Client 通过 HTTP 协议通信时只能用 HTTP Basic 传递凭证。两者服务于不同消费方，缺一不可。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 禁用 CSRF 保护的原因是什么？</p>
+<span class="opt">A. SBA Server 没有 CSRF 攻击面，它不处理用户数据</span>
+<span class="opt">B. SBA 管理后台的 Vue.js 前端 AJAX 请求不携带 CSRF token，且 SBA Client 的 HTTP Basic 认证也不支持 CSRF，不关闭会导致 403</span>
+<span class="opt">C. Spring Security 6.x 已经废弃了 CSRF 功能</span>
+<span class="opt">D. 项目中使用了 JWT 替代了 CSRF</span>
+<details><summary>看答案</summary><b>B</b>。两个原因：(1) SBA 自带的 Vue.js UI 在做 AJAX 请求时不带 CSRF token；(2) Client 通过 HTTP Basic 认证也不走 CSRF。这是 SBA 官方文档明确推荐的配置。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://codecentric.github.io/spring-boot-admin/current/#_securing_spring_boot_admin_server" target="_blank">SBA 官方文档 · Securing Server</a> 与 <a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html" target="_blank">Spring Security 架构参考</a>。本课源码见 <code>resources.md</code> 引用的 <code>SecurityConfig.java</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「SBA 自带登录页长什么样？」「能换成 RuoYi 的统一登录页吗？」「如果不用 memory-user，接数据库认证怎么改？」下一课我们讲事件驱动：<strong>CustomNotifier 自定义通知器如何监听实例状态变化</strong>。</div>
+
+<div class="nav">课程 03 / 使命：读懂 Spring Boot Admin 监控模块 · 上一课：<a href="02.html">自注册模式</a> · 下一课预告：CustomNotifier 事件通知器</div>
+
+</body>
+</html>

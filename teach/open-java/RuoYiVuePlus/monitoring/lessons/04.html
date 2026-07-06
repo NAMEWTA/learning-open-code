@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 事件驱动：CustomNotifier 自定义状态变化通知</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn b { color: #b8821e; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .chain { font-family: Consolas, monospace; font-size: 0.82rem; background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; margin: 0.6rem 0; line-height: 1.6; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 事件驱动：CustomNotifier 状态变化通知器 <span class="tag">扩展</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #4）</b>：学完你能读懂 <code>CustomNotifier.java</code> 的事件驱动设计——继承 <code>AbstractEventNotifier</code>、通过 <code>doNotify()</code> 拦截 <code>InstanceStatusChangedEvent</code>、使用 Reactor <code>Mono.fromRunnable()</code> 异步处理、以及将 6 种 SBA 状态码映射为中文业务语义的 switch 表达式。
+</div>
+
+<p>前 3 课我们搭好了监控中心的骨架——Server 接收数据、Client 上报数据、Security 保护后台。但这一切发生时，你作为运维人员如何<strong>第一时间知道</strong>某个服务挂了？这就轮到 CustomNotifier 上场了。它是 SBA 事件体系中的「哨兵」——当实例状态发生变化，立刻触发通知逻辑。</p>
+
+<h2>一、全貌：68 行代码 = 继承 + 过滤 + 映射 + 记录</h2>
+
+<div class="region">
+<h3>CustomNotifier.java — 完整源码</h3>
+<span class="where">ruoyi-monitor-admin/src/main/java/org/dromara/monitor/admin/notifier/CustomNotifier.java</span>
+<pre><code>@Slf4j
+@Component
+public class CustomNotifier extends AbstractEventNotifier {
+
+    protected CustomNotifier(InstanceRepository repository) {
+        super(repository);
+    }
+
+    @Override
+    @SuppressWarnings("all")
+    protected Mono&lt;Void&gt; doNotify(InstanceEvent event, Instance instance) {
+        return Mono.fromRunnable(() -> {
+            <span class="yml-comment">// 实例状态改变事件</span>
+            if (event instanceof InstanceStatusChangedEvent) {
+                <span class="yml-comment">// 获取实例注册名称</span>
+                String registName = instance.getRegistration().getName();
+                <span class="yml-comment">// 获取实例ID</span>
+                String instanceId = event.getInstance().getValue();
+                <span class="yml-comment">// 获取实例状态</span>
+                String status = ((InstanceStatusChangedEvent) event)
+                    .getStatusInfo().getStatus();
+                <span class="yml-comment">// 获取服务URL</span>
+                String serviceUrl = instance.getRegistration().getServiceUrl();
+                String statusName = switch (status) {
+                    case STATUS_UP -> "服务上线";
+                    case STATUS_OFFLINE -> "服务离线";
+                    case STATUS_RESTRICTED -> "服务受限";
+                    case STATUS_OUT_OF_SERVICE -> "停止服务状态";
+                    case STATUS_DOWN -> "服务下线";
+                    case STATUS_UNKNOWN -> "服务未知异常";
+                    default -> "未知状态";
+                };
+                log.info("Instance Status Change: 状态名称【{}】, "
+                    + "注册名称【{}】, 实例ID【{}】, 状态【{}】, 服务URL【{}】",
+                    statusName, registName, instanceId, status, serviceUrl);
+            }
+        });
+    }
+}</code></pre>
+</div>
+
+<h2>二、三层继承链：理解 SBA 的通知器体系</h2>
+
+<div class="chain">SBA 事件通知器的继承体系：
+
+Notifier (接口)
+  └── notify(InstanceEvent) → Mono&lt;Void&gt;
+      │
+AbstractEventNotifier (抽象类)  ← CustomNotifier 继承的就是它
+  ├── 持有 InstanceRepository 引用（可查询其他实例）
+  ├── 内置 event type 过滤（可配置只关心某些类型）
+  └── 定义 doNotify(InstanceEvent, Instance) 模板方法
+      │
+CustomNotifier (你的实现)
+  └── 覆盖 doNotify()，只处理 InstanceStatusChangedEvent</div>
+
+<p>理解这个继承链的两个要点：</p>
+<ul>
+<li><strong><code>AbstractEventNotifier</code> 提供的是「骨架」</strong>——它帮你做了 event 类型过滤、去重检查等通用逻辑，你的 <code>doNotify()</code> 只被调用「当且仅当事件是你关心的类型」。也就是说，抽象的过滤在基类完成，你不需要在子类里写重复的类型判断。</li>
+<li><strong><code>InstanceRepository</code> 是 SBA 的内存数据库</strong>——它存储了所有注册实例的完整信息（registration、status、endpoints 等）。通过它可以查询「当前有哪些实例在线」「某个实例的详细信息」。CustomNotifier 虽然没直接用到它，但通过 <code>super(repository)</code> 传递给了基类。</li>
+</ul>
+
+<h2>三、Reactor 异步模型：为什么是 Mono.fromRunnable()？</h2>
+
+<p><code>doNotify()</code> 的返回值不是 <code>void</code>，而是 <code>Mono&lt;Void&gt;</code>。这是 SBA 通知器体系的强制约定——<strong>所有通知器必须基于 Project Reactor 响应式编程模型</strong>。</p>
+
+<pre><code>protected Mono&lt;Void&gt; doNotify(InstanceEvent event, Instance instance) {
+    return Mono.fromRunnable(() -> {
+        <span class="yml-comment">// 你的通知逻辑</span>
+    });
+}</code></pre>
+
+<p>这行代码的意图是：</p>
+<table>
+<tr><th>Mono 操作</th><th>含义</th></tr>
+<tr><td><code>Mono.fromRunnable()</code></td><td>将一段同步代码包装成响应式的 <code>Mono&lt;Void&gt;</code>。Runnable 中的代码会在 <strong>订阅时执行</strong>，而不是定义时。</td></tr>
+<tr><td><code>Mono.fromCallable()</code></td><td>（未使用）包装有返回值的同步代码为 <code>Mono&lt;T&gt;</code></td></tr>
+<tr><td><code>Mono.just()</code></td><td>（未使用）包装一个已知值为 Mono</td></tr>
+</table>
+
+<div class="why"><b>为什么不简单地写 void 方法？</b>SBA Server 内部的事件总线是响应式的——当多个实例状态同时发生变化，Server 可以用 Reactor 的调度器在非阻塞线程上并发调用所有已注册的 Notifier。如果你的通知器里做了慢操作（如发邮件、调 HTTP 接口），<code>Mono</code> 可以让你用 <code>.subscribeOn(Schedulers.boundedElastic())</code> 把慢操作挪到弹性线程池，不阻塞事件总线。</div>
+
+<div class="warn"><b>一个注意：本课程的实现是在 Runnable 里做 log.info()，不涉及真正的异步</b>。如果以后扩展为真实告警（发邮件/钉钉/企微），你应该在 <code>Mono.fromRunnable()</code> 后链式调用 <code>.subscribeOn()</code> 指定调度器，并返回新的 Mono。否则慢 I/O 会阻塞事件分发线程。</div>
+
+<h2>四、事件过滤：instanceof 精确拦截</h2>
+
+<pre><code>if (event instanceof InstanceStatusChangedEvent) {
+    <span class="yml-comment">// 只处理状态变化事件</span>
+}</code></pre>
+
+<p>SBA 的事件类型不止一种。除了 <code>InstanceStatusChangedEvent</code>，还有：</p>
+<table>
+<tr><th>事件类型</th><th>触发场景</th></tr>
+<tr><td><code>InstanceRegisteredEvent</code></td><td>新实例注册到 Server</td></tr>
+<tr><td><code>InstanceDeregisteredEvent</code></td><td>实例从 Server 注销</td></tr>
+<tr><td><code>InstanceStatusChangedEvent</code></td><td>实例状态变化（UP→DOWN 等），<strong>本 Notifier 关注这个</strong></td></tr>
+<tr><td><code>InstanceInfoChangedEvent</code></td><td>实例元数据（metadata）或 info 端点信息变更</td></tr>
+<tr><td><code>InstanceEndpointsDetectedEvent</code></td><td>探测到实例暴露了新的 actuator 端点</td></tr>
+</table>
+
+<p>基类 <code>AbstractEventNotifier</code> 的 <code>notify()</code> 方法也有一个事件类型过滤（通过构造函数参数配置），但那个过滤粒度较粗。在 <code>doNotify()</code> 里用 <code>instanceof</code> 再做一次精确过滤，是最清晰的写法。</p>
+
+<h2>五、switch 表达式：6 种状态码 → 中文业务语义</h2>
+
+<div class="region">
+<h3>状态映射表 — 本课最精华的设计决策</h3>
+<pre><code>String statusName = switch (status) {
+    case STATUS_UP              -> "服务上线";
+    case STATUS_OFFLINE         -> "服务离线";
+    case STATUS_RESTRICTED      -> "服务受限";
+    case STATUS_OUT_OF_SERVICE  -> "停止服务状态";
+    case STATUS_DOWN            -> "服务下线";
+    case STATUS_UNKNOWN         -> "服务未知异常";
+    default                     -> "未知状态";
+};</code></pre>
+</div>
+
+<p>这段 switch 的精彩之处：</p>
+
+<p><strong>(1) 用的是 Java 14+ 的 switch 表达式（Expression Switch），不是传统的 switch 语句</strong>。箭头语法 <code>-></code> 自动 break，不穿透；返回值直接赋给变量 <code>statusName</code>。比传统写法简洁一个数量级。</p>
+
+<p><strong>(2) 常量来自静态导入，不写硬编码字符串</strong>：</p>
+<pre><code>import static de.codecentric.boot.admin.server.domain.values.StatusInfo.*;</code></pre>
+<p>把 <code>STATUS_UP</code>、<code>STATUS_DOWN</code> 等常量直接导入命名空间，避免写 <code>StatusInfo.STATUS_UP</code> 这种冗长的前缀。这些常量定义在 SBA 框架的 <code>StatusInfo</code> 类中，值是 <code>"UP"</code>、<code>"DOWN"</code> 等字符串。</p>
+
+<p><strong>(3) 「服务上线」和「服务下线」的区分有业务意义</strong>：</p>
+<ul>
+<li><code>UP → "服务上线"</code> — 应用的 <code>/health</code> 返回 UP，一切正常</li>
+<li><code>OFFLINE → "服务离线"</code> — 实例从注册中心移除（可能是手动注销或心跳超时）</li>
+<li><code>DOWN → "服务下线"</code> — 应用还在，但 <code>/health</code> 返回 DOWN（如数据库连不上）</li>
+</ul>
+<p>细品这三个中文翻译的差异——「上线」是正常状态，「离线」是非正常退出，「下线」是挂了但进程可能还在。运维人员看到这条日志能立刻判断严重程度。</p>
+
+<p><strong>(4) default 分支是防御性编程的体现</strong>。虽然有 6 个已知状态，但如果 SBA 未来版本新增了状态码（如 <code>STATUS_STARTING</code>），这个 <code>default -> "未知状态"</code> 保证了 switch 不会因为缺少 case 而抛异常。日志仍然会打印出来，只是状态名是「未知状态」。</p>
+
+<h2>六、事件处理的完整数据流</h2>
+
+<div class="chain">SBA 内部事件流：
+
+1. Client 心跳上报 → Server 更新 Instance 状态
+               │
+2. Server 对比新旧状态 → 发现状态变化（如 UP→DOWN）
+               │
+3. Server 发布 InstanceStatusChangedEvent 到事件总线
+               │
+4. 事件总线遍历所有 Notifier Bean
+               │
+5. AbstractEventNotifier.notify(event)
+   ├→ 检查 event type 过滤 → 匹配，继续
+   └→ 调用 doNotify(event, instance)
+               │
+6. CustomNotifier.doNotify()
+   ├→ instanceof InstanceStatusChangedEvent ✓
+   ├→ 提取 registName, instanceId, status, serviceUrl
+   ├→ switch 映射 status → 中文名称
+   └→ log.info("状态名称【服务上线】, 注册名称【ruoyi-monitor-admin】, ...")
+               │
+7. 日志落盘 → 运维人员在 ELK/Splunk 中搜索到状态变化记录</div>
+
+<h2>七、从日志记录到真实告警的扩展思路</h2>
+
+<div class="why"><b>本课的 CustomNotifier 只做了 log.info()，但你能扩展什么？</b><br>
+这是通知器体系设计的巧妙之处——<code>doNotify()</code> 模板方法只定义了「什么时候触发」和「给你什么数据」，剩下的「怎么通知」完全由你决定。以下是一些可扩展的方向（属于 Out of Scope，但作为课外思考）：<br>
+1. 发钉钉/飞书/企业微信机器人消息 — 在 Runnable 里调 HTTP API<br>
+2. 发邮件 — Spring Mail + Thymeleaf 模板<br>
+3. 写数据库 — 建一张 <code>monitor_event_log</code> 表，持久化状态变化<br>
+4. 触发 Prometheus AlertManager — 调 AlertManager 的 HTTP API<br>
+5. 发短信/电话 — 对接云厂商的通知服务</div>
+
+<h2>八、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. <code>doNotify()</code> 为什么返回 <code>Mono&lt;Void&gt;</code> 而不是 <code>void</code>？</p>
+<span class="opt">A. 因为 Spring 要求所有方法返回 Mono</span>
+<span class="opt">B. SBA 通知器体系基于 Project Reactor 响应式编程，用 Mono 支持非阻塞异步处理。多个 Notifier 可并发执行，慢操作不阻塞事件总线</span>
+<span class="opt">C. 因为 Java 不支持 void 返回类型</span>
+<span class="opt">D. 为了兼容 Kotlin 的协程</span>
+<details><summary>看答案</summary><b>B</b>。SBA 内部事件总线是响应式的，所有通知器返回 Mono 以支持非阻塞调度。如果你的通知逻辑有慢 I/O（发邮件、调 HTTP），可以通过 <code>.subscribeOn(Schedulers.boundedElastic())</code> 把慢操作挪到弹性线程池，不阻塞事件分发。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>InstanceStatusChangedEvent</code> 和 <code>InstanceRegisteredEvent</code> 有什么区别？</p>
+<span class="opt">A. 完全相同，只是命名不同</span>
+<span class="opt">B. RegisteredEvent 是新实例首次注册时触发，StatusChangedEvent 是实例状态发生改变（UP→DOWN 等）时触发</span>
+<span class="opt">C. RegisteredEvent 只在 Windows 上触发</span>
+<span class="opt">D. StatusChangedEvent 只在使用 MySQL 时触发</span>
+<details><summary>看答案</summary><b>B</b>。RegisteredEvent 在实例首次向 Server 注册时触发一次。StatusChangedEvent 在每次状态发生变化（如 UP→DOWN、DOWN→UP）时触发——这是一个高频事件，是本 Notifier 关注的核心事件。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. switch 的 default 分支返回 "未知状态"，它的防御作用是什么？</p>
+<span class="opt">A. 没有实际作用，纯粹为了凑够代码行数</span>
+<span class="opt">B. 如果 SBA 未来版本新增了状态码，不会因为缺少 case 分支而导致 switch 异常，日志仍能打印</span>
+<span class="opt">C. 为了兼容 Java 8</span>
+<span class="opt">D. 为了让 IDE 停止显示警告</span>
+<details><summary>看答案</summary><b>B</b>。防御性编程的最佳实践——default 分支确保即使出现未知状态码，switch 表达式也有一个合法返回值，不会抛异常。同时日志仍然会被打印，只是状态名为「未知状态」。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. <code>STATUS_UP -> "服务上线"</code> 和 <code>STATUS_DOWN -> "服务下线"</code> 这两行翻译的业务考量是什么？</p>
+<span class="opt">A. 没有区别，只是为了让日志看起来好看</span>
+<span class="opt">B. UP 表示实例 /health 返回正常，DOWN 表示 /health 返回不健康（如数据库断开），两个状态反映的是服务的可用性级别，运维人员能据此判断严重程度</span>
+<span class="opt">C. UP 比 DOWN 多一个字母</span>
+<span class="opt">D. 它们只是枚举值，日志里都会打印原始状态码</span>
+<details><summary>看答案</summary><b>B</b>。「上线/下线」的区分在运维场景中有明确业务含义：(1) DOWN 比 OFFLINE 更严重——DOWN 说明进程可能还在但功能坏了，OFFLINE 是正常的注销；(2) 运维人员看到「服务下线」会直接冲去排查数据库/Redis 连接，看到「服务离线」可能是计划内重启或缩容。中文翻译让非技术人员也能直观判断。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://codecentric.github.io/spring-boot-admin/current/#_notifying" target="_blank">SBA 官方文档 · Notifications</a> 与 <a href="https://projectreactor.io/docs/core/release/reference/" target="_blank">Project Reactor 参考指南</a>。本课源码见 <code>resources.md</code> 引用的 <code>CustomNotifier.java</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「怎么给 CustomNotifier 加上钉钉告警？」「InstanceRepository 可以查其他实例的状态吗？」「SBA 有没有内置的去重机制，避免同一次状态变化触发多次通知？」<br><br>🏁 <b>恭喜你学完了 Spring Boot Admin 监控模块的全部 4 节课！</b>你已经掌握了自注册监控架构、YML 四段配置、SecurityConfig 安全过滤链、以及 CustomNotifier 事件驱动通知。下一步可以尝试：(1) 将另一个 RuoYi 模块接入 SBA 监控；(2) 扩展 CustomNotifier 接入真实告警通道；(3) 阅读 SBA 官方文档的「Clustering」章节了解高可用部署。</div>
+
+<div class="nav">课程 04 / 使命：读懂 Spring Boot Admin 监控模块 · 上一课：<a href="03.html">安全配置</a> · 模块学完，课程结束</div>
+
+</body>
+</html>

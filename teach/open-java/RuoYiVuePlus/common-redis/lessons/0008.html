@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 课 · 异常处理、依赖边界与全局复盘</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+</style>
+</head>
+<body>
+
+<h1>第 8 课 · 异常处理、依赖边界与全局复盘 <span class="tag">完结课</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #7 + 全局复盘）</b>：学完你能说清 <code>RedisExceptionHandler</code> 的职责（以及它为什么只处理 Lock4j）、模块与它依赖的 6 个外部库的边界在哪、自动装配是如何把 4 个 Config 一起拉起来的，并能在脑中重建整个模块的<strong>完整大图</strong>。
+</div>
+
+<h2>一、RedisExceptionHandler：只做一件事</h2>
+<span class="where">handler/RedisExceptionHandler.java</span>
+
+<pre><code>@RestControllerAdvice
+public class RedisExceptionHandler {
+
+    @ExceptionHandler(LockFailureException.class)
+    public R&lt;Void&gt; handleLockFailureException(LockFailureException e, HttpServletRequest request) {
+        log.error("获取锁失败了'{}',发生Lock4j异常.", requestURI, e);
+        return R.fail(HTTP_UNAVAILABLE, "业务处理中，请稍后再试...");
+    }
+}</code></pre>
+
+<div class="why"><b>为什么只处理 LockFailureException？</b>Lock4j 是 baomidou 的分布式锁框架，本模块在 pom.xml 里引入了 <code>lock4j-redisson-spring-boot-starter</code>。当两个请求同时抢同一把锁失败时，Lock4j 会抛 <code>LockFailureException</code>——这不是系统 bug，是正常的并发竞争结果。如果让这个异常冒泡到全局异常处理器，可能被当成 500 返回，用户看到的是"系统错误"而非"别人正在处理"。所以 Redis 模块自己把它兜成友好的 <code>"业务处理中，请稍后再试"</code>。</div>
+
+<p>注意：<code>RedisExceptionHandler</code> 不处理 Redis 连接超时、序列化失败等异常——那些归全局异常处理器管。它<strong>只兜 Lock4j</strong>。这说明它就是 Lock4j 的一个"文明降级"适配器。</p>
+
+<h2>二、自动装配：4 个 Config 怎么一起拉起来</h2>
+<span class="where">META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</span>
+
+<pre><code>org.dromara.common.redis.config.RedisConfig
+org.dromara.common.redis.config.CacheConfig
+org.dromara.common.redis.config.IdempotentConfig
+org.dromara.common.redis.config.RateLimiterConfig</code></pre>
+
+<p>这 4 个类都标了 <code>@AutoConfiguration</code>，在 Spring Boot 3.x 的自动装配机制下，只要 <code>pom.xml</code> 引入了 <code>ruoyi-common-redis</code>，Spring 就会扫描这个文件，把 4 个配置类全部实例化：</p>
+
+<div class="flow">spring.factories (旧) → AutoConfiguration.imports (Spring Boot 3.x)
+
+引入 ruoyi-common-redis → Spring 读 imports 文件 → 装配：
+  RedisConfig         → Redisson 序列化/前缀/连接
+  CacheConfig         → @EnableCaching + Caffeine + PlusSpringCacheManager
+  RateLimiterConfig   → RateLimiterAspect（被 @RateLimiter 触发）
+  IdempotentConfig    → RepeatSubmitAspect（被 @RepeatSubmit 触发）</div>
+
+<div class="side">
+💡 <code>RateLimiterConfig</code> 和 <code>IdempotentConfig</code> 都加了 <code>@AutoConfiguration(after = RedisConfiguration.class)</code>，确保在 Redis 连接就绪后才装配切面——否则 <code>RedisUtils</code> 里的 <code>CLIENT</code> 拿不到。
+</div>
+
+<h2>三、依赖边界：模块到底依赖了什么</h2>
+<span class="where">pom.xml</span>
+
+<p>回到 <code>pom.xml</code>，看看这个模块引了哪些外部库，以及它们各管什么边界：</p>
+
+<table>
+<tr><th>依赖</th><th>在本模块的角色</th><th>跨边界说明</th></tr>
+<tr><td><code>ruoyi-common-core</code></td><td>拿 Spring 容器工具类、常量、异常、HTTP 工具</td><td>依赖方向：redis ← core（redis 依赖 core 的工具）</td></tr>
+<tr><td><code>ruoyi-common-json</code></td><td>JSON 序列化（Jackson3 + Hutool JSON）</td><td>RedisConfig 用 Jackson3 Codec；RepeatSubmit 用 JsonUtils</td></tr>
+<tr><td><code>redisson-spring-boot-starter</code></td><td>★ 核心：操作 Redis 的客户端</td><td>整个模块的基石，所有工具类的 CLIENT 都来自这个依赖</td></tr>
+<tr><td><code>lock4j-redisson-...</code></td><td>分布式锁（本模块只接管它的异常）</td><td>边界清晰：锁由 Lock4j 管，异常归 RedisExceptionHandler 兜</td></tr>
+<tr><td><code>caffeine</code></td><td>本地一级缓存</td><td>可选：不传 caffeine 构造则二级缓存不启用</td></tr>
+<tr><td><code>sa-token-core</code></td><td>读 token 名（RepeatSubmit key 用）</td><td>仅 <code>SaManager.getConfig().getTokenName()</code> 一处</td></tr>
+</table>
+
+<h2>四、全局复盘：模块全景大图</h2>
+
+<p>现在回顾 8 节课的全部内容，把 5 大区域汇总成一张最终地图。这是你以后"回来找东西"的索引。</p>
+
+<div class="flow">ruoyi-common-redis（Redisson 业务封装层）
+│
+│  依赖: redisson / caffeine / lock4j / sa-token / ruoyi-common-core / ruoyi-common-json
+│
+├── config/  ── 启动装配，定地基规则
+│   ├── RedisConfig         → 序列化(CompositeCodec)、前缀(KeyPrefixHandler)、单机/集群(RedissonProperties)
+│   ├── CacheConfig         → @EnableCaching + Caffeine 本地缓存 + PlusSpringCacheManager
+│   ├── RateLimiterConfig   → 注册限流切面 @AutoConfiguration(after=RedisConfiguration)
+│   ├── IdempotentConfig    → 注册防重切面
+│   └── RedissonProperties  → yml: redisson.* 映射（线程/前缀/单机/集群）
+│
+├── handler/  ── 挂在框架扩展点上的小钩子
+│   ├── KeyPrefixHandler    → 实现 NameMapper，给所有 key 加/去前缀（对业务透明）
+│   └── RedisExceptionHandler → 兜 Lock4j 锁失败，降级为"请稍后再试"
+│
+├── aspectj/ + annotation/ + enums/  ── 注解驱动的拦截行为
+│   ├── @RateLimiter        → 控频率：RRateLimiter 令牌桶，3 种 LimitType（DEFAULT/IP/CLUSTER）
+│   └── @RepeatSubmit       → 控重复：setIfAbsent 占位 + 成功留键/失败删键
+│
+├── manager/  ── 二级缓存核心
+│   ├── PlusSpringCacheManager → 自定义 CacheManager，支持 cacheName#参数 语法
+│   └── CaffeineCacheDecorator → 给 Redis Cache 装饰一层本地 Caffeine（30s/1000条）
+│
+└── utils/  ── 业务最常直接调用的入口
+    ├── RedisUtils           → 裸键值：对象/集合/Map/原子/发布订阅/keys扫描/限流
+    ├── CacheUtils           → Spring Cache 命名空间（和 @Cacheable 同源）
+    ├── QueueUtils           → 轻量分布式队列（普通+优先级）
+    └── SequenceUtils        → 分布式发号器（P20260630000001）</div>
+
+<p><strong>用一张图记住这个模块</strong>：Redisson 是底层引擎 → config 把它配成"懂 RuoYi 规则的 Redisson"→ handler 加透明前缀和异常降级 → aspectj 提供注解式限流和防重 → manager 搭二级缓存加速 → utils 给业务开门。你日常写的代码里 90% 只碰到 utils 里的四个工具类和那两个注解——但你现在知道，它们背后是这张完整的地图。</p>
+
+<h2>五、检验一下（最终提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>RedisExceptionHandler</code> 为什么只处理 Lock4j 的异常，而不处理 Redis 连接超时？</p>
+<span class="opt">A. Redis 连接超时不会被抛出，不需要处理</span>
+<span class="opt">B. 它只负责把 Lock4j 的锁竞争降级成友好提示；Redis 连接异常归全局异常处理器管</span>
+<span class="opt">C. Lock4j 异常是唯一的异常类型，Redis 不会出异常</span>
+<span class="opt">D. Redis 连接超时会被 KeyPrefixHandler 自动重试</span>
+<details><summary>看答案</summary><b>B</b>。本模块和 Lock4j 有边界：锁由 Lock4j 管、锁失败由本模块兜（降级友好提示）。Redis 自身异常不属于本模块范围。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Spring Boot 3.x 是通过什么机制把 4 个 Config 自动装配的？</p>
+<span class="opt">A. spring.factories 文件</span>
+<span class="opt">B. AutoConfiguration.imports 文件（Spring Boot 3.x 新机制）</span>
+<span class="opt">C. 编译时注解处理器自动扫描包</span>
+<span class="opt">D. Maven 插件在打包时注入</span>
+<details><summary>看答案</summary><b>B</b>。<code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 是 Spring Boot 3.x 的自动装配入口文件，替代了旧版的 <code>spring.factories</code>。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 读完 8 节课，一个新人问你"RuoYi 的缓存模块到底是什么"，用一句话回答？</p>
+<span class="opt">A. 就是一个 RedisUtils 工具类而已，没别的了</span>
+<span class="opt">B. 是 Redisson 的业务封装层：配好序列化/前缀/连接 → 提供限流防重注解 → 搭二级缓存 → 给四个工具类开门</span>
+<span class="opt">C. 核心是 Lock4j 分布式锁模块</span>
+<span class="opt">D. 核心是 Caffeine 本地缓存</span>
+<details><summary>看答案</summary><b>B</b>。8 节课的最终答案——config 定地基、handler 装钩子、aspectj 加保护、manager 做加速、utils 开大门。一句话讲清模块的全貌和设计分层。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html" target="_blank">Spring Boot 官方文档 · Auto-configuration</a>——本课的 <code>AutoConfiguration.imports</code> 机制在这一节有完整说明。</div>
+
+<div class="reminder">💡 8 节课学完了！你可以回来查阅任何一课的速查参考文档（<code>reference/</code>），或翻 <code>GLOSSARY.md</code> 巩固术语。我随时在这里等你追问任何细节。</div>
+
+<div class="nav">课程 0008（完结）/ 使命：全面读懂 ruoyi-common-redis · 完整课程序列：0001→0002→0003→0004→0005→0006→0007→0008</div>
+
+</body>
+</html>

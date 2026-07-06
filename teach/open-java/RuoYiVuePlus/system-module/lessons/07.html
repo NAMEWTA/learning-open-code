@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第7课：缓存策略 — Redis 缓存设计与失效机制</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>⚡ 第7课：缓存策略 — Redis 缓存设计与失效机制</h1>
+
+<p><strong>胜利目标：</strong>能说出 ruoyi-system 中所有缓存分类、缓存 Key 命名规则、缓存失效的触发时机，以及同类方法调用的 AopProxy 技巧。</p>
+
+<h2>1. 缓存分类全景</h2>
+
+<table>
+  <thead><tr><th>缓存名（CacheNames）</th><th>缓存内容</th><th>Key 模式</th><th>Cacheable 位置</th><th>CacheEvict 触发</th></tr></thead>
+  <tbody>
+    <tr><td><code>SYS_USER_NAME</code></td><td>用户登录名</td><td>#userId</td><td>selectUserNameById()</td><td>（长期有效）</td></tr>
+    <tr><td><code>SYS_NICKNAME</code></td><td>用户昵称</td><td>#userId</td><td>selectNicknameById()</td><td>修改用户/修改个人资料时</td></tr>
+    <tr><td><code>SYS_DEPT</code></td><td>部门详情</td><td>#deptId</td><td>selectDeptById()</td><td>修改/删除部门时</td></tr>
+    <tr><td><code>SYS_DEPT_AND_CHILD</code></td><td>部门+所有子部门ID串</td><td>#deptId</td><td>getDeptAndChild()</td><td>新增/修改/删除部门时（全清）</td></tr>
+    <tr><td><code>SYS_ROLE_CUSTOM</code></td><td>角色自定义数据权限部门ID串</td><td>#roleId</td><td>getRoleCustom()</td><td>修改角色权限时</td></tr>
+    <tr><td><code>SYS_OSS_CONFIG</code></td><td>OSS 配置</td><td>#ossConfigId</td><td>（OSS 模块）</td><td>修改 OSS 配置时</td></tr>
+    <tr><td><code>PWD_ERR_CNT_KEY</code></td><td>密码错误次数</td><td>#userName</td><td>（登录模块）</td><td>登录成功/手动解锁时</td></tr>
+  </tbody>
+</table>
+
+<h2>2. 缓存注解使用模式</h2>
+
+<h3>2.1 @Cacheable — 读时缓存</h3>
+
+<pre><code>// 模式1：简单缓存 — 有就返回，没有就查库并缓存
+@Cacheable(cacheNames = CacheNames.SYS_USER_NAME, key = "#userId")
+public String selectUserNameById(Long userId) {
+    return userMapper.lambda().select(SysUser::getUserName)...;
+}
+
+// 模式2：条件缓存 — 只在 key 不为 null 时缓存
+@Cacheable(cacheNames = CacheNames.SYS_ROLE_CUSTOM, key = "#roleId",
+           condition = "#roleId != null")
+public String getRoleCustom(Long roleId) {
+    // 防止 roleId=null 导致缓存空值污染
+}</code></pre>
+
+<h3>2.2 @CacheEvict — 写时失效</h3>
+
+<pre><code>// 单条失效 — 按 key 精准删除
+@CacheEvict(cacheNames = CacheNames.SYS_NICKNAME, key = "#user.userId")
+public int updateUserProfile(SysUserBo user) { ... }
+
+// 全量清空 — 当无法按 key 精准删除时（如部门移动影响所有子部门）
+@CacheEvict(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, allEntries = true)
+public int insertDept(SysDeptBo bo) { ... }
+
+// 🔑 组合失效 — @Caching 同时清理多个缓存
+@Caching(evict = {
+    @CacheEvict(cacheNames = CacheNames.SYS_DEPT, key = "#bo.deptId"),
+    @CacheEvict(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, allEntries = true)
+})
+public int updateDept(SysDeptBo bo) { ... }</code></pre>
+
+<h2>3. 同类方法调用的 AopProxy 技巧</h2>
+
+<p>Spring 的 @Cacheable 是基于 AOP 代理的，同类内部调用不经过代理，缓存注解失效。ruoyi 的解决方案：</p>
+
+<pre><code>// ❌ 问题代码 — 同类内部调用不触发缓存
+public String selectNicknameByIds(String userIds) {
+    for (Long id : StringUtils.splitTo(userIds, Convert::toLong)) {
+        // this.selectNicknameById(id);  ← 直接调用，不经过代理，缓存不生效！
+    }
+}
+
+// ✅ ruoyi 解决方案 — 通过 AopProxy 走代理
+public String selectNicknameByIds(String userIds) {
+    for (Long id : StringUtils.splitTo(userIds, Convert::toLong)) {
+        // 通过 SpringUtils.getAopProxy(this) 获取当前对象的代理
+        String nickname = SpringUtils.getAopProxy(this).selectNicknameById(id);
+        // ...
+    }
+}
+// SpringUtils.getAopProxy(this) 返回的是代理对象
+// 代理对象上的 @Cacheable 才会生效</code></pre>
+
+<div class="highlight">
+  <strong>AopProxy 的本质：</strong>从一个 Bean 内部调用自身的另一个方法时，需要显式获取代理对象来调用，才能让 AOP 切面（包括 @Cacheable、@Transactional）生效。ruoyi 封装的 <code>SpringUtils.getAopProxy(this)</code> 就是做这件事。
+</div>
+
+<h2>4. 缓存的失效时机策略</h2>
+
+<table>
+  <thead><tr><th>操作</th><th>失效策略</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>修改个人信息</td><td>精准失效：按 userId</td><td>只影响单个用户的昵称</td></tr>
+    <tr><td>新增部门</td><td>全量失效：SYS_DEPT_AND_CHILD</td><td>新部门可能改变任意部门的子部门列表</td></tr>
+    <tr><td>移动部门</td><td>精准 + 全量：SYS_DEPT + SYS_DEPT_AND_CHILD</td><td>自身信息变了 + 子部门树变了</td></tr>
+    <tr><td>修改角色权限</td><td>精准失效 + 踢出在线用户</td><td>权限变更需要立即生效（通过事件）</td></tr>
+    <tr><td>删除角色（批量）</td><td>全量失效：allEntries = true</td><td>批量删除无法逐个精准失效</td></tr>
+  </tbody>
+</table>
+
+<h2>5. 缓存 Key 设计原则</h2>
+
+<pre><code>// ruoyi 的缓存 Key 命名模式
+// 1. 对象缓存 — 用对象 ID 作为 key
+//    SYS_DEPT::123     → 部门123的详情
+//    SYS_USER_NAME::456 → 用户456的登录名
+
+// 2. 列表缓存 — 用关键参数作为 key
+//    SYS_ROLE_CUSTOM::789 → 角色789的自定义数据范围
+//    SYS_DEPT_AND_CHILD::100 → 部门100及其所有子部门
+
+// 3. 功能缓存
+//    PWD_ERR_CNT_KEY::admin → admin 用户的密码错误次数</code></pre>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>列举 ruoyi-system 中 5 个不同的缓存名及其缓存内容</li>
+  <li>解释为什么 <code>SYS_DEPT_AND_CHILD</code> 在增删改时都选择 <code>allEntries = true</code></li>
+  <li>写出一个场景：什么时候需要使用 <code>SpringUtils.getAopProxy(this)</code></li>
+  <li>解释 <code>@Caching</code> 和多个 <code>@CacheEvict</code> 的区别和适用场景</li>
+  <li>为什么 <code>getRoleCustom()</code> 要加上 <code>condition = "#roleId != null"</code></li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>CacheNames.java</code> 常量类 — 了解所有缓存分类的定义</div>
+<div class="reminder">💡 有疑问？直接问我。例如："如果缓存和数据库不一致怎么办？" 或 "为什么不用 @CachePut 而是修改时直接失效缓存？"</div>
+
+</body>
+</html>

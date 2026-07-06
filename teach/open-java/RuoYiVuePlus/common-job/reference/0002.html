@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 02 · SnailJobConfig 自动配置详解</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; overflow-x: auto; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  .note { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.4rem 0.7rem; margin: 0.6rem 0; font-size: 0.82rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 02 · SnailJobConfig 自动配置详解</h1>
+<p class="a">配套课程：<code>lessons/0002.html</code> · 使命：读懂 ruoyi-common-job 定时任务模块</p>
+
+<h2>源码结构（43 行）</h2>
+<pre>@AutoConfiguration                           // ① 自动配置
+@ConditionalOnProperty(prefix = "snail-job",
+    name = "enabled", havingValue = "true")  // ② 开关控制
+@EnableScheduling                           // ③ 启用 Spring 调度
+@EnableSnailJob                             // ④ 启用 SnailJob 客户端
+public class SnailJobConfig {
+
+    @EventListener(SnailClientStartingEvent.class)
+    public void onStarting(SnailClientStartingEvent event) {
+        LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
+        SnailLogbackAppender&lt;ILoggingEvent&gt; ca = new SnailLogbackAppender&lt;&gt;();
+        ca.setName("snail_log_appender");
+        ca.start();
+        Logger rootLogger = lc.getLogger(Logger.ROOT_LOGGER_NAME);
+        rootLogger.addAppender(ca);             // ⑤ 挂载远程日志 Appender
+    }
+}</pre>
+
+<h2>四注解一方法速查</h2>
+<table>
+<tr><th>元素</th><th>源码位置</th><th>作用</th><th>不写会怎样</th></tr>
+<tr><td><code>@AutoConfiguration</code></td><td>第 21 行</td><td>声明自动配置类，Spring Boot 自动加载</td><td>类不被加载，其余注解不生效</td></tr>
+<tr><td><code>@ConditionalOnProperty(...)</code></td><td>第 22 行</td><td>yml 开关控制：<code>snail-job.enabled=true</code> 才生效</td><td>永远生效，无法按环境开关</td></tr>
+<tr><td><code>@EnableScheduling</code></td><td>第 23 行</td><td>允许使用 Spring <code>@Scheduled</code></td><td>不影响 SnailJob，仅影响原生调度</td></tr>
+<tr><td><code>@EnableSnailJob</code></td><td>第 24 行</td><td>触发 SnailJob 客户端全部初始化（连接、扫描、注册）</td><td>客户端不启动，任务无法被调度</td></tr>
+<tr><td><code>onStarting()</code></td><td>第 32-39 行</td><td>客户端启动时将 <code>SnailLogbackAppender</code> 挂载到 Logback 根 Logger</td><td>日志不回传 Server，运维看不到任务日志</td></tr>
+</table>
+
+<h2>yml 关键配置</h2>
+<table>
+<tr><th>配置项</th><th>示例值</th><th>说明</th></tr>
+<tr><td><code>snail-job.enabled</code></td><td><code>true</code> / <code>false</code></td><td>客户端总开关（对应 @ConditionalOnProperty）</td></tr>
+<tr><td><code>snail-job.group</code></td><td><code>"ruoyi_group"</code></td><td>任务分组，需在 Server 后台创建</td></tr>
+<tr><td><code>snail-job.token</code></td><td><code>"SJ_..."</code></td><td>接入令牌，Server 验证客户端身份</td></tr>
+<tr><td><code>snail-job.server.host</code></td><td><code>127.0.0.1</code></td><td>SnailJob Server IP</td></tr>
+<tr><td><code>snail-job.server.port</code></td><td><code>17888</code></td><td>SnailJob Server 端口</td></tr>
+<tr><td><code>snail-job.namespace</code></td><td><code>dev</code></td><td>命名空间，隔离不同环境</td></tr>
+<tr><td><code>snail-job.port</code></td><td><code>2${server.port}</code></td><td>客户端端口漂移（8080→28080）</td></tr>
+</table>
+
+<h2>启动链路</h2>
+<div class="note">
+① Spring 加载 SnailJobConfig → ② 检查 snail-job.enabled → ③ @EnableSnailJob 初始化客户端（读配置、连 Server、注册心跳、扫描 @JobExecutor） → ④ 发布 SnailClientStartingEvent → ⑤ onStarting() 挂载远程 Appender → ⑥ 客户端就绪，等待调度
+</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><code>@EnableSnailJob</code> 是核心——没有它就没有 SnailJob 客户端。</li>
+<li><code>@ConditionalOnProperty</code> 是一键开关——开发环境 <code>enabled: false</code> 什么都不会启动。</li>
+<li><code>onStarting</code> 挂载 Appender 到根 Logger——所有 log.info() 自动上报 Server。</li>
+<li>端口漂移 <code>2${server.port}</code> 是巧妙设计——同一机器多实例不冲突。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：SnailJobConfig、@EnableSnailJob、@ConditionalOnProperty、SnailLogbackAppender、SnailClientStartingEvent</p>
+</body>
+</html>

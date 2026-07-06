@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 | 三阶段管道与自定义翻译器：collect → prepare → process 全链路</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>02 | 三阶段管道与自定义翻译器：collect → prepare → process 全链路</h1>
+
+<div class="mission">
+<strong>课程目标：</strong>掌握 <code>TranslationJsonFieldProcessor</code> 的 collect → prepare → process 三阶段生命周期，理解批量翻译的性能优势，能够从零实现一个自定义翻译器并注册到系统中。
+</div>
+
+<h2>1. collect → prepare → process 三阶段详解</h2>
+
+<p><code>TranslationJsonFieldProcessor</code> 实现了 <code>JsonFieldProcessor</code> 接口（来自 <code>ruoyi-common-json</code> 模块），通过 <code>@Order(0)</code> 注解确保它在所有字段处理器中第一个执行。它遵循严格的三阶段生命周期：</p>
+
+<pre>
+                 collect                            prepare                          process
+                    ↓                                  ↓                                ↓
+  遍历响应对象树的每一个字段    →    聚合后批量调用翻译器    →    将翻译结果写回字段值
+
+  扫描 @Translation 注解         调用 translationBatch        从 context 取出翻译值
+  按 (type, other) 分组          获取 Map&lt;Object, String&gt;     覆盖到字段上
+  存入 JsonEnhancementContext     存入 JsonEnhancementContext   字段变成可读名称
+</pre>
+
+<h3>1.1 第一阶段：collect（收集）</h3>
+
+<p>collect 阶段递归遍历整个响应对象树，找出所有带 <code>@Translation</code> 注解的字段，将它们的原始值按 <code>(type, other)</code> 分组存入上下文。</p>
+
+<pre>
+// collect 阶段核心逻辑（简化）
+void collect(JsonEnhancementContext ctx, JsonFieldContext fieldCtx) {
+    Translation annotation = fieldCtx.getAnnotation(Translation.class);
+    if (annotation == null) return;  // 没有 @Translation，跳过
+
+    // 1. 确定翻译的输入值
+    Object rawValue;
+    if (StringUtils.isNotBlank(annotation.mapper())) {
+        // 有 mapper：反射读取 owner 对象上的源字段
+        rawValue = ReflectionUtils.getFieldValue(
+            fieldCtx.getOwner(), annotation.mapper()
+        );
+    } else {
+        // 无 mapper：直接取当前字段的值
+        rawValue = fieldCtx.getValue();
+    }
+    if (rawValue == null) return;  // 空值不翻译
+
+    // 2. 构建分组 key
+    String groupKey = annotation.type() + ":" +
+        (StringUtils.isNotBlank(annotation.other()) ? annotation.other() : "");
+
+    // 3. 将值收集到对应分组中
+    ctx.getOrCreateAttribute(groupKey, HashSet::new).add(rawValue);
+}
+</pre>
+
+<p><strong>遍历策略：</strong>使用反射递归检查响应对象及其嵌套对象和集合元素。即使 VO 内部嵌套了子 VO 或 List，只要子对象的字段上有 <code>@Translation</code>，都会被扫描到并纳入翻译计划。</p>
+
+<p><strong>分组的意义：</strong></p>
+
+<pre>
+假设一个响应对象包含以下 3 个带 @Translation 的字段：
+
+字段 A: @Translation(type="user_id_to_name"), 值=1
+字段 B: @Translation(type="user_id_to_name"), 值=3
+字段 C: @Translation(type="dept_id_to_name"), 值=5
+
+collect 后的分组：
+  "user_id_to_name:" → Set{1, 3}     ← 两个字段分到同一组
+  "dept_id_to_name:" → Set{5}        ← 独立一组
+</pre>
+
+<p>同一 <code>(type, other)</code> 下的所有值会作为一个整体传给 <code>translationBatch()</code>，这是批量优化的基础。</p>
+
+<h3>1.2 第二阶段：prepare（准备）</h3>
+
+<p>prepare 阶段遍历 collect 阶段建立的所有分组，对每组调用对应翻译器的 <code>translationBatch()</code> 方法，将返回的映射结果存入上下文。</p>
+
+<pre>
+// prepare 阶段核心逻辑（简化）
+void prepare(JsonEnhancementContext ctx) {
+    for (Map.Entry&lt;String, Set&lt;Object&gt;&gt; entry : ctx.getAttributeMap().entrySet()) {
+        String groupKey = entry.getKey();        // "user_id_to_name:"
+        Set&lt;Object&gt; rawValues = entry.getValue(); // {1, 3}
+
+        // 1. 从 groupKey 中拆分出 type 和 other
+        String type = groupKey.split(":")[0];       // "user_id_to_name"
+        String other = groupKey.split(":").length > 1
+            ? groupKey.split(":")[1] : null;
+
+        // 2. 根据 type 查找对应的 TranslationInterface 实现
+        TranslationInterface<?> translator = translatorMap.get(type);
+
+        // 3. 批量翻译
+        Map&lt;Object, ?&gt; translatedMap = translator.translationBatch(rawValues, other);
+        // 返回: {1→"张三", 3→"李四"}
+
+        // 4. 将翻译结果存入上下文
+        ctx.setAttribute(groupKey + "_result", translatedMap);
+    }
+}
+</pre>
+
+<p><strong>为什么分阶段？</strong>如果边收集边翻译（collect 中直接调 translator），则无法实现批量——先收集所有待翻译的值，再一次性批量查询，是批量优化的前提条件。</p>
+
+<h3>1.3 第三阶段：process（处理）</h3>
+
+<p>process 阶段再次遍历所有带 <code>@Translation</code> 的字段，从上下文中取出 prepare 阶段准备好的翻译结果，覆盖到字段值上。</p>
+
+<pre>
+// process 阶段核心逻辑（简化）
+Object process(JsonEnhancementContext ctx, JsonFieldContext fieldCtx) {
+    Translation annotation = fieldCtx.getAnnotation(Translation.class);
+    if (annotation == null) return fieldCtx.getValue();
+
+    // 1. 确定原始值（与 collect 逻辑一致）
+    Object rawValue = getRawValue(fieldCtx, annotation);
+    if (rawValue == null) return null;
+
+    // 2. 计算分组 key，获取翻译结果映射
+    String groupKey = annotation.type() + ":" +
+        (annotation.other() != null ? annotation.other() : "");
+    Map&lt;Object, String&gt; resultMap = ctx.getAttribute(groupKey + "_result");
+
+    // 3. 查表替换：原始值 → 翻译后的可读名称
+    String translated = resultMap.get(rawValue);
+    return translated != null ? translated : rawValue;
+}
+</pre>
+
+<div class="insight">
+<strong>关键细节：</strong>process 阶段替换的是 JSON 序列化输出中的值，<strong>而不是</strong> Java 对象的字段值。因此翻译不会污染原始 VO 对象——下次序列化时如果字段值变化，翻译结果也会自动更新。
+</div>
+
+<h3>1.4 JsonEnhancementContext 上下文</h3>
+
+<p><code>JsonEnhancementContext</code> 是三个阶段的共享数据容器，生命周期与单次 JSON 序列化绑定：</p>
+
+<table>
+  <tr><th>方法</th><th>作用</th><th>使用阶段</th></tr>
+  <tr><td><code>getOrCreateAttribute(key, factory)</code></td><td>获取或初始化一个属性</td><td>collect</td></tr>
+  <tr><td><code>setAttribute(key, value)</code></td><td>存储翻译结果</td><td>prepare</td></tr>
+  <tr><td><code>getAttribute(key)</code></td><td>读取翻译结果</td><td>process</td></tr>
+</table>
+
+<p>每个 HTTP 请求的 JSON 序列化都是独立的一次三阶段流程，context 不跨请求共享。</p>
+
+<h2>2. 性能优势：批量翻译 vs N+1 退化</h2>
+
+<h3>2.1 批量优化的原理</h3>
+
+<p>假设一个列表接口返回 100 条记录，每条记录有 2 个需要翻译的字段（创建人和部门），未批量优化时的查询次数：</p>
+
+<table>
+  <tr><th>方案</th><th>查询次数</th><th>数据库往返</th><th>典型耗时</th></tr>
+  <tr><td>N+1（退化，逐条查询）</td><td>200 次</td><td>200 次</td><td>~2000ms</td></tr>
+  <tr><td>批量优化（覆盖 translationBatch）</td><td>2 次</td><td>2 次</td><td>~30ms</td></tr>
+</table>
+
+<p>批量优化的核心是将分散的 ID 聚合后一次性查询：</p>
+
+<pre>
+// N+1 退化模式（默认行为，每个 ID 单独查一次）
+for (Object id : ids) {
+    result.put(id, remoteUserService.selectById(id));  // 100 次 RPC
+}
+
+// 批量优化模式（所有内置实现都采用）
+Set&lt;Long&gt; allIds = collectLongIds(ids);
+List&lt;SysUserVo&gt; users = remoteUserService.selectListByIds(allIds);  // 1 次 RPC
+Map&lt;Long, String&gt; result = users.stream()
+    .collect(Collectors.toMap(SysUserVo::getUserId, SysUserVo::getUserName));
+</pre>
+
+<div class="mission">
+<strong>自定义翻译器必须注意：</strong>一定要覆盖 <code>translationBatch()</code> 方法。默认实现的循环调用会在日志中输出 WARNING，同时产生严重的性能问题。这不是可选的优化，而是生产环境的基本要求。
+</div>
+
+<h3>2.2 分组策略对批量的影响</h3>
+
+<p>分组 key 是 <code>type + ":" + other</code>。这意味着：</p>
+
+<ul>
+  <li>同一个翻译类型且 other 也相同的字段会共用一次批量查询</li>
+  <li>同一个翻译类型但 other 不同的字段会各自独立查询（对于 DictTypeTranslation 来说这是必要的——不同字典类型有不同数据）</li>
+  <li>翻译器不需要感知分组逻辑——它只接收一组 key 和一个 other 参数</li>
+</ul>
+
+<h2>3. TranslationConfig 自动装配机制</h2>
+
+<h3>3.1 配置类的完整结构</h3>
+
+<p><code>TranslationConfig</code> 是 <code>@AutoConfiguration</code> 类，只有一个 <code>@Bean</code> 方法：</p>
+
+<pre>
+@AutoConfiguration
+public class TranslationConfig {
+
+    @Bean
+    @Order(0)  // 确保 TranslationJsonFieldProcessor 在所有字段处理器中第一个执行
+    public TranslationJsonFieldProcessor translationJsonFieldProcessor(
+            List&lt;TranslationInterface&lt;?&gt;&gt; list) {
+
+        // 构建 type → 实现类的映射
+        Map&lt;String, TranslationInterface&lt;?&gt;&gt; translatorMap = new HashMap&lt;&gt;();
+        for (TranslationInterface&lt;?&gt; impl : list) {
+            TranslationType annotation = impl.getClass()
+                .getAnnotation(TranslationType.class);
+            if (annotation != null) {
+                translatorMap.put(annotation.type(), impl);
+            }
+        }
+
+        return new TranslationJsonFieldProcessor(translatorMap);
+    }
+}
+</pre>
+
+<h3>3.2 Spring DI 如何收集所有实现</h3>
+
+<pre>
+List&lt;TranslationInterface&lt;?&gt;&gt; list
+</pre>
+
+<p>这行参数声明利用了 Spring 的类型注入能力——Spring 会自动查找容器中所有 <code>TranslationInterface</code> 的子类型 Bean 并注入为一个 List。编写自定义翻译器时，不需要修改任何配置文件，只需要：</p>
+
+<ol>
+  <li>让实现类实现 <code>TranslationInterface</code></li>
+  <li>添加 <code>@Component</code>（或 <code>@Service</code>）注册为 Spring Bean</li>
+  <li>添加 <code>@TranslationType(type = "...")</code> 声明类型</li>
+</ol>
+
+<p>TranslationConfig 会<strong>自动</strong>发现新实现并注册到 translatorMap 中。</p>
+
+<h3>3.3 @Order(0) 的含义</h3>
+
+<p><code>@Order(0)</code> 确保 <code>TranslationJsonFieldProcessor</code> 在 JSON 序列化的字段处理器链中第一个执行。这是必要的，因为后续处理器可能会对字段值做进一步处理（如加密、脱敏），而翻译需要在原始值上操作。</p>
+
+<h2>4. 自定义翻译器实战：订单 ID → 订单摘要</h2>
+
+<div class="mission">
+<strong>实战场景：</strong>业务系统中有一个订单模块，VO 里存储的是订单 ID，但前端需要展示一个包含订单号和金额的摘要字符串（如 "ORD-2024001 ￥1,280.00"）。我们需要创建一个自定义翻译器来实现这个转换。
+</div>
+
+<h3>Step 1：定义常量</h3>
+
+<p>在 <code>TransConstant</code> 接口中新增常量（或创建自己的常量接口）：</p>
+
+<pre>
+public interface TransConstant {
+    // ... 已有常量 ...
+
+    // 新增：订单 ID → 订单摘要
+    String ORDER_ID_TO_SUMMARY = "order_id_to_summary";
+}
+</pre>
+
+<h3>Step 2：创建翻译器实现类</h3>
+
+<pre>
+@Component
+@TranslationType(type = TransConstant.ORDER_ID_TO_SUMMARY)
+public class OrderTranslation implements TranslationInterface&lt;String&gt; {
+
+    @Autowired
+    private RemoteOrderService remoteOrderService;
+
+    @Override
+    public String translation(Object key, String other) {
+        Long orderId = Long.valueOf(key.toString());
+        OrderVo order = remoteOrderService.selectById(orderId);
+        if (order == null) return null;
+        return formatOrderSummary(order);
+    }
+
+    @Override
+    public Map&lt;Object, String&gt; translationBatch(Set&lt;Object&gt; keys, String other) {
+        // 1. 收集所有订单 ID
+        Set&lt;Long&gt; orderIds = collectLongIds(keys);
+
+        // 2. 批量查询（关键：一次 RPC 查全部）
+        List&lt;OrderVo&gt; orders = remoteOrderService.selectListByIds(orderIds);
+
+        // 3. 构建 ID → 摘要 的映射
+        return orders.stream().collect(Collectors.toMap(
+            OrderVo::getOrderId,
+            this::formatOrderSummary
+        ));
+    }
+
+    private String formatOrderSummary(OrderVo order) {
+        return String.format("%s ￥%.2f", order.getOrderNo(), order.getAmount());
+    }
+}
+</pre>
+
+<h3>Step 3：在 VO 中使用</h3>
+
+<pre>
+public class PaymentVO {
+
+    // 存储数据库字段
+    private Long orderId;
+
+    // 前端展示字段
+    @Translation(type = "order_id_to_summary", mapper = "orderId")
+    private String orderSummary;
+
+    // 也可以直接用当前字段的值翻译
+    @Translation(type = "order_id_to_summary")
+    private Long anotherOrderId;
+}
+</pre>
+
+<h3>Step 4：验证</h3>
+
+<p>无需修改任何配置类或 XML。重启服务后，Spring 自动发现 <code>OrderTranslation</code> Bean，<code>TranslationConfig</code> 自动将其注册到 translatorMap 中。</p>
+
+<p>调用任何返回 PaymentVO 的接口，<code>orderSummary</code> 字段会自动从 <code>"ORD-2024001 ￥1,280.00"</code>。</p>
+
+<div class="insight">
+<strong>零配置扩展：</strong>这种设计的好处是，添加新翻译类型不需要改动任何现有代码——不需要修改 TranslationConfig、不需要修改 TranslationJsonFieldProcessor、不需要修改任何 XML/Properties 配置。这就是 Spring DI + 策略模式 + 约定优于配置的威力。
+</div>
+
+<h2>5. mapper 机制深入</h2>
+
+<h3>5.1 mapper 的反射原理</h3>
+
+<p>当 <code>@Translation(mapper = "createById")</code> 时，处理器需要从 owner 对象上读取 <code>createById</code> 字段的值。reflection 工作原理：</p>
+
+<pre>
+// 伪代码：mapper 获取源值
+Object owner = fieldCtx.getOwner();                         // NoticeVO 实例
+Field sourceField = owner.getClass()
+    .getDeclaredField(annotation.mapper());                // "createById" 字段
+ReflectionUtils.makeAccessible(sourceField);
+Object sourceValue = sourceField.get(owner);               // 读取值 = 1001L
+</pre>
+
+<h3>5.2 逗号分隔多值字符串的处理</h3>
+
+<p>某些业务场景中，一个字段可能存储多个 ID（逗号分隔），翻译后也需要逗号分隔的名称：</p>
+
+<pre>
+// 输入字段
+private String userIds = "1,2,3";
+
+// 翻译后输出
+private String userNames = "张三,李四,王五";
+</pre>
+
+<p>这时使用的工具链是：<code>collectLongIds</code> 拆分 ID → <code>translationBatch</code> 批量查询 → <code>joinMappedValues</code> 拼接输出。</p>
+
+<pre>
+// collectLongIds 会将 "1,2,3" 拆分为 {1L, 2L, 3L} 加入待翻译集合
+// translationBatch 一次性查询返回 {1L→"张三", 2L→"李四", 3L→"王五"}
+// process 阶段将单个字段的 "1,2,3" 拆开逐个查映射，再拼回 "张三,李四,王五"
+</pre>
+
+<h3>5.3 mapper 的典型应用模式</h3>
+
+<table>
+  <tr><th>模式</th><th>注解位置</th><th>mapper 值</th><th>说明</th></tr>
+  <tr>
+    <td>ID+Name 双字段</td>
+    <td>name 字段上</td>
+    <td>对应的 id 字段名</td>
+    <td>最常见：createById + createByName</td>
+  </tr>
+  <tr>
+    <td>自翻译</td>
+    <td>id 字段上</td>
+    <td>无（不设置 mapper）</td>
+    <td>直接翻译当前字段，如 userId 变成 "张三"</td>
+  </tr>
+  <tr>
+    <td>跨对象引用</td>
+    <td>子对象字段上</td>
+    <td>父对象的字段名</td>
+    <td>较少见，需确保 owner 可达</td>
+  </tr>
+</table>
+
+<h2>6. 综合练习与自测</h2>
+
+<div class="quiz">
+<details>
+<summary><strong>自测题 1：三阶段流程（点击展开）</strong></summary>
+<p><strong>Q1：</strong>为什么需要将翻译流程分成 collect、prepare、process 三个阶段？不能在一个阶段内完成吗？</p>
+<p><strong>Q2：</strong>prepare 阶段中，如果某个类型的翻译器在处理时抛出了异常，会发生什么？会影响其他类型的翻译吗？</p>
+<p><strong>Q3：</strong><code>JsonEnhancementContext</code> 的声明周期是多久？它是否跨请求共享数据？</p>
+<hr>
+<p><strong>A1：</strong>不能。如果边收集边翻译，就无法实现批量优化——必须先收集完所有待翻译的值，才能对每组值进行一次批量查询。分离三个阶段是批量优化的前提。</p>
+<p><strong>A2：</strong>取决于具体实现。通常翻译异常应该被 try-catch 捕获并记录日志，不应该阻断整个 JSON 序列化流程。合理的做法是：某个翻译器失败时，该类型的字段保持原值（ID 而非名称），其他类型的翻译不受影响。</p>
+<p><strong>A3：</strong>生命周期与单次 JSON 序列化绑定——一次 HTTP 响应序列化 → 创建 context → collect → prepare → process → context 销毁。它不跨请求共享数据，每次序列化都是全新的三阶段流程。</p>
+</details>
+</div>
+
+<div class="quiz">
+<details>
+<summary><strong>自测题 2：自定义翻译器（点击展开）</strong></summary>
+<p><strong>Q1：</strong>自定义一个翻译器需要改动哪些现有文件？</p>
+<p><strong>Q2：</strong>如果自定义翻译器没有覆盖 <code>translationBatch()</code>，会发生什么？日志中会看到什么？</p>
+<p><strong>Q3：</strong>以下代码有什么问题？</p>
+<pre>
+@Component
+public class MyTranslation implements TranslationInterface&lt;String&gt; {
+    @Override
+    public String translation(Object key, String other) {
+        return "hello";
+    }
+}
+</pre>
+<hr>
+<p><strong>A1：</strong>理论上只需要创建一个新类。但最佳实践是同时在 TransConstant 中定义新的类型常量。不需要修改 TranslationConfig、TranslationJsonFieldProcessor 或任何配置类——这些都是自动装配的。</p>
+<p><strong>A2：</strong>默认实现会循环调用 <code>translation()</code> 方法，每次调用都打印一条 WARNING 级别的日志。如果翻译列表中有 100 个值，就会看到 100 条警告日志 + 产生 N+1 查询性能问题。</p>
+<p><strong>A3：</strong>缺少 <code>@TranslationType</code> 注解。虽然该类实现了 TranslationInterface，但 TranslationConfig 需要通过 <code>@TranslationType.type()</code> 来注册它。没有这个注解，这个翻译器永远不会被调用——它是 Spring Bean 但不会进入 translatorMap。</p>
+</details>
+</div>
+
+<div class="cite">
+<strong>参考源文件：</strong>TranslationJsonFieldProcessor.java、TranslationConfig.java、JsonFieldProcessor.java（ruoyi-common-json）、JsonEnhancementContext.java、JsonFieldContext.java
+</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。如果你想实际动手写一个自定义翻译器，我可以逐步引导你完成代码和调试。</div>
+
+<div class="nav">
+<span>上一课：<a href="01-@Translation注解与五种内置翻译器.html">01 | @Translation 注解与五种内置翻译器</a></span>
+<span>下一课：无（本系列最后一课）</span>
+</div>
+
+</body>
+</html>

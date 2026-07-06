@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 第 4 课：CustomNotifier 事件驱动通知器</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.3rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; padding-bottom: 0.2rem; border-bottom: 2px solid #e3e8ef; }
+  h3 { font-size: 1.02rem; margin-top: 1.3rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.08rem 0.35rem; border-radius: 3px; font-size: 0.84em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.78rem; line-height: 1.5; margin: 0.5rem 0; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.35rem 0.55rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; font-weight: 600; }
+  .badge { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.1rem 0.4rem; border-radius:3px; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; border-radius: 0 4px 4px 0; margin: 0.6rem 0; font-size: 0.85rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.5rem 0.8rem; border-radius: 0 4px 4px 0; margin: 0.6rem 0; font-size: 0.85rem; }
+  .nav { margin-top: 2rem; font-size: 0.82rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 · 第 4 课：CustomNotifier 事件驱动通知器 <span class="badge">速查</span></h1>
+
+<h2>一句话核心</h2>
+<p>继承 <code>AbstractEventNotifier</code>，覆盖 <code>doNotify()</code>，用 <code>instanceof</code> 过滤 <code>InstanceStatusChangedEvent</code>，用 switch 表达式将 6 种 SBA 状态码映射为中文业务语义并记录日志。</p>
+
+<h2>完整源码速览</h2>
+<pre><code>@Slf4j
+@Component
+public class CustomNotifier extends AbstractEventNotifier {
+
+    protected CustomNotifier(InstanceRepository repository) {
+        super(repository);
+    }
+
+    @Override
+    protected Mono&lt;Void&gt; doNotify(InstanceEvent event, Instance instance) {
+        return Mono.fromRunnable(() -> {
+            if (event instanceof InstanceStatusChangedEvent) {
+                String registName = instance.getRegistration().getName();
+                String instanceId = event.getInstance().getValue();
+                String status = ((InstanceStatusChangedEvent) event)
+                    .getStatusInfo().getStatus();
+                String serviceUrl = instance.getRegistration().getServiceUrl();
+                String statusName = switch (status) {
+                    case STATUS_UP              -> "服务上线";
+                    case STATUS_OFFLINE         -> "服务离线";
+                    case STATUS_RESTRICTED      -> "服务受限";
+                    case STATUS_OUT_OF_SERVICE  -> "停止服务状态";
+                    case STATUS_DOWN            -> "服务下线";
+                    case STATUS_UNKNOWN         -> "服务未知异常";
+                    default                     -> "未知状态";
+                };
+                log.info("Instance Status Change: 状态名称【{}】, "
+                    + "注册名称【{}】, 实例ID【{}】, 状态【{}】, 服务URL【{}】",
+                    statusName, registName, instanceId, status, serviceUrl);
+            }
+        });
+    }
+}</code></pre>
+
+<h2>继承体系</h2>
+<pre><code>Notifier (接口)                          ← 定义 notify(InstanceEvent) → Mono&lt;Void&gt;
+  └── AbstractEventNotifier (抽象类)       ← 提供骨架：event 类型过滤 + 去重检查
+        ├── 持有 InstanceRepository        ← SBA 的内存数据库
+        └── 定义 doNotify() 模板方法        ← 子类覆盖
+              └── CustomNotifier (本类)     ← 只处理 InstanceStatusChangedEvent</code></pre>
+
+<h2>SBA 事件类型速查</h2>
+<table>
+<tr><th>事件类型</th><th>触发时机</th><th>本 Notifier 是否关注</th></tr>
+<tr><td><code>InstanceRegisteredEvent</code></td><td>新实例首次注册</td><td>否</td></tr>
+<tr><td><code>InstanceDeregisteredEvent</code></td><td>实例注销</td><td>否</td></tr>
+<tr><td><code>InstanceStatusChangedEvent</code></td><td>实例状态变化（UP→DOWN 等）</td><td><strong>是 ★</strong></td></tr>
+<tr><td><code>InstanceInfoChangedEvent</code></td><td>元数据或 info 端点信息变更</td><td>否</td></tr>
+<tr><td><code>InstanceEndpointsDetectedEvent</code></td><td>探测到新 actuator 端点</td><td>否</td></tr>
+</table>
+
+<h2>状态码 → 中文映射表</h2>
+<table>
+<tr><th>SBA 状态码</th><th>中文映射</th><th>业务含义</th><th>严重度</th></tr>
+<tr><td><code>STATUS_UP</code></td><td>服务上线</td><td>/health 返回 UP，一切正常</td><td>正常</td></tr>
+<tr><td><code>STATUS_OFFLINE</code></td><td>服务离线</td><td>实例从注册中心移除（心跳超时/主动注销）</td><td>警告</td></tr>
+<tr><td><code>STATUS_DOWN</code></td><td>服务下线</td><td>/health 返回 DOWN（进程可能还在但功能坏了）</td><td>严重</td></tr>
+<tr><td><code>STATUS_RESTRICTED</code></td><td>服务受限</td><td>限流触发或部分功能降级</td><td>警告</td></tr>
+<tr><td><code>STATUS_OUT_OF_SERVICE</code></td><td>停止服务状态</td><td>手动标记，计划内维护</td><td>信息</td></tr>
+<tr><td><code>STATUS_UNKNOWN</code></td><td>服务未知异常</td><td>刚注册未上报 / 网络中断</td><td>警告</td></tr>
+<tr><td><code>default</code></td><td>未知状态</td><td>防御性编程——未来版本新增状态码时不抛异常</td><td>—</td></tr>
+</table>
+
+<h2>Reactor Mono 操作速查（本类涉及的）</h2>
+<table>
+<tr><th>Mono 操作</th><th>含义</th><th>本类是否使用</th></tr>
+<tr><td><code>Mono.fromRunnable()</code></td><td>将同步代码包装成 Mono&lt;Void&gt;，代码在订阅时执行</td><td><strong>是</strong></td></tr>
+<tr><td><code>Mono.fromCallable()</code></td><td>包装有返回值的同步代码为 Mono&lt;T&gt;</td><td>否</td></tr>
+<tr><td><code>Mono.just()</code></td><td>包装已知值</td><td>否</td></tr>
+<tr><td><code>.subscribeOn(Schedulers.boundedElastic())</code></td><td>将慢操作调度到弹性线程池</td><td>否（扩展时建议）</td></tr>
+</table>
+
+<h2>事件处理完整数据流</h2>
+<pre><code>1. Client 心跳上报 → Server 更新 Instance 状态
+2. Server 对比新旧状态 → 发现变化（如 UP→DOWN）
+3. Server 发布 InstanceStatusChangedEvent 到事件总线
+4. 事件总线遍历所有 Notifier Bean
+5. AbstractEventNotifier.notify(event)
+   ├→ event type 过滤 → 匹配，继续
+   └→ doNotify(event, instance)
+6. CustomNotifier.doNotify()
+   ├→ instanceof InstanceStatusChangedEvent ✓
+   ├→ 提取 registName, instanceId, status, serviceUrl
+   ├→ switch 映射 status → 中文
+   └→ log.info(...)
+7. 日志落盘 → ELK/Splunk 可搜索到状态变化</code></pre>
+
+<h2>设计要点</h2>
+<div class="why"><strong>为什么返回 Mono&lt;Void&gt; 而非 void？</strong>SBA 事件总线是响应式的，所有 Notifier 返回 Mono 以支持非阻塞调度。多个 Notifier 可并发执行，慢操作不阻塞事件分发。扩展真实告警时，用 <code>.subscribeOn(Schedulers.boundedElastic())</code> 将慢 I/O 挪到弹性线程池。</div>
+<div class="why"><strong>静态导入常量的意义</strong>：<code>import static ...StatusInfo.*</code> 将 STATUS_UP/DOWN 等常量直接导入命名空间，避免写 <code>StatusInfo.STATUS_UP</code> 冗长前缀。switch 表达式（Java 14+）箭头语法自动 break，不穿透。</div>
+<div class="warn"><strong>default 分支是防御性编程</strong>：如果 SBA 未来版本新增状态码（如 STATUS_STARTING），不会因为缺少 case 分支而抛异常。日志仍然打印，状态名为"未知状态"。</div>
+<div class="warn"><strong>当前实现只做 log.info()，不涉及真正异步</strong>。扩展为真实告警（邮件/钉钉/企微/短信）时，必须在 Mono.fromRunnable() 后链式调用 .subscribeOn() 指定调度器，否则慢 I/O 会阻塞事件分发线程。</div>
+
+<h2>扩展方向（课外思考）</h2>
+<table>
+<tr><th>告警通道</th><th>技术方案</th></tr>
+<tr><td>钉钉/飞书/企业微信</td><td>在 Runnable 中调 Webhook API</td></tr>
+<tr><td>邮件</td><td>Spring Mail + Thymeleaf 模板</td></tr>
+<tr><td>持久化</td><td>建 monitor_event_log 表，写数据库持久化状态变化</td></tr>
+<tr><td>Prometheus AlertManager</td><td>调 AlertManager HTTP API</td></tr>
+<tr><td>短信/电话</td><td>对接云厂商通知服务</td></tr>
+</table>
+
+<div class="nav">速查 04 / 04 · 对应课程：<a href="../lessons/04.html">第 4 课 · 事件驱动</a></div>
+
+</body>
+</html>

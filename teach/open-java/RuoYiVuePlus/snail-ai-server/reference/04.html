@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 04 · 安全、监控与部署</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.65; color: #1a1a1a; background: #fcfcfc; font-size: 0.9rem; }
+  h1 { font-size: 1.45rem; margin-top: 0.3rem; }
+  h2 { font-size: 1.1rem; margin-top: 1.5rem; padding-bottom: 0.2rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 0.95rem; margin-top: 1rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.7rem 0.9rem; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin: 0.7rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.35rem 0.5rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.68rem; padding:0.08rem 0.4rem; border-radius:3px; vertical-align:middle; }
+  .key { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.4rem 0.7rem; border-radius: 0 4px 4px 0; margin: 0.7rem 0; font-size: 0.85rem; }
+  .warn { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.4rem 0.7rem; border-radius: 0 4px 4px 0; margin: 0.7rem 0; font-size: 0.85rem; }
+  .nav { margin-top: 1.5rem; font-size: 0.8rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 04 · 安全、监控与部署 <span class="tag">运维 & 部署</span></h1>
+
+<h2>一、两层安全设计</h2>
+
+<h3>1. SecurityConfig —— 配置层（40 行）</h3>
+<pre><code>@Configuration
+public class SecurityConfig {
+
+    @Value("${spring.boot.admin.client.username}")
+    private String username;
+    @Value("${spring.boot.admin.client.password}")
+    private String password;
+
+    @Bean
+    public FilterRegistrationBean&lt;ActuatorAuthFilter&gt; actuatorFilterRegistrationBean() {
+        FilterRegistrationBean&lt;ActuatorAuthFilter&gt; registrationBean = new FilterRegistrationBean&lt;&gt;();
+        registrationBean.setFilter(new ActuatorAuthFilter(username, password));
+        registrationBean.addUrlPatterns("/actuator", "/actuator/*");
+        return registrationBean;
+    }
+}</code></pre>
+<table>
+<tr><th>设计点</th><th>实现</th><th>意图</th></tr>
+<tr><td>凭据复用</td><td><code>@Value("${spring.boot.admin.client.username}")</code></td><td>一套凭据两处使用：Admin 注册 + Actuator 保护</td></tr>
+<tr><td>最小拦截范围</td><td><code>addUrlPatterns("/actuator", "/actuator/*")</code></td><td>仅拦截运维端点，不影响管理后台静态页面</td></tr>
+<tr><td>构造器注入</td><td><code>new ActuatorAuthFilter(username, password)</code></td><td>过滤器无状态，不需要 Spring 容器依赖</td></tr>
+</table>
+
+<h3>2. ActuatorAuthFilter —— 过滤器层（92 行）</h3>
+<pre><code>public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse,
+                     FilterChain filterChain) throws IOException, ServletException {
+    HttpServletRequest request = (HttpServletRequest) servletRequest;
+    HttpServletResponse response = (HttpServletResponse) servletResponse;
+
+    // 第 1 层：Authorization 头存在且以 "Basic " 开头
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Basic ")) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    // 第 2 层：Base64 解码 + 格式校验 "username:password"
+    String base64Credentials = authHeader.substring("Basic ".length());
+    byte[] credDecoded = Base64.getDecoder().decode(base64Credentials);
+    String credentials = new String(credDecoded, StandardCharsets.UTF_8);
+    String[] split = credentials.split(":");
+    if (split.length != 2) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    // 第 3 层：凭据比对
+    if (!username.equals(split[0]) || !password.equals(split[1])) {
+        response.setHeader("WWW-Authenticate", "Basic realm=\"realm\"");
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized");
+        return;
+    }
+
+    filterChain.doFilter(request, response);  // 放行
+}</code></pre>
+
+<h3>三层校验对应三种攻击</h3>
+<table>
+<tr><th>校验层</th><th>防御的攻击</th><th>失败响应</th></tr>
+<tr><td>Authorization 头检查</td><td>无认证信息的直接访问</td><td>401 + WWW-Authenticate</td></tr>
+<tr><td>Base64 解码 + 格式检查</td><td>Authorization 头格式错误</td><td>401</td></tr>
+<tr><td>凭据比对</td><td>错误的用户名/密码</td><td>401</td></tr>
+</table>
+
+<h3>为什么不用 Sa-Token / Spring Security？</h3>
+<div class="key">
+<strong>独立部署 = 独立认证。</strong>snailai-server 不依赖 <code>ruoyi-common-satoken</code>，没有登录态和会话上下文。它被设计为可被任何系统通过 gRPC 调用的通用 AI 平台。对仅需保护 Actuator 端点的场景，92 行的 Servlet Filter 比引入 Spring Security 更轻量、更合适。
+</div>
+
+<h2>二、监控集成：Spring Boot Admin 客户端</h2>
+<pre><code>spring.boot.admin.client:
+  enabled: true
+  url: http://localhost:9090/admin          # → ruoyi-monitor-admin
+  instance:
+    service-host-type: IP                   # 容器环境用 IP 而非主机名
+    metadata:
+      username: ${spring.boot.admin.client.username}
+      userpassword: ${spring.boot.admin.client.password}
+  username: @monitor.username@              # Maven 构建时替换
+  password: @monitor.password@</code></pre>
+<div class="key">
+<strong>凭据闭环：</strong>metadata 中的 username/userpassword 就是 Actuator 的认证凭据。Admin Server 用它们访问 snailai-server 的 Actuator 端点获取监控数据。一套凭据，两端闭环使用。
+</div>
+
+<h2>三、Dockerfile 解析</h2>
+<pre><code>FROM bellsoft/liberica-openjdk-rocky:21.0.11-cds    # JDK 21 + CDS 类数据共享
+
+RUN mkdir -p /ruoyi/snailai/logs
+WORKDIR /ruoyi/snailai
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 JAVA_OPTS=""
+
+EXPOSE 8900      # HTTP 管理后台 + Actuator
+EXPOSE 18888     # gRPC AI 能力接口
+
+ADD ./target/ruoyi-snailai-server.jar ./app.jar
+
+ENTRYPOINT java -Djava.security.egd=file:/dev/./urandom \
+           -XX:+HeapDumpOnOutOfMemoryError -XX:+UseZGC ${JAVA_OPTS} \
+           -jar app.jar</code></pre>
+
+<h3>JVM 参数速查</h3>
+<table>
+<tr><th>参数</th><th>含义</th><th>为何重要</th></tr>
+<tr><td><code>-XX:+UseZGC</code></td><td>启用 ZGC 垃圾回收器</td><td>亚毫秒级暂停——AI 对话对延迟敏感，避免 GC 抖动</td></tr>
+<tr><td><code>-XX:+HeapDumpOnOutOfMemoryError</code></td><td>OOM 时自动生成堆转储</td><td>事后分析内存泄漏</td></tr>
+<tr><td><code>-Djava.security.egd=file:/dev/./urandom</code></td><td>非阻塞随机数生成器</td><td>加速 SSL/TLS 握手和 AES 加密操作</td></tr>
+<tr><td><code>${JAVA_OPTS}</code></td><td>环境变量注入点</td><td>运行时通过 <code>-e JAVA_OPTS="-Xmx2g"</code> 追加参数</td></tr>
+<tr><td><code>bellsoft/liberica-openjdk-rocky:21.0.11-cds</code></td><td>BellSoft JDK 21 + CDS</td><td>CDS 预存档类元数据，加速容器冷启动</td></tr>
+</table>
+
+<h3>GC 策略对比</h3>
+<table>
+<tr><th>GC</th><th>暂停时间</th><th>适用场景</th></tr>
+<tr><td>G1（默认）</td><td>通常 &lt; 200ms</td><td>通用服务端应用</td></tr>
+<tr><td>ZGC</td><td>&lt; 1ms</td><td>低延迟——AI 推理、实时对话</td></tr>
+<tr><td>Shenandoah</td><td>&lt; 1ms</td><td>低延迟（Red Hat 生态）</td></tr>
+</table>
+
+<h2>四、日志策略：四级 Appender 管道</h2>
+<pre><code>logback-plus.xml:
+├── console (ConsoleAppender)
+│   └── 实时输出到标准输出（容器日志）—— 按级别分色
+├── file_console (RollingFileAppender, 同步)
+│   ├── 文件：console.log，≥INFO 全量
+│   ├── 保留 1 天
+│   └── 用途：Actuator logfile 端点数据源 / 短期排障
+├── async_info (AsyncAppender → file_info)
+│   ├── 文件：info.log，仅 INFO 级别
+│   ├── 保留 60 天
+│   ├── queueSize=1024, discardingThreshold=100
+│   └── 用途：业务审计、对话记录追溯
+└── async_error (AsyncAppender → file_error)
+    ├── 文件：error.log，仅 ERROR 级别
+    ├── 保留 60 天
+    ├── queueSize=1024, discardingThreshold=100
+    └── 用途：告警接入、故障排查</code></pre>
+
+<div class="warn">
+<strong>为什么 INFO 和 ERROR 用异步写入？</strong>同步日志每次 <code>log.info()</code> 触发磁盘 IO——高并发 AI 对话场景中可能成为性能瓶颈。异步 Appender 将日志写入内存队列，由独立线程批量刷盘。队列满到 <code>discardingThreshold: 100</code> 时丢弃低级别日志。<br><br>
+<strong>权衡：</strong><code>file_console</code> 是同步写入，确保 Actuator logfile 端点总能看到最新日志（实时性）。<code>async_info/error</code> 使用异步写入，追求吞吐量（性能）。实时性 vs 吞吐量的经典取舍。
+</div>
+
+<h2>五、运维闭环全景</h2>
+<table>
+<tr><th>关注点</th><th>组件</th><th>文件</th></tr>
+<tr><td>认证安全</td><td>HTTP Basic Auth（3 层校验）</td><td>SecurityConfig.java + ActuatorAuthFilter.java</td></tr>
+<tr><td>监控上报</td><td>Spring Boot Admin Client</td><td>application-dev.yml / application-prod.yml</td></tr>
+<tr><td>容器化</td><td>Dockerfile（ZGC + CDS + 双端口）</td><td>Dockerfile</td></tr>
+<tr><td>日志</td><td>logback 四级管道（同步 + 异步）</td><td>logback-plus.xml</td></tr>
+<tr><td>健康检查</td><td>Actuator 全端点暴露</td><td>application.yml (management 段)</td></tr>
+</table>
+
+<div class="nav">速查 04 / ruoyi-snailai-server · <a href="03.html">← 上一张</a> · 全模块 4 张速查卡结束</div>
+
+</body>
+</html>

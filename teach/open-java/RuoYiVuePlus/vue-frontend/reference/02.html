@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查：02 路由系统与动态菜单</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2rem; color: #409EFF; }
+  h2 { font-size: 1.2rem; margin-top: 1.8rem; border-bottom: 2px solid #409EFF; padding-bottom: 0.25rem; }
+  h3 { font-size: 1rem; margin-top: 1.2rem; color: #555; }
+  code { background: #f0f0f0; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.88em; }
+  pre { background: #282c34; color: #abb2bf; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.8em; line-height: 1.45; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.85rem; }
+  th { background: #f5f5f5; text-align: left; padding: 0.4rem 0.6rem; border: 1px solid #e0e0e0; }
+  td { padding: 0.4rem 0.6rem; border: 1px solid #e0e0e0; }
+  .tag { display: inline-block; background: #409EFF; color: #fff; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.75em; margin-right: 0.3em; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.5rem 0.8rem; margin: 0.8rem 0; font-size: 0.85rem; }
+  .diagram { background: #f8f9fa; border: 1px solid #e0e0e0; padding: 0.8rem; border-radius: 6px; font-family: monospace; font-size: 0.82em; line-height: 1.5; white-space: pre; margin: 0.8rem 0; }
+</style>
+</head>
+<body>
+<h1>速查 02：路由系统与动态菜单</h1>
+
+<h2>路由架构双层次</h2>
+<table>
+<tr><th>类型</th><th>定义位置</th><th>何时注入</th><th>示例</th></tr>
+<tr><td><code>constantRoutes</code></td><td>router/index.ts</td><td>构建时</td><td>login, 404, 401, /index, /user/profile, /redirect</td></tr>
+<tr><td><code>dynamicRoutes</code></td><td>router/index.ts（空数组）</td><td>登录后 filterDynamicRoutes 过滤 → addRoute</td><td>本地定义的权限路由（需配 permissions/roles）</td></tr>
+<tr><td>后端菜单路由</td><td>后端 /system/menu/getRouters</td><td>登录后 generateRoutes → addRoute</td><td>所有业务模块路由</td></tr>
+</table>
+
+<h2>路由守卫核心流程</h2>
+<div class="diagram">router.beforeEach(to, from)
+├── getToken() 存在?
+│   ├── YES: to.path === '/login'? → redirect '/'
+│   │        roles.length === 0?
+│   │        ├── YES → getInfo() → generateRoutes() → addRoute()
+│   │        │        → return { path: to.path, replace: true }  (hack 重匹配)
+│   │        └── NO  → return true (直接放行)
+│   └── NO:  whiteList.includes(to.path)?
+│            ├── YES → return true
+│            └── NO  → redirect /login?redirect=xxx</div>
+
+<h2>generateRoutes 6 步</h2>
+<pre><code>1. getRouters() → 获取后端菜单树
+2. structuredClone(data) ×3 → sdata(侧边栏) / rdata(注册路由) / defaultData(顶栏)
+3. filterAsyncRouter(sdata) → 侧边栏菜单
+4. filterAsyncRouter(rdata, ..., true) → 完整路由（含组件重写）
+5. filterAsyncRouter(defaultData) → 顶栏菜单
+6. filterDynamicRoutes(dynamicRoutes) → 本地权限路由 addRoute
+7. setRoutes / setSidebarRouters / setTopbarRoutes → 存入 store
+8. duplicateRouteChecker → name 重复检测</code></pre>
+
+<h2>filterAsyncRouter：组件名 → 真实组件</h2>
+<pre><code>// 构建时预建查找表
+const modules = import.meta.glob('./../../views/**/*.vue');
+// 运行时 O(1) 查找
+viewModuleMap.get('system/user/index') → () => import('...')
+
+// 特殊组件直接映射
+'Layout'     → Layout
+'ParentView' → ParentView
+'InnerLink'  → InnerLink</code></pre>
+
+<h2>关键知识点</h2>
+<table>
+<tr><th>知识点</th><th>说明</th></tr>
+<tr><td><span class="tag">Hack</span> addRoute 重匹配</td><td>addRoute() 不会触发当前导航重新匹配，需 return { path: to.path, replace: true }</td></tr>
+<tr><td><span class="tag">克隆</span> structuredClone ×3</td><td>同一份菜单数据生成三个视图：侧边栏菜单、注册路由、顶栏菜单，需独立深拷贝</td></tr>
+<tr><td><span class="tag">Vite</span> import.meta.glob</td><td>构建时静态分析，等价 webpack 的 require.context</td></tr>
+<tr><td><span class="tag">KeepAlive</span> createCustomNameComponent</td><td>异步组件无 name → 壳层组件注入 name → keep-alive 的 include 匹配</td></tr>
+<tr><td><span class="tag">检测</span> duplicateRouteChecker</td><td>name 重复导致 keep-alive 缓存混乱 → 404</td></tr>
+</table>
+
+<div class="warn"><strong>坑点：</strong>本地 dynamicRoutes 和后端菜单的 name 冲突 → 404。用 duplicateRouteChecker 在开发时早发现。</div>
+</body>
+</html>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 | 全局异常处理与响应增强</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+
+<h1>02 | 全局异常处理与响应增强：GlobalExceptionHandler 16 种异常 + ResponseEnhancementAdvice</h1>
+
+<div class="mission">
+<strong>课程目标：</strong>掌握 GlobalExceptionHandler 的 16 种异常覆盖策略及内外有别（内部全栈日志 + 外部友好提示）的核心纪律，理解 ResponseEnhancementAdvice 的响应增强机制，以及 WaveAndCircleCaptcha 验证码生成、I18nLocaleResolver 国际化等 Web 层配套能力。
+</div>
+
+<h2>1. GlobalExceptionHandler 全景</h2>
+
+<h3>1.1 角色定位</h3>
+
+<p><code>GlobalExceptionHandler</code> 使用 <code>@RestControllerAdvice</code> 注解，拦截所有 Controller 抛出的异常，是系统的最后一道防线。它的核心纪律是：</p>
+
+<blockquote>
+<p><strong>内部：</strong><code>log.error()</code> 记录完整堆栈，方便开发人员排查。<br>
+<strong>外部：</strong><code>R.fail()</code> 返回友好消息，不暴露内部细节给客户端。</p>
+</blockquote>
+
+<p>这保证了两个目标同时达成：日志有足够信息溯源问题，响应对用户友好不泄露技术细节。</p>
+
+<h3>1.2 16 种异常覆盖一览</h3>
+
+<table>
+<tr><th>序号</th><th>异常类型</th><th>处理策略</th><th>特殊性</th></tr>
+<tr><td>1</td><td><code>AccessDeniedException</code></td><td>返回 403，提示无权限</td><td>Spring Security 权限异常</td></tr>
+<tr><td>2</td><td><code>NotLoginException</code></td><td>返回 401，提示未登录</td><td>Sa-Token 未登录异常</td></tr>
+<tr><td>3</td><td><code>NotPermissionException</code></td><td>返回 403，提示无接口权限</td><td>Sa-Token 权限不足</td></tr>
+<tr><td>4</td><td><code>NotRoleException</code></td><td>返回 403，提示无角色权限</td><td>Sa-Token 角色不匹配</td></tr>
+<tr><td>5</td><td><code>HttpRequestMethodNotSupportedException</code></td><td>返回提示：不支持该请求方式</td><td>GET/POST 方法错误</td></tr>
+<tr><td>6</td><td><code>HttpMediaTypeNotSupportedException</code></td><td>返回提示：不支持该媒体类型</td><td>Content-Type 不匹配</td></tr>
+<tr><td>7</td><td><code>ServiceException</code></td><td>提取业务错误码和消息</td><td>业务异常，可能带自定义 code</td></tr>
+<tr><td>8</td><td><code>BindException</code></td><td>提取第一个字段校验错误</td><td>@Valid 参数校验失败</td></tr>
+<tr><td>9</td><td><code>MethodArgumentNotValidException</code></td><td>提取第一个字段校验错误</td><td>@Validated 请求体校验失败</td></tr>
+<tr><td>10</td><td><code>DemoModeException</code></td><td>返回演示模式限制提示</td><td>演示环境禁止修改操作</td></tr>
+<tr><td>11</td><td><code>AsyncRequestTimeoutException</code></td><td><strong>空处理，不返回任何内容</strong></td><td>SSE 连接超时（见 2.2）</td></tr>
+<tr><td>12</td><td><code>IOException</code> (SSE)</td><td><strong>检查 URI 是否含 "sse"，是则忽略</strong></td><td>SSE 客户端断开（见 2.3）</td></tr>
+<tr><td>13</td><td><code>RuntimeException</code></td><td>生成 8 位错误码，日志记录</td><td>通用运行时异常（见 2.1）</td></tr>
+<tr><td>14</td><td><code>Exception</code> (catch-all)</td><td>生成 8 位错误码，日志记录</td><td>所有未匹配的受检异常（见 2.1）</td></tr>
+<tr><td>15</td><td><code>NotWebSocketConnectionException</code></td><td>返回 WebSocket 连接失败提示</td><td>WebSocket 异常</td></tr>
+<tr><td>16</td><td><code>SocketException</code></td><td>返回网络异常提示</td><td>底层 Socket 通信异常</td></tr>
+</table>
+
+<div class="insight">
+<strong>覆盖密度：</strong>从 Spring MVC 层（参数校验、方法不支持）、安全层（认证鉴权）、业务层（ServiceException）、网络层（SocketException）到 SSE/WebSocket 长连接，覆盖了 Web 应用可能抛出的几乎所有异常类型。16 种异常处理器的设计让每种异常都有最合适的处理方式。
+</div>
+
+<h2>2. 关键异常处理策略详解</h2>
+
+<h3>2.1 RuntimeException/Exception 的兜底策略 —— 8 位错误码</h3>
+
+<p>这是最重要的兜底处理器。对于未预料的 RuntimeException 和 Exception，系统生成一个<strong>8 位唯一错误码</strong>：</p>
+
+<pre>
+@ExceptionHandler(RuntimeException.class)
+public R&lt;Void&gt; handleRuntimeException(RuntimeException e, HttpServletRequest request) {
+    // 生成 8 位错误码（基于异常内容 hash 或随机生成）
+    String errorCode = generateErrorCode();
+    log.error("请求地址'{}', 发生运行时异常. 错误码: {}", request.getRequestURI(), errorCode, e);
+    return R.fail("系统异常，请联系管理员. 错误码: " + errorCode);
+}
+
+@ExceptionHandler(Exception.class)
+public R&lt;Void&gt; handleException(Exception e, HttpServletRequest request) {
+    String errorCode = generateErrorCode();
+    log.error("请求地址'{}', 发生系统异常. 错误码: {}", request.getRequestURI(), errorCode, e);
+    return R.fail("系统异常，请联系管理员. 错误码: " + errorCode);
+}
+</pre>
+
+<p><strong>工作流程：</strong></p>
+<ol>
+  <li>用户调用接口发生未知异常。</li>
+  <li>GlobalExceptionHandler 捕获，生成 8 位错误码（例如 <code>A3F7B9C2</code>）。</li>
+  <li>日志中输出：完整异常堆栈 + 错误码 + 请求地址。</li>
+  <li>用户收到："系统异常，请联系管理员. 错误码: A3F7B9C2"。</li>
+  <li>用户反馈错误码 → 运维/开发通过 <code>grep A3F7B9C2 app.log</code> 立即定位异常。</li>
+</ol>
+
+<div class="insight">
+<strong>为什么不用异常消息直接返回给用户？</strong>异常消息（如 "NullPointerException: Cannot invoke method on null"）会暴露代码细节，存在安全隐患。错误码机制让用户只拿到一个无意义的编码，而内部人员可以精确追溯。这是日志安全的最佳实践。
+</div>
+
+<h3>2.2 AsyncRequestTimeoutException —— SSE 超时的静默处理</h3>
+
+<p>当 SSE（Server-Sent Events）连接超时时，Spring MVC 的异步机制会抛出 <code>AsyncRequestTimeoutException</code>。这不是真正的错误——SSE 连接本身就有生命周期，超时是正常行为。</p>
+
+<pre>
+@ExceptionHandler(AsyncRequestTimeoutException.class)
+public void handleAsyncRequestTimeoutException(AsyncRequestTimeoutException e) {
+    // 空方法体 —— 不做任何处理，不返回任何响应
+}
+</pre>
+
+<p><strong>关键点：</strong></p>
+<ul>
+  <li>返回类型是 <code>void</code>，不是 <code>R&lt;Void&gt;</code>——Spring 不会写入响应体。</li>
+  <li>方法体为空——不记录日志，不返回错误信息。SSE 超时是预期行为，不是故障。</li>
+  <li>如果对此异常返回错误信息，前端 SSE 客户端会在每次超时后看到一个错误 JSON，破坏 SSE 的事件流。</li>
+</ul>
+
+<h3>2.3 IOException 对 SSE 端点的特殊处理</h3>
+
+<p>当 SSE 客户端断开连接（关闭浏览器、刷新页面）时，服务端写入响应会抛出 IOException。对普通接口这是需要处理的异常，但对 SSE 端点这是正常的客户端行为。</p>
+
+<pre>
+@ExceptionHandler(IOException.class)
+public void handleIOException(IOException e, HttpServletRequest request) {
+    String uri = request.getRequestURI();
+    // 仅对 SSE 端点忽略
+    if (StringUtils.containsIgnoreCase(uri, "sse")) {
+        return;  // 静默忽略
+    }
+    // 非 SSE 端点的 IOException 仍然记录并返回
+    log.error("请求地址'{}', 发生 IO 异常.", uri, e);
+    // 返回错误信息
+}
+</pre>
+
+<p>这个设计避免了 SSE 服务日志被大量"Broken pipe"错误淹没。</p>
+
+<h3>2.4 ServiceException —— 业务异常的错误码透传</h3>
+
+<p><code>ServiceException</code> 是若依框架内业务代码抛出的异常，可能携带自定义错误码和消息：</p>
+
+<pre>
+@ExceptionHandler(ServiceException.class)
+public R&lt;Void&gt; handleServiceException(ServiceException e) {
+    // 提取错误码，无自定义则使用默认值
+    Integer code = e.getCode();
+    String message = e.getMessage();
+    return R.fail(code, message);
+}
+</pre>
+
+<p>与 RuntimeException 不同，ServiceException 的 message 是<strong>业务人员编写的、面向用户的提示</strong>（如"用户名已存在"），直接返回给客户端是安全的。</p>
+
+<h2>3. 响应增强：ResponseEnhancementAdvice</h2>
+
+<h3>3.1 实现机制</h3>
+
+<p><code>ResponseEnhancementAdvice</code> 实现了 Spring MVC 的 <code>ResponseBodyAdvice&lt;Object&gt;</code> 接口，在 Controller 返回数据写入响应体之前进行拦截和增强：</p>
+
+<pre>
+@ControllerAdvice
+public class ResponseEnhancementAdvice implements ResponseBodyAdvice&lt;Object&gt; {
+
+    @Override
+    public boolean supports(MethodParameter returnType, Class converterType) {
+        // 委托给 JsonValueEnhancer 判断是否需要增强
+        return jsonValueEnhancer.supports(converterType);
+    }
+
+    @Override
+    public Object beforeBodyWrite(Object body, MethodParameter returnType,
+                                   MediaType selectedContentType,
+                                   Class selectedConverterType,
+                                   ServerHttpRequest request,
+                                   ServerHttpResponse response) {
+        // 检查 Content-Type 是否兼容 JSON
+        if (!isJsonCompatible(selectedContentType)) {
+            return body;  // 非 JSON 响应不增强
+        }
+
+        // 委托 ruoyi-common-json 的 JsonValueEnhancer 执行实际增强
+        return jsonValueEnhancer.enhance(body);
+    }
+}
+</pre>
+
+<h3>3.2 双层检查机制</h3>
+
+<table>
+<tr><th>检查点</th><th>位置</th><th>目的</th></tr>
+<tr><td><code>supports()</code></td><td>判断消息转换器类型</td><td>确保是 Jackson 等 JSON 转换器才走增强逻辑</td></tr>
+<tr><td><code>beforeBodyWrite()</code></td><td>判断 Content-Type</td><td>确保响应确实是 JSON 格式，避免对 XML/文件下载等误增强</td></tr>
+</table>
+
+<h3>3.3 实际增强逻辑在哪？</h3>
+
+<p>注意：<code>ResponseEnhancementAdvice</code> 本身不包含增强逻辑。它只是一个<strong>适配器</strong>，将 Spring MVC 的 <code>ResponseBodyAdvice</code> 接口适配到 <code>ruoyi-common-json</code> 模块的 <code>JsonValueEnhancer</code>。实际的增强功能（日期格式化、Long 精度处理、敏感字段脱敏等）全部在 JSON 模块中实现。</p>
+
+<blockquote>
+<p><strong>模块解耦设计：</strong>Web 层只负责"拦截时机"（when to intercept），JSON 层负责"如何增强"（how to enhance）。这种分离使得增强逻辑可以独立演进，Web 层不依赖任何具体的 JSON 序列化实现。</p>
+</blockquote>
+
+<h2>4. 验证码生成：WaveAndCircleCaptcha</h2>
+
+<h3>4.1 类结构</h3>
+
+<p><code>WaveAndCircleCaptcha</code> 继承自 Hutool 的 <code>AbstractCaptcha</code>，通过三步绘制生成抗 OCR 识别的验证码图片：</p>
+
+<pre>
+public class WaveAndCircleCaptcha extends AbstractCaptcha {
+
+    // 多个构造器重载
+    public WaveAndCircleCaptcha(int width, int height, int codeCount, int interfereCount) { ... }
+    public WaveAndCircleCaptcha(int width, int height, int codeCount, int interfereCount, float fontScale) { ... }
+
+    @Override
+    protected Image createImage(String code) {
+        // ① drawString —— 绘制验证码文字（带颜色 + 抗锯齿）
+        // ② shear —— X/Y 双向正弦波扭曲（抗 OCR 分割）
+        // ③ drawInterfere —— 绘制干扰元素（圆点 + 正弦波曲线）
+    }
+}
+</pre>
+
+<h3>4.2 三步绘制详解</h3>
+
+<table>
+<tr><th>步骤</th><th>方法</th><th>效果</th><th>对抗目的</th></tr>
+<tr><td>1</td><td><code>drawString()</code></td><td>设置随机颜色 + Graphics2D 抗锯齿，绘制验证码文字</td><td>让文字有颜色变化，简单的灰度二值化无法分离文字</td></tr>
+<tr><td>2</td><td><code>shear()</code></td><td>对图像进行 X 轴和 Y 轴的双向正弦波扭曲变形</td><td>破坏文字的连续笔画特征，OCR 无法通过字符分割识别</td></tr>
+<tr><td>3</td><td><code>drawInterfere()</code></td><td>绘制随机圆点 + 平滑正弦波干扰线</td><td>增加背景噪声，干扰 OCR 的像素级分析</td></tr>
+</table>
+
+<h3>4.3 构造器重载设计</h3>
+
+<pre>
+// 方式一：指定宽高和字符数
+new WaveAndCircleCaptcha(200, 100, 5, 10);
+// → 200x100 图片，5 个验证码字符，10 个干扰元素
+
+// 方式二：额外指定字体缩放
+new WaveAndCircleCaptcha(200, 100, 5, 10, 0.8f);
+// → 字体缩小至 80%，增加识别难度
+
+// 方式三：使用默认值
+new WaveAndCircleCaptcha(200, 100, 4, 5);
+// → 标准验证码尺寸
+</pre>
+
+<div class="insight">
+<strong>为什么扭曲（shear）是核心？</strong>现代 OCR 通过先分割字符再逐个识别来工作。正弦波扭曲让相邻字符粘连在一起，分割算法会失败。即使是最先进的深度学习 OCR，在字符粘连的场景下准确率也会大幅下降。而人类视觉系统对形状的感知不依赖字符的独立性，所以扭曲后仍然可读。
+</div>
+
+<h2>5. 国际化：I18nLocaleResolver</h2>
+
+<h3>5.1 前端驱动的 Locale 策略</h3>
+
+<p><code>I18nLocaleResolver</code> 实现了 Spring 的 <code>LocaleResolver</code> 接口，采用前端驱动的区域设置方案：</p>
+
+<pre>
+public class I18nLocaleResolver implements LocaleResolver {
+
+    @Override
+    public Locale resolveLocale(HttpServletRequest request) {
+        // 从 HTTP 请求头 content-language 读取语言标签
+        String language = request.getHeader("content-language");
+
+        if (StringUtils.isBlank(language)) {
+            // 未设置时回退到系统默认区域
+            return Locale.getDefault();
+        }
+
+        // BCP47 格式解析，如 "zh-CN" → Locale.SIMPLIFIED_CHINESE
+        return Locale.forLanguageTag(language);
+    }
+
+    @Override
+    public void setLocale(HttpServletRequest request, HttpServletResponse response, Locale locale) {
+        // 空方法 —— 不支持服务端切换语言
+        // 语言由前端通过 content-language 请求头控制
+    }
+}
+</pre>
+
+<h3>5.2 关键设计决策</h3>
+
+<table>
+<tr><th>设计点</th><th>选择</th><th>原因</th></tr>
+<tr><td>区域信息来源</td><td><code>content-language</code> 请求头</td><td>前端每次请求携带，无需服务端保存状态</td></tr>
+<tr><td>解析方式</td><td><code>Locale.forLanguageTag()</code></td><td>支持 BCP47 标准格式（zh-CN, en-US, ja-JP）</td></tr>
+<tr><td>setLocale() 实现</td><td>空方法</td><td>不维护服务端语言状态，由前端驱动</td></tr>
+<tr><td>回退策略</td><td><code>Locale.getDefault()</code></td><td>无请求头时使用 JVM 默认区域</td></tr>
+</table>
+
+<div class="insight">
+<strong>为什么不支持 setLocale？</strong>传统的服务端国际化方案会在 Session 中存储用户的语言偏好（如 Spring 的 SessionLocaleResolver）。但若依是前后端分离架构，前端通过请求头控制语言，后端无状态，更符合 RESTful 设计原则。每次请求独立决定语言，避免了 Session 状态管理。
+</div>
+
+<h3>5.3 I18nConfig 注册顺序</h3>
+
+<p>为了让自定义的 <code>I18nLocaleResolver</code> 优先生效，必须确保在 Spring MVC 的默认 <code>AcceptHeaderLocaleResolver</code> 之前注册：</p>
+
+<pre>
+@AutoConfiguration(before = WebMvcAutoConfiguration.class)
+public class I18nConfig implements WebMvcConfigurer {
+
+    @Bean
+    public LocaleResolver localeResolver() {
+        return new I18nLocaleResolver();
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        // 注册 LocaleChangeInterceptor（如果需要）
+    }
+}
+</pre>
+
+<p><code>@AutoConfiguration(before = WebMvcAutoConfiguration.class)</code> 是关键——它确保自定义的 LocaleResolver Bean 在 Spring Boot 的 WebMvcAutoConfiguration 注册默认 LocaleResolver 之前完成注册，从而覆盖默认行为。</p>
+
+<h2>6. AutoConfiguration.imports：自动装配清单</h2>
+
+<p>ruoyi-common-web 的自动装配入口在 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件中：</p>
+
+<pre>
+com.ruoyi.common.web.config.CaptchaConfig
+com.ruoyi.common.web.config.FilterConfig
+com.ruoyi.common.web.config.I18nConfig
+com.ruoyi.common.web.config.ResourcesConfig
+</pre>
+
+<table>
+<tr><th>配置类</th><th>注册的 Bean</th><th>职责</th></tr>
+<tr><td><code>CaptchaConfig</code></td><td>验证码相关 Bean 和 Controller</td><td>验证码生成器配置、验证码接口注册</td></tr>
+<tr><td><code>FilterConfig</code></td><td>RepeatableFilter, XssFilter 的 FilterRegistrationBean</td><td>Filter 链的顺序和参数配置</td></tr>
+<tr><td><code>I18nConfig</code></td><td>I18nLocaleResolver, LocaleChangeInterceptor</td><td>国际化方案注册（before WebMvcAutoConfiguration）</td></tr>
+<tr><td><code>ResourcesConfig</code></td><td>静态资源映射、跨域配置</td><td>CORS 设置、静态资源路径</td></tr>
+</table>
+
+<p>Spring Boot 3.x 在启动时自动扫描此文件，加载所有列出的配置类，无需 <code>@EnableAutoConfiguration</code> 或 <code>spring.factories</code>（旧版机制）。</p>
+
+<h2>本章总结</h2>
+
+<table>
+<tr><th>组件</th><th>核心职责</th><th>关键机制</th></tr>
+<tr><td>GlobalExceptionHandler</td><td>16 种异常全覆盖，内外有别</td><td>内部 log.error 全栈 + 外部 R.fail 友好信息</td></tr>
+<tr><td>运行时异常兜底</td><td>8 位错误码生成</td><td>用户反馈错误码 → grep 日志精确定位</td></tr>
+<tr><td>SSE 异常处理</td><td>AsyncRequestTimeoutException + IOException 静默</td><td>避免 SSE 日志被长连接正常超时/断连淹没</td></tr>
+<tr><td>ResponseEnhancementAdvice</td><td>响应统一增强</td><td>适配 Spring MVC → 委托 JsonValueEnhancer</td></tr>
+<tr><td>WaveAndCircleCaptcha</td><td>抗 OCR 验证码</td><td>三步绘制：drawString + shear + drawInterfere</td></tr>
+<tr><td>I18nLocaleResolver</td><td>无状态国际化</td><td>content-language 请求头 + BCP47 解析</td></tr>
+<tr><td>AutoConfiguration.imports</td><td>4 配置类自动装配</td><td>Spring Boot 3.x 自动发现机制</td></tr>
+</table>
+
+<div class="quiz">
+<details>
+<summary>&#x1F4DD; 课后小测（点击展开）</summary>
+
+<p><strong>问题 1：</strong>为什么 GlobalExceptionHandler 对 RuntimeException 要生成 8 位错误码？直接返回 e.getMessage() 不行吗？</p>
+
+<p><strong>问题 2：</strong>AsyncRequestTimeoutException 的处理方法返回类型是 void，方法体为空。如果改成返回 R.fail("超时")，会对 SSE 客户端造成什么影响？</p>
+
+<p><strong>问题 3：</strong>ResponseEnhancementAdvice 本身没有增强逻辑，它只是一个适配器。这种设计的好处是什么？如果将增强逻辑直接写在 ResponseEnhancementAdvice 中会有什么问题？</p>
+
+<p><strong>问题 4：</strong>I18nLocaleResolver 的 setLocale() 是空方法。在什么场景下，你会考虑实现它？如果实现了，需要配套做哪些改动？</p>
+
+</details>
+</div>
+
+<div class="cite">
+<strong>参考源码：</strong>GlobalExceptionHandler.java, ResponseEnhancementAdvice.java, WaveAndCircleCaptcha.java, I18nLocaleResolver.java, I18nConfig.java, CaptchaConfig.java, FilterConfig.java, AutoConfiguration.imports
+</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav">
+<span><a href="01-Filter链与请求包装.html">&larr; 01 | Filter 链与请求包装</a></span>
+<span>课程目录</span>
+</div>
+
+</body>
+</html>

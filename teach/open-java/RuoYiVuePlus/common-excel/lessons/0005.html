@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 工具类与实战：ExcelBuilder DSL、完整导入导出代码</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#fce4ec; color:#c2185b; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 工具层与实战：ExcelBuilder DSL + 完整导入导出代码 <span class="tag">工具/API 层</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5 + #6）</b>：学完你能独立写出标准的导出和导入代码，理解 <code>ExcelBuilder</code> 的链式 DSL 设计、<code>ExcelWriterWrapper</code> 的安全包装策略、<code>ExcelBigNumberConvert</code> 的大数字保护机制，并完成完整导入导出链路的填空题。
+</div>
+
+<p>前四课分别看完了注解层、转换器层、导入处理器、导出处理器。本课讲最后一层——<strong>工具层</strong>，也就是业务代码真正打交道的 <code>ExcelBuilder</code>。</p>
+
+<h2>一、ExcelBuilder —— 模块的唯一对外 API</h2>
+
+<p>位置：<code>utils/ExcelBuilder.java</code>（1110 行，模块最长的文件）</p>
+
+<p><code>ExcelBuilder</code> 是一个 <code>final class</code>，包含<strong>三个内部类</strong>（ReadBuilder、TemplateBuilder）和一个私有枚举：</p>
+
+<div class="flow">ExcelBuilder&lt;T&gt;
+├── 导出 API
+│   ├── static of(data, headType) → ExcelBuilder         // 列表导出
+│   ├── static writer(headType) → ExcelBuilder            // 自定义写出
+│   └── static template(templatePath) → TemplateBuilder   // 模板填充
+├── 导入 API
+│   └── static read(is, clazz) → ReadBuilder              // 导入读取
+├── 链式配置 (导出)
+│   ├── sheetName / sheetNo / merge / options / password
+│   ├── needHead / automaticMergeHead
+│   ├── includeFields / excludeFields / includeIndexes / excludeIndexes
+│   ├── orderByIncludeColumn / columnWidth / rowHeight
+│   ├── registerWriteHandler / registerConverter
+│   ├── zip / zip(pageSize)
+│   └── toResponse(response) / toStream(os) / toStream(os, consumer)
+└── 链式配置 (导入 — ReadBuilder)
+    ├── validate / failFast / listener
+    ├── sheetNo / sheetName / headRowNumber
+    ├── ignoreEmptyRow / password / autoTrim / autoStrip / numRows
+    ├── registerConverter
+    └── doRead() / doReadSync() / doReadAll() / doReadAllSync()</div>
+
+<div class="side">
+💡 <b>DSL 设计的亮点</b>：<code>ExcelBuilder</code> 的方法全部返回 <code>this</code>，实现了流畅的链式调用。但注意它是 <strong>有状态的建造者</strong>——配置顺序（在 <code>createWriterBuilder()</code> 前还是后）无所谓，关键是最后调用 <code>toResponse()</code> / <code>toStream()</code> 时才真正执行。
+</div>
+
+<h2>二、createWriterBuilder() —— 所有默认处理器的注册点</h2>
+
+<p>这是整个模块最重要的一段初始化代码（<code>ExcelBuilder.java:472-521</code>）：</p>
+
+<pre><code>private ExcelWriterBuilder createWriterBuilder(OutputStream outputStream) {
+    ExcelWriterBuilder builder = FesodSheet.write(outputStream, headType)
+        .autoCloseStream(false)
+        // ═══ 始终注册 ═══
+        .registerConverter(new ExcelBigNumberConvert())  // ① 大数字精度保护
+        .registerWriteHandler(new DataWriteHandler(headType))  // ② 批注+必填
+        // 列宽策略
+        if (columnWidth == null) {
+            builder.registerWriteHandler(new LongestMatchColumnWidthStyleStrategy());
+        } else {
+            builder.registerWriteHandler(new SimpleColumnWidthStyleStrategy(columnWidth));
+        }
+        // 行高策略
+        if (headRowHeight != null || contentRowHeight != null) {
+            builder.registerWriteHandler(new SimpleRowHeightStyleStrategy(...));
+        }
+        // ═══ 始终注册 ═══
+        .registerWriteHandler(new ExcelDownHandler(options));  // ③ 下拉
+        // ④ CellMergeStrategy 在 writeSheet() 中仅在 merge=true 时注册
+        // ... 应用其他配置项
+        return builder;
+}</code></pre>
+
+<div class="step"><span class="num">关键</span><b>注册顺序有意义吗？</b><br>
+Fesod Sheet 按注册顺序依次调用各 WriteHandler 的回调。但本模块的几个处理器互相独立——ExcelDownHandler 只管数据校验、CellMergeStrategy 只管合并区域、DataWriteHandler 只管表头样式——所以注册顺序不影响最终结果。</div>
+
+<h2>三、ExcelWriterWrapper —— 安全包装的价值</h2>
+
+<p>位置：<code>utils/ExcelWriterWrapper.java</code>（248 行）</p>
+
+<pre><code>public record ExcelWriterWrapper&lt;T&gt;(ExcelWriter excelWriter) {
+    public void write(Collection&lt;T&gt; data, WriteSheet writeSheet) {
+        excelWriter.write(data, writeSheet);
+    }
+    // ... 其他 write/fill 方法
+    // 注意：没有暴露 excelWriter.finish() !
+}</code></pre>
+
+<p>这是一个 <strong>Java Record</strong>，对 Fesod Sheet 的 <code>ExcelWriter</code> 做了安全包装。关键设计：</p>
+<ul>
+  <li><strong>不暴露 <code>finish()</code></strong>：防止业务代码提前关闭输出流。</li>
+  <li><strong>不暴露 <code>ExcelWriter</code> 本身</strong>（Record 的字段是私有的，只有一个 getter 方法）。</li>
+  <li><strong>提供 <code>writeContext()</code></strong>：允许业务代码获取写出上下文做一些高级操作。</li>
+  <li><strong>内置 <code>sheetBuilder()</code> / <code>tableBuilder()</code> 静态工厂</strong>：方便创建 <code>WriteSheet</code> 和 <code>WriteTable</code>。</li>
+</ul>
+
+<div class="side">
+💡 <b>为什么不用 Lombok @Delegate</b>？Record 的开销极低，且编译器会保证所有字段 final、自带 equals/hashCode/toString。这里的包装层只有薄薄 248 行，但对于防止「调用方不小心关了流」这种事，它提供了编译期安全保证。
+</div>
+
+<h2>四、ExcelBigNumberConvert —— 15 位精度的分水岭</h2>
+
+<p>位置：<code>convert/ExcelBigNumberConvert.java</code>（81 行）</p>
+
+<pre><code>// convertToExcelData() — 关键的判断
+public WriteCellData&lt;Object&gt; convertToExcelData(Long object, ...) {
+    if (ObjectUtil.isNull(object)) {
+        return new WriteCellData&lt;&gt;("");
+    }
+    String str = Convert.toStr(object);
+    if (str.length() > 15) {
+        // 超过15位 → 按字符串写出，前面加制表符防止科学计数法
+        return new WriteCellData&lt;&gt;(str);
+    }
+    // 15位以内 → 按数值类型写出
+    WriteCellData&lt;Object&gt; cellData = new WriteCellData&lt;&gt;(new BigDecimal(object));
+    cellData.setType(CellDataTypeEnum.NUMBER);
+    return cellData;
+}</code></pre>
+
+<div class="step"><span class="num">1</span><b>为什么是 15 位？</b><br>
+Excel 的数值精度是 15 位有效数字。超过 15 位的数字（如 18 位身份证号、雪花算法生成的 Long 型 ID）如果按数值写入，会被 Excel 截断并显示为科学计数法（如 <code>1.23457E+17</code>），导致数据失真。</div>
+
+<div class="step"><span class="num">2</span><b>解决方案：文本单元格</b><br>
+长度 > 15 时，以字符串形式写入单元格。Excel 打开后会将其视为文本，完整保留所有位数。这也是 <code>ExcelBuilder</code> 在 <code>createWriterBuilder()</code> 中<strong>始终注册</strong>这个 Converter 的原因——它是基础数据保护，不需要用户选择。</div>
+
+<h2>五、完整实战：导出代码</h2>
+
+<pre><code>// ====== 场景一：标准列表导出（最常用） ======
+@PostMapping("/export")
+public void export(HttpServletResponse response, SysUser user) {
+    // 1. 查数据
+    List&lt;SysUser&gt; list = userService.selectUserList(user);
+
+    // 2. 导出
+    ExcelBuilder.of(list, SysUser.class)
+        .sheetName("用户数据")
+        .merge()                         // 合并相同值的列
+        .excludeFields(List.of("password", "salt"))  // 排除敏感字段
+        .toResponse(response);
+}
+
+// ====== 场景二：带下拉选项的模板导出 ======
+@PostMapping("/exportTemplate")
+public void exportTemplate(HttpServletResponse response) {
+    List&lt;DropDownOptions&gt; options = List.of(
+        // 简单下拉
+        new DropDownOptions(2, List.of("男", "女")),
+        // 级联下拉：省份 → 城市
+        DropDownOptions.buildLinkedOptions(
+            provinceList, 3, cityList, 4,
+            Province::getId, City::getProvinceId,
+            Province::getName
+        )
+    );
+
+    ExcelBuilder.of(Collections.emptyList(), SysUser.class)
+        .sheetName("用户导入模板")
+        .options(options)
+        .needHead(true)
+        .toResponse(response);
+}
+
+// ====== 场景三：大数据量 ZIP 分页导出 ======
+@PostMapping("/exportLarge")
+public void exportLarge(HttpServletResponse response) {
+    List&lt;Order&gt; list = orderService.selectAll(); // 假设有 5000 条
+
+    ExcelBuilder.of(list, Order.class)
+        .sheetName("订单数据")
+        .zip(1000)  // 每 1000 条一个 Excel 文件，打包成 ZIP
+        .toResponse(response);
+    // → 浏览器下载 订单数据.zip，内含 5 个 xlsx 文件
+}
+
+// ====== 场景四：自定义写出（多 Sheet） ======
+@PostMapping("/exportMultiSheet")
+public void exportMultiSheet(HttpServletResponse response) {
+    List&lt;User&gt; users = userService.list();
+    List&lt;Order&gt; orders = orderService.list();
+
+    ExcelBuilder.writer(null)
+        .toResponse(response, wrapper -> {
+            // Sheet 1: 用户数据
+            wrapper.write(users, ExcelWriterWrapper.buildSheet(0, "用户"));
+            // Sheet 2: 订单数据
+            wrapper.write(orders, ExcelWriterWrapper.buildSheet(1, "订单"));
+        });
+}</code></pre>
+
+<h2>六、完整实战：导入代码</h2>
+
+<pre><code>// ====== 场景一：标准导入（异步校验） ======
+@PostMapping("/importData")
+public R&lt;Void&gt; importData(@RequestPart("file") MultipartFile file) throws Exception {
+    ExcelResult&lt;SysUser&gt; result = ExcelBuilder
+        .read(file.getInputStream(), SysUser.class)
+        .failFast(false)    // 全量收集错误，不因一个错就终止
+        .doRead();
+
+    if (CollUtil.isEmpty(result.getErrorList())) {
+        userService.saveBatch(result.getList());
+        return R.ok("全部导入成功，共 " + result.getList().size() + " 条");
+    }
+    // 部分成功：记录错误日志
+    log.warn("导入部分失败: {}", result.getAnalysis());
+    if (CollUtil.isNotEmpty(result.getList())) {
+        userService.saveBatch(result.getList());
+    }
+    return R.fail(result.getAnalysis());
+}
+
+// ====== 场景二：严格校验导入 ======
+@PostMapping("/importStrict")
+public R&lt;Void&gt; importStrict(@RequestPart("file") MultipartFile file) throws Exception {
+    try {
+        ExcelResult&lt;SysUser&gt; result = ExcelBuilder
+            .read(file.getInputStream(), SysUser.class)
+            .failFast(true)   // 一个错就终止
+            .headRowNumber(2) // 表头占 2 行
+            .ignoreEmptyRow(true)
+            .doRead();
+        userService.saveBatch(result.getList());
+        return R.ok();
+    } catch (ExcelAnalysisException e) {
+        return R.fail("导入失败：" + e.getMessage());
+    }
+}
+
+// ====== 场景三：自定义监听器（导入后做额外业务校验） ======
+@PostMapping("/importWithCheck")
+public R&lt;Void&gt; importWithCheck(@RequestPart("file") MultipartFile file) throws Exception {
+    ExcelListener&lt;SysUser&gt; customListener = new DefaultExcelListener&lt;&gt;(true, false) {
+        @Override
+        public void invoke(SysUser data, AnalysisContext context) {
+            // 先做标准校验
+            super.invoke(data, context);
+            // 再做业务校验
+            if (userService.existsByPhone(data.getPhonenumber())) {
+                throw new ServiceException("手机号已存在：" + data.getPhonenumber());
+            }
+        }
+    };
+
+    ExcelResult&lt;SysUser&gt; result = ExcelBuilder
+        .read(file.getInputStream(), SysUser.class)
+        .listener(customListener)
+        .doRead();
+
+    userService.saveBatch(result.getList());
+    return R.ok(result.getAnalysis());
+}</code></pre>
+
+<h2>七、模板导出：TemplateBuilder</h2>
+
+<pre><code>// ====== 场景：基于模板文件填充数据 ======
+@PostMapping("/exportByTemplate")
+public void exportByTemplate(HttpServletResponse response) {
+    Map&lt;String, Object&gt; data = Map.of(
+        "users", userService.list(),   // {users.字段} 在模板中引用
+        "dept", deptService.list()
+    );
+
+    ExcelBuilder.template("templates/用户报表.xlsx")
+        .filename("用户报表")
+        .multiList(data)    // 多列表填充模式
+        .toResponse(response);
+}
+
+// TemplateBuilder 支持三种模式：
+// .data(list)       — LIST: 单表数据，模板中用 {.属性}
+// .multiList(map)   — MULTI_LIST: 多表数据，模板中用 {key.属性}
+// .multiSheet(list) — MULTI_SHEET: 多 Sheet 数据</code></pre>
+
+<h2>八、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。本课的练习是填空题——填充正确的代码来完成导入导出。</p>
+
+<div class="quiz">
+<p>Q1. 填空题：导出用户列表，合并单元格，排除密码字段。</p>
+<pre><code>ExcelBuilder.__(list, SysUser.class)
+    .__(true)
+    .__(List.of("password"))
+    .toResponse(response);</code></pre>
+<span class="opt">A. of, merge, excludeFields</span>
+<span class="opt">B. write, merge, excludeIndexes</span>
+<span class="opt">C. of, zip, includeFields</span>
+<span class="opt">D. read, merge, excludeFields</span>
+<details><summary>看答案</summary><b>A</b>。<code>ExcelBuilder.<b>of</b>(list, SysUser.class).<b>merge</b>(true).<b>excludeFields</b>(List.of("password")).toResponse(response);</code></details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>ExcelBigNumberConvert</code> 在什么条件下将 Long 值以<strong>字符串</strong>形式写入 Excel？</p>
+<span class="opt">A. 值大于 999999</span>
+<span class="opt">B. 值的字符串长度 > 15</span>
+<span class="opt">C. 总是以字符串形式写入</span>
+<span class="opt">D. 值以 0 开头时</span>
+<details><summary>看答案</summary><b>B</b>。<code>if (str.length() > 15)</code>。Excel 数值精度为 15 位，超过则必须用文本格式避免精度丢失。这是处理雪花算法 ID（18-19 位）等长数字的标准做法。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>ExcelWriterWrapper</code> 没有暴露 <code>ExcelWriter</code> 的哪个方法？为什么？</p>
+<span class="opt">A. write()——防止写入错误数据</span>
+<span class="opt">B. finish()——防止业务代码提前关闭输出流</span>
+<span class="opt">C. fill()——防止模板填充失败</span>
+<span class="opt">D. 所有方法都暴露了</span>
+<details><summary>看答案</summary><b>B</b>。<code>ExcelWriterWrapper</code> 是 Record，只通过包装方法暴露了 <code>write()</code> / <code>fill()</code> / <code>writeContext()</code>，特意没有暴露 <code>finish()</code>。finish() 由调用方（<code>ExcelBuilder.toStream()</code> 中的 try-with-resources）统一管理。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 填空题：导入用户数据，遇到错误不终止，读取第 2 个 Sheet。</p>
+<pre><code>ExcelResult&lt;SysUser&gt; result = ExcelBuilder
+    .__(file.getInputStream(), SysUser.class)
+    .__(1)
+    .__(false)
+    .doRead();</code></pre>
+<span class="opt">A. read, sheetNo, failFast</span>
+<span class="opt">B. of, sheetNo, validate</span>
+<span class="opt">C. read, sheetName, failFast</span>
+<span class="opt">D. read, sheetNo, zip</span>
+<details><summary>看答案</summary><b>A</b>。<code>ExcelBuilder.<b>read</b>(is, clazz).<b>sheetNo</b>(1).<b>failFast</b>(false).doRead();</code>。sheetNo 从 0 开始，1 表示第 2 个 Sheet。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<code>utils/ExcelBuilder.java</code>（1110 行）——虽然长，但结构清晰：前半段是导出 DSL（字段 + 链式方法），中间是 <code>ReadBuilder</code>（导入 DSL），最后是 <code>TemplateBuilder</code>（模板导出）。建议先读完本课，再去源码中对照。<code>convert/ExcelBigNumberConvert.java</code>（81 行）短小精悍，值得点开看完整实现。</div>
+
+<div class="reminder">💡 恭喜完成全部 5 节课！你现在应该能独立阅读和理解 <code>ruoyi-common-excel</code> 的全部 21 个文件了。建议回顾一下 mission.md 中的 Success 清单，检查自己是否都能做到。有疑问随时问我。</div>
+
+<div class="nav">课程 0005 / 使命：读懂 ruoyi-common-excel 模块 · 上一课：导出处理器链 · 全课程完成 🎉</div>
+
+</body>
+</html>

@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 客户端抽象：从接口到工厂的完整继承链</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef9f0; color:#1a9c54; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 客户端抽象：从接口到工厂的完整继承链 <span class="tag">核心类 ①</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #2）</b>：学完你能画出 <code>OssClient</code> → <code>AbstractOssClientImpl</code> → <code>DefaultOssClientImpl</code> 继承链，说清 <code>OssFactory</code> 的双重检查锁 + 配置热更新机制。
+</div>
+
+<p>OSS 模块的核心是一套精心设计的<strong>三层继承体系</strong>，加上一个管理客户端生命周期的工厂。看似类很多，但只要抓住「接口定义契约 → 抽象类收敛共性 → 实现类只覆写初始化 → 工厂缓存所有实例」这条线，就能一通百通。</p>
+
+<h2>一、OssClient 接口 —— 契约的设计哲学</h2>
+
+<h3>为什么要用接口？</h3>
+<p>亚马逊 S3、阿里云 OSS、腾讯云 COS、华为云 OBS —— 每个厂商都有自己的一套 SDK，但暴露给上层业务的操作<strong>高度一致</strong>：上传、下载、删除、生成预签名 URL。因此，RuoYi 抽象出一个 <code>OssClient</code> 接口，所有厂商的实现类都必须满足同一套 API 契约：</p>
+
+<div class="flow">OssClient (接口)
+  └── AbstractOssClientImpl (抽象类，70+ 方法，统一实现)
+        └── DefaultOssClientImpl (唯一覆写 doInitialize())
+        └── [未来扩展] AliyunOssClientImpl、TencentOssClientImpl …</div>
+
+<h3>两层 API 设计：bucketXxx() vs xxx()</h3>
+<p>接口把每个操作分成两组：</p>
+<ul>
+  <li><b>bucketXxx(bucket, key, ...)</b> —— 指定 bucket，适用于多 bucket 场景</li>
+  <li><b>xxx(key, ...)</b> —— 使用默认 bucket（从配置读取），适用于 90% 的单 bucket 业务</li>
+</ul>
+
+<div class="flow">          OssClient 接口方法分组
+
+  ┌─ bucketUpload()  ── 6 种输入类型 × 2（带/不带 Options）= 12 个重载
+  ├─ upload()        ── 同上 12 个重载，调用 defaultBucket()
+  ├─ bucketDownload()── 6 种输出目标（File, OutputStream 等）
+  ├─ download()      ── 同上，调用 defaultBucket()
+  ├─ bucketDelete()  /  delete()
+  ├─ bucketPresignGetUrl()  /  presignGetUrl()
+  └─ bucketPresignPutUrl()  /  presignPutUrl()</div>
+
+<h3>上传的 6 种输入类型</h3>
+<p>这是接口最精彩的设计——不管你手里是什么形态的数据，总有一个重载接住你：</p>
+
+<table>
+<tr><th>输入类型</th><th>使用场景</th></tr>
+<tr><td><code>Path</code></td><td>NIO 路径，本地文件已落盘</td></tr>
+<tr><td><code>File</code></td><td>传统 IO，Java 最常用的文件引用</td></tr>
+<tr><td><code>RandomAccessFile</code></td><td>大文件断点续传场景</td></tr>
+<tr><td><code>ReadableByteChannel</code></td><td>NIO Channel，零拷贝场景</td></tr>
+<tr><td><code>InputStream</code></td><td>内存流、网络流，最通用但需指定长度</td></tr>
+<tr><td><code>byte[]</code></td><td>小数据（缩略图、JSON），已在内存中</td></tr>
+</table>
+
+<h3>clientId() 默认方法</h3>
+<p>接口声明了一个 <code>default</code> 方法 <code>clientId()</code>，用 <code>IdUtil.fastSimpleUUID()</code> 生成一个不带横线的 UUID，作为客户端实例的唯一标识：</p>
+
+<pre><code>// OssClient.java 接口中的默认方法
+default String clientId() {
+    return IdUtil.fastSimpleUUID();
+}</code></pre>
+
+<p>这意味着任何 <code>OssClient</code> 实例天生带有一个全局唯一 ID，工厂用它做缓存的 key。抽象实现类会把这个值塞进构造函数并覆盖掉默认行为——后面会看到。</p>
+
+<h2>二、AbstractOssClientImpl —— 模板方法模式的精髓</h2>
+
+<p>这个抽象类是整个模块的<strong>绝对核心</strong>。70+ 个公开方法，覆盖了接口中声明的所有操作，但最终全部收敛到<strong>两个私有方法</strong>。这就是模板方法模式的教科书级应用。</p>
+
+<h3>四个核心字段</h3>
+<pre><code>// AbstractOssClientImpl.java 核心状态
+protected S3AsyncClient s3AsyncClient;          // AWS SDK 异步客户端
+protected S3TransferManager s3TransferManager;  // 传输管理器（上传/下载）
+protected S3Presigner s3Presigner;              // 预签名 URL 生成器
+protected ExecutorService asyncExecutor;        // 异步线程池
+
+private final AtomicBoolean initialized = new AtomicBoolean(false);</code></pre>
+
+<p>这 4 个字段构成了客户端的<strong>全部运行时依赖</strong>。注意 <code>AtomicBoolean</code>——它保证初始化的线程安全性，且只允许<strong>一次</strong>初始化（直到 <code>close()</code> 重置它）。</p>
+
+<h3>所有方法收敛到两个私有方法</h3>
+
+<div class="flow">12 个 bucketUpload(Path/File/RandomAccessFile/ReadableByteChannel/InputStream/byte[])
+  │
+  ├─ 每种输入类型先转换为 AsyncRequestBody
+  │     ├─ Path        → AsyncRequestBody.fromFile(path)
+  │     ├─ File        → RandomAccessFile → ReadableByteChannel → AsyncRequestBody
+  │     ├─ InputStream → 写临时文件 → 上传 → finally 删除临时文件  ← ⚠️ 关键技巧
+  │     └─ byte[]      → AsyncRequestBody.fromBytes(data)
+  │
+  └─ 全部流入 ──► private bucketUpload(bucket, key, AsyncRequestBody body, Options)
+                     │
+                     └─► doCustomUpload() ──► s3TransferManager.upload()</div>
+
+<div class="step"><span class="num">1</span><b>InputStream 上传的"先落盘再上传"技巧</b><br>
+<span class="where">AbstractOssClientImpl.java · bucketUpload(InputStream)</span><br>
+S3 传输管理器需要知道文件的 <code>contentLength</code> 才能做分片上传。但 <code>InputStream</code> 本身不提供长度信息（除非调用方传入）。解决方案：先把 InputStream 写到 <strong>临时文件</strong>，然后从临时文件构建 <code>AsyncRequestBody</code>，上传完成后在 <code>finally</code> 块中删除临时文件。这是用磁盘空间换确定性的经典权衡。</div>
+
+<div class="step"><span class="num">2</span><b>File → AsyncRequestBody 的转换链</b><br>
+<code>File</code> 不是直接转成 body 的，而是走了一组精细的转换：<code>File</code> → <code>new RandomAccessFile(file, "r")</code> → <code>randomAccessFile.getChannel()</code> → <code>AsyncRequestBody.fromReadableByteChannel(channel, size)</code>。每一步都有目的：<code>RandomAccessFile</code> 支持随机定位（大文件分片需要），<code>ReadableByteChannel</code> 是 NIO 的零拷贝通道。</div>
+
+<h3>路径构建：buildPathKey</h3>
+<pre><code>// buildPathKey(businessPrefix, fileName) 的核心逻辑
+prefix = mergePrefix(defaultPrefix, businessPrefix);   // 合并前缀
+datePath = yyyy/MM/dd;                                  // 按日期分目录
+uuid = IdUtil.fastSimpleUUID();                         // 全局唯一文件名
+suffix = FileUtil.getSuffix(fileName);                  // 保留原始扩展名
+// 结果: prefix/2026/07/05/a1b2c3d4...jpg</code></pre>
+
+<p><code>mergePrefix()</code> 和 <code>normalizePrefix()</code> 保证路径永远是 URL 安全的：去空格、去首尾斜杠、空值兜底。这两个方法很短（各约 10 行），但因为<strong>每个上传都调用</strong>，所以出错影响面极大。</p>
+
+<h3>异常统一转换：toStorageException</h3>
+<p>S3 SDK 的异步操作都包在 <code>CompletableFuture</code> 里，抛出的异常外面会套 <code>CompletionException</code> 或 <code>ExecutionException</code>。业务代码不想关心这些包装层。所以抽象类提供了一个 <code>toStorageException()</code>：</p>
+
+<pre><code>// 解包 CompletionException / ExecutionException → 统一 S3StorageException
+private RuntimeException toStorageException(Throwable e) {
+    Throwable cause = unwrapAsyncException(e);   // 剥掉异步包装
+    return new S3StorageException(cause);         // 换成统一异常
+}</code></pre>
+
+<p>这样上层调用方只需要捕获 <code>S3StorageException</code>，不用管底层是 CompletionException 还是 ExecutionException。</p>
+
+<h3>close()：有序关闭四件套 + 重置状态位</h3>
+<pre><code>// close() 方法（伪代码）
+public void close() {
+    closeQuietly(s3TransferManager);   // 1. 先停传输（防止新任务提交）
+    closeQuietly(s3AsyncClient);       // 2. 再停客户端（释放连接池）
+    closeQuietly(s3Presigner);         // 3. 停预签名器
+    shutdownAndAwait(asyncExecutor);   // 4. 最后停线程池（等任务跑完）
+    initialized.compareAndSet(true, false);  // 重置初始化标记
+}</code></pre>
+
+<p>关闭顺序不能乱：先断传输、再断连接、然后停辅件、最后收线程。<code>AtomicBoolean</code> 被重置后，同一个实例可以<strong>再次初始化</strong>——这是 OssFactory 热更新机制的基础。</p>
+
+<h2>三、DefaultOssClientImpl —— 唯一需要覆写的 doInitialize()</h2>
+
+<p>抽象类把 70+ 个方法都实现完了，子类只有一个任务：告诉框架「怎么连上 S3」。这个唯一需要覆写的方法是 <code>doInitialize()</code>。</p>
+
+<div class="step"><span class="num">1</span><b>校验凭证</b>：检查 <code>accessKey</code> 和 <code>secretKey</code> 是否为空。缺任何一个直接抛异常——没有凭证，后面的连接构建毫无意义。</div>
+
+<div class="step"><span class="num">2</span><b>解析端点与域名</b>：<code>endpointUrl</code> 用于 API 调用（如 <code>https://s3.amazonaws.com</code>），<code>domainUrl</code> 用于访问文件（如 <code>https://my-bucket.s3.amazonaws.com</code>）。两者可能不同——endpoint 是 API 网关，domain 是 CDN 或自定义域名。同时解析 <code>region</code>，默认 <code>Region.US_EAST_1</code>。</div>
+
+<div class="step"><span class="num">3</span><b>构建 S3AsyncClient</b>：这是整个初始化的核心，配置密集：</div>
+
+<pre><code>// DefaultOssClientImpl.doInitialize() —— S3AsyncClient 构建
+S3AsyncClient.builder()
+    .credentialsProvider(
+        StaticCredentialsProvider.create(
+            AwsBasicCredentials.create(accessKey, secretKey)))
+    .endpointOverride(URI.create(endpointUrl))
+    .region(region)
+    .forcePathStyle(usePathStyleAccess)         // 路径风格 vs 虚拟主机风格
+    .requestChecksumCalculation(
+        ChecksumValidatingPublisher.WHEN_REQUIRED)    // 请求校验和
+    .responseChecksumValidation(
+        ChecksumValidatingPublisher.WHEN_REQUIRED)    // 响应校验和
+    .httpClient(
+        NettyNioAsyncHttpClient.builder()
+            .connectionTimeout(Duration.ofSeconds(60))            // 连接超时 60s
+            .connectionAcquisitionTimeout(Duration.ofSeconds(30)) // 获取连接超时 30s
+            .maxConcurrency(100)                                   // 最大并发 100
+            .maxPendingConnectionAcquires(1000)                    // 等待队列 1000
+            .build())
+    .build();</code></pre>
+
+<div class="side">
+⚠️ <b>校验和策略</b>：<code>ChecksumValidatingPublisher.WHEN_REQUIRED</code> 表示「仅当服务端要求时才计算和验证校验和」。这比 <code>WHEN_SUPPORTED</code> 更省 CPU，大多数对象存储服务（S3、阿里云 OSS）都支持服务端自动校验，不需要客户端重复计算。
+</div>
+
+<div class="step"><span class="num">4</span><b>构建 S3TransferManager 和 S3Presigner</b>：TransferManager 基于 S3AsyncClient 构建，负责分片上传/下载的编排；Presigner 用 <code>domainUrl</code>（不是 endpointUrl）作为端点，生成的预签名 URL 才是对外可访问的地址。</div>
+
+<div class="step"><span class="num">5</span><b>创建 asyncExecutor：虚拟线程 vs 线程池</b></div>
+
+<pre><code>// 两种异步执行器策略
+if (asyncExecutorConfig.enabledVirtualThread()) {
+    this.asyncExecutor = Executors.newVirtualThreadPerTaskExecutor();
+} else {
+    this.asyncExecutor = Executors.newScheduledThreadPool(
+        asyncExecutorConfig.corePoolSize());
+}</code></pre>
+
+<p>Java 21+ 的<strong>虚拟线程</strong>是首选：每个异步任务一个虚拟线程，不消耗 OS 线程，可以同时跑成千上万个。但对于 Java 17 或不想用虚拟线程的场景，退回到传统的 <code>ScheduledThreadPool</code>。这种设计让同一个实现类适配不同 JDK 版本。</p>
+
+<h2>四、OssFactory —— 门面、缓存、热更新三合一</h2>
+
+<p>前面三层继承链解决了「怎么发请求」，但业务代码不需要（也不应该）知道这些细节。OssFactory 提供了一个极简的入口：<code>OssFactory.instance()</code>。但它做的事远不止「new 一个对象」。</p>
+
+<h3>完整调用流程</h3>
+
+<div class="flow">OssFactory.instance()
+  │
+  ├─ 1. RedisUtils.getCacheObject(OssConstant.DEFAULT_CONFIG_KEY)
+  │       └─ 从 Redis 读出当前生效的配置 key（如 "aliyun-oss"）
+  │
+  └─ 2. instance("aliyun-oss")
+        │
+        ├─ 3. CacheUtils.get("sys_oss_config", "aliyun-oss")
+        │     └─ 从缓存（Redis/Caffeine）读配置的 JSON 字符串
+        │
+        ├─ 4. JsonUtils.parseObject(json, OssProperties.class)
+        │     └─ JSON → OssProperties POJO
+        │
+        ├─ 5. OssClientConfig.formProperties(properties)
+        │     └─ OssProperties → OssClientConfig（字段映射 + 策略解析）
+        │
+        ├─ 6. getClientLock(configKey)  // 每个 configKey 一把 ReentrantLock
+        │
+        ├─ 7. lock.lock()
+        │     │
+        │     ├─ client = CLIENT_CACHE.get(configKey)
+        │     │
+        │     ├─ if client != null && client.verifyConfig(newConfig)  ← 配置没变
+        │     │     └─ return client;  // 直接返回缓存的实例
+        │     │
+        │     ├─ if client != null && !verifyConfig  ← 配置变了
+        │     │     └─ closeClient(configKey, client);  // 优雅关闭旧实例
+        │     │
+        │     └─ new DefaultOssClientImpl(configKey, newConfig)
+        │           └─ CLIENT_CACHE.put(configKey, newClient);
+        │           └─ return newClient;
+        │
+        └─ 8. lock.unlock() (finally)</div>
+
+<h3>双重检查锁 — 不仅是性能优化</h3>
+
+<p>经典的 DCL（Double-Checked Locking）模式：</p>
+
+<pre><code>// OssFactory.instance(configKey) 核心逻辑（简化）
+ReentrantLock lock = getClientLock(configKey);
+lock.lock();
+try {
+    OssClient client = CLIENT_CACHE.get(configKey);
+    if (client != null && client.verifyConfig(config)) {
+        return client;                           // ← 第二次检查：缓存命中
+    }
+    if (client != null) {
+        closeClient(configKey, client);          // 配置变了 → 关旧的
+    }
+    OssClient newClient = new DefaultOssClientImpl(configKey, config);
+    CLIENT_CACHE.put(configKey, newClient);      // ← 第一次检查已在 lock 外
+    return newClient;
+} finally {
+    lock.unlock();
+}</code></pre>
+
+<div class="step"><span class="num">🔑</span><b>为什么必须上锁？</b> 如果没有锁，两个并发请求同时发现缓存里没有 client，就会<strong>创建两个 S3AsyncClient 实例</strong>，各占一份连接池（Netty 线程 + 内存），造成资源泄漏。锁保证同一个 configKey 的初始化一定是串行的。</div>
+
+<div class="step"><span class="num">🔑</span><b>为什么是 per-key 锁而不是一把全局锁？</b> <code>CLIENT_LOCKS</code> 是 <code>ConcurrentHashMap&lt;String, ReentrantLock&gt;</code>，每个 configKey 有自己的锁。这样「阿里云 OSS 的初始化」不会阻塞「腾讯云 COS 的初始化」——多个厂商的客户端可以并行创建。</div>
+
+<h3>配置热更新机制</h3>
+
+<p>这是 OssFactory 最体现工程智慧的地方。假设管理员在后台改了 OSS 的 <code>accessKey</code>：</p>
+
+<ol>
+  <li>修改保存后，新的配置 JSON 写入数据库并刷入缓存（CacheUtils 更新）</li>
+  <li>下一个请求调用 <code>OssFactory.instance()</code> 时，从缓存读到的已经是新配置</li>
+  <li><code>OssClientConfig.formProperties()</code> 生成新的 config 对象</li>
+  <li><code>client.verifyConfig(newConfig)</code> 返回 <code>false</code>（accessKey 变了）</li>
+  <li><code>closeClient()</code> 优雅关闭旧实例（释放连接池等资源）</li>
+  <li>创建新的 <code>DefaultOssClientImpl</code>，用新凭证建立连接</li>
+  <li>新实例覆盖 CLIENT_CACHE，<strong>整个过程无需重启服务</strong></li>
+</ol>
+
+<pre><code>// closeClient —— 安全关闭 + 日志告警
+private static void closeClient(String configKey, OssClient client) {
+    try {
+        client.close();
+    } catch (Exception e) {
+        log.warn("关闭OSS客户端[{}]失败", configKey, e);
+    }
+}</code></pre>
+
+<p><code>remove()</code> 方法也走同样的 closeClient 逻辑，用于主动销毁某个客户端实例（比如删除了某个厂商的配置）。</p>
+
+<div class="side">
+💡 <b>为什么用这个模式？</b> RuoYi 项目里 OSS 配置存在数据库 <code>sys_oss_config</code> 表中，管理员通过后台 UI 修改后，缓存自动更新。OssFactory 的 verifyConfig + close + recreate 三步走，让「改配置就生效」成为可能——不用发版、不用重启、不用手动清理连接池。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. AbstractOssClientImpl 中，所有公开的 bucketUpload() 方法最终汇聚到哪个私有方法？</p>
+<span class="opt">A. 汇聚到 doCustomUpload()</span>
+<span class="opt">B. 汇聚到 private bucketUpload(bucket, key, AsyncRequestBody body, Options options)，然后再调 doCustomUpload()</span>
+<span class="opt">C. 每个重载独立调用 s3TransferManager.upload()</span>
+<span class="opt">D. 汇聚到 s3AsyncClient.putObject()</span>
+<details><summary>看答案</summary><b>B</b>。所有 12 个 bucketUpload 重载都将输入转为 AsyncRequestBody，然后统一涌入私有的 <code>bucketUpload(bucket, key, AsyncRequestBody, Options)</code>，再委托给 <code>doCustomUpload()</code> → <code>s3TransferManager.upload()</code>。这是模板方法模式的精髓——变的部分（输入类型转换）分散在各重载，不变的部分（构建请求、发起传输、处理结果）集中在两个私有方法里。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. DefaultOssClientImpl 的 doInitialize() 中，asyncExecutor 有两种创建策略：虚拟线程和线程池。选择逻辑是什么？</p>
+<span class="opt">A. 随机选择</span>
+<span class="opt">B. 根据 asyncExecutorConfig.enabledVirtualThread() 决定：true 用虚拟线程，false 用 ScheduledThreadPool</span>
+<span class="opt">C. 根据 JDK 版本自动判断</span>
+<span class="opt">D. 根据 CPU 核心数决定</span>
+<details><summary>看答案</summary><b>B</b>。由配置项 <code>asyncExecutorConfig.enabledVirtualThread()</code> 控制。虚拟线程是 Java 21+ 的特性，每个任务一个虚拟线程，不占 OS 线程。关闭虚拟线程时退回到 <code>ScheduledThreadPool</code>，核心线程数也由配置决定。这是「能力可选、降级可用」的设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. OssFactory 使用 per-key ReentrantLock（每个 configKey 一把锁）而不是一把全局锁，主要原因是什么？</p>
+<span class="opt">A. 代码更简单</span>
+<span class="opt">B. 让不同厂商的客户端可以并行初始化，不会互相阻塞</span>
+<span class="opt">C. ReentrantLock 比 synchronized 快</span>
+<span class="opt">D. 全局锁会导致死锁</span>
+<details><summary>看答案</summary><b>B</b>。<code>CLIENT_LOCKS</code> 是一个 <code>ConcurrentHashMap&lt;String, ReentrantLock&gt;</code>，通过 <code>computeIfAbsent</code> 为每个 configKey 创建独立的锁。这样「阿里云 OSS 的初始化」不会阻塞「腾讯云 COS 的初始化」——不同 key 的操作完全并行。如果是一把全局锁，多厂商场景下所有初始化都要排队，影响启动性能。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/async.html" target="_blank">AWS SDK for Java v2 · S3AsyncClient 异步客户端文档</a>，以及 <a href="https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/transfer/s3/S3TransferManager.html" target="_blank">S3TransferManager API 文档</a>。对照本课中 DefaultOssClientImpl 的构建代码，理解每个 builder 参数的含义。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「如果 InputStream 上传时临时文件写满了磁盘怎么办？」「close() 时如果 s3TransferManager 还有正在进行的上传任务会怎样？」「verifyConfig() 比较了哪些字段？只比较 accessKey 吗？」下一课讲 <code>OssAutoConfiguration</code> —— 它是怎么把 OssFactory 和业务代码串起来的，以及 <code>@ConditionalOnProperty</code> 的开关机制。</div>
+
+<div class="nav">课程 0002 / 使命：读懂 ruoyi-common-oss 对象存储模块 · 上一课：模块全景 · 下一课预告：OssAutoConfiguration 自动配置与业务接入</div>
+
+</body>
+</html>

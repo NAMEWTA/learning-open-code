@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 02 · 算法体系速查</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+
+<h1>速查 02 · 算法体系速查</h1>
+
+<p>覆盖 IEncryptor 接口、AlgorithmType 枚举、五种加密器、EncryptUtils 工具类、EncodeType 编码类型。</p>
+<p class="a">核心文件：IEncryptor.java, AlgorithmType.java, EncodeType.java, EncryptUtils.java, encryptor/*.java</p>
+
+<h2>IEncryptor 接口</h2>
+
+<table>
+  <tr><th>方法</th><th>签名</th><th>说明</th></tr>
+  <tr><td><code>algorithm()</code></td><td><code>AlgorithmType algorithm()</code></td><td>返回对应的算法类型枚举值</td></tr>
+  <tr><td><code>encrypt()</code></td><td><code>String encrypt(String value, EncodeType encodeType)</code></td><td>加密，encodeType 控制输出编码（BASE64 或 HEX）</td></tr>
+  <tr><td><code>decrypt()</code></td><td><code>String decrypt(String value)</code></td><td>解密，自动识别密文编码格式</td></tr>
+</table>
+
+<h2>AlgorithmType 枚举</h2>
+
+<table>
+  <tr><th>枚举值</th><th>clazz 字段</th><th>算法类型</th><th>密钥要求</th></tr>
+  <tr><td><code>DEFAULT</code></td><td><code>null</code></td><td>占位，由 EncryptContextFactory 替换为 yml 默认值</td><td>-</td></tr>
+  <tr><td><code>BASE64</code></td><td><code>Base64Encryptor.class</code></td><td>Base64 编码（非加密）</td><td>无</td></tr>
+  <tr><td><code>AES</code></td><td><code>AesEncryptor.class</code></td><td>AES 对称加密</td><td>password 16/24/32 字节</td></tr>
+  <tr><td><code>RSA</code></td><td><code>RsaEncryptor.class</code></td><td>RSA 非对称加密</td><td>publicKey + privateKey，&ge;1024 bit</td></tr>
+  <tr><td><code>SM2</code></td><td><code>Sm2Encryptor.class</code></td><td>SM2 国密非对称加密</td><td>publicKey + privateKey</td></tr>
+  <tr><td><code>SM4</code></td><td><code>Sm4Encryptor.class</code></td><td>SM4 国密对称加密</td><td>password 恰好 16 字节</td></tr>
+</table>
+
+<div class="chain">
+<b>反射实例化机制：</b>
+EncryptorManager.registAndGetEncryptor(encryptContext):
+  → key = EncryptorCacheKey.of(encryptContext)
+  → encryptorMap.computeIfAbsent(key, k ->
+      ReflectUtil.newInstance(k.algorithm().getClazz(), encryptContext))
+  // 通过枚举的 clazz 字段反射 new 加密器实例
+  // 相同 (algorithm, encode, password, publicKey, privateKey) 的加密器会被缓存复用
+</div>
+
+<h2>五种加密器详情</h2>
+
+<table>
+  <tr><th>类</th><th>算法</th><th>构造器行为</th><th>encrypt() 委托</th><th>decrypt() 委托</th></tr>
+  <tr>
+    <td><code>Base64Encryptor</code></td>
+    <td>BASE64</td>
+    <td>无校验，仅 super(context)</td>
+    <td><code>EncryptUtils.encryptByBase64()</code><br>忽略 encodeType 参数</td>
+    <td><code>EncryptUtils.decryptByBase64()</code></td>
+  </tr>
+  <tr>
+    <td><code>AesEncryptor</code></td>
+    <td>AES</td>
+    <td>无校验，保存 context<br>（校验在 EncryptUtils 中）</td>
+    <td>HEX → <code>encryptByAesHex()</code><br>否则 → <code>encryptByAes()</code></td>
+    <td><code>EncryptUtils.decryptByAes()</code><br>自动识别 Base64/Hex</td>
+  </tr>
+  <tr>
+    <td><code>RsaEncryptor</code></td>
+    <td>RSA</td>
+    <td><b>构造时校验：</b>publicKey 和 privateKey 任一为空则抛 IllegalArgumentException</td>
+    <td>HEX → <code>encryptByRsaHex()</code><br>否则 → <code>encryptByRsa()</code></td>
+    <td><code>EncryptUtils.decryptByRsa()</code></td>
+  </tr>
+  <tr>
+    <td><code>Sm2Encryptor</code></td>
+    <td>SM2</td>
+    <td><b>构造时校验：</b>publicKey 和 privateKey 任一为空则抛 IllegalArgumentException</td>
+    <td>HEX → <code>encryptBySm2Hex()</code><br>否则 → <code>encryptBySm2()</code></td>
+    <td><code>EncryptUtils.decryptBySm2()</code></td>
+  </tr>
+  <tr>
+    <td><code>Sm4Encryptor</code></td>
+    <td>SM4</td>
+    <td>无校验，保存 context<br>（校验在 EncryptUtils 中）</td>
+    <td>HEX → <code>encryptBySm4Hex()</code><br>否则 → <code>encryptBySm4()</code></td>
+    <td><code>EncryptUtils.decryptBySm4()</code></td>
+  </tr>
+</table>
+
+<h2>EncryptUtils 关键方法速查</h2>
+
+<table>
+  <tr><th>分类</th><th>方法</th><th>底层</th></tr>
+  <tr><td>Base64 编码</td><td><code>encryptByBase64(String)</code></td><td><code>Base64.encode(data, UTF_8)</code></td></tr>
+  <tr><td>Base64 解码</td><td><code>decryptByBase64(String)</code></td><td><code>Base64.decodeStr(data, UTF_8)</code></td></tr>
+  <tr><td>AES 加密</td><td><code>encryptByAes(data, password)</code></td><td><code>SecureUtil.aes(key).encryptBase64()</code></td></tr>
+  <tr><td>AES 加密(Hex)</td><td><code>encryptByAesHex(data, password)</code></td><td><code>SecureUtil.aes(key).encryptHex()</code></td></tr>
+  <tr><td>AES 解密</td><td><code>decryptByAes(data, password)</code></td><td><code>SecureUtil.aes(key).decryptStr()</code></td></tr>
+  <tr><td>RSA 加密</td><td><code>encryptByRsa(data, publicKey)</code></td><td><code>SecureUtil.rsa(null, pk).encryptBase64()</code></td></tr>
+  <tr><td>RSA 加密(Hex)</td><td><code>encryptByRsaHex(data, publicKey)</code></td><td><code>SecureUtil.rsa(null, pk).encryptHex()</code></td></tr>
+  <tr><td>RSA 解密</td><td><code>decryptByRsa(data, privateKey)</code></td><td><code>SecureUtil.rsa(sk, null).decryptStr()</code></td></tr>
+  <tr><td>SM2 加密</td><td><code>encryptBySm2(data, publicKey)</code></td><td><code>SmUtil.sm2(null, pk).encryptBase64()</code></td></tr>
+  <tr><td>SM2 加密(Hex)</td><td><code>encryptBySm2Hex(data, publicKey)</code></td><td><code>SmUtil.sm2(null, pk).encryptHex()</code></td></tr>
+  <tr><td>SM2 解密</td><td><code>decryptBySm2(data, privateKey)</code></td><td><code>SmUtil.sm2(sk, null).decryptStr()</code></td></tr>
+  <tr><td>SM4 加密</td><td><code>encryptBySm4(data, password)</code></td><td><code>SmUtil.sm4(key).encryptBase64()</code></td></tr>
+  <tr><td>SM4 加密(Hex)</td><td><code>encryptBySm4Hex(data, password)</code></td><td><code>SmUtil.sm4(key).encryptHex()</code></td></tr>
+  <tr><td>SM4 解密</td><td><code>decryptBySm4(data, password)</code></td><td><code>SmUtil.sm4(key).decryptStr()</code></td></tr>
+  <tr><td>生成 RSA 密钥</td><td><code>generateRsaKey()</code></td><td><code>KeyPairGenerator RSA 1024bit</code> → Map&lt;publicKey,privateKey&gt;</td></tr>
+  <tr><td>生成 SM2 密钥</td><td><code>generateSm2Key()</code></td><td><code>SmUtil.sm2()</code> → Map&lt;publicKey,privateKey&gt;</td></tr>
+  <tr><td>校验 RSA 公钥</td><td><code>validateRsaPublicKey(String)</code></td><td>Base64→KeyFactory→X509→bitLength &ge; 1024</td></tr>
+  <tr><td>校验 RSA 私钥</td><td><code>validateRsaPrivateKey(String)</code></td><td>Base64→KeyFactory→PKCS8→bitLength &ge; 1024</td></tr>
+  <tr><td>MD5 哈希</td><td><code>encryptByMd5(String)</code></td><td><code>SecureUtil.md5(data)</code></td></tr>
+  <tr><td>SHA256 哈希</td><td><code>encryptBySha256(String)</code></td><td><code>SecureUtil.sha256(data)</code></td></tr>
+  <tr><td>SM3 哈希</td><td><code>encryptBySm3(String)</code></td><td><code>SmUtil.sm3(data)</code></td></tr>
+  <tr><td>SM2 验签</td><td><code>verifySm2Sign(data,sign,pk)</code></td><td><code>SmUtil.sm2().verify()</code></td></tr>
+  <tr><td>SM2 验签(Hex)</td><td><code>verifySm2SignHex(dataH,signH,pk)</code></td><td><code>SmUtil.sm2().verifyHex()</code></td></tr>
+</table>
+
+<h2>EncodeType 编码类型</h2>
+
+<table>
+  <tr><th>枚举值</th><th>说明</th><th>适用算法</th></tr>
+  <tr><td><code>DEFAULT</code></td><td>使用 yml 全局配置（默认 BASE64）</td><td>AES/RSA/SM2/SM4</td></tr>
+  <tr><td><code>BASE64</code></td><td>Base64 编码输出，字符串较短，URL 友好</td><td>AES/RSA/SM2/SM4</td></tr>
+  <tr><td><code>HEX</code></td><td>十六进制编码输出，纯 0-9A-F，便于数据库比较</td><td>AES/RSA/SM2/SM4</td></tr>
+</table>
+<p style="font-size:0.82rem;color:#888;">注：EncodeType 对 Base64Encryptor 无效。Base64 编码本身输出就是 Base64 字符串，不存在二次编码。</p>
+
+<h2>关键陷阱与注意事项</h2>
+
+<table>
+  <tr><th>陷阱</th><th>说明</th></tr>
+  <tr>
+    <td><b>Base64 是编码不是加密</b></td>
+    <td>Base64Encryptor 不使用任何密钥，任何人都可解码。生产环境不要用它保护敏感数据。它的主要用途是开发调试时的占位算法。</td>
+  </tr>
+  <tr>
+    <td><b>SM4 密钥必须恰好 16 字节</b></td>
+    <td><code>EncryptUtils</code> 中 SM4 的校验是 <code>password.length() != 16</code>（精确相等），而不是像 AES 那样允许 16/24/32。注意中文密码的 UTF-8 字节长度不等于字符数。</td>
+  </tr>
+  <tr>
+    <td><b>AES 密钥支持 16/24/32</b></td>
+    <td>分别对应 AES-128/192/256。Hutool 使用 <code>password.getBytes(UTF_8)</code> 直接作为密钥字节，所以密码必须是恰好 16/24/32 个 UTF-8 字节。</td>
+  </tr>
+  <tr>
+    <td><b>RSA 密钥最低 1024 位</b></td>
+    <td><code>CryptoFilter</code> 构造时调用 <code>validateRsaPublicKey/PrivateKey</code> 校验。不满足则应用启动失败（Fail-Fast）。生产环境建议使用 2048 位以上。</td>
+  </tr>
+  <tr>
+    <td><b>RSA/SM2 构造器校验公私钥完整性</b></td>
+    <td>RsaEncryptor 和 Sm2Encryptor 的构造器中检查 publicKey 和 privateKey 是否同时提供，任一缺失直接抛异常。但 AesEncryptor 和 Sm4Encryptor 不在构造器中校验 password（留给 EncryptUtils 处理）。</td>
+  </tr>
+  <tr>
+    <td><b>解密不需要 encodeType</b></td>
+    <td><code>IEncryptor.decrypt(String value)</code> 不接收 EncodeType 参数。Hutool 的 decryptStr() 方法能自动识别密文是 Base64 还是 Hex 编码。</td>
+  </tr>
+  <tr>
+    <td><b>EncryptorCacheKey 使用 Record</b></td>
+    <td>Java 16+ 的 Record 类型自动实现 equals()/hashCode()，天然适合作为 HashMap 的 Key。加密器相同配置会被复用，避免重复创建。</td>
+  </tr>
+</table>
+
+<h2>加密器创建与缓存流程</h2>
+
+<div class="chain">
+调用链：
+MybatisEncryptInterceptor.intercept()
+  → EncryptedFieldProcessor.encrypt(sourceObject)
+    → handle() 递归扫描所有 @EncryptField 字段
+      → EncryptContextFactory.create(field)  // 注解+yml 合并
+      → EncryptorManager.encrypt(value, encryptContext)
+        → if (value.startsWith("ENC_")) return value;  // 幂等性保护
+        → registAndGetEncryptor(encryptContext)
+          → EncryptorCacheKey.of(encryptContext)  // 构建缓存键
+          → encryptorMap.computeIfAbsent(key,
+              k -> ReflectUtil.newInstance(k.algorithm().getClazz(), encryptContext))
+          // 缓存未命中则反射创建，命中则复用
+        → encryptor.encrypt(value, encryptContext.getEncode())
+        → return "ENC_" + encryptedValue;
+</div>
+
+</body>
+</html>

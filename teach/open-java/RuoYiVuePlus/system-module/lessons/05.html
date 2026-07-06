@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>第5课：动态菜单与前端路由 — SysMenu → RouterVo 的魔法</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #333; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+  code { background: #f0f0f0; padding: 0.15rem 0.3rem; border-radius: 3px; font-size: 0.9rem; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .highlight { background: #fff3cd; padding: 0.5rem 1rem; border-left: 4px solid #ffc107; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>📋 第5课：动态菜单与前端路由 — SysMenu → RouterVo 的魔法</h1>
+
+<p><strong>胜利目标：</strong>能完整解释 sys_menu 表中的一行数据如何变成前端 Vue Router 的一段配置，理解三种 menu_type 的路由生成差异。</p>
+
+<h2>1. 核心思路：数据库驱动的前端路由</h2>
+
+<blockquote>
+  前端不硬编码路由，而是登录后从后端 <code>GET /system/menu/getRouters</code> 获取当前用户可访问的菜单树，动态生成 Vue Router 配置。这样权限变更无需重新部署前端。
+</blockquote>
+
+<h2>2. 三种菜单类型的路由生成</h2>
+
+<table>
+  <thead><tr><th>menu_type</th><th>含义</th><th>前端表现</th><th>component 取值</th></tr></thead>
+  <tbody>
+    <tr><td>M（目录）</td><td>侧边栏的折叠分组</td><td>无实际页面，仅做子路由容器</td><td>Layout</td></tr>
+    <tr><td>C（菜单）</td><td>实际的页面入口</td><td>点击后加载对应组件</td><td>system/user/index</td></tr>
+    <tr><td>F（按钮）</td><td>页面内的操作按钮</td><td>不生成路由，仅做权限校验</td><td>（不生成路由）</td></tr>
+  </tbody>
+</table>
+
+<h2>3. 完整转换链路</h2>
+
+<pre><code>
+【API 请求】
+GET /system/menu/getRouters
+    │
+    ▼
+SysMenuController.getRouters()
+    │  1. 获取当前用户 userId
+    │  2. 查询用户可访问的菜单（按角色过滤）
+    │  3. 构建树结构
+    │  4. 转换为前端 RouterVo 格式
+    │
+    ▼
+menuService.selectMenuTreeByUserId(userId)
+    │  超管 → selectMenuTreeAll() （查全部菜单）
+    │  普通用户 → selectMenuTreeByUserId() （按角色过滤）
+    │  然后 → TreeBuildUtils.build() 构建树结构
+    │
+    ▼
+menuService.buildMenus(menus)
+    │  遍历 SysMenu 树，逐节点转换为 RouterVo
+    │  ├── getRouteName()    → RouterVo.name
+    │  ├── getRouterPath()   → RouterVo.path
+    │  ├── getComponentInfo() → RouterVo.component
+    │  └── 构建 MetaVo       → RouterVo.meta
+    │
+    ▼
+返回 List&lt;RouterVo&gt; → 前端 Vue Router
+</code></pre>
+
+<h2>4. SysMenu 的三个关键计算方法</h2>
+
+<h3>4.1 getRouteName() — 路由名称</h3>
+
+<pre><code>public String getRouteName() {
+    String routerName = StringUtils.capitalize(path);  // system/user → SystemUser
+    if (isMenuFrame()) {
+        routerName = "";  // 顶级菜单如果是内嵌框架，路由名为空
+    }
+    return routerName;  // 最终 name = "SystemUser" + menuId
+}</code></pre>
+
+<h3>4.2 getRouterPath() — 路由地址</h3>
+
+<pre><code>public String getRouterPath() {
+    String routerPath = this.path;
+    // 1. 非顶级 + 内链 → 替换域名特殊字符
+    if (!isTopParent() && isInnerLink()) {
+        routerPath = innerLinkReplaceEach(routerPath);  // http://xxx → /xxx
+    }
+    // 2. 顶级目录 → 加 / 前缀
+    if (isTopParent() && TYPE_DIR.equals(menuType) && NO.equals(isFrame)) {
+        routerPath = "/" + this.path;
+    }
+    // 3. 顶级菜单（内嵌框架模式）→ 路由设为 /
+    else if (isMenuFrame()) {
+        routerPath = "/";
+    }
+    return routerPath;
+}</code></pre>
+
+<h3>4.3 getComponentInfo() — 组件路径</h3>
+
+<pre><code>public String getComponentInfo() {
+    String component = "Layout";  // 默认使用布局组件
+    // 1. 有自定义组件 + 非内嵌框架 → 使用自定义组件
+    if (StringUtils.isNotEmpty(this.component) && !isMenuFrame()) {
+        component = this.component;  // system/user/index
+    }
+    // 2. 无组件 + 非顶级 + 内链 → InnerLink
+    else if (StringUtils.isEmpty(this.component) && !isTopParent() && isInnerLink()) {
+        component = "InnerLink";
+    }
+    // 3. 无组件 + 父视图 → ParentView
+    else if (StringUtils.isEmpty(this.component) && isParentView()) {
+        component = "ParentView";
+    }
+    return component;
+}</code></pre>
+
+<h2>5. buildMenus() — 递归转换为 RouterVo 树</h2>
+
+<pre><code>public List&lt;RouterVo&gt; buildMenus(List&lt;SysMenu&gt; menus) {
+    List&lt;RouterVo&gt; routers = new LinkedList&lt;&gt;();
+    for (SysMenu menu : menus) {
+        RouterVo router = new RouterVo();
+        router.setHidden("1".equals(menu.getVisible()));
+        router.setName(menu.getRouteName() + menu.getMenuId());
+        router.setPath(menu.getRouterPath());
+        router.setComponent(menu.getComponentInfo());
+        router.setMeta(new MetaVo(
+            menu.getMenuName(), menu.getIcon(),
+            !menu.getIsCache(),      // 是否缓存（取反）
+            menu.getPath(),
+            menu.getActiveMenu()
+        ));
+
+        // 🔑 四种子路由处理策略
+        if (hasChildren && TYPE_DIR.equals(menu.getMenuType())) {
+            // 策略1: 目录+有子菜单 → 嵌套路由，递归构建 children
+            router.setAlwaysShow(true);
+            router.setRedirect("noRedirect");
+            router.setChildren(buildMenus(children));
+        } else if (menu.isMenuFrame()) {
+            // 策略2: 顶级菜单+内嵌框架 → 创建包装路由
+            router.setMeta(null);
+            // 创建子路由指向实际页面
+            router.setChildren([...]);
+        } else if (menu.getParentId().equals(TOP) && menu.isInnerLink()) {
+            // 策略3: 顶级内链 → 特殊路由处理
+            router.setPath("/");
+            router.setChildren([内链组件]);
+        }
+        // 策略4: 其他情况（如按钮类型F）→ 不生成路由
+    }
+    return routers;
+}</code></pre>
+
+<div class="highlight">
+  <strong>四种路由构建策略总结：</strong>
+  <ol>
+    <li><strong>目录 + 子菜单</strong> → Layout 嵌套路由（标准多级菜单）</li>
+    <li><strong>菜单（内嵌框架）</strong> → 包装路由指向 iframe 页面</li>
+    <li><strong>内链</strong> → 特殊处理域名转路径，生成 InnerLink 组件</li>
+    <li><strong>按钮</strong> → 跳过，不生成路由</li>
+  </ol>
+</div>
+
+<h2>6. 前端收到的 JSON 示例</h2>
+
+<pre><code>[
+  {
+    "name": "SystemUser123",
+    "path": "/system/user",
+    "hidden": false,
+    "component": "system/user/index",
+    "meta": {
+      "title": "用户管理",
+      "icon": "user",
+      "noCache": false,
+      "link": null
+    }
+  },
+  {
+    "name": "SystemRole124",
+    "path": "/system/role",
+    "component": "system/role/index",
+    "meta": { "title": "角色管理", "icon": "peoples" }
+  }
+]
+// 前端动态 addRoute 到 Vue Router</code></pre>
+
+<h2>🎯 本课胜利检查</h2>
+
+<ol>
+  <li>画出 SysMenu 表一行数据到 RouterVo 的完整转换流程</li>
+  <li>说出 M/C/F 三种 menu_type 在前端路由中的不同表现</li>
+  <li>解释 <code>buildMenus()</code> 方法中四种路由构建策略分别处理什么场景</li>
+  <li>设计一个新的菜单项（含 path、component、menuType），预测其生成的 RouterVo</li>
+  <li>解释为什么超管调用 <code>selectMenuTreeAll()</code> 而普通用户调用 <code>selectMenuTreeByUserId()</code></li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<code>SysMenuServiceImpl.buildMenus()</code> 源码（<code>ruoyi-system/.../service/impl/SysMenuServiceImpl.java:159</code>）</div>
+<div class="reminder">💡 有疑问？直接问我。例如："如果要支持外部 URL 作为菜单项，应该怎么配置？" 或 "MetaVo 里的 noCache 字段在前端是如何使用的？"</div>
+
+</body>
+</html>

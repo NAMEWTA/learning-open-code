@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · 跨节点推送与实战速查</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · 跨节点推送与实战速查</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code></p>
+
+<h2>跨节点链路（完整）</h2>
+<div class="chain">PushHelper.publishMessage(userIds, payload)
+  → PushSessionManager.publishMessage(dto)
+  → RedisUtils.publish("global:message", dto)
+  → 集群所有节点 MessageTopicListener 消费
+  → 各节点判断 userIds：非空→逐一 sendMessage(userId, payload) / 空→sendMessage(payload)
+  → 各自 USER_TOKEN_EMITTERS/SESSIONS 中查找连接
+  → 找到 → emitter.send() / session.sendMessage() → 浏览器收到</div>
+
+<h2>PushHelper API 速查</h2>
+<table>
+<tr><th>方法</th><th>作用</th><th>跨节点？</th></tr>
+<tr><td><code>sendMessage(userId, message)</code></td><td>单发文本消息</td><td>否（仅本节点）</td></tr>
+<tr><td><code>sendMessage(userId, payload)</code></td><td>单发 JSON 消息</td><td>否</td></tr>
+<tr><td><code>sendMessage(message)</code></td><td>广播文本消息</td><td>否</td></tr>
+<tr><td><code>sendMessage(payload)</code></td><td>广播 JSON 消息</td><td>否</td></tr>
+<tr><td><code>publishMessage(userIds, payload)</code></td><td>发布给指定用户</td><td>是（Redis）</td></tr>
+<tr><td><code>publishMessage(dto)</code></td><td>发布完整 PushDTO</td><td>是</td></tr>
+<tr><td><code>publishAll(message)</code></td><td>广播文本</td><td>是</td></tr>
+<tr><td><code>publishAll(payload)</code></td><td>广播 JSON</td><td>是</td></tr>
+</table>
+
+<h2>Send vs Publish 选择</h2>
+<ul>
+  <li><b>单节点</b>：send 和 publish 都能用，publish 多一次 Redis 往返。</li>
+  <li><b>集群</b>：<b>必须用 publish</b>——不确定目标用户连接在哪个节点上。</li>
+  <li><b>经验法则</b>：集群环境无脑用 publish 系列；单节点用 send 稍快。</li>
+</ul>
+
+<h2>MessageTopicListener</h2>
+<div class="chain">ApplicationRunner + Ordered(-1) → 最早初始化
+run() → pushSessionManager.subscribeMessage(consumer)
+收到消息 → userIds 非空？→ forEach sendMessage(userId, payload)
+         → userIds 为空？→ sendMessage(payload) 广播</div>
+
+<h2>PushDTO 结构</h2>
+<table>
+<tr><th>字段</th><th>说明</th></tr>
+<tr><td><code>userIds</code></td><td>目标用户列表，null = 广播</td></tr>
+<tr><td><code>payload</code></td><td>PushPayloadDTO：type/source/message/data/path/timestamp</td></tr>
+</table>
+
+<h2>PushPayloadDTO 字段</h2>
+<table>
+<tr><th>字段</th><th>说明</th></tr>
+<tr><td><code>type</code></td><td>message / warning / notification 等</td></tr>
+<tr><td><code>source</code></td><td>backend / client</td></tr>
+<tr><td><code>message</code></td><td>文本正文</td></tr>
+<tr><td><code>data</code></td><td>扩展数据（任意对象）</td></tr>
+<tr><td><code>path</code></td><td>前端跳转路径</td></tr>
+<tr><td><code>timestamp</code></td><td>时间戳</td></tr>
+</table>
+
+<h2>PushHelper 防御机制</h2>
+<div class="chain">isEnabled() → SpringUtils.getProperty("message.enabled", Boolean.TRUE)
+每个公开方法开头调用 → enabled=false 则静默返回
+getSessionManager() → SpringUtils.getBean(PushSessionManager.class)
+→ 永远拿到当前激活的通道管理器</div>
+
+<h2>关键常量</h2>
+<div class="chain">MessageConstants.MESSAGE_TOPIC = "global:message"   // Redis 发布订阅频道
+MessageConstants.LOGIN_USER_KEY = "loginUser"        // WS attributes key
+MessageConstants.LOGIN_TOKEN_KEY = "token"            // WS attributes key
+MessageConstants.PING = "ping" / PONG = "pong"        // 心跳标识
+MessageConstants.KICKED = "kicked"                    // 顶替旧连接通知</div>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：PushSessionManager、MessageTopicListener、PushHelper、PushDTO、Redis Pub/Sub</p>
+</body>
+</html>

@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>导入与下拉处理</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>导入与下拉处理</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>学完你能完整追踪导入链路——<code>ExcelBuilder.read(inputStream, clazz).doRead()</code> → <code>DefaultExcelListener</code>（逐行 validate + 收集）→ <code>ExcelResult.getAnalysis()</code> 返回回执。能讲清 ExcelDownHandler 如何处理 4 种下拉数据源，以及"选项 > 20 个或总字符超 255 时切换为隐藏 Sheet 方案"的原因和实现。</div>
+
+<h2>一、先看全景：导入链路的三段式结构</h2>
+
+<p>导入链路比导出链路更简洁——核心只有 <strong>1 个接口 + 1 个默认实现 + 1 个结果接口 + 1 个默认结果</strong>，共 4 个文件。但简洁不意味着简单，它的设计精炼度很高。</p>
+
+<p>导入的入口同样是一行代码：</p>
+
+<pre>// 同步导入
+ExcelResult&lt;UserImportVO&gt; result = ExcelBuilder
+    .read(file.getInputStream(), UserImportVO.class)
+    .validate(true)    // 开启 Jakarta Validation
+    .failFast(false)   // 遇到错误不中断，继续处理后续行
+    .doRead();
+
+// 获取分析回执
+String analysis = result.getAnalysis();
+// → "成功 98 条，错误 2 条：第 3 行（用户名不能为空），第 15 行（手机号格式不正确）"</pre>
+
+<p>让我们先看全景调用链，再逐环节深入：</p>
+
+<pre>阶段①  ReadBuilder 构造与配置
+  ExcelBuilder.read(inputStream, clazz)
+    .validate(true)       // 开启 Jakarta Validation
+    .failFast(false)      // 容错模式：错误不中断
+    .sheetNo(0)           // 读取第一个 Sheet
+    .headRowNumber(1)     // 表头在第 1 行
+    .ignoreEmptyRow(true) // 跳过空行
+    │
+
+阶段②  注册 DefaultExcelListener 并执行读取
+  .doRead()
+    │
+  Fesod Sheet ReadBuilder
+    ├─ 注册 DefaultExcelListener 作为 AnalysisEventListener
+    ├─ 逐行解析 Excel
+    └─ 每行触发 listener.invoke(data, context)
+    │
+
+阶段③  DefaultExcelListener 逐行处理
+  invoke(data, context):
+    ├─ ① 如果 validate=true → ValidatorUtils.validate(data)
+    │     └─ 失败抛 ConstraintViolationException（Jakarta Validation）
+    ├─ ② 收集成功行 → successList.add(data)
+    └─ onException(exception, context):
+        ├─ 记录行号、错误信息
+        ├─ 构造 errorMsg
+        └─ 如果 failFast=true → 重新抛出异常（中断读取）
+           如果 failFast=false → 吞掉异常（继续处理后续行）
+    │
+
+阶段④  获取结果
+  result = listener.getExcelResult()  →  DefaultExcelResult
+    ├─ getList()       → 成功数据列表
+    ├─ getErrorList()  → 错误信息列表
+    └─ getAnalysis()   → 人性化回执字符串</pre>
+
+<p>下面我们逐层深入。</p>
+
+<h2>二、ExcelListener 接口 —— 仅一个扩展方法</h2>
+
+<p>文件：<code>core/ExcelListener.java</code></p>
+
+<p>这个接口极其精简——它继承 Fesod Sheet 的 <code>ReadListener&lt;T&gt;</code>，只新增了一个方法：</p>
+
+<pre>public interface ExcelListener&lt;T&gt; extends ReadListener&lt;T&gt; {
+    ExcelResult&lt;T&gt; getExcelResult();
+}</pre>
+
+<p><code>ReadListener&lt;T&gt;</code> 本身提供了三个回调生命周期（由 Fesod Sheet 定义）：</p>
+
+<table>
+<tr><th>回调方法</th><th>触发时机</th><th>典型用途</th></tr>
+<tr><td><code>invoke(T data, AnalysisContext context)</code></td><td>每解析完一行数据</td><td>校验数据、收集到列表</td></tr>
+<tr><td><code>doAfterAllAnalysed(AnalysisContext context)</code></td><td>全部行解析完成后</td><td>写日志、汇总统计</td></tr>
+<tr><td><code>onException(Exception e, AnalysisContext context)</code></td><td>解析或校验过程中抛出异常</td><td>记录错误行、决定是否中断</td></tr>
+</table>
+
+<p><code>ExcelListener</code> 接口只做了一件事：声明"我支持获取结果"。这使得业务代码可以拿到导入结果做后续处理，而不仅仅是"成功与否"的布尔值。</p>
+
+<h2>三、DefaultExcelListener —— 容错与校验的核心</h2>
+
+<p>文件：<code>core/DefaultExcelListener.java</code>（约 152 行）</p>
+
+<p>这是整个导入链路中最值得细读的类。它实现了三个回调方法，编码了两条关键的异常处理策略。</p>
+
+<h3>3.1 invoke() —— 逐行校验与收集</h3>
+
+<pre>// DefaultExcelListener.invoke() 核心逻辑（伪代码）
+@Override
+public void invoke(T data, AnalysisContext context) {
+    // ① Jakarta Validation 校验（可选）
+    if (validate) {
+        try {
+            ValidatorUtils.validate(data);
+        } catch (ConstraintViolationException e) {
+            // 校验失败：构造异常信息并重新抛出
+            // onException 会捕获它
+            String msg = e.getConstraintViolations().stream()
+                .map(v -> v.getMessage())
+                .collect(Collectors.joining(", "));
+            throw new ExcelAnalysisException(context.readRowHolder().getRowIndex() + 1, msg);
+        }
+    }
+
+    // ② 收集成功行
+    successList.add(data);
+}</pre>
+
+<p>这里有一个设计细节：<code>ValidatorUtils.validate()</code> 来自 <code>ruoyi-common-core</code>。它内部调用 Jakarta Bean Validation 的标准 API（<code>Validator.validate()</code>），校验实体类上的 <code>@NotNull</code>、<code>@NotBlank</code>、<code>@Size</code> 等标准注解。校验失败时，<code>ConstraintViolationException</code> 被包装为 <code>ExcelAnalysisException</code>，携带行号信息。</p>
+
+<blockquote>
+<strong>ExcelAnalysisException</strong> 是本模块自定义的运行时异常（定义在 <code>core/</code> 包内），继承 <code>RuntimeException</code>。它携带两个关键字段：<code>rowIndex</code>（错误行号）和 <code>message</code>（错误描述）。onException 中通过 <code>instanceof</code> 判断异常类型来提取行号。
+</blockquote>
+
+<h3>3.2 onException() —— failFast 策略的分叉点</h3>
+
+<pre>// DefaultExcelListener.onException() 核心逻辑（伪代码）
+@Override
+public void onException(Exception exception, AnalysisContext context) {
+    // ① 提取行号和错误信息
+    int rowIndex = 0;
+    String errorMsg = exception.getMessage();
+
+    if (exception instanceof ExcelAnalysisException) {
+        rowIndex = ((ExcelAnalysisException) exception).getRowIndex();
+    } else if (exception instanceof ExcelDataConvertException) {
+        // Fesod Sheet 的类型转换异常——无法将单元格文本转为目标类型
+        ExcelDataConvertException e = (ExcelDataConvertException) exception;
+        rowIndex = e.getRowIndex() + 1;  // Fesod Sheet 的行号从 0 开始
+        errorMsg = "第 " + e.getColumnIndex() + " 列数据格式错误";
+    }
+
+    // ② 记录错误
+    errorList.add(new ErrorInfo(rowIndex, errorMsg));
+
+    // ③ failFast 分叉
+    if (failFast) {
+        // 快速失败模式——重新抛出，中断整个读取
+        throw new RuntimeException("导入第 " + rowIndex + " 行失败：" + errorMsg);
+    }
+    // 否则吞掉异常，继续处理后续行（容错模式）
+}</pre>
+
+<p><strong>两种异常类型</strong>的处理策略不同：</p>
+
+<table>
+<tr><th>异常类型</th><th>来源</th><th>行号提取方式</th></tr>
+<tr>
+  <td><code>ExcelAnalysisException</code></td>
+  <td>本模块—— Jakarta Validation 校验失败</td>
+  <td><code>exception.getRowIndex()</code> 直接获取</td>
+</tr>
+<tr>
+  <td><code>ExcelDataConvertException</code></td>
+  <td>Fesod Sheet——类型转换失败（如"abc"转 Integer 失败）</td>
+  <td><code>e.getRowIndex() + 1</code>（Fesod 从 0 计数，业务需要从 1 计数）</td>
+</tr>
+</table>
+
+<p>异常信息最终存储在 <code>List&lt;ErrorInfo&gt;</code> 中，每个 <code>ErrorInfo</code> 是一个内部 Record，包含 <code>rowIndex</code> 和 <code>errorMsg</code>。</p>
+
+<h3>3.3 doAfterAllAnalysed() —— 汇总日志</h3>
+
+<pre>@Override
+public void doAfterAllAnalysed(AnalysisContext context) {
+    log.info("Excel 导入完成。成功 {} 条，失败 {} 条。", successList.size(), errorList.size());
+}</pre>
+
+<p>仅做日志记录。实际的结果汇总由 <code>DefaultExcelResult.getAnalysis()</code> 完成。</p>
+
+<h2>四、ExcelResult / DefaultExcelResult —— 结果回执</h2>
+
+<p>文件：<code>core/ExcelResult.java</code>（接口）+ <code>core/DefaultExcelResult.java</code>（实现）</p>
+
+<p>导入完成后的调用模式：</p>
+
+<pre>ExcelResult&lt;UserImportVO&gt; result = listener.getExcelResult();
+List&lt;UserImportVO&gt; successData = result.getList();      // 成功数据
+List&lt;String&gt; errors = result.getErrorList();              // 错误列表
+String analysis = result.getAnalysis();                  // 人性化回执
+
+// getAnalysis() 输出示例：
+// "恭喜您，全部数据导入成功！共 100 条。"
+// "成功 98 条，错误 2 条：第 3 行（用户名不能为空），第 15 行（手机号格式不正确）"</pre>
+
+<p><code>DefaultExcelResult</code> 的 <code>getAnalysis()</code> 方法根据错误列表是否为空，生成两种不同格式的回执字符串：</p>
+
+<pre>// DefaultExcelResult.getAnalysis() 核心逻辑（伪代码）
+@Override
+public String getAnalysis() {
+    if (CollectionUtils.isEmpty(errorList)) {
+        return "恭喜您，全部数据导入成功！共 " + list.size() + " 条。";
+    }
+
+    StringBuilder sb = new StringBuilder();
+    sb.append("成功 ").append(list.size()).append(" 条");
+    sb.append("，错误 ").append(errorList.size()).append(" 条");
+    sb.append("：");
+    for (String error : errorList) {
+        sb.append(error).append("，");
+    }
+    sb.deleteCharAt(sb.length() - 1);  // 去掉末尾逗号
+    sb.append("。");
+    return sb.toString();
+}</pre>
+
+<div class="insight"><strong>💡 设计洞察：为什么要有 ExcelResult 接口？</strong><br><br>
+如果你只需要知道"导入是否全部成功"，一个 <code>List&lt;T&gt;</code> 就够了。但真实的业务场景中，你需要：①拿到成功数据列表（做后续批量处理）；②知道哪些行失败了、为什么失败（展示给用户）；③决定"部分成功算不算成功"（比如需求是"至少导入一条就行"还是"必须全部成功"）。<code>ExcelResult</code> 接口把这三个需求封装在一个返回值中，同时 <code>getAnalysis()</code> 为前端提供了一个开箱即用的人性化提示字符串——Controller 不需要自己写 if-else 拼句子。
+</div>
+
+<h2>五、ExcelDownHandler —— 下拉处理全景</h2>
+
+<p>文件：<code>core/ExcelDownHandler.java</code></p>
+
+<p>这是模块中最复杂的 WriteHandler，也是最能体现"企业级 Excel 导出"需求的类。它负责在导出模板时为每列生成 <strong>Excel 数据验证下拉</strong>——就是用户在 Excel 中点击单元格时弹出的小箭头选择框。</p>
+
+<h3>5.1 四种下拉数据源</h3>
+
+<p><code>ExcelDownHandler</code> 在 <code>afterSheetCreate()</code> 中遍历实体类的所有字段，检查每个字段上的注解，从四种来源收集下拉选项：</p>
+
+<table>
+<tr><th>#</th><th>数据源</th><th>对应注解/参数</th><th>获取方式</th><th>适用场景</th></tr>
+<tr>
+  <td>①</td>
+  <td><strong>字典服务（查库）</strong></td>
+  <td><code>@ExcelDictFormat(dictType = "sys_user_sex")</code></td>
+  <td>调用 <code>DictUtils.getDictData()</code> 查字典表</td>
+  <td>数据量大、多模块共用、频繁变更</td>
+</tr>
+<tr>
+  <td>②</td>
+  <td><strong>内联表达式</strong></td>
+  <td><code>@ExcelDictFormat(readConverterExp = "0=男,1=女")</code></td>
+  <td>解析表达式字符串 split 出标签列表</td>
+  <td>选项少且固定、不走库</td>
+</tr>
+<tr>
+  <td>③</td>
+  <td><strong>枚举类</strong></td>
+  <td><code>@ExcelEnumFormat(enumClass = UserStatus.class)</code></td>
+  <td>反射枚举的 <code>textField</code> 属性</td>
+  <td>选项由枚举定义、编译期固定</td>
+</tr>
+<tr>
+  <td>④</td>
+  <td><strong>动态提供者</strong></td>
+  <td><code>@ExcelDynamicOptions(providerClass = DeptOptionsProvider.class)</code></td>
+  <td>从 Spring 容器获取 provider，调用 <code>getOptions()</code></td>
+  <td>运行时查询数据库、选项动态变化</td>
+</tr>
+</table>
+
+<p>此外，<code>ExcelBuilder</code> 还支持通过 <code>.options(DropDownOptions)</code> 链式方法直接传入外部 <code>DropDownOptions</code> 对象，这是第五种来源（外部传入），但不走注解扫描，而是作为独立参数处理。</p>
+
+<pre>// ExcelDownHandler 收集所有字段的下拉选项（伪代码）
+@Override
+public void afterSheetCreate(WriteSheetHolder holder, ...) {
+    Sheet sheet = holder.getSheet();
+    List&lt;Field&gt; fields = getAllFields(headType);
+
+    for (int i = 0; i &lt; fields.size(); i++) {
+        Field field = fields.get(i);
+        List&lt;String&gt; options = new ArrayList&lt;&gt;();
+
+        // ① @ExcelDictFormat.dictType → 字典服务
+        ExcelDictFormat dictFormat = field.getAnnotation(ExcelDictFormat.class);
+        if (dictFormat != null && StringUtils.isNotBlank(dictFormat.dictType())) {
+            List&lt;SysDictData&gt; dictList = DictUtils.getDictData(dictFormat.dictType());
+            options = dictList.stream().map(SysDictData::getDictLabel).collect(toList());
+        }
+        // ② @ExcelDictFormat.readConverterExp → 解析表达式
+        else if (dictFormat != null && StringUtils.isNotBlank(dictFormat.readConverterExp())) {
+            options = parseExpression(dictFormat.readConverterExp());
+        }
+        // ③ @ExcelEnumFormat → 枚举反射
+        else {
+            ExcelEnumFormat enumFormat = field.getAnnotation(ExcelEnumFormat.class);
+            if (enumFormat != null) {
+                options = getEnumTexts(enumFormat.enumClass(), enumFormat.textField());
+            }
+        }
+        // ④ @ExcelDynamicOptions → Spring provider
+        else {
+            ExcelDynamicOptions dynamicOpts = field.getAnnotation(ExcelDynamicOptions.class);
+            if (dynamicOpts != null) {
+                ExcelOptionsProvider provider = SpringUtils.getBean(dynamicOpts.providerClass());
+                options = new ArrayList&lt;&gt;(provider.getOptions());
+            }
+        }
+
+        // 为第 i 列生成下拉
+        if (!options.isEmpty()) {
+            addValidation(sheet, i, options);
+        }
+    }
+}</pre>
+
+<h3>5.2 ">20 个选项或 >255 字符"的分叉策略</h3>
+
+<p>这是 ExcelDownHandler 中最精妙的设计决策。POI 的显式列表约束（<code>createExplicitListConstraint</code>）有严重的局限：</p>
+
+<blockquote>
+POI 显式列表约束（DVConstraint.createExplicitListConstraint）的公式参数是一个逗号分隔的字符串，在 Excel 中这个字符串<strong>总长度不能超过 255 个字符</strong>。如果选项很多（如部门有 50 个），拼接出来的字符串很容易超过 255 字符，导致下拉失效或 Excel 打开报错。<br><br>
+即使不超 255 字符，选项太多（>20 个）时，Excel 的下拉滚动体验也很差——用户需要在小小的下拉框里翻很久才能找到目标选项。
+</blockquote>
+
+<p>因此，ExcelDownHandler 采用了<strong>双轨策略</strong>：</p>
+
+<pre>// ExcelDownHandler 根据选项数量和总字符数切换策略（伪代码）
+private void addValidation(Sheet sheet, int colIndex, List&lt;String&gt; options) {
+    String formulaString = String.join(",", options);
+
+    if (options.size() <= 20 && formulaString.length() <= 255) {
+        // 策略 A：显式列表约束（简单场景）
+        // 直接在公式里写死选项："男,女,未知"
+        DataValidationHelper helper = sheet.getDataValidationHelper();
+        DataValidationConstraint constraint = helper.createExplicitListConstraint(
+            options.toArray(new String[0])
+        );
+        CellRangeAddressList regions = new CellRangeAddressList(
+            1, 65535, colIndex, colIndex  // 从第 2 行到最大行
+        );
+        DataValidation validation = helper.createValidation(constraint, regions);
+        sheet.addValidationData(validation);
+    } else {
+        // 策略 B：隐藏 Sheet + 名称管理器（复杂场景）
+        // 1. 创建一个隐藏的 Sheet，把选项列表写到该 Sheet 的 A 列
+        // 2. 给这个区域定义一个名称（如 "dict_sys_user_sex"）
+        // 3. 公式约束使用 =INDIRECT("dict_sys_user_sex")
+        createFormulaListConstraint(sheet, colIndex, options, colIndex);
+    }
+}</pre>
+
+<p><strong>策略 B 的细节：隐藏 Sheet + 名称管理器</strong></p>
+
+<pre>// createFormulaListConstraint 的内部实现（伪代码）
+private void createFormulaListConstraint(Sheet sheet, int colIndex, List&lt;String&gt; options, int dictIndex) {
+    Workbook workbook = sheet.getWorkbook();
+
+    // 1. 创建隐藏 Sheet
+    String hiddenSheetName = "dictSheet" + dictIndex;
+    Sheet hiddenSheet = workbook.createSheet(hiddenSheetName);
+    workbook.setSheetHidden(workbook.getSheetIndex(hiddenSheet), true);
+
+    // 2. 把选项写入隐藏 Sheet 的 A 列
+    for (int i = 0; i &lt; options.size(); i++) {
+        Row row = hiddenSheet.createRow(i);
+        row.createCell(0).setCellValue(options.get(i));
+    }
+
+    // 3. 给数据区域定义名称
+    String nameName = "dict_" + dictIndex;
+    Name name = workbook.createName();
+    name.setNameName(nameName);
+    name.setRefersToFormula(hiddenSheetName + "!$A$1:$A$" + options.size());
+
+    // 4. 在下拉列使用 INDIRECT 公式引用名称
+    DataValidationHelper helper = sheet.getDataValidationHelper();
+    DataValidationConstraint constraint = helper.createFormulaListConstraint(
+        "INDIRECT(\"" + nameName + "\")"
+    );
+    CellRangeAddressList regions = new CellRangeAddressList(1, 65535, colIndex, colIndex);
+    DataValidation validation = helper.createValidation(constraint, regions);
+    sheet.addValidationData(validation);
+}</pre>
+
+<div class="insight"><strong>💡 设计洞察：为什么阈值选 20 和 255？</strong><br><br>
+这两个阈值来自 Excel 的硬性限制和实际体验：<br>
+① <strong>255 字符</strong>是 Excel 数据验证公式参数的最大长度——这是硬限制，超过会导致校验失效。<br>
+② <strong>20 个选项</strong>是经验阈值——虽然 30 个选项的字符串可能不超 255 字符（如果每个选项都很短），但 30 个选项的下拉框用户体验极差。20 是一个在"性能开销"（隐藏 Sheet 有额外 IO）和"用户体验"之间的平衡点。<br><br>
+隐藏 Sheet 方案的代价是：多写一个 Sheet、文件体积稍大、打开时需加载额外数据。但它没有选项数量上限——理论上可以放几千个选项。
+</div>
+
+<h2>六、DropDownOptions —— 级联下拉</h2>
+
+<p>文件：<code>core/DropDownOptions.java</code></p>
+
+<p>前面讲了单列下拉，但真实的业务场景经常需要<strong>级联下拉</strong>——选择"省份"后，"城市"的下拉只显示该省的城市。这就是 <code>DropDownOptions</code> 解决的问题。</p>
+
+<pre>// DropDownOptions 的核心结构
+public class DropDownOptions {
+    private int index;                              // 一级下拉所在列索引
+    private int nextIndex;                          // 二级下拉所在列索引
+    private List&lt;String&gt; options;                    // 一级选项列表
+    private Map&lt;String, List&lt;String&gt;&gt; nextOptions;  // 一级值 → 二级选项列表
+
+    // 从业务实体列表自动构建级联结构
+    public static &lt;T&gt; DropDownOptions buildLinkedOptions(
+            List&lt;T&gt; data,
+            int index, int nextIndex,
+            Function&lt;T, String&gt; parentExtractor,    // 提取一级值（如省份）
+            Function&lt;T, String&gt; childExtractor       // 提取二级值（如城市）
+    ) {
+        DropDownOptions ddo = new DropDownOptions();
+        ddo.index = index;
+        ddo.nextIndex = nextIndex;
+
+        // 收集去重后的一级选项
+        Set&lt;String&gt; parentSet = data.stream().map(parentExtractor).collect(Collectors.toSet());
+        ddo.options = new ArrayList&lt;&gt;(parentSet);
+
+        // 构建一级→二级映射
+        ddo.nextOptions = new HashMap&lt;&gt;();
+        for (String parent : parentSet) {
+            List&lt;String&gt; children = data.stream()
+                .filter(item -> parent.equals(parentExtractor.apply(item)))
+                .map(childExtractor)
+                .distinct()
+                .collect(Collectors.toList());
+            ddo.nextOptions.put(parent, children);
+        }
+        return ddo;
+    }
+}</pre>
+
+<p>使用方式（在 Controller 中）：</p>
+
+<pre>// 构建省份-城市级联下拉
+List&lt;CityData&gt; cityDataList = cityService.list();
+DropDownOptions linkedOptions = DropDownOptions.buildLinkedOptions(
+    cityDataList,
+    0, 1,                        // 一级在第 0 列，二级在第 1 列
+    CityData::getProvince,       // 提取省份
+    CityData::getCity            // 提取城市
+);
+
+ExcelBuilder.writer(UserImportVO.class)
+    .options(linkedOptions)      // 传入外部 DropDownOptions
+    .toResponse(response);</pre>
+
+<p>ExcelDownHandler 接收到 <code>DropDownOptions</code> 后，为一级和二级分别创建隐藏 Sheet 和对应的名称管理器，二级下拉使用 <code>=INDIRECT(一级选择值)</code> 公式实现联动——这与策略 B 的隐藏 Sheet 方案一脉相承，只是二级的名称映射更复杂（需要为每个一级值创建独立的名称）。</p>
+
+<blockquote>
+<strong>级联下拉的 Excel INDIRECT 原理</strong>：假设省份选择了"广东"，城市下拉的公式是 <code>=INDIRECT("city_广东")</code>，指向名为 <code>city_广东</code> 的隐藏 Sheet 区域。当用户改变省份选择时，INDIRECT 函数重新计算，城市下拉自动切换到对应省份的城市列表。这不是 Java 代码在运行——这是 Excel 的公式引擎在工作。Java 代码只负责"预先创建所有名称和对应的隐藏 Sheet 数据"。
+</blockquote>
+
+<div class="quiz">
+<details>
+<summary>📝 自检问答：导入与下拉</summary>
+<p>1. <code>DefaultExcelListener.invoke()</code> 中做校验用的是哪个工具类？校验失败时抛出什么异常？行号信息是怎么带出去的？</p>
+<p>2. <code>failFast = true</code> 和 <code>failFast = false</code> 的行为差异是什么？在 <code>onException()</code> 中的哪个分支实现的？</p>
+<p>3. ExcelDownHandler 的四种下拉数据源分别是什么？每种对应哪个注解或接口？</p>
+<p>4. 为什么"选项 > 20 个或总字符 > 255"时要切换到隐藏 Sheet 方案？隐藏 Sheet 方案的关键步骤是什么？</p>
+<p>5. <code>DropDownOptions.buildLinkedOptions()</code> 中的 4 个参数分别是什么？二级下拉的联动是如何通过 Excel INDIRECT 函数实现的？</p>
+</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+<code>core/ExcelListener.java</code> — 监听接口，继承 ReadListener<br>
+<code>core/DefaultExcelListener.java</code> — invoke/onException/doAfterAllAnalysed 实现<br>
+<code>core/ExcelResult.java</code> — 结果接口<br>
+<code>core/DefaultExcelResult.java</code> — getAnalysis() 人性化回执<br>
+<code>core/ExcelDownHandler.java</code> — 四种下拉数据源 + 双轨策略<br>
+<code>core/DropDownOptions.java</code> — 级联下拉 POJO + buildLinkedOptions()<br>
+<code>core/ExcelOptionsProvider.java</code> — 动态数据提供接口<br>
+<code>utils/ExcelBuilder.java</code> — read() 导入入口</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav"><a href="02-导出链路详解.html">← 上一课</a><a href="../">模块首页 →</a></div>
+</body>
+</html>

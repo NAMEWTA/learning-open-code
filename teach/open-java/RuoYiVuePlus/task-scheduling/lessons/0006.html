@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · MapReduce 任务：分片 + 汇总</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .where { font-size: 0.78rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .chain { font-family: Consolas, monospace; font-size: 0.82rem; background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; margin: 0.6rem 0; line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<h1>第 6 课 · MapReduce 任务：分片 + 汇总 <span class="tag">模式 6a</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #6）</b>：学完你能讲清 MapReduce 任务的完整链路——它在 Map 任务基础上增加了 <code>@ReduceExecutor</code> 汇总阶段，Reduce 方法如何通过 <code>reduceArgs.getMapResult()</code> 收集所有 Map 子任务的结果并做最终聚合。
+</div>
+
+<p>上一课的 Map 任务各子任务结果独立返回。但很多场景下你需要一个最终结果——比如「1~200 的总和是多少」。MapReduce 就是 Map 任务 + 一个 Reduce 汇总阶段。</p>
+
+<h2>一、TestMapReduceAnnotation1 — Map 分片 + Reduce 汇总</h2>
+
+<div class="region">
+<h3>完整源码（三个方法：根 Map + 子 Map + Reduce）</h3>
+<span class="where">ruoyi-job/src/main/java/org/dromara/job/snailjob/TestMapReduceAnnotation1.java</span>
+<pre><code>@Component
+@JobExecutor(name = "testMapReduceAnnotation1")
+public class TestMapReduceAnnotation1 {
+
+    // ========== ① 根 Map：拆分数据（和上一课完全一样）==========
+    @MapExecutor
+    public ExecuteResult rootMapExecute(MapArgs mapArgs, MapHandler mapHandler) {
+        int partitionSize = 50;
+        List&lt;Integer&gt; sourceList = IntStream.rangeClosed(1, 200).boxed().toList();
+        List&lt;List&lt;Integer&gt;&gt; partition = StreamUtils.groupByKey(sourceList,
+            i -&gt; (i - 1) / partitionSize).values().stream().toList();
+        SnailJobLog.REMOTE.info("端口:{}完成分配任务", SpringUtil.getProperty("server.port"));
+        return mapHandler.doMap(partition, "doCalc");
+    }
+
+    // ========== ② 子 Map：处理一片数据（和上一课完全一样）==========
+    @MapExecutor(taskName = "doCalc")
+    public ExecuteResult doCalc(MapArgs mapArgs) {
+        List&lt;Integer&gt; sourceList = (List&lt;Integer&gt;) mapArgs.getMapResult();
+        int partitionTotal = sourceList.stream().mapToInt(i -&gt; i).sum();
+        ThreadUtil.sleep(3, TimeUnit.SECONDS);
+        SnailJobLog.REMOTE.info("端口:{},partitionTotal:{}",
+            SpringUtil.getProperty("server.port"), partitionTotal);
+        return ExecuteResult.success(partitionTotal);
+    }
+
+    // ========== ③ Reduce：汇总所有子任务结果 ★ 这是新增的！==========
+    @ReduceExecutor
+    public ExecuteResult reduceExecute(ReduceArgs reduceArgs) {
+        // reduceArgs.getMapResult() → 所有子 Map 返回值的集合
+        int reduceTotal = reduceArgs.getMapResult().stream()
+            .mapToInt(i -&gt; Integer.parseInt((String) i))
+            .sum();
+        SnailJobLog.REMOTE.info("端口:{},reduceTotal:{}",
+            SpringUtil.getProperty("server.port"), reduceTotal);
+        return ExecuteResult.success(reduceTotal);  // 返回总和 20100
+    }
+}</code></pre>
+</div>
+
+<h2>二、MapReduce 的完整执行模型</h2>
+
+<div class="flow">① 服务端触发 testMapReduceAnnotation1
+       │
+       ▼
+② 根 Map: rootMapExecute()
+   └→ mapHandler.doMap(4片数据, "doCalc")
+       │
+       ├──→ doCalc([1~50])      → sum=1275  ──┐
+       ├──→ doCalc([51~100])    → sum=3775  ──┤
+       ├──→ doCalc([101~150])   → sum=6275  ──┤  所有子任务执行完毕
+       └──→ doCalc([151~200])   → sum=8775  ──┘
+                                                  │
+                                                  ▼
+③ Reduce: reduceExecute()
+   reduceArgs.getMapResult() = [1275, 3775, 6275, 8775]
+   → 汇总计算: 1275+3775+6275+8775 = 20100
+   → return ExecuteResult.success(20100)
+
+最终结果：20100（1+2+...+200 的总和）</div>
+
+<div class="why"><b>MapReduce 和 Map 的唯一区别就是多了 Reduce！</b>根 Map 和子 Map 的代码完全不变。你只需要添加一个 <code>@ReduceExecutor</code> 方法，它会在所有子 Map 任务执行完毕后自动被调用，通过 <code>reduceArgs.getMapResult()</code> 拿到所有子任务返回值的集合，做最终聚合。</div>
+
+<h2>三、ReduceArgs — 汇总阶段的「数据收集器」</h2>
+
+<div class="chain">
+<b>ReduceArgs 的核心方法：</b>
+├── getMapResult()           → 所有子 Map 返回值的 List（类型取决于子 map 返回了什么）
+├── getTaskBatchId()         → 本次执行批次 ID
+└── getJobId()               → 任务定义 ID
+
+注意：getMapResult() 返回的每个元素是对应子 Map 任务 <b>ExecuteResult.success(obj)</b> 中的 obj。
+在本例中，每个子 Map 返回 <b>ExecuteResult.success(partitionTotal)</b>，partitionTotal 是 int。
+所以 getMapResult() 返回的是包含 4 个 int 的集合。
+</div>
+
+<div class="region">
+<h3>类型转换的坑</h3>
+<p>注意代码中的类型转换：</p>
+<pre><code>int reduceTotal = reduceArgs.getMapResult().stream()
+    .mapToInt(i -&gt; Integer.parseInt((String) i))  // ← 为什么要 toString？
+    .sum();</code></pre>
+<p>因为 SnailJob 框架在传输过程中可能将子任务返回值统一序列化为 String。所以 Reduce 中需要 <code>Integer.parseInt((String) i)</code> 来还原。这是一个常见的坑——Reduce 中拿到的类型不一定和子 Map 返回的类型一致，取决于框架的序列化机制。</p>
+</div>
+
+<h2>四、Map vs MapReduce 场景选型指南</h2>
+
+<table>
+<tr><th>场景</th><th>选 Map</th><th>选 MapReduce</th><th>原因</th></tr>
+<tr><td>统计所有用户订单总金额</td><td></td><td>✓</td><td>需要最终汇总为一个总数</td></tr>
+<tr><td>给每个用户发个性化通知</td><td>✓</td><td></td><td>每个用户的结果独立有意义，不需要汇总</td></tr>
+<tr><td>批量导出报表文件</td><td>✓</td><td></td><td>每个分片生成一个文件，不需要合并</td></tr>
+<tr><td>全量用户标签重新计算</td><td>✓</td><td></td><td>每个用户的标签独立写入，各自成功即可</td></tr>
+<tr><td>计算所有商品的平均评分</td><td></td><td>✓</td><td>需要汇总所有分片的 (总分, 总数) 再算平均</td></tr>
+<tr><td>数据对账（A表 vs B表）</td><td></td><td>✓</td><td>各分片返回差异数，Reduce 汇总成差异报告</td></tr>
+</table>
+
+<h2>五、MapReduce 的扩展：多 Reduce 阶段</h2>
+
+<p>SnailJob 支持在一个 Job 中定义多组 Map-Reduce 链。但本模块的 demo 只展示了最基础的一层 Map + 一层 Reduce。更复杂的拓扑（如 Map → Reduce → Map → Reduce）需要通过 DAG 工作流来实现——这是下一课的内容。</p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. <code>@ReduceExecutor</code> 方法什么时候被调用？</p>
+<span class="opt">A. 和根 Map 同时执行</span>
+<span class="opt">B. 在所有子 Map 任务执行完毕后自动调用</span>
+<span class="opt">C. 每个子 Map 执行完就调一次</span>
+<span class="opt">D. 需要手动在代码中调用</span>
+<details><summary>看答案</summary><b>B</b>。Reduce 阶段的触发条件是所有子 Map 任务执行完毕。SnailJob 框架自动等待，然后聚合结果调用 Reduce 方法。这是一个隐式的屏障（barrier）。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 如果 4 个子 Map 中有一个执行失败了，Reduce 方法还会被调用吗？</p>
+<span class="opt">A. 会，Reduce 会跳过失败的那个子任务的结果</span>
+<span class="opt">B. 不会，Reduce 只在所有子 Map 都成功后才执行</span>
+<span class="opt">C. 会，但 reduceArgs.getMapResult() 中失败的那一条值为 null</span>
+<span class="opt">D. 取决于服务端配置的失败策略</span>
+<details><summary>看答案</summary><b>B</b>。MapReduce 的屏障语义是「所有子 Map 成功」→ Reduce。如果有子任务失败，Reduce 不会执行，整批任务标记为失败（具体行为可能受服务端重试策略影响，但默认如此）。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 子 Map 返回 <code>ExecuteResult.success(1275)</code>，在 Reduce 中 <code>getMapResult()</code> 拿到的元素类型是什么？</p>
+<span class="opt">A. 一定是 int 类型</span>
+<span class="opt">B. 可能是 String（框架序列化机制可能转换类型），需要手动转换</span>
+<span class="opt">C. 是 ExecuteResult 对象</span>
+<span class="opt">D. 是 MapArgs 对象</span>
+<details><summary>看答案</summary><b>B</b>。注意代码中用了 <code>Integer.parseInt((String) i)</code> 来做类型转换——这说明框架在传输过程中把 int 转成了 String。这是 MapReduce 开发中最常见的坑：不要在 Reduce 中假设子 Map 返回值的类型，先打日志看实际类型。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 和上一课的 Map 任务相比，MapReduce 多出了什么？</p>
+<span class="opt">A. 多了一个根 Map 方法</span>
+<span class="opt">B. 多了一个 <code>@ReduceExecutor</code> 方法 + 子任务全部完成后自动调用 Reduce</span>
+<span class="opt">C. 多了一个 MapHandler</span>
+<span class="opt">D. 多了一个 @JobExecutor 注解</span>
+<details><summary>看答案</summary><b>B</b>。根 Map 和子 Map 的代码完全不变（你可以对比两个 demo 类）。唯一的增量就是 <code>@ReduceExecutor</code> 汇总方法。从 Map 到 MapReduce，加一个方法就够了。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://juejin.cn/post/7448551286506913802" target="_blank">掘金：SnailJob MapReduce 任务教程</a>——了解 Reduce 阶段的详细配置项和超时处理。配套速查见 <code>reference/0006.html</code>，术语见 <code>GLOSSARY.md</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。比如可以问：「如果子 Map 返回的是复杂对象（不是基本类型），Reduce 中怎么还原？」「Reduce 执行时是单机还是分布式的？」下一课我们进入最后一个主题：<strong>DAG 工作流——用 wfContext 将多个节点串联成流水线</strong>。</div>
+
+<div class="nav">课程 0006 / 使命：全面读懂 ruoyi-job 任务调度模块 · 上一课：<a href="0005.html">Map 任务</a> · 下一课预告：DAG 工作流</div>
+
+</body>
+</html>

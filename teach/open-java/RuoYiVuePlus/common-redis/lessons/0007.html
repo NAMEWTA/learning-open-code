@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课 · CacheUtils / QueueUtils / SequenceUtils</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 7 课 · <code>CacheUtils</code> / <code>QueueUtils</code> / <code>SequenceUtils</code> <span class="tag">utils 区</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #6 中后三个工具部分）</b>：学完你能说清 <code>CacheUtils</code> 和 <code>RedisUtils</code> 的根本区别、<code>QueueUtils</code> 的定位（以及什么时候该用 MQ 而非它）、<code>SequenceUtils</code> 的发号器怎么生成 <code>P20260630000001</code> 这种单号。
+</div>
+
+<h2>一、CacheUtils：操作的是 Spring Cache 命名空间</h2>
+<span class="where">utils/CacheUtils.java</span>
+
+<p><code>CacheUtils</code> 很小，只有 get / put / evict / clear 四个方法。但它有个容易踩的坑：它操作的<strong>不是裸 Redis key</strong>，而是 Spring Cache 命名空间下的数据。</p>
+
+<pre><code>// 用 @Cacheable 存的
+@Cacheable(cacheNames = "sys_dict", key = "#dictType")
+public List&lt;SysDictData&gt; getDict(String dictType) { ... }
+
+// CacheUtils 读到同一份数据
+List&lt;SysDictData&gt; list = CacheUtils.get("sys_dict", dictType);
+
+// RedisUtils 读不到！（key 拼法不同、序列化可能不同）
+List&lt;?&gt; list = RedisUtils.getCacheObject("sys_dict:xx"); // NO!</code></pre>
+
+<div class="why"><b>根本区别</b>：<code>RedisUtils</code> 是"裸键值"——key 是你自己拼的，序列化是你控制的；<code>CacheUtils</code> 走 <code>CacheManager</code> 抽象——key 是 Spring Cache 生成的（按 <code>@Cacheable</code> 的 key 表达式），序列化也是 <code>PlusSpringCacheManager</code> 决定的。<br><br>
+简单记：<strong>注解存在 CacheUtils 取，裸存就用 RedisUtils</strong>。用错就是"对不上"。</div>
+
+<p>实现上，<code>CacheUtils</code> 通过内部类 <code>CacheManagerHolder</code> 延迟持有 <code>CacheManager</code>（懒加载模式），和 <code>RedisUtils</code> 直接拿 <code>RedissonClient</code> 是一个思路。</p>
+
+<h2>二、QueueUtils：轻量分布式队列</h2>
+<span class="where">utils/QueueUtils.java</span>
+
+<p>代码注释写得很直白：<strong>"轻量级队列，重量级数据量请使用 MQ"</strong>。基于 Redisson 的 <code>RBlockingQueue</code> 和 <code>RPriorityBlockingQueue</code>：</p>
+
+<pre><code>// 普通队列
+QueueUtils.addQueueObject("task", data);       // 入队
+T item = QueueUtils.getQueueObject("task");    // 出队（poll，没数据返回 null）
+QueueUtils.removeQueueObject("task", data);     // 删指定元素
+
+// 优先级队列
+QueueUtils.addPriorityQueueObject("task", data);
+T item = QueueUtils.getPriorityQueueObject("task");
+
+// 订阅消费（阻塞等待）
+QueueUtils.subscribeBlockingQueue("task", element -> { ... });</code></pre>
+
+<p>底层 <code>RBlockingQueue</code> 就是一个 Redis List（LPUSH + BRPOP）。特点和限制都很明显：</p>
+<table>
+<tr><th>适合</th><th>不适合（请用 MQ）</th></tr>
+<tr><td>小数据量、临时性任务</td><td>需要持久化、重试、死信队列</td></tr>
+<tr><td>不需要严格可靠性保证</td><td>海量数据堆积</td></tr>
+<tr><td>同项目内简单任务分发</td><td>跨系统异步通信</td></tr>
+<tr><td>优先级队列</td><td>延迟消息（Redisson 已废弃 delay queue）</td></tr>
+</table>
+
+<div class="side">💡 代码里有一行被注释掉的 <code>// CLIENT.getDelayedQueue(queue)</code>，标注了 Redisson 已废弃延迟队列。需要延迟消息的场景，老老实实用 RocketMQ/Kafka 的延迟消息能力。</div>
+
+<h2>三、SequenceUtils：分布式发号器</h2>
+<span class="where">utils/SequenceUtils.java</span>
+
+<p>这可能是四个工具类里"最有花活"的一个。本质是 Redisson 的 <code>RIdGenerator</code>，但包装了丰富的 API 层来生成业务单号。</p>
+
+<h3>底层：RIdGenerator</h3>
+
+<pre><code>RIdGenerator idGenerator = CLIENT.getIdGenerator(key);
+idGenerator.tryInit(initValue, stepValue);  // 初始值=1, 步长=1
+idGenerator.expire(expireTime);             // 不同时间粒度的过期
+long nextId = idGenerator.nextId();         // 拿下一个</code></pre>
+
+<p><code>RIdGenerator</code> 在 Redis 里用一个 key 存当前值，每次 <code>nextId()</code> 通过 Lua 原子递增。步长机制支持批量预取以减少 Redis 调用。</p>
+
+<h3>两种时间格式 + 业务前缀</h3>
+
+<div class="flow">getDateId("P", true, 6)
+    ↓
+"P" + "20260630" + "000001"
+ └─前缀   └─日期     └─当天序号(6位不足补0)
+
+getDateTimeId("O", true, 6)
+    ↓
+"O" + "20260630153045" + "000001"
+ └─前缀   └─日期时间(到秒)   └─该分钟序号(6位不足补0)</div>
+
+<p>两个版本的关键差异在<strong>过期策略</strong>：</p>
+<table>
+<tr><th>方法</th><th>时间粒度</th><th>默认过期</th><th>典型用途</th></tr>
+<tr><td><code>getDateId</code></td><td>天（yyyyMMdd）</td><td>1 天</td><td>订单号、工单号</td></tr>
+<tr><td><code>getDateTimeId</code></td><td>到秒（yyyyMMddHHmmss）</td><td>1 分钟</td><td>流水号、请求编号</td></tr>
+</table>
+
+<div class="why"><b>为什么 sequence key 要过期？</b>key 名是 <code>前缀 + 时间戳</code>，每过一天/一分钟就是一个新 key。老 key 过期自动清理，否则每天一个新 key 会无限堆积。这就是"按时间分片 + 自动清理"——用 Redis 的过期机制替代定时任务。</div>
+
+<h3>补零：minIdCapacityBits</h3>
+
+<p><code>getPaddedDateId("P", true)</code> 默认补到 6 位（最少能生成 999999 个序号）。代码里 <code>DEFAULT_MIN_ID_CAPACITY_BITS = 6</code>，可自定义。</p>
+
+<h3>废弃方法</h3>
+
+<p><code>getDateId()</code> 和 <code>getDateTimeId()</code> 的两个无参重载被标记了 <code>@Deprecated</code>，注释说"请使用带 prefix 的版本，确保不同业务的 ID 连续性"——因为如果多个业务共用一个 key，会互相干扰序号。</p>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 用 <code>@Cacheable(cacheNames="sys_dict")</code> 存的数据，想在另一个 Service 里手动读取，应该用？</p>
+<span class="opt">A. RedisUtils.getCacheObject("sys_dict:xxx")</span>
+<span class="opt">B. CacheUtils.get("sys_dict", key)</span>
+<span class="opt">C. QueueUtils.getQueueObject("sys_dict")</span>
+<span class="opt">D. 直接 new 一个 RedisConnection</span>
+<details><summary>看答案</summary><b>B</b>。<code>@Cacheable</code> 的数据归 Spring CacheManager 管，<code>CacheUtils</code> 走的同一套抽象，key 拼法和序列化都一致。用 <code>RedisUtils</code> 可能对不上。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>SequenceUtils</code> 为什么给不同时间粒度的 key 设不同过期时间？</p>
+<span class="opt">A. 为了节省带宽，小 key 传得快</span>
+<span class="opt">B. 按时间分片的 key（如 P20260630）如果不自动过期，每天产生一个会无限堆积；用 Redis 过期机制自动清理</span>
+<span class="opt">C. 不同业务需要不同格式的单号</span>
+<span class="opt">D. 这是 Redisson 的强制要求，没设计原因</span>
+<details><summary>看答案</summary><b>B</b>。每天/每分钟产生一个新 key，老 key 过期自动清理，避免 key 堆积。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>QueueUtils</code> 注释里说"重量级数据量请使用 MQ"，主要因为？</p>
+<span class="opt">A. Redis 队列比 MQ 更贵</span>
+<span class="opt">B. Redis 队列没有持久化、重试、死信等可靠性保证，数据堆积会消耗 Redis 内存</span>
+<span class="opt">C. MQ 由 Java 实现，速度更快</span>
+<span class="opt">D. Redis 不支持阻塞队列</span>
+<details><summary>看答案</summary><b>B</b>。Redis List 做队列是内存型、无持久化、无重试/死信/事务消息等企业级能力。适合临时轻量任务，生产级异步该用 MQ。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/6.-distributed-objects#66-id-generator" target="_blank">Redisson Wiki · RIdGenerator</a>——本课 SequenceUtils 的 <code>tryInit</code> / <code>nextId</code> 在这里有完整说明。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「RIdGenerator 的步长预取是怎么在 Lua 里实现的？」「为什么不直接用 Snowflake？」下一课是<strong>最后一课</strong>：异常处理、依赖边界与全局复盘——学完整个模块闭环。</div>
+
+<div class="nav">课程 0007 / 使命：全面读懂 ruoyi-common-redis · 上一课：RedisUtils · 下一课：异常处理与全局复盘</div>
+
+</body>
+</html>

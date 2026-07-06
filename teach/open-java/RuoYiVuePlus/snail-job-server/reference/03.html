@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查：安全防护与日志体系</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; margin-top: 2rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.8rem; border-bottom: 1px solid #eee; padding-bottom: 0.25rem; }
+  h3 { font-size: 1rem; margin-top: 1.4rem; color: #333; }
+  code { background: #f5f5f5; padding: 0.12em 0.35em; border-radius: 3px; font-size: 0.88em; }
+  pre { background: #282c34; color: #abb2bf; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.8em; line-height: 1.4; }
+  .tag { display: inline-block; background: #409EFF; color: #fff; padding: 0.1em 0.5em; border-radius: 3px; font-size: 0.7em; font-weight: 600; margin-right: 0.4em; }
+  .tag-green { background: #67C23A; }
+  .tag-orange { background: #E6A23C; }
+  .tag-red { background: #F56C6C; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.85rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .arch-diagram { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 0.8rem; margin: 0.8rem 0; font-family: monospace; font-size: 0.78rem; line-height: 1.5; white-space: pre; overflow-x: auto; color: #333; }
+  .flow-chart { background: #f0f7ff; border: 1px solid #cce5ff; border-radius: 8px; padding: 0.8rem; margin: 0.8rem 0; font-size: 0.85rem; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 0.8rem; border-top: 1px solid #eee; font-size: 0.85rem; }
+  .nav a { font-weight: 600; text-decoration: none; color: #409EFF; }
+</style>
+</head>
+<body>
+
+<h1>速查 #03：安全防护与日志体系</h1>
+
+<h2>Actuator 安全防护架构</h2>
+
+<h3>Actuator 暴露配置</h3>
+<pre>management:
+  endpoints:
+    web:
+      exposure:
+        include: '*'                    # 暴露全部端点（敏感！）
+  endpoint:
+    health:
+      show-details: ALWAYS</pre>
+
+<h3>两层防护组件</h3>
+
+<table>
+  <tr><th>组件</th><th>类型</th><th>职责</th></tr>
+  <tr><td><code>SecurityConfig</code></td><td>@Configuration</td><td>读取凭据，注册 FilterRegistrationBean，绑定 URL 模式</td></tr>
+  <tr><td><code>ActuatorAuthFilter</code></td><td>javax.servlet.Filter</td><td>四步 Basic Auth 校验</td></tr>
+</table>
+
+<h3>ActuatorAuthFilter 四步校验链</h3>
+
+<div class="arch-diagram">请求 → /actuator/**
+  │
+  ├─ 校验1: Authorization 请求头是否存在且以 "Basic " 开头
+  │   失败 → 401 + WWW-Authenticate 头
+  │
+  ├─ 校验2: 截取 "Basic " 之后的 Base64 字符串并解码
+  │   失败 → 401
+  │
+  ├─ 校验3: 解码结果是否包含且仅包含一个 ":" 分隔符
+  │   失败 → 401
+  │
+  └─ 校验4: username 和 password 精确匹配配置值
+      失败 → 401
+      成功 → chain.doFilter() 放行</div>
+
+<h3>认证凭据来源</h3>
+<pre>spring.boot.admin.client:
+  username: @monitor.username@      # Maven 属性，父 pom 定义
+  password: @monitor.password@
+  instance:
+    metadata:
+      username: ${...username}       # Admin Server 回调时携带
+      userpassword: ${...password}   # 构造 Basic Auth 头</pre>
+
+<p><span class="tag tag-orange">安全提示</span> Basic Auth 在非 HTTPS 下为 Base64 编码（非加密），生产环境应配合 Nginx HTTPS 或更安全的认证方案。</p>
+
+<h2>日志体系：7 个 Appender</h2>
+
+<table>
+  <tr><th>Appender</th><th>类型</th><th>关键参数</th><th>用途</th></tr>
+  <tr><td><code>console</code></td><td>ConsoleAppender</td><td>-</td><td>控制台彩色输出</td></tr>
+  <tr><td><code>file_console</code></td><td>RollingFileAppender</td><td>按天滚动，保留 1 天</td><td>控制台日志落盘 → console.log</td></tr>
+  <tr><td><code>file_info</code></td><td>RollingFileAppender</td><td>INFO+，保留 60 天</td><td>INFO 级别文件 → info.log</td></tr>
+  <tr><td><code>file_error</code></td><td>RollingFileAppender</td><td>ERROR+，保留 60 天</td><td><span class="tag tag-red">排障入口</span> ERROR 单独文件 → error.log</td></tr>
+  <tr><td><code>async_info</code></td><td>AsyncAppender</td><td>队列 1024，丢弃阈值 100</td><td>异步包装 file_info</td></tr>
+  <tr><td><code>async_error</code></td><td>AsyncAppender</td><td>队列 1024，丢弃阈值 100</td><td>异步包装 file_error</td></tr>
+  <tr><td><code>snail_log_server_appender</code></td><td><span class="tag tag-green">SnailJobServerLogbackAppender</span></td><td>-</td><td>接收客户端远程日志，持久化到数据库</td></tr>
+</table>
+
+<h3>日志目录结构</h3>
+<div class="arch-diagram">./logs/ruoyi-snailjob-server/
+├── console.log          ← 保留 1 天
+├── console.2026-07-04.log
+├── info.log             ← 保留 60 天
+├── info.2026-07-04.log
+├── error.log            ← 保留 60 天 ★ 线上排障第一入口
+└── error.2026-07-04.log</div>
+
+<h2>远程日志通道（核心特色）</h2>
+
+<div class="flow-chart">
+<div style="font-weight:600; margin-bottom:0.4rem;">客户端 → 服务端日志流转链路</div>
+<table>
+  <tr><th>步骤</th><th>位置</th><th>动作</th></tr>
+  <tr><td>1</td><td>客户端 SnailJobConfig</td><td>监听 SnailClientStartingEvent，动态挂载 SnailLogbackAppender 到 Logback 根 Logger</td></tr>
+  <tr><td>2</td><td>客户端任务执行</td><td>任务 INFO/WARN/ERROR 日志被 SnailLogbackAppender 拦截</td></tr>
+  <tr><td>3</td><td>客户端 Netty</td><td>日志通过 17888 端口实时发送到服务端</td></tr>
+  <tr><td>4</td><td>服务端 Logback</td><td>SnailJobServerLogbackAppender 接收并持久化到 MySQL</td></tr>
+  <tr><td>5</td><td>Dashboard</td><td>从数据库查询展示任务执行日志</td></tr>
+</table>
+</div>
+
+<h3>客户端侧代码片段</h3>
+<pre>@EventListener(SnailClientStartingEvent.class)
+public void onStarting(SnailClientStartingEvent event) {
+    LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
+    SnailLogbackAppender&lt;ILoggingEvent&gt; ca = new SnailLogbackAppender&lt;&gt;();
+    ca.setName("snail_log_appender");
+    ca.start();
+    Logger rootLogger = lc.getLogger(Logger.ROOT_LOGGER_NAME);
+    rootLogger.addAppender(ca);
+}</pre>
+
+<h3>服务端侧配置</h3>
+<pre>&lt;appender name="snail_log_server_appender"
+          class="com.aizuda.snailjob.server.common.appender
+                        .SnailJobServerLogbackAppender"&gt;
+&lt;/appender&gt;
+
+&lt;root level="info"&gt;
+    &lt;appender-ref ref="snail_log_server_appender" /&gt;
+&lt;/root&gt;</pre>
+
+<p><span class="tag tag-green">设计价值</span> 无需 SSH 到每台客户端机器。所有任务日志集中存储在服务端数据库，Dashboard 统一检索——在微服务/分布式任务场景下极大降低排障成本。</p>
+
+<h2>三课知识全景</h2>
+
+<table>
+  <tr><th>课程</th><th>核心知识</th><th>关键文件</th></tr>
+  <tr><td>第1课</td><td>模块定位、依赖结构、跨包启动</td><td>pom.xml, SnailJobServerApplication.java</td></tr>
+  <tr><td>第2课</td><td>配置体系、双端口模型</td><td>application.yml, application-dev.yml, Dockerfile</td></tr>
+  <tr><td>第3课</td><td>Actuator 安全、日志三层架构、远程日志通道</td><td>SecurityConfig.java, ActuatorAuthFilter.java, logback-plus.xml</td></tr>
+</table>
+
+<h2>自我检测要点</h2>
+
+<ol>
+  <li>ActuatorAuthFilter 做了哪四层校验？攻击者直接访问 /actuator/env 会发生什么？</li>
+  <li>AsyncAppender 的 discardingThreshold=100 和 queueSize=1024 含义？</li>
+  <li>描述客户端任务日志从产生到 Dashboard 展示的完整 6 步链路。</li>
+  <li>ERROR 日志为何单独存文件？线上排查看哪个文件？</li>
+</ol>
+
+<div class="nav">
+  <a href="02.html">← 上一张速查：配置体系与通信模型</a>
+  <span></span>
+</div>
+
+</body>
+</html>

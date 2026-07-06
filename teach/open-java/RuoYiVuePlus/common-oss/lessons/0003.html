@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 配置体系：从数据库 JSON 到强类型配置的转换链</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#fef3e6; color:#d47500; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 配置体系：从数据库 JSON 到强类型配置的转换链 <span class="tag">config</span></h1>
+
+<div class="mission">
+&#127919; <b>本节目标（对应使命 Success #3）</b>：学完你能追踪 <code>OssProperties</code> &#8594; <code>OssClientConfig</code> 的完整转换链，说清 <code>resolvePathStyleAccess</code> 的自动推断逻辑，理解 <code>AccessPolicy</code> 枚举如何映射到 AWS S3 ACL。
+</div>
+
+<p>前两节课我们讲了 <code>OssClient</code> 接口和 <code>AbstractOssClientImpl</code>/<code>DefaultOssClientImpl</code> 的模板方法继承链。但有一个核心问题悬而未决：<strong>OssClientImpl 里的 <code>s3AsyncClient</code> 和 <code>OssClientConfig</code> 到底从哪来的？</strong>本课讲那根「配置链」——从数据库里一行 JSON，到最终变成一个不可变的 <code>OssClientConfig</code> 的全部转换过程。</p>
+
+<h2>一、配置全景 —— 数据流向图</h2>
+
+<div class="flow">数据库表 sys_oss_config 的一行记录
+  |
+  | （包含字段：access_key, secret_key, endpoint, bucket_name, region, is_https, access_policy ...）
+  v
+CacheUtils 存入 Redis（JSON 字符串）
+  KEY: "global:sys_oss:default_config"
+  |
+  | （每次 OssFactory.instance() 调用时）
+  v
+OssFactory.instance()
+  |
+  |  ① CacheUtils.get(DEFAULT_CONFIG_KEY) 取出 Redis 中的 JSON 字符串
+  v
+JsonUtils.parseObject(jsonStr, OssProperties.class)
+  |     → 得到 OssProperties POJO（9 个 @Data 字段）
+  v
+OssClientConfig.formProperties(ossProperties)
+  |     → formPropertiesBuilder(properties) 做字段映射 + 类型转换
+  v
+OssClientConfig（11 个 final 字段，@Builder 构建，不可变）
+  |     → 传入 DefaultOssClientImpl 构造函数
+  v
+DefaultOssClientImpl 持有 config，用于构建 s3AsyncClient 和 URL 拼接</div>
+
+<p>数据库中实际存储的 JSON 结构（sys_oss_config 表的配置字段反序列化前）：</p>
+
+<pre><code>{
+  "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+  "domainUrl": "",
+  "prefix": "ruoyi",
+  "accessKey": "LTAI5t...",
+  "secretKey": "xxx...",
+  "bucketName": "my-bucket",
+  "region": "cn-hangzhou",
+  "isHttps": "Y",
+  "accessPolicy": "2"
+}</code></pre>
+
+<p>接下来我们逐个拆解这条链上的每一个类。</p>
+
+<h2>二、OssProperties —— 外部配置的 POJO</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：properties/OssProperties.java</span></div>
+
+<pre><code>@Data
+public class OssProperties {
+
+    private String endpoint;        // 访问站点，如 https://oss-cn-hangzhou.aliyuncs.com
+    private String domainUrl;       // 自定义域名（可选，优先于 endpoint）
+    private String prefix;          // 对象 key 前缀，如 "ruoyi"
+    private String accessKey;       // 云服务商 AccessKey
+    private String secretKey;       // 云服务商 SecretKey
+    private String bucketName;      // 存储桶名称
+    private String region;          // 存储区域，如 "cn-hangzhou"
+    private String isHttps;         // 是否 HTTPS（"Y" / "N"）—— 注意是字符串不是 boolean
+    private String accessPolicy;    // 桶权限类型（"0"=private, "1"=public-read-write, "2"=public-read）
+}</code></pre>
+
+<p><strong>为什么需要这个独立的 POJO？</strong>理由有三：</p>
+<ol>
+  <li><b>解耦数据库 schema 和内部类型</b>：数据库里存的是字符串（<code>"Y"/"N"</code>、<code>"0"/"1"/"2"</code>），内部 <code>OssClientConfig</code> 需要的是 <code>boolean</code>、<code>Region</code>、<code>AccessPolicy</code> 枚举等强类型。中间放一个纯字符串 POJO 做缓冲，转换逻辑在 <code>OssClientConfig</code> 里统一处理。</li>
+  <li><b>允许前端直接编辑 JSON</b>：<code>@Data</code> 标记（Lombok 自动生成 getter/setter/toString/equals/hashCode），配合 Jackson 序列化，前端可以拿到一个扁平的 JSON 表单直接编辑，不需要理解内部类型。</li>
+  <li><b>单一数据源</b>：无论配置来自数据库、配置文件还是环境变量，最终都收敛为 <code>OssProperties</code>，再经由 <code>OssClientConfig.formProperties()</code> 统一转换。</li>
+</ol>
+
+<div class="side">
+&#128161; <b>设计意图</b>：<code>OssProperties</code> 是「外部世界的代表」——和 JSON 一一对应，弱类型、可序列化。而 <code>OssClientConfig</code> 是「内部世界的代表」——强类型、不可变。两者之间的桥就是 <code>formProperties()</code>。
+</div>
+
+<h2>三、OssClientConfig —— 内部不可变配置</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：config/OssClientConfig.java</span></div>
+
+<h3>3.1 类注解 —— 不可变 + 相等性比较</h3>
+
+<pre><code>@RequiredArgsConstructor   // 为所有 final 字段生成构造器
+@Builder                    // 生成 Builder 模式
+@EqualsAndHashCode          // 用于配置变更检测：比较两个 config 是否相同
+public class OssClientConfig implements
+    Config&lt;OssClientConfig, OssClientConfig.OssClientConfigBuilder&gt;,
+    Serializable { ... }</code></pre>
+
+<p><code>@EqualsAndHashCode</code> 是关键——<code>OssFactory</code> 用它来检测配置是否变更。如果新旧 config 的 <code>equals()</code> 返回 true，就复用旧客户端；返回 false 才关闭旧的、创建新的。<strong>所有字段都是 final，保证配置一旦创建就不能被意外修改。</strong></p>
+
+<h3>3.2 11 个字段 —— 全部 Optional 包装</h3>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>来源 OssProperties 字段</th><th>访问方法</th></tr>
+<tr><td><code>endpoint</code></td><td>String</td><td>endpoint（直传）</td><td><code>endpoint() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>domain</code></td><td>String</td><td>domainUrl（直传）</td><td><code>domain() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>useHttps</code></td><td>boolean</td><td>isHttps（"Y"→true, 其他→false）</td><td><code>useHttps() → boolean</code></td></tr>
+<tr><td><code>usePathStyleAccess</code></td><td>boolean</td><td><b>自动推断（见 3.3）</b></td><td><code>usePathStyleAccess() → boolean</code></td></tr>
+<tr><td><code>accessKey</code></td><td>String</td><td>accessKey（直传）</td><td><code>accessKey() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>secretKey</code></td><td>String</td><td>secretKey（直传）</td><td><code>secretKey() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>bucket</code></td><td>String</td><td>bucketName（直传）</td><td><code>bucket() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>region</code></td><td>Region</td><td>region → <b>Region.of() 解析</b></td><td><code>region() → Optional&lt;Region&gt;</code></td></tr>
+<tr><td><code>prefix</code></td><td>String</td><td>prefix（直传）</td><td><code>prefix() → Optional&lt;String&gt;</code></td></tr>
+<tr><td><code>accessControlPolicyConfig</code></td><td>AccessControlPolicyConfig</td><td>accessPolicy → <b>解析为 record</b></td><td><code>accessControlPolicyConfig() → @NonNull</code></td></tr>
+<tr><td><code>asyncExecutorConfig</code></td><td>OssAsyncExecutorConfig</td><td>（暂不来自 OssProperties）</td><td><code>asyncExecutorConfig() → @NonNull</code></td></tr>
+</table>
+
+<div class="side">
+&#128161; <b>为什么用 Optional 包装？</b>配置字段可能为 null（比如用户没填 domainUrl）。用 <code>Optional.ofNullable(field)</code> 包裹后，调用方可以通过 <code>.filter(StringUtils::isNotBlank).orElseGet(...)</code> 链式处理空值，避免了到处写 <code>if (field == null)</code> 的样板代码。
+</div>
+
+<h3>3.3 转换桥 —— formPropertiesBuilder() 里的三个关键逻辑</h3>
+
+<p><code>formProperties(OssProperties properties)</code> 调用 <code>formPropertiesBuilder(properties).build()</code>。后者是一个纯映射方法，但有三处值得深究的类型转换：</p>
+
+<div class="step"><span class="num">A</span><b><code>resolvePathStyleAccess(OssProperties)</code> —— 自动推断路径风格</b><br>
+<span class="where">OssClientConfig.java:247-250</span>
+<pre><code>private static boolean resolvePathStyleAccess(OssProperties properties) {
+    // 旧配置没有显式路径风格字段，只能继续按内置云厂商 endpoint 做兼容推断。
+    return !StringUtils.containsAny(properties.getEndpoint(), OssConstant.CLOUD_SERVICE);
+}</code></pre>
+其中 <code>OssConstant.CLOUD_SERVICE = {"aliyun", "qcloud", "qiniu", "obs"}</code>。<br>
+<strong>逻辑</strong>：如果 endpoint 里包含以上四个关键词<strong>任意一个</strong>，说明是主流云厂商的 endpoint，它们使用 <b>site-style（虚拟主机风格）</b>，即 <code>bucket.endpoint</code>；否则认为是自建 S3 兼容服务（如 MinIO），使用 <b>path-style</b>，即 <code>endpoint/bucket</code>。<br>
+<strong>设计动机</strong>：这是<strong>向后兼容</strong>的妥协。旧版配置没有 <code>pathStyle</code> 字段，只能靠 endpoint 字符串内容猜测。如果你接入一个新厂商，它的 endpoint 不包含这四个关键词且用 site-style，需要修改此方法或增加配置字段。
+</div>
+
+<div class="step"><span class="num">B</span><b><code>resolveAccessControlPolicy(String)</code> —— 解析 ACL 策略</b><br>
+<span class="where">OssClientConfig.java:258-267</span>
+<pre><code>private static AccessControlPolicyConfig resolveAccessControlPolicy(String accessPolicyString) {
+    // 绝大多数云厂商不允许操作 ACL，默认禁用；当前业务只用访问策略判断是否生成预签名 URL。
+    if (StringUtils.isBlank(accessPolicyString)) {
+        return AccessControlPolicyConfig.DEFAULT;   // enabled=false
+    }
+    return AccessControlPolicyConfig.builder()
+        .enabled(true)
+        .accessPolicy(AccessPolicy.formType(accessPolicyString))
+        .build();
+}</code></pre>
+空白字符串 &#8594; 返回 <code>DEFAULT</code>（禁用）；非空 &#8594; 用 <code>AccessPolicy.formType()</code> 把字符串解析为枚举，构建一个 enabled=true 的配置。注意这里的注释：<strong>绝大多数云厂商不允许操作 ACL</strong>，所以默认是禁用。当前业务只用它来判断「是否生成预签名 URL」。
+</div>
+
+<div class="step"><span class="num">C</span><b><code>parseRegion(String)</code> —— Region 字符串转对象</b><br>
+<span class="where">OssClientConfig.java:234-239</span>
+<pre><code>private static Region parseRegion(String regionString) {
+    if (StringUtils.isBlank(regionString)) {
+        return Region.US_EAST_1;          // 空值兜底
+    }
+    return Region.of(regionString);       // AWS SDK 标准解析
+}</code></pre>
+空字符串或 null &#8594; 回退到 <code>Region.US_EAST_1</code>；否则用 AWS SDK 的 <code>Region.of()</code> 解析。注意这个 fallback 意味着<strong>如果 region 没填，实际请求会发到美东</strong>——对国内用户来说是隐藏的坑。
+</div>
+
+<h3>3.4 URL 构建方法</h3>
+
+<table>
+<tr><th>方法</th><th>职责</th><th>核心逻辑</th></tr>
+<tr>
+  <td><code>getEndpointUrl()</code></td>
+  <td>获取协议 + endpoint 的完整 URL</td>
+  <td><code>BucketUrlUtil.rebuildUrlHeader(useHttps, getEndpoint())</code> —— 根据 useHttps 决定加 http:// 还是 https://</td>
+</tr>
+<tr>
+  <td><code>getDomainUrl()</code></td>
+  <td>获取访问基础 URL（优先自定义域名）</td>
+  <td>domain 非空 &#8594; <code>rebuildUrlHeader(useHttps, domain)</code>；否则 fallback 到 <code>getEndpointUrl()</code></td>
+</tr>
+<tr>
+  <td><code>getBucketUrl()</code></td>
+  <td>获取桶完整 URL（无参版）</td>
+  <td>从 <code>bucket()</code> 取桶名，调 <code>getBucketUrl(bucket)</code></td>
+</tr>
+<tr>
+  <td><code>getBucketUrl(String bucket)</code></td>
+  <td>获取指定桶的完整 URL</td>
+  <td>根据 <code>usePathStyleAccess</code> 决定：path-style &#8594; <code>host/bucket</code>；site-style &#8594; <code>bucket.host</code></td>
+</tr>
+<tr>
+  <td><code>getAccessBaseUrl()</code></td>
+  <td>获取基础 URL（私有）</td>
+  <td>domain 非空 &#8594; domain；否则 &#8594; endpoint（<b>不带协议头</b>，给 URL 拼接用）</td>
+</tr>
+</table>
+
+<h3>3.5 copy() 和 toBuilder() —— Config 接口实现</h3>
+
+<pre><code>@Override
+public OssClientConfig copy() {
+    return toBuilder().build();           // 防御性拷贝：返回一个完全相同的新对象
+}
+
+@Override
+public OssClientConfigBuilder toBuilder() {
+    return builder()
+        .endpoint(endpoint)
+        .domain(domain)
+        .useHttps(useHttps)
+        .usePathStyleAccess(usePathStyleAccess)
+        .accessKey(accessKey)
+        .secretKey(secretKey)
+        .bucket(bucket)
+        .region(region)
+        .prefix(prefix)
+        .accessControlPolicyConfig(accessControlPolicyConfig().copy())   // 递归拷贝
+        .asyncExecutorConfig(asyncExecutorConfig().copy());              // 递归拷贝
+}</code></pre>
+
+<p><code>copy()</code> 用在 <code>DefaultOssClientImpl</code> 构造时保存一份快照，防止外部修改原对象影响已运行的客户端。<code>toBuilder()</code> 用于需要基于当前配置做局部修改的场景（虽然当前代码暂未使用此场景，但接口定义了契约）。</p>
+
+<h2>四、Config&lt;T, B&gt; 接口 —— 配置对象的统一契约</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：config/Config.java</span></div>
+
+<pre><code>public interface Config&lt;T, B&gt; {
+    T copy();        // 深拷贝（防御性编程）
+    B toBuilder();   // 转为 Builder（支持局部修改重构）
+}</code></pre>
+
+<p>这个接口被三个配置类实现：</p>
+<ul>
+  <li><code>OssClientConfig</code> —— 客户端主配置</li>
+  <li><code>AccessControlPolicyConfig</code> —— ACL 访问策略配置</li>
+  <li><code>OssAsyncExecutorConfig</code> —— 异步执行器配置</li>
+</ul>
+
+<p>统一契约的意义：</p>
+<ul>
+  <li><b>防御性拷贝（defensive copy）</b>：<code>OssFactory</code> 在构造客户端时调用 <code>config.copy()</code>，确保客户端持有的是配置的快照，而非引用。后续即使外部改了原对象，客户端不受影响。</li>
+  <li><b>Builder 重构（toBuilder）</b>：允许从现有配置出发，改一两个字段就生成新配置，而不是从头 new。</li>
+  <li><b>配置不可变性（config immutability）</b>：配合 Builder 模式 + final 字段，配置对象一旦构建完毕就无法修改，消除了并发环境下的「配置在读取过程中被改了一半」的风险。</li>
+</ul>
+
+<h2>五、AccessPolicy 枚举 —— 三种访问级别</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：enums/AccessPolicy.java</span></div>
+
+<pre><code>@Getter
+@AllArgsConstructor
+public enum AccessPolicy {
+
+    PRIVATE(0, BucketCannedACL.PRIVATE, ObjectCannedACL.PRIVATE),
+    PUBLIC_READ_WRITE(1, BucketCannedACL.PUBLIC_READ_WRITE, ObjectCannedACL.PUBLIC_READ_WRITE),
+    PUBLIC_READ(2, BucketCannedACL.PUBLIC_READ, ObjectCannedACL.PUBLIC_READ);
+    // ...
+}</code></pre>
+
+<table>
+<tr><th>枚举值</th><th>type</th><th>桶 ACL</th><th>对象 ACL</th><th>含义</th></tr>
+<tr>
+  <td><code>PRIVATE</code></td>
+  <td>0</td>
+  <td><code>BucketCannedACL.PRIVATE</code></td>
+  <td><code>ObjectCannedACL.PRIVATE</code></td>
+  <td>私有读写：只有凭证持有者可访问</td>
+</tr>
+<tr>
+  <td><code>PUBLIC_READ_WRITE</code></td>
+  <td>1</td>
+  <td><code>BucketCannedACL.PUBLIC_READ_WRITE</code></td>
+  <td><code>ObjectCannedACL.PUBLIC_READ_WRITE</code></td>
+  <td>公共读写：任何人可读写（高风险）</td>
+</tr>
+<tr>
+  <td><code>PUBLIC_READ</code></td>
+  <td>2</td>
+  <td><code>BucketCannedACL.PUBLIC_READ</code></td>
+  <td><code>ObjectCannedACL.PUBLIC_READ</code></td>
+  <td>公共读私有写：适合静态资源（如图片、CSS）</td>
+</tr>
+</table>
+
+<p>每个枚举直接持有 AWS SDK 的 <code>BucketCannedACL</code> 和 <code>ObjectCannedACL</code> 常量，使用时不需要二次映射。这样当 <code>DefaultOssClientImpl</code> 需要设 ACL 时，直接 <code>policy.getBucketCannedACL()</code> 即可传入 SDK。</p>
+
+<p><strong>formType(String) 解析方法：</strong></p>
+
+<pre><code>public static AccessPolicy formType(String type) {
+    return Arrays.stream(values())
+        .filter(policy -> policy.getType().toString().equals(type))
+        .findFirst()
+        .orElseThrow(() -> S3StorageException.form("'type' not found By " + type));
+}</code></pre>
+
+<p>把字符串 <code>"0"</code>、<code>"1"</code>、<code>"2"</code> 匹配到对应枚举。注意比较方式是 <code>getType().toString().equals(type)</code>——这意味着如果配置里写的是 <code>"1"</code> 而不是 <code>"01"</code> 或空白，才能匹配。找不到就抛 <code>S3StorageException</code>，<strong>不是返回 null 或默认值</strong>。</p>
+
+<h2>六、AccessControlPolicyConfig —— 策略配置 record</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：config/AccessControlPolicyConfig.java</span></div>
+
+<pre><code>@Builder
+public record AccessControlPolicyConfig(
+    boolean enabled,
+    AccessPolicy accessPolicy
+) implements Config&lt;AccessControlPolicyConfig, ...&gt;, Serializable {
+
+    public static final AccessControlPolicyConfig DEFAULT = AccessControlPolicyConfig.builder()
+        .enabled(false)
+        .accessPolicy(AccessPolicy.PUBLIC_READ_WRITE)
+        .build();
+}</code></pre>
+
+<p><strong>它是一个 Java record</strong>，天然不可变 + equals/hashCode 自动生成。两个字段：</p>
+<ul>
+  <li><code>enabled</code>：是否启用 ACL 操作。默认 <code>false</code>，因为「绝大多数云厂商不允许操作 ACL」。</li>
+  <li><code>accessPolicy</code>：访问策略。默认 <code>PUBLIC_READ_WRITE</code>。注意 <code>accessPolicy()</code> 方法标记了 <code>@NonNull</code>，如果用户 builder 时没设值，会 fallback 到 <code>PUBLIC_READ_WRITE</code>。</li>
+</ul>
+
+<h2>七、OssConstant —— 系统常量</h2>
+
+<div class="step"><span class="num">1</span><b>定位</b> <span class="where">ruoyi-common-oss：constant/OssConstant.java</span></div>
+
+<pre><code>public interface OssConstant {
+
+    // Redis 中默认配置的 key
+    String DEFAULT_CONFIG_KEY = GlobalConstants.GLOBAL_REDIS_KEY + "sys_oss:default_config";
+
+    // 内置云服务商标识（用于 resolvePathStyleAccess 推断）
+    String[] CLOUD_SERVICE = new String[]{"aliyun", "qcloud", "qiniu", "obs"};
+
+    // 系统预设的配置记录 ID（不可删除的种子数据）
+    List&lt;Long&gt; SYSTEM_DATA_IDS = Arrays.asList(
+        1761900000000000001L, 1761900000000000002L,
+        1761900000000000003L, 1761900000000000004L
+    );
+}</code></pre>
+
+<ul>
+  <li><code>DEFAULT_CONFIG_KEY</code> 拼上了 <code>GLOBAL_REDIS_KEY</code> 前缀，保证不同项目的 Redis 实例隔离。</li>
+  <li><code>CLOUD_SERVICE</code> 是 <code>resolvePathStyleAccess</code> 判断的核心依据——如果在 endpoint 里匹配到这四个关键词之一，就认为用 site-style。</li>
+  <li><code>SYSTEM_DATA_IDS</code> 是系统预置的四条配置记录 ID，业务层可能会用来判断「这条配置能不能删」。</li>
+</ul>
+
+<h2>八、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. <code>OssProperties</code> 里的 <code>isHttps</code> 是 String 类型（"Y"/"N"），而 <code>OssClientConfig.useHttps</code> 是 boolean。这个转换发生在哪里？</p>
+<span class="opt">A. 在 OssProperties 的 getter 里</span>
+<span class="opt">B. 在 OssClientConfig.formPropertiesBuilder() 的 .useHttps(SystemConstants.YES.equals(properties.getIsHttps()))</span>
+<span class="opt">C. 在 OssFactory 里</span>
+<span class="opt">D. 不需要转换，直接传</span>
+<details><summary>看答案</summary><b>B</b>。<code>formPropertiesBuilder()</code> 里用 <code>SystemConstants.YES.equals(properties.getIsHttps())</code> 将字符串 "Y" 转为 boolean true，其他值一律 false。这是转换桥的核心职责之一。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. <code>resolvePathStyleAccess()</code> 的判断逻辑是：如果 endpoint 包含 "aliyun"/"qcloud"/"qiniu"/"obs" 中任意一个，返回 false。这表示什么？</p>
+<span class="opt">A. 这些厂商不支持 path-style</span>
+<span class="opt">B. 这些厂商使用 site-style（虚拟主机风格），不需要 path-style；非这些厂商（如 MinIO）使用 path-style</span>
+<span class="opt">C. 这些厂商必须用 path-style</span>
+<span class="opt">D. 这是随机决定的</span>
+<details><summary>看答案</summary><b>B</b>。这是向后兼容逻辑：旧版配置没有 pathStyle 字段，只能通过 endpoint 字符串猜测。主流云厂商的 endpoint 包含品牌关键词，默认用 site-style（<code>bucket.endpoint</code>）；自建 S3 兼容服务（MinIO 等）不含这些关键词，默认用 path-style（<code>endpoint/bucket</code>）。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 如果配置里 <code>accessPolicy</code> 字段是空字符串，最终 <code>OssClientConfig</code> 的 <code>accessControlPolicyConfig</code> 会是什么？</p>
+<span class="opt">A. null</span>
+<span class="opt">B. 抛异常</span>
+<span class="opt">C. AccessControlPolicyConfig.DEFAULT —— enabled=false, accessPolicy=PUBLIC_READ_WRITE</span>
+<span class="opt">D. 自动推断为 PRIVATE</span>
+<details><summary>看答案</summary><b>C</b>。<code>resolveAccessControlPolicy()</code> 对空白字符串返回 <code>AccessControlPolicyConfig.DEFAULT</code>，其 enabled 为 false。这是因为「绝大多数云厂商不允许操作 ACL」，默认禁用是最安全的策略。</details>
+</div>
+
+<div class="cite">&#128214; 推荐一手资料：<a href="../../RuoYi-Vue-Plus/ruoyi-common/ruoyi-common-oss/src/main/java/org/dromara/common/oss/config/OssClientConfig.java" target="_blank">OssClientConfig.java</a> —— 本文所有转换逻辑的源码；<a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/VirtualHosting.html" target="_blank">AWS S3 Virtual Hosted-Style vs Path-Style</a> —— 理解两种 URL 风格差异的权威文档。</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我。比如：「如果我要接入一个既不在 CLOUD_SERVICE 列表里又用 site-style 的厂商，应该改哪里？」「为什么 accessControlPolicyConfig 默认是禁用，而不根据 accessPolicy 的 type 推断？」下一课讲 <code>OssFactory</code> —— 这个工厂如何利用本课的配置链实现多客户端实例管理、配置热更新时如何安全关闭旧客户端。</div>
+
+<div class="nav">课程 0003 / 使命：读懂 ruoyi-common-oss 对象存储模块 · 上一课：AbstractOssClientImpl 模板方法 · 下一课预告：OssFactory 多客户端工厂与配置热更新</div>
+
+</body>
+</html>

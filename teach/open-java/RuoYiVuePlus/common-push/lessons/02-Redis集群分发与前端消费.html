@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Redis 集群分发与前端消费</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>02 - Redis 集群分发与前端消费</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>完整追踪「业务发送消息 → 前端收到」的跨节点链路，理解 Redis Pub/Sub 在集群消息分发中的作用，掌握 PushHelper 的 API 使用方式，并能解释 MessageTopicListener 的启动时机与消费逻辑。</div>
+
+<h2>1. 全景鸟瞰</h2>
+<p>上一课讲了两个通道的本地连接管理。本课聚焦消息如何跨节点传递——当用户 A 连接在服务器 1 上、用户 B 连接在服务器 2 上时，一条消息如何准确送达目标用户。</p>
+
+<p>集群消息流全景：</p>
+<pre>
+服务器 1 (用户 A 在线)                   服务器 2 (用户 B 在线)
+  │                                          │
+  │ PushHelper.publishMessage(userB, msg)     │
+  │   → pushSessionManager.publishMessage()   │
+  │     → RedisUtils.publish(TOPIC, dto)      │
+  │         │                                 │
+  │         └──── Redis Pub/Sub ─────────────→│
+  │                                           │
+  │         ←──── 广播到所有节点 ────────────→│
+  │                                           │
+  │  MessageTopicListener 收到                 │  MessageTopicListener 收到
+  │   → dto.userIds.contains(userA)? No       │   → dto.userIds.contains(userB)? Yes!
+  │   → 跳过                                   │   → pushSessionManager.sendMessage(userB, dto)
+  │                                           │     → SSE/WebSocket 发送到用户 B 的浏览器
+</pre>
+
+<h2>2. 核心设计</h2>
+
+<h3>2.1 Redis Pub/Sub 跨节点投递</h3>
+<p>为什么需要 Redis Pub/Sub？因为 HTTP 推送连接是绑定在服务器进程上的——用户 B 的 WebSocket 连接在服务器 2 的 JVM 内存中，服务器 1 无法直接访问。Redis Pub/Sub 作为「消息总线」，让集群中所有节点都能收到通知。</p>
+
+<p>关键常量：<code>MessageConstants.MESSAGE_TOPIC = "global:message"</code></p>
+
+<p><strong>发布端（publishMessage）：</strong></p>
+<pre>
+// SseEmitterSessionManager / WebSocketSessionManager 都实现
+publishMessage(PushDTO dto) {
+    RedisUtils.publish(MESSAGE_TOPIC, dto);
+}
+</pre>
+
+<p><strong>订阅端（MessageTopicListener）：</strong></p>
+<pre>
+// 实现 ApplicationRunner, Ordered(-1) → 优先级最高，最先启动
+@Component
+public class MessageTopicListener implements ApplicationRunner, Ordered {
+
+    @Override
+    public void run(ApplicationArguments args) {
+        pushSessionManager.subscribeMessage(dto → {
+            if (dto.getUserIds() != null && !dto.getUserIds().isEmpty()) {
+                // 有目标用户 → 逐一投递
+                dto.getUserIds().forEach(userId →
+                    pushSessionManager.sendMessage(userId, dto));
+            } else {
+                // userIds 为空 → 全局广播
+                pushSessionManager.publishAll(dto);
+            }
+        });
+    }
+
+    @Override
+    public int getOrder() {
+        return -1;  // 最先启动，确保消息不丢失
+    }
+}
+</pre>
+
+<blockquote><strong>Ordered(-1) 的意义：</strong>ApplicationRunner 按 order 升序执行。Ordered(-1) 保证 MessageTopicListener 在所有业务 Runner 之前启动。这意味着 Redis 消息订阅在系统还没完全启动时就已经就绪，不会丢失启动过程中的任何推送消息。</blockquote>
+
+<h3>2.2 PushHelper：业务层的唯一入口</h3>
+<p>全静态方法、私有构造函数——典型的工具类模式。业务代码无需关心底层是 SSE 还是 WebSocket：</p>
+
+<pre>
+// 发送给指定用户
+PushHelper.sendMessage(userId, "您的审批已通过");
+
+// 发送给多个用户
+PushHelper.publishMessage(Arrays.asList(1L, 2L, 3L), payloadDTO);
+
+// 全局广播
+PushHelper.publishAll(payloadDTO);
+</pre>
+
+<p><strong>PushHelper 内部逻辑：</strong></p>
+<pre>
+public static void sendMessage(Long userId, String message) {
+    if (!isEnabled()) return;  // ❶ 兜底检查：推送功能是否开启
+
+    PushSessionManager manager = SpringUtils.getBean(PushSessionManager.class);
+    PushDTO dto = PushDTO.of(Collections.singletonList(userId), payload);
+    manager.sendMessage(userId, dto);
+}
+</pre>
+
+<p><strong>isEnabled() 的重要性：</strong>如果在没有引入 push 模块的环境中调用 PushHelper（如单元测试），方法直接 return 不抛异常。这消除了业务代码对 push 模块的强依赖——引入模块推送生效、不引入模块静默跳过。</p>
+
+<h3>2.3 PushDTO 与 PushPayloadDTO：消息结构</h3>
+<table>
+  <tr><th>字段</th><th>类型</th><th>含义</th></tr>
+  <tr><td><code>userIds</code></td><td>List&lt;Long&gt;</td><td>目标用户列表（空=广播）</td></tr>
+  <tr><td><code>payload</code></td><td>PushPayloadDTO</td><td>消息体（title + content + type + data）</td></tr>
+</table>
+
+<p>Payload 结构：</p>
+<pre>
+PushPayloadDTO:
+  title:   "新任务通知"
+  content: "您有一条新的审批任务"
+  type:    "TASK_NOTIFY"
+  data:    { taskId: 12345, assignee: "张三" }
+</pre>
+
+<p>静态工厂方法：<code>PushDTO.of(userIds, payload)</code> → 定点推送；<code>PushDTO.broadcast(payload)</code> → 全局广播。</p>
+
+<h3>2.4 两种发送方式的区别</h3>
+<table>
+  <tr><th>方法</th><th>作用范围</th><th>是否经 Redis</th><th>适用场景</th></tr>
+  <tr><td><code>sendMessage(userId, dto)</code></td><td>本节点本地连接</td><td>否（直接发）</td><td>用户在本节点在线时</td></tr>
+  <tr><td><code>publishMessage(dto)</code></td><td>集群所有节点</td><td>是（Pub/Sub）</td><td>不确定用户在哪个节点时</td></tr>
+  <tr><td><code>publishAll(dto)</code></td><td>集群所有节点的所有在线用户</td><td>是（Pub/Sub）</td><td>系统公告、全局通知</td></tr>
+</table>
+
+<blockquote><strong>最佳实践：</strong>业务代码应优先使用 <code>publishMessage</code> 而不是 <code>sendMessage</code>。因为集群环境下你不知道目标用户连接在哪个节点——sendMessage 只在本地查找，目标用户可能连接在其他节点上收不到。publishMessage 通过 Redis 广播到所有节点，保证送达。</blockquote>
+
+<h3>2.5 前端消费（SSE / WebSocket）</h3>
+<p><strong>SSE 前端（JavaScript）：</strong></p>
+<pre>
+const eventSource = new EventSource('/message/connect');
+eventSource.addEventListener('message', (event) => {
+    const data = JSON.parse(event.data);
+    console.log('收到推送:', data.title, data.content);
+});
+eventSource.onerror = () => {
+    // EventSource 会自动重连
+};
+</pre>
+
+<p><strong>WebSocket 前端（JavaScript）：</strong></p>
+<pre>
+const ws = new WebSocket('ws://localhost:8080/message?token=' + token);
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data === 'PONG') return;  // 心跳忽略
+    console.log('收到推送:', data.title, data.content);
+};
+// 手动心跳
+setInterval(() => ws.send('PING'), 30000);
+ws.onclose = () => { /* 手动重连 */ };
+</pre>
+
+<h2>3. 实战练习</h2>
+<details class="quiz"><summary>🧠 提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么 publishMessage 会发送到所有节点，目标用户不在线的节点也收到消息？这不浪费吗？</p>
+<p><strong>参考:</strong> 确实会浪费——每个节点都收到消息、检查 userIds、发现本地无此用户、丢弃。但这是 Redis Pub/Sub 的固有特性：消息广播给所有订阅者，无法按条件路由。在节点数少的场景（3-5 个节点），浪费可忽略。如果节点数很多（50+），可以考虑改用 Redis Stream + Consumer Group 模式——每个用户连接时注册到特定的 Stream Group，消息只投递给用户所在节点。</p>
+<p><strong>Q2:</strong> PushHelper 为什么用 isEnabled() 做兜底而不是依赖 @ConditionalOnProperty？</p>
+<p><strong>参考:</strong> @ConditionalOnProperty 控制的是 Bean 是否注册。如果 push 模块未引入或 message.enabled=false，PushSessionManager Bean 不存在。此时业务代码调用 PushHelper.sendMessage() 如果没有 isEnabled() 检查，SpringUtils.getBean() 会抛 NoSuchBeanDefinitionException。isEnabled() 通过检查配置项避免了这个异常，使 push 成为可选依赖而不是强依赖。</p>
+<p><strong>Q3:</strong> MessageTopicListener 的 Ordered(-1) 如果改成 Ordered(100) 会有什么影响？</p>
+<p><strong>参考:</strong> 如果某个 Ordered(50) 的业务 Runner 在启动时调用 PushHelper.publishMessage() 发送消息，而此时 MessageTopicListener 的 subscribeMessage 还没注册，消息发布到 Redis Pub/Sub 后没有消费者——消息丢失。Ordered(-1) 保证订阅在一切业务逻辑之前就绪，消息零丢失。</p>
+</details>
+
+<h2>4. 调用链路</h2>
+<pre>
+// 场景：审批通过后通知申请人
+
+审批 Service:
+  PushHelper.publishMessage(
+      Arrays.asList(applicantUserId),
+      PushPayloadDTO.of("审批通知", "您的请假申请已通过", "APPROVAL_NOTIFY")
+  );
+
+内部路径:
+1. PushHelper.publishMessage(userIds, payload)
+   → isEnabled() → true
+   → SpringUtils.getBean(PushSessionManager.class)
+     → 返回 SseEmitterSessionManager (假设 transport=sse)
+
+2. SseEmitterSessionManager.publishMessage(PushDTO)
+   → RedisUtils.publish("global:message", dto)
+   → Redisson RTopic.publish(topic, dto)
+   → Redis PUBLISH global:message {...json...}
+
+3. 集群所有节点的 MessageTopicListener 收到消息
+   → consumer.accept(dto)
+
+   节点 1 (申请人不在线):
+   → dto.userIds = [applicantUserId]
+   → 遍历 userIds → sendMessage(applicantUserId, dto)
+     → USER_TOKEN_EMITTERS.get(applicantUserId) → empty (不在线)
+     → 无操作
+
+   节点 2 (申请人在线):
+   → dto.userIds = [applicantUserId]
+   → 遍历 userIds → sendMessage(applicantUserId, dto)
+     → USER_TOKEN_EMITTERS.get(applicantUserId) → { token1 → emitter1 }
+     → emitter1.send(SseEmitter.event().data(dto))
+     → 浏览器 EventSource 收到事件 → 弹出通知
+</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>模块的集群消息分发设计体现了「发布订阅模式」的精髓——消息生产者（PushHelper）不关心消费者在哪里，消费者（MessageTopicListener）不关心消息从哪来。Redis 充当消息总线，所有节点平等——没有主节点、没有选举、没有单点故障。同时，PushHelper 的 isEnabled() 兜底设计体现了一种务实的防御性编程：让推送成为可选的能力增强模块，而不是强依赖——不引入不会报错、引入了自动生效。这是微服务拆分中「可选模块」的理想形态。</div>
+
+<div class="cite">📖 推荐一手资料：<a href="https://github.com/redisson/redisson/wiki/6.-distributed-objects/#610-topic">Redisson RTopic 文档</a> · 入口文件：<code>helper/PushHelper.java</code> · <code>listener/MessageTopicListener.java</code> · <code>dto/PushDTO.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。push 模块课程到此结束。</div>
+<div class="nav"><a href="01-SSE与WebSocket双传输.html">← 上一课</a><a href="../">模块首页 →</a></div>
+</body>
+</html>

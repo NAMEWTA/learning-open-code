@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 路由系统与动态菜单</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  code { background: #f5f5f5; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #282c34; color: #abb2bf; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; }
+  blockquote { border-left: 3px solid #409EFF; margin-left: 0; padding-left: 1rem; color: #555; background: #f0f7ff; padding: 0.8rem 1rem; border-radius: 0 6px 6px 0; }
+  .tip { background: #f0f9eb; border-left: 3px solid #67C23A; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .keyword { color: #409EFF; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>02 路由系统与动态菜单</h1>
+
+<p>RuoYi-Vue-Plus 的路由系统是"常量路由 + 动态路由"的双层架构：<strong>常量路由</strong>（登录页、首页、404 等）在构建时已注册，<strong>动态路由</strong>在用户登录后从后端接口拉取并调用 <code>router.addRoute()</code> 注入。<strong>学完本课后，你将能完整追踪从后端菜单数据到侧边栏渲染的全链路。</strong></p>
+
+<h2>常量路由：constantRoutes</h2>
+
+<p>常量路由在 <code>src/router/index.ts</code> 中预先定义，包含以下部分：</p>
+
+<pre><code>export const constantRoutes: RouteRecordRaw[] = [
+  { path: '/redirect', component: Layout, hidden: true, children: [...] },
+  { path: '/social-callback', hidden: true, component: ... },
+  { path: '/login', component: () => import('@/views/login.vue'), hidden: true },
+  { path: '/register', component: () => import('@/views/register.vue'), hidden: true },
+  { path: '/:pathMatch(.*)*', component: () => import('@/views/error/404.vue'), hidden: true },
+  { path: '/401', component: () => import('@/views/error/401.vue'), hidden: true },
+  {
+    path: '', component: Layout, redirect: '/index',
+    children: [
+      { path: '/index', component: () => import('@/views/index.vue'),
+        name: 'Index', meta: { title: '首页', icon: 'dashboard', affix: true } }
+    ]
+  },
+  {
+    path: '/user', component: Layout, hidden: true,
+    children: [
+      { path: 'profile', component: ..., name: 'Profile', meta: { title: '个人中心' } }
+    ]
+  }
+];</code></pre>
+
+<p>所有常量路由都设置 <code>hidden: true</code>（除首页外），意味着它们不会出现在侧边栏菜单中，但路由本身可用。</p>
+
+<h2>动态路由：dynamicRoutes（空数组 + 本地验证）</h2>
+
+<pre><code>// 动态路由，基于用户权限动态去加载
+export const dynamicRoutes: RouteRecordRaw[] = [];</code></pre>
+
+<p><code>dynamicRoutes</code> 在本项目中是空数组。它的设计意图是通过 <code>filterDynamicRoutes</code> 函数根据 <code>route.permissions</code> 和 <code>route.roles</code> 字段判断本地路由是否可被有权限的用户访问。如果有需求在本地定义权限路由，在这个数组中填入路由对象即可，框架会自动过滤。</p>
+
+<h2>路由守卫：permission.ts 的 beforeEach</h2>
+
+<p>路由守卫是登录态校验和动态路由注入的核心：</p>
+
+<pre><code>import { getToken } from '@/utils/auth';
+import router from './router';
+
+const whiteList = ['/login', '/register', '/social-callback', ...];
+
+router.beforeEach(async (to, from) => {
+  NProgress.start();
+
+  if (getToken()) {
+    // === 有 Token ===
+    if (to.path === '/login') {
+      return { path: '/' }; // 已登录用户访问登录页 → 重定向首页
+    }
+
+    if (useUserStore().roles.length === 0) {
+      // 角色为空 → 说明 userInfo 还没拉取，现在拉取
+      await useUserStore().getInfo();          // 获取用户信息 + 角色/权限列表
+      const accessRoutes = await usePermissionStore().generateRoutes(); // 拉取菜单生成路由
+      accessRoutes.forEach(route => {
+        router.addRoute(route);                // 动态注入路由
+      });
+      return { path: to.path, replace: true }; // hack: 确保 addRoute 生效后重新匹配
+    }
+    return true; // 角色已存在，直接放行
+  } else {
+    // === 无 Token ===
+    if (whiteList.includes(to.path)) {
+      return true; // 白名单放行
+    }
+    return `/login?redirect=${encodeURIComponent(to.fullPath)}`; // 重定向登录页
+  }
+});</code></pre>
+
+<div class="tip">
+  <strong>Hack 模式说明：</strong> <code>return { path: to.path, replace: true }</code> 是一段经典的 Vue Router 动态路由 hack。因为 <code>router.addRoute()</code> 不会自动触发当前导航的重新匹配，必须通过返回一个新的导航对象来触发重新解析。这个 hack 会导致目标路由经过两次 beforeEach，第二次时 <code>roles.length</code> 已不为 0，直接放行。
+</div>
+
+<blockquote>
+  <strong>与 React 对比：</strong> React Router v6 没有官方的路由守卫概念，通常通过封装 <code>&lt;AuthRoute&gt;</code> 组件或在 loader 中检查认证态来实现。Vue Router 的 <code>beforeEach</code> 提供了更干净的全局拦截点，支持异步 resolve 和路由重定向。
+</blockquote>
+
+<h2>generateRoutes：后端菜单 -> 前端路由的转换核心</h2>
+
+<p>这是整个路由系统最关键的函数，位于 <code>src/store/modules/permission.ts</code>：</p>
+
+<pre><code>const generateRoutes = async (): Promise&lt;RouteRecordRaw[]&gt; => {
+  // 1. 调用后端接口获取菜单树
+  const res = await getRouters(); // GET /system/menu/getRouters
+  const data = Array.isArray(res.data) ? res.data : [];
+
+  // 2. 深克隆三份数据，用于不同的展示场景
+  const sdata = structuredClone(data);    // 侧边栏展示用
+  const rdata = structuredClone(data);    // 注册路由用（含组件重写）
+  const defaultData = structuredClone(data); // 默认路由
+
+  // 3. filterAsyncRouter 将后端字符串组件名 → 真实 Vue 组件
+  const sidebarRoutes = filterAsyncRouter(sdata);           // 侧边栏菜单
+  const rewriteRoutes = filterAsyncRouter(rdata, undefined, true); // 注册路由
+  const defaultRoutes = filterAsyncRouter(defaultData);     // 顶栏菜单
+
+  // 4. 从本地 dynamicRoutes 中过滤有权限的路由并 addRoute
+  const asyncRoutes = filterDynamicRoutes(dynamicRoutes);
+  asyncRoutes.forEach(route => { router.addRoute(route); });
+
+  // 5. 存入 store，供 Layout 组件消费
+  setRoutes(rewriteRoutes);
+  setSidebarRouters(constantRoutes.concat(sidebarRoutes));
+  setTopbarRoutes(defaultRoutes);
+
+  // 6. 路由 name 重复检测
+  duplicateRouteChecker(asyncRoutes, sidebarRoutes);
+
+  return rewriteRoutes;
+};</code></pre>
+
+<h2>filterAsyncRouter：组件字符串 → 真实组件的映射</h2>
+
+<p>后端返回的菜单数据中，<code>component</code> 字段是字符串（如 <code>'system/user/index'</code>），需要转换为 Vue 的异步组件加载函数：</p>
+
+<pre><code>// 在 store 初始化时预建查找表
+const modules = import.meta.glob('./../../views/**/*.vue');
+const viewModuleMap = new Map&lt;string, () =&gt; Promise&lt;any&gt;&gt;();
+for (const path in modules) {
+  const dir = path.substring(
+    path.indexOf('/views/') + 7,
+    path.lastIndexOf('.vue')
+  );
+  viewModuleMap.set(dir, modules[path]);
+}
+
+const filterAsyncRouter = (asyncRouterMap, lastRouter?, type = false) => {
+  return asyncRouterMap.filter(route => {
+    // 特殊组件直接赋值
+    if (route.component?.toString() === 'Layout') {
+      route.component = Layout;
+    } else if (route.component?.toString() === 'ParentView') {
+      route.component = ParentView;
+    } else if (route.component?.toString() === 'InnerLink') {
+      route.component = InnerLink;
+    } else {
+      // 从查找表中获取异步组件
+      route.component = loadView(route.component, route.name);
+    }
+    // 递归处理子路由
+    if (route.children?.length) {
+      route.children = filterAsyncRouter(route.children, route, type);
+    }
+    return true;
+  });
+};</code></pre>
+
+<p><span class="keyword">import.meta.glob</span> 是 Vite 的静态导入语法，相当于 Webpack 的 <code>require.context</code>。它在构建时将所有匹配的 <code>.vue</code> 文件路径转化为一个键值对对象，运行时从 Map 中 O(1) 查找对应的 loader 函数。</p>
+
+<h2>路由 Name 重复检测：duplicateRouteChecker</h2>
+
+<p>当本地 <code>dynamicRoutes</code> 和后端菜单中包含相同 name 的路由时（<code>keep-alive</code> 依赖 name 作为缓存 key），会导致页面 404。框架通过展平所有路由并检查 name 唯一性来防御：</p>
+
+<pre><code>function duplicateRouteChecker(localRoutes, routes) {
+  const allRoutes = flatRoutes([...localRoutes, ...routes]);
+  const nameList = [];
+  allRoutes.forEach(route => {
+    const name = route.name?.toString() ?? '';
+    if (!name) return;
+    if (nameList.includes(name)) {
+      console.error(`路由名称: [${name}] 重复, 会造成 404`);
+      ElNotification({ title: '路由名称重复', message: ..., type: 'error' });
+      return;
+    }
+    nameList.push(name);
+  });
+}</code></pre>
+
+<div class="warn">
+  <strong>常见坑点：</strong> 如果你在本地 <code>dynamicRoutes</code> 中定义了与后端菜单 name 相同的路由，前端不会报编译错误，但运行时 <code>keep-alive</code> 会混乱，导致页面 404。这个检测器在开发时帮你尽早发现。
+</div>
+
+<h2>createCustomNameComponent：为异步组件注入 name</h2>
+
+<p>由于 <code>import.meta.glob</code> 加载的是包装后的异步组件，其自身没有 <code>name</code> 选项，而 <code>keep-alive</code> 需要 name 作为缓存 key。该工具用一个有 name 的壳层组件包裹：</p>
+
+<pre><code>export function createCustomNameComponent(loader, options = {}) {
+  const { name } = options;
+  let component = null;
+  let wrappedComponent = null;
+
+  return async () => {
+    if (!component) {
+      const { default: loadedComponent } = await loader();
+      component = loadedComponent;
+    }
+    if (!wrappedComponent) {
+      wrappedComponent = defineComponent({
+        name,
+        render() { return h(component); }
+      });
+    }
+    return wrappedComponent;
+  };
+}</code></pre>
+
+<div class="cite">📖 推荐一手资料：<a href="https://router.vuejs.org/zh/guide/advanced/dynamic-routing.html">Vue Router - 动态路由</a> · <a href="https://cn.vitejs.dev/guide/features.html#glob-import">Vite - Glob Import</a></div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以追问：「为什么需要 structuredClone 三份数据？」「addRoute 的导航 hack 有没有更好的替代方案？」「后端菜单的数据结构是什么样的？」</div>
+</body>
+</html>

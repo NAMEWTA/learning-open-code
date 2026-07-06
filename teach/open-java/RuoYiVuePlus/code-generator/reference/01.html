@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · 第 1 课：代码生成器全流程管线</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.5rem; margin-top: 0.3rem; line-height: 1.3; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 0.9rem 1.1rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.55; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.7rem; padding:0.08rem 0.45rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; margin: 0.6rem 0; }
+  th { background: #eef4ff; padding: 0.35rem 0.5rem; text-align: left; color: #1d6fd6; }
+  td { padding: 0.35rem 0.5rem; border-top: 1px solid #eee; vertical-align: top; }
+  .file { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; }
+  .oneliner { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.5rem 0.9rem; border-radius: 0 6px 6px 0; margin: 0.8rem 0; font-size: 0.88rem; font-weight: 600; }
+  .nav { margin-top: 2rem; font-size: 0.82rem; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>速查 01 · 鸟瞰：代码生成器全流程管线 <span class="tag">cheat sheet</span></h1>
+
+<h2>五层架构</h2>
+
+<table>
+<tr><th>#</th><th>层次</th><th>职责</th><th class="file">关键文件</th></tr>
+<tr><td>1</td><td>API 接入层</td><td>12 个 REST 端点</td><td class="file">GenController.java</td></tr>
+<tr><td>2</td><td>业务服务层</td><td>导入表→AnyLine 元数据→构建上下文→ZIP 打包→同步</td><td class="file">GenTableServiceImpl.java</td></tr>
+<tr><td>3</td><td>模板引擎层</td><td>FreeMarker 初始化、context 构建、模板选择、输出文件名计算</td><td class="file">TemplateEngineUtils.java<br>PathNamedTemplate.java</td></tr>
+<tr><td>4</td><td>类型推断层</td><td>DB 类型→Java 类型→HTML 控件；字段名后缀智能匹配</td><td class="file">GenUtils.java</td></tr>
+<tr><td>5</td><td>数据适配层</td><td>AnyLine 与 baomidou 动态数据源桥接</td><td class="file">MyBatisDataSourceMonitor.java</td></tr>
+</table>
+
+<h2>12 个 API 端点速查</h2>
+
+<table>
+<tr><th>分组</th><th>方法</th><th class="file">路径 /tool/gen/...</th><th>干什么</th></tr>
+<tr><td>浏览</td><td>GET</td><td class="file">/list</td><td>已导入表分页</td></tr>
+<tr><td>浏览</td><td>GET</td><td class="file">/db/list</td><td>数据库可用表分页</td></tr>
+<tr><td>浏览</td><td>GET</td><td class="file">/getDataNames</td><td>数据源名称列表</td></tr>
+<tr><td>浏览</td><td>GET</td><td class="file">/{tableId}</td><td>表配置 + 字段明细</td></tr>
+<tr><td>浏览</td><td>GET</td><td class="file">/column/{tableId}</td><td>字段列表</td></tr>
+<tr><td>导入</td><td>POST</td><td class="file">/importTable</td><td>导入表（分布式锁防并发）</td></tr>
+<tr><td>配置</td><td>PUT</td><td class="file">/</td><td>保存配置（树参数校验）</td></tr>
+<tr><td>配置</td><td>DELETE</td><td class="file">/{tableIds}</td><td>删除配置</td></tr>
+<tr><td>配置</td><td>GET</td><td class="file">/synchDb/{tableId}</td><td>同步最新列结构</td></tr>
+<tr><td>产出</td><td>GET</td><td class="file">/preview/{tableId}</td><td>预览代码</td></tr>
+<tr><td>产出</td><td>GET</td><td class="file">/download/{tableId}</td><td>单表下载 ZIP</td></tr>
+<tr><td>产出</td><td>GET</td><td class="file">/batchGenCode</td><td>批量下载 ZIP</td></tr>
+</table>
+
+<h2>核心数据结构</h2>
+
+<table>
+<tr><th>表</th><th>关键字段</th><th>说明</th></tr>
+<tr><td>gen_table</td><td>dataName, tableName, className, packageName, moduleName, businessName, functionName, functionAuthor, tplCategory, frontendType, options(JSON)</td><td>生成配置主表。options 存 JSON 扩展配置（导出/状态/唯一/排序/树参数），避免为每个可选功能加列</td></tr>
+<tr><td>gen_table_column</td><td>columnName, columnType, javaType, javaField, isPk, isIncrement, isRequired, isInsert, isEdit, isList, isQuery, queryType, htmlType, dictType, sort</td><td>字段配置明细。所有 is* 字段值 "1"/"0"，通过 isPk()/isInsert() 等 boolean 辅助方法供模板使用</td></tr>
+</table>
+
+<h2>生成的 13~16 个产出文件</h2>
+
+<table>
+<tr><th>分类</th><th>数量</th><th>文件</th></tr>
+<tr><td>后端 Java</td><td>8</td><td>Domain → VO → BO → Mapper → Service → ServiceImpl → Controller + Mapper XML</td></tr>
+<tr><td>前端 TS/Vue/React</td><td>4</td><td>api/index.ts → types.ts → index.vue/tsx（或 index-tree 变体）</td></tr>
+<tr><td>数据库 SQL</td><td>1</td><td>按方言自动选：mysql/oracle/postgres/sqlserver 菜单 INSERT SQL</td></tr>
+</table>
+
+<div class="oneliner">
+核心链路一句话：用户导表 → AnyLine 读元数据 → GenUtils 推断类型 → FreeMarker 渲染模板 → ZIP 打包下载
+</div>
+
+<h2>关键设计思想</h2>
+<ul>
+<li><strong>数据与模板分离</strong>：元数据（gen_table + gen_table_column）与渲染模板（.ftl）彻底解耦，加新语言/框架只需加模板目录</li>
+<li><strong>类型推断引擎</strong>：数据库类型 + 字段长度 + 字段名约定 + 业务语义，四维联合推断</li>
+<li><strong>动态数据源适配</strong>：AnyLine 与 baomidou 桥接——多个框架共享一个连接池的经典案例</li>
+</ul>
+
+<h2>模板路径速查</h2>
+<pre><code>fm/
+├── java/          ← 8 个后端模板（与前端类型无关）
+│   domain.java.ftl, vo.java.ftl, bo.java.ftl,
+│   mapper.java.ftl, service.java.ftl, serviceImpl.java.ftl,
+│   controller.java.ftl
+├── xml/
+│   mapper.xml.ftl
+├── {vue|react}/   ← 前端模板（按 frontendType 动态选择）
+│   api.ts.ftl, types.ts.ftl, index.*.ftl, index-tree.*.ftl
+└── sql/           ← SQL 模板（按数据库方言自动选择）
+    mysql.sql.ftl, oracle.sql.ftl, postgres.sql.ftl, sqlserver.sql.ftl</code></pre>
+
+<div class="nav">速查 01 / 共 4 课 · 返回 <a href="../lessons/01.html">课程正文</a></div>
+
+</body>
+</html>

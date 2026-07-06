@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 导出处理器：下拉、合并、批注三条 WriteHandler 链</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#fef3c7; color:#b45309; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 导出处理器链：下载一个 Excel 经过了哪些 WriteHandler <span class="tag">处理器层 ②</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #5 + #7）</b>：学完你能完整讲清导出链路中三条 WriteHandler 链各自的职责——<code>ExcelDownHandler</code> 的四种下拉数据源与「简单列表 vs 隐藏 Sheet」两种实现策略、<code>CellMergeHandler</code> + <code>CellMergeStrategy</code> 的合并算法与执行时序、<code>DataWriteHandler</code> 的表头样式标注。
+</div>
+
+<p>导出链路有 <strong>3 条 WriteHandler 线</strong>，全部由 <code>ExcelBuilder.createWriterBuilder()</code> 自动注册。本课逐一拆解。</p>
+
+<h2>一、三条 WriteHandler 线总览</h2>
+
+<table>
+<tr><th>处理器</th><th>实现的接口</th><th>回调时机</th><th>做什么</th></tr>
+<tr>
+  <td><code>ExcelDownHandler</code></td>
+  <td><code>SheetWriteHandler</code></td>
+  <td>Sheet 创建后</td>
+  <td>为每列生成数据校验下拉（4种数据源）</td>
+</tr>
+<tr>
+  <td><code>CellMergeStrategy</code></td>
+  <td><code>AbstractMergeStrategy</code> + <code>SheetWriteHandler</code></td>
+  <td>Sheet 创建后 + 每格写入后</td>
+  <td>先批量写入合并区域，再逐格清空非首行内容</td>
+</tr>
+<tr>
+  <td><code>DataWriteHandler</code></td>
+  <td><code>SheetWriteHandler</code> + <code>CellWriteHandler</code></td>
+  <td>每格写入后（仅表头行）</td>
+  <td>表头字体标红（必填）+ 添加批注</td>
+</tr>
+</table>
+
+<h2>二、ExcelDownHandler —— 下拉选项四种数据源</h2>
+
+<p>位置：<code>core/ExcelDownHandler.java</code>（445 行，模块最长的文件）</p>
+
+<p>它的 <code>afterSheetCreate()</code> 遍历实体类的每个字段，根据注解类型从四种数据源收集下拉选项：</p>
+
+<div class="flow">// afterSheetCreate() 中的遍历逻辑 — ExcelDownHandler.java:101-155
+for (字段 : 实体类的全部字段) {
+
+    ① @ExcelDictFormat:
+       if (dictType 有值) → getDictService().getAllDictByDictType(dictType) → 取全部标签
+       else if (readConverterExp 有值) → 解析 "0=男,1=女" → 取等号右边的值列表
+
+    ② @ExcelEnumFormat:
+       EnumUtil.getFieldValues(enumClass, textField) → 取所有枚举的 text 值
+
+    ③ @ExcelDynamicOptions:
+       SpringUtils.getBean(providerClass).getOptions() → 取运行时提供的数据
+
+    ④ DropDownOptions（外部传入）:
+       遍历 dropDownOptions 列表 → 内部调用上面的 dropDownLinkedOptions 等方法
+
+    if (options 非空):
+        if (选项数 > 20 或 总字符数 > 255):
+            → dropDownWithSheet()  — 隐藏 Sheet 方案
+        else:
+            → dropDownWithSimple() — 内联列表方案
+}</div>
+
+<h3>2.1 简单下拉：dropDownWithSimple()</h3>
+
+<pre><code>// ExcelDownHandler.java:182-187
+private void dropDownWithSimple(DataValidationHelper helper, Sheet sheet,
+                                 Integer celIndex, List&lt;String&gt; value) {
+    this.markOptionsToSheet(helper, sheet, celIndex,
+        helper.createExplicitListConstraint(ArrayUtil.toArray(value, String.class)));
+}</code></pre>
+
+<p>使用 POI 的 <code>createExplicitListConstraint</code>，直接把下拉选项写成逗号分隔的字符串。Excel 限制：<strong>总字符数不能超过 255</strong>。适合选项少且短的场景。</p>
+
+<h3>2.2 隐藏 Sheet 下拉：dropDownWithSheet()</h3>
+
+<p>当选项太多或太长时，切换为更高级的方案：</p>
+
+<div class="flow">// ExcelDownHandler.java:337-374
+① 创建一个隐藏的 Sheet（名称 options_0, options_1, ...）
+② 把选项值逐行写入这个隐藏 Sheet 的 A 列
+③ 用 workbook.createName() 创建名称管理器，指向隐藏 Sheet 的 A1:AN
+④ 用 createFormulaListConstraint(nameName) 在主表列上创建数据校验
+⑤ workbook.setSheetHidden(...) 隐藏辅助 Sheet</div>
+
+<p>这是 Excel 下拉选项的标准高级用法——通过名称管理器（Name Manager）引用另一个 Sheet 的单元格区域作为下拉数据源，完全避开 255 字符限制。</p>
+
+<h3>2.3 级联下拉：dropDownLinkedOptions()（最复杂的逻辑）</h3>
+
+<p>位置：<code>ExcelDownHandler.java:194-315</code>（120 行，约占整个文件的 1/4）</p>
+
+<div class="flow">// 级联下拉的核心思路（以「省份 → 城市」为例）：
+
+① 创建隐藏 Sheet "linkedOptions_0"
+② 第一行横向写入所有一级选项（如 北京 | 上海 | 广东）
+③ 创建名称管理器 "linkedOptions_0" → 引用 =linkedOptions_0!$A$1:$C$1
+④ 一级列的数据校验 = 公式列表约束 "linkedOptions_0"
+    → 用户在一级列（省份）只能选 A1:C1 中的值
+
+⑤ 为每个一级选项创建子名称管理器：
+   名称管理器 "北京" → 引用 =linkedOptions_0!$A$2:$A$5
+   名称管理器 "上海" → 引用 =linkedOptions_0!$B$2:$B$4
+   ...
+
+⑥ 二级列（城市）每一行的数据校验 = =INDIRECT(A2)
+    → Excel 的 INDIRECT 函数：取 A2 格的值（如"北京"），
+      找到名为"北京"的名称管理器，展示其引用的区域作为下拉选项
+
+⑦ 按列填充二级数据：把每个一级选项对应的二级数据按行排列</div>
+
+<div class="side">
+💡 <b>INDIRECT 函数</b>是级联下拉的关键。Excel 的 INDIRECT(text) 把文本当作单元格引用或名称管理器来解析。当用户在 A2 选了"北京"，B2 的校验公式 <code>=INDIRECT(A2)</code> 就解析为 <code>=INDIRECT("北京")</code> → 找到名称管理器"北京" → 展示"北京"下的二级选项。
+</div>
+
+<h3>2.4 markDataValidationToSheet() —— 统一的校验挂载</h3>
+
+<pre><code>// ExcelDownHandler.java:399-418
+private void markDataValidationToSheet(DataValidationHelper helper, Sheet sheet,
+                                        DataValidationConstraint constraint,
+                                        CellRangeAddressList addressList) {
+    DataValidation dataValidation = helper.createValidation(constraint, addressList);
+    if (dataValidation instanceof XSSFDataValidation) {
+        dataValidation.setSuppressDropDownArrow(true);
+        dataValidation.setErrorStyle(DataValidation.ErrorStyle.STOP);
+        dataValidation.createErrorBox("提示", "此值与单元格定义数据不一致");
+        dataValidation.createPromptBox("填写说明：",
+            "填写内容只能为下拉中数据，其他数据将导致导入失败");
+    }
+    sheet.addValidationData(dataValidation);
+}</code></pre>
+
+<p>注意：下拉校验挂载到<strong>前 1000 行</strong>（<code>FIRST_DATA_ROW_INDEX=1</code> 到 <code>LAST_DATA_ROW_INDEX=1000</code>）。注释明确说明：超过 1000 行需要分次导出，否则 Excel 打开会很慢。</p>
+
+<h2>三、CellMergeHandler + CellMergeStrategy —— 合并的「分析-执行」分离</h2>
+
+<p>这两个类是模块中「分析」与「执行」分离的典范：</p>
+
+<table>
+<tr><th></th><th>CellMergeHandler</th><th>CellMergeStrategy</th></tr>
+<tr><td><b>角色</b></td><td>分析器（静态工具类）</td><td>执行器（Fesod Sheet WriteHandler）</td></tr>
+<tr><td><b>核心方法</b></td><td><code>handle(List&lt;?&gt; rows) → List&lt;CellRangeAddress&gt;</code></td><td><code>afterSheetCreate()</code> + <code>merge()</code></td></tr>
+<tr><td><b>做的事</b></td><td>扫描数据行，计算哪些区域需要合并</td><td>将合并区域写入 Sheet，清理非首行重复值</td></tr>
+</table>
+
+<h3>3.1 CellMergeHandler.handle() —— 合并算法</h3>
+
+<pre><code>// CellMergeHandler.java:62-125
+public List&lt;CellRangeAddress&gt; handle(List&lt;?&gt; rows) {
+    // ① 获取所有带 @CellMerge 的字段及其列索引
+    Map&lt;Field, FieldColumnIndex&gt; mergeFields = getFieldColumnIndexMap(rows.get(0).getClass());
+
+    // ② 逐字段、逐行扫描
+    for (字段 : mergeFields) {
+        for (i = 0; i < rows.size(); i++) {
+            当前行字段值 = ReflectUtils.invokeGetter(rows.get(i), 字段名);
+
+            if (值为空) {
+                // 空值 = 合并中断 → 收口上一段合并区间
+                appendMergeResult(result, 上次缓存的RepeatCell, i-1, 列号);
+                continue;
+            }
+            if (缓存中无此字段) {
+                // 首次遇到 → 开始一个新的合并区间
+                缓存.put(字段, RepeatCell.of(当前值, i));
+                continue;
+            }
+
+            缓存值 = 缓存.get(字段).value();
+            // ③ 检查合并条件：值相同 + 依赖字段也相同
+            if (当前值.equals(缓存值) && isMerge(当前行, 上一行, cellMerge)) {
+                // 继续扩展当前合并区间
+            } else {
+                // ④ 中断当前区间，开始新区间
+                appendMergeResult(result, 缓存RepeatCell, i-1, 列号);
+                缓存.put(字段, RepeatCell.of(当前值, i));
+            }
+        }
+        // ⑤ 处理最后一组
+        appendMergeResult(result, 缓存RepeatCell, rows.size()-1, 列号);
+    }
+    return result;
+}</code></pre>
+
+<div class="step"><span class="num">核心</span><b>空值中断</b>：如果某行的合并字段值为 null 或空字符串，<code>handle()</code> 会立即收口上一段合并区间，并且该行不参与合并。这意味着导出时如果一个分组内有空值行，合并会被打断。</div>
+
+<div class="step"><span class="num">核心</span><b>getFieldColumnIndexMap() 的列索引推断优先级</b>：<br>
+<code>@CellMerge.index()</code> → <code>@ExcelProperty.index()</code> → 反射遍历顺序。同时会跳过 <code>serialVersionUID</code>、<code>@ExcelIgnore</code> 标注的字段、以及 <code>@ExcelIgnoreUnannotated</code> 下未标注 <code>@ExcelProperty</code> 的字段。</div>
+
+<h3>3.2 CellMergeStrategy —— 为什么要分两步执行？</h3>
+
+<pre><code>// CellMergeStrategy.java:89-98 — afterSheetCreate()
+public void afterSheetCreate(WriteWorkbookHolder wwb, WriteSheetHolder wsh) {
+    // 提前写入所有合并区域
+    for (CellRangeAddress item : cellList) {
+        sheet.addMergedRegion(item);
+    }
+}
+
+// CellMergeStrategy.java:68-79 — merge()
+protected void merge(Sheet sheet, Cell cell, Head head, Integer relativeRowIndex) {
+    // 单元格写入后，如果该格在合并区域内且不是首行 → 清空内容
+    for (CellRangeAddress cellAddresses : cellList) {
+        if (cellAddresses.isInRange(cell) && rowIndex != cellAddresses.getFirstRow()) {
+            cell.setBlank();
+        }
+    }
+}</code></pre>
+
+<div class="side">
+⚠️ <b>为什么合并区域要在 afterSheetCreate 提前写入？</b><br>
+POI 的限制：如果在数据写入过程中动态添加合并区域，可能导致 "Attempting to write a row in the range that is already written to disk" 错误。所以 <code>CellMergeStrategy</code> 的策略是：<strong>先在 Sheet 创建时一次性写入所有合并区域（只占位置，此时格子里还没数据），后续 Fesod Sheet 正常逐格填充数据（首行格子正常写入，非首行格子被 merge() 清空）。</strong> 这是一种「预占坑」策略。
+</div>
+
+<h2>四、DataWriteHandler —— 表头批注与必填样式</h2>
+
+<p>位置：<code>handler/DataWriteHandler.java</code>（143 行）</p>
+
+<p>这是最轻量的一个处理器，但它的职责很明确：在导出模板时让表头看起来更专业。</p>
+
+<pre><code>// DataWriteHandler.java:59-101 — afterCellDispose()
+public void afterCellDispose(CellWriteHandlerContext context) {
+    if (context.getHead()) {  // 只在表头行生效！
+        // ① 设置单元格文本格式 (format index=49)
+        // ② 如果表头名在 requiredMap 中 → 设置字体颜色为红色
+        // ③ 如果表头名在 notationMap 中 → 创建批注 Comment
+    }
+}</code></pre>
+
+<p>核心判断：<code>context.getHead()</code> —— Fesod Sheet 的 <code>CellWriteHandlerContext</code> 会自动告知当前正在写的是不是表头行。这确保了批注和必填标红<strong>只在表头行生效</strong>，数据行不受影响。</p>
+
+<h2>五、检验一下（提取练习）</h2>
+<p>不要回看上文，凭记忆作答。</p>
+
+<div class="quiz">
+<p>Q1. <code>ExcelDownHandler</code> 在什么条件下从「简单下拉」切换为「隐藏 Sheet」方案？</p>
+<span class="opt">A. 选项数量 > 10</span>
+<span class="opt">B. 选项数量 > 20 或 所有选项总字符数 > 255</span>
+<span class="opt">C. 总是使用隐藏 Sheet 方案</span>
+<span class="opt">D. 选项中有中文时</span>
+<details><summary>看答案</summary><b>B</b>。代码 <code>ExcelDownHandler.java:148</code>：<code>if (options.size() > 20 || totalCharacter > 255)</code>。简单下拉用 Excel 的显式列表约束，有 255 字符的硬限制；隐藏 Sheet 方案没有这个限制。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 级联下拉中，二级选项的 Excel 校验公式是什么？</p>
+<span class="opt">A. =VLOOKUP(A2, options, 2, FALSE)</span>
+<span class="opt">B. =INDIRECT(A2)</span>
+<span class="opt">C. =IF(A2="", "", A2)</span>
+<span class="opt">D. 直接列出所有二级选项</span>
+<details><summary>看答案</summary><b>B</b>。<code>=INDIRECT(A2)</code>。INDIRECT 是 Excel 内置函数，把文本参数解析为单元格引用或名称管理器。当用户在 A2 选了一级选项（如"北京"），INDIRECT 就去找名为"北京"的名称管理器，返回其关联的二级选项列表。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. <code>CellMergeStrategy</code> 为什么要把合并区域的写入拆成 <code>afterSheetCreate</code> + <code>merge</code> 两步？</p>
+<span class="opt">A. 为了代码更清晰</span>
+<span class="opt">B. 先在 afterSheetCreate 预占坑防止 POI 写入冲突，再在 merge 中清空非首行重复值</span>
+<span class="opt">C. 没有特殊原因</span>
+<span class="opt">D. 因为 Fesod Sheet 只能分两步注册 WriteHandler</span>
+<details><summary>看答案</summary><b>B</b>。POI 的 <code>addMergedRegion()</code> 需要在数据写入前完成，否则会报 "row already written to disk" 错误。而清空非首行重复值的逻辑需要在单元格写入后才能执行（才能知道哪些单元格需要清空）。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<code>core/ExcelDownHandler.java</code>（445 行，模块最长的文件，但四种下拉方案的结构很清晰）+ <code>core/CellMergeHandler.java</code>（276 行，合并算法的完整实现）。</div>
+
+<div class="reminder">💡 有疑问？直接问我。比如：「如果我想在导出 Workbook 级别加密码保护，应该在哪个处理器里做？」「下拉选项的隐藏 Sheet 会不会被用户看到？」下一课聚焦工具层——ExcelBuilder 的 DSL 设计、ExcelWriterWrapper 的安全包装、完整导入导出实战。</div>
+
+<div class="nav">课程 0004 / 使命：读懂 ruoyi-common-excel 模块 · 上一课：导入处理器链 · 下一课预告：工具类与实战</div>
+
+</body>
+</html>

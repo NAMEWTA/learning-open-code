@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 模型与 DTO：LoginUser 继承体系 + DTO 独立于 Entity 的设计</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 模型与 DTO：LoginUser 继承体系 + DTO 独立于 Entity <span class="tag">数据契约</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #6~#8）</b>：学完你能讲清 <code>LoginUser</code> 为什么放 api 模块、<code>XcxLoginUser</code> 怎么扩展它、<code>getLoginId()</code> 的设计意图，以及 DTO 独立于 Entity 的契约价值。还能解释 <code>StartProcessReturnDTO</code> 为什么用 Java record。
+</div>
+
+<p>上一课我们看了「行为契约」（接口），这一课看「数据契约」——那些被多个模块共享的模型对象和 DTO。它们为什么不在 Entity 旁边放着？为什么有的用 <code>@Data class</code>、有的用 <code>record</code>？</p>
+
+<h2>一、LoginUser：为什么它是一个「共享模型」？</h2>
+
+<p><code>LoginUser</code>（151 行）是整个鉴权体系的核心上下文对象。它在 <code>ruoyi-api</code> 里定义，但在至少 4 个模块里流转：</p>
+
+<div class="diagram">LoginUser 的跨模块流转
+══════════════════════════════════════════════
+
+ruoyi-system                   ruoyi-admin
+  buildLoginUser() ──────────► AuthStrategy
+  构建 LoginUser 对象            放入 Sa-Token Session
+       │                              │
+       │    ruoyi-api (LoginUser)     │
+       │    作为公共数据类型           │
+       │                              │
+       ▼                              ▼
+  ruoyi-common-satoken           ruoyi-common-log
+  从 Session 读取 LoginUser      记录操作日志时读 LoginUser
+  做权限校验                     获取 userId/username/deptId</div>
+
+<p>如果 <code>LoginUser</code> 放在 <code>ruoyi-system</code> 里，那么 <code>common-satoken</code> 和 <code>common-log</code> 就必须依赖 <code>ruoyi-system</code>——但这两个 common 模块是框架层，不应该反向依赖业务模块。放在 <code>ruoyi-api</code> 里解决了这个方向问题：框架层只需依赖 api，而不需要知道 system 的存在。</p>
+
+<div class="step"><span class="num">🔑</span><b>getLoginId() 方法的深意</b><br>
+<span class="where">LoginUser.java:141-149</span><br>
+<pre><code>public String getLoginId() {
+    if (userType == null) throw new IllegalArgumentException("用户类型不能为空");
+    if (userId == null) throw new IllegalArgumentException("用户ID不能为空");
+    return userType + ":" + userId;
+}</code></pre>
+这个方法不是简单的 getter，而是 <strong>构造了一个复合标识</strong>：<code>"sys_user:1"</code>（系统用户） vs <code>"app_user:1"</code>（App 用户）。Sa-Token 用这个字符串作为 <code>loginId</code>，从而在同一个 Redis/Session 里区分不同类型的用户，避免「系统用户 ID=1」和「App 用户 ID=1」被认为同一个人。这就是 <code>LoginUser</code> 必须知道 <code>userType</code> 和 <code>userId</code> 但不直接存 <code>loginId</code> 的原因——<strong>loginId 是计算出来的，不是存储的</strong>。</div>
+
+<h2>二、XcxLoginUser：继承 + 最小扩展</h2>
+
+<div class="diagram">LoginUser（151行）                          common-core 的 LoginBody
+    │                                              │
+    ├── userId, deptId, username,                  │
+    │   menuPermission, roles, posts ...           │
+    │   + getLoginId()                             │
+    │                                              │
+    ▼                                              ▼
+XcxLoginUser（27行）                      PasswordLoginBody（33行）
+    │  只多加一个字段：openid                      │  extends LoginBody
+    │  + 继承所有 LoginUser 的能力                 │  + username, password
+    │                                              │
+    │                                    SmsLoginBody（29行）
+    │                                      extends LoginBody
+    │                                      + phoneNumber, smsCode
+    │
+    │                                    EmailLoginBody（31行）
+    │                                      extends LoginBody
+    │                                      + email, emailCode
+    │
+    │                                    SocialLoginBody（35行）
+    │                                      extends LoginBody
+    │                                      + source, socialCode, socialState
+    │
+    │                                    XcxLoginBody（28行）
+    │                                      extends LoginBody
+    │                                      + xcxCode
+    │
+    │                                    RegisterBody（38行）
+    │                                      extends LoginBody
+    │                                      + username, password, userType</div>
+
+<p><strong>设计模式：</strong></p>
+
+<div class="step"><span class="num">1</span><b>LoginBody 是基类（在 common-core）</b><br>
+含 <code>clientId</code> + <code>grantType</code>——所有登录请求都需要的字段。它在 common-core 因为它是最基础的登录抽象，不依赖任何业务模型。</div>
+
+<div class="step"><span class="num">2</span><b>6 种 XxxLoginBody 在 ruoyi-api</b><br>
+每种登录方式的特有字段（密码登录有 username/password，短信有 phoneNumber/smsCode）。它们在 api 因为需要被 admin 模块的策略类和前端 DTO 两边引用。</div>
+
+<div class="step"><span class="num">3</span><b>LoginUser → XcxLoginUser 的继承</b><br>
+小程序登录后需要缓存 <code>openid</code>（微信返回的用户标识），后续调用微信 API 时需要它。但 <code>LoginUser</code> 不能加 <code>openid</code> 字段——不是所有登录都需要这个字段（密码登录、短信登录不需要）。继承解决：不动父类，子类只加一个字段。</div>
+
+<h2>三、DTO 为什么独立于 Entity？</h2>
+
+<p>以 <code>UserDTO</code> vs <code>SysUser</code> 为例：</p>
+
+<table>
+<tr><th>字段</th><th>SysUser（Entity，在 ruoyi-system）</th><th>UserDTO（DTO，在 ruoyi-api）</th></tr>
+<tr><td>userId</td><td>✅</td><td>✅</td></tr>
+<tr><td>deptId</td><td>✅</td><td>✅</td></tr>
+<tr><td>userName</td><td>✅</td><td>✅</td></tr>
+<tr><td>nickName</td><td>✅</td><td>✅</td></tr>
+<tr><td>userType</td><td>✅</td><td>✅</td></tr>
+<tr><td>email</td><td>✅</td><td>✅</td></tr>
+<tr><td>phoneNumber</td><td>✅</td><td>✅</td></tr>
+<tr><td>gender</td><td>✅</td><td>✅</td></tr>
+<tr><td>status</td><td>✅</td><td>✅</td></tr>
+<tr><td>createTime</td><td>✅</td><td>✅</td></tr>
+<tr><td><b>password</b></td><td>✅</td><td>❌</td></tr>
+<tr><td><b>delFlag</b></td><td>✅（逻辑删除）</td><td>❌</td></tr>
+<tr><td><b>loginIp / loginDate</b></td><td>✅</td><td>❌</td></tr>
+<tr><td><b>remark</b></td><td>✅</td><td>❌</td></tr>
+<tr><td><b>@TableName / @TableId</b></td><td>✅（MyBatis-Plus 注解）</td><td>❌（纯 POJO）</td></tr>
+</table>
+
+<p>DTO 是 <strong>选择性暴露</strong> 的——不传 password（安全）、不传 delFlag（无意义）、不传 ORM 注解（消费者不需要 MyBatis-Plus）。这是 <strong>接口隔离原则在数据层的应用</strong>：消费者只看到它需要的数据，实现方可以自由修改 Entity 结构，只要 DTO 契约不变。</p>
+
+<div class="side">
+💡 <b>反过来说</b>：如果外部模块直接引用 <code>SysUser</code> Entity，那么修改 <code>sys_user</code> 表结构时，所有引用方都可能编译失败。DTO 的独立存在把这种「数据库变更的影响范围」锁在了 system 模块内部。
+</div>
+
+<h2>四、Java record：新契约的现代选择</h2>
+
+<p>ruoyi-api 里有两个文件用了 Java 14 的 <code>record</code>：</p>
+
+<pre><code>// StartProcessReturnDTO.java — 14 行
+public record StartProcessReturnDTO(
+    Long processInstanceId,
+    Long taskId
+) {}
+
+// FlowCopyDTO.java — 14 行
+public record FlowCopyDTO(
+    Long userId,
+    String nickName
+) {}</code></pre>
+
+<p><strong>为什么这两个用 record 而不是 @Data class？</strong></p>
+
+<ol>
+<li><b>语义匹配</b>：它们是不可变的返回值/值对象——启动流程后返回的 ID 不应该被修改，抄送人信息创建后不应该被篡改。<code>record</code> 天生不可变，<code>@Data</code> 天生可变。</li>
+<li><b>简洁</b>：14 行 vs ~40 行（如果用 @Data + Serializable + serialVersionUID）。对于明确的数据载体，减少代码就是减少出错面。</li>
+<li><b>一致性信号</b>：项目在新增的 DTO 上使用 record，在遗留的 DTO 上保留 @Data——这是渐进式的现代化。读者一眼就知道：record = 不可变返回值，@Data = 可能需要序列化/设置在 Session 里的可变对象。</li>
+</ol>
+
+<p>注意 <code>StartProcessReturnDTO</code> 和 <code>FlowCopyDTO</code> 都 <b>没有 implements Serializable</b>——record 自动可序列化（当所有字段都可序列化时）。这是 record 相比 @Data class 的另一个优势：不用手写 serialVersionUID。</p>
+
+<h2>五、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. LoginUser 为什么放在 ruoyi-api 而不是 ruoyi-system？</p>
+<span class="opt">A. 因为 system 模块还没有创建</span>
+<span class="opt">B. 因为 common-satoken、common-log 等框架模块需要它，但它们不应该反向依赖 ruoyi-system</span>
+<span class="opt">C. 因为 api 包名更短</span>
+<span class="opt">D. 因为 Maven 中心仓库要求公共模型必须在 api 模块</span>
+<details><summary>看答案</summary><b>B</b>。<code>LoginUser</code> 被 common-satoken（从 Session 读）、common-log（记录日志）等框架模块消费。如果放在 system 里，这些 common 模块就得依赖 system——违反了「框架层不应依赖业务层」的原则。放在 api 里，common 模块只需依赖 api。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. XcxLoginUser 继承 LoginUser 后只加了一个字段 openid。为什么不直接把 openid 加到 LoginUser 里？</p>
+<span class="opt">A. LoginUser 字段数量有限制</span>
+<span class="opt">B. openid 只在微信小程序登录时才有意义，密码登录/短信登录不需要它。加在父类会让所有登录类型都携带一个无意义的 null 字段</span>
+<span class="opt">C. openid 字段类型不兼容</span>
+<details><summary>看答案</summary><b>B</b>。这是单一职责 + 开放封闭原则。不是所有登录都产生 openid，让父类干净、子类按需扩展，是最小惊讶的设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么 StartProcessReturnDTO 用 record 而 UserDTO 用 @Data class？</p>
+<span class="opt">A. record 是新语法，作者想试试</span>
+<span class="opt">B. StartProcessReturnDTO 是不可变的返回值（启动流程后 ID 不应被改），UserDTO 是可能被框架序列化/反序列化、需要 setter 的可变对象</span>
+<span class="opt">C. UserDTO 字段太多，record 不支持超过 10 个字段</span>
+<details><summary>看答案</summary><b>B</b>。<code>record</code> 的字段是 final 的，适合不可变的返回值。UserDTO 通过 <code>@Data</code> 提供 getter/setter，因为它在序列化/反序列化时需要 setter，在 Thymeleaf/模板里需要 getter。两者的语义选择都是正确的。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>LoginUser.java</code> 第 141 行，看 <code>getLoginId()</code> 方法——它不是简单的字段 getter，而是用 <code>userType + ":" + userId</code> 拼出一个复合登录标识。再去 <a href="https://sa-token.cc/doc.html#/use/login-auth" target="_blank">Sa-Token 登录认证文档</a> 看 loginId 的概念，你会理解这个设计为什么是必须的。</div>
+
+<div class="reminder">💡 有疑问？直接问我——可以问：「Java record 在 Redis 序列化时有什么坑吗？」「如果新加一种 C 端用户类型（比如 PartnerUser），应该继承 LoginUser 还是重新写？」下一课我们聚焦 <b>workflow.api 的事件解耦</b>——三种流程事件如何让业务代码脱离流程引擎依赖。</div>
+
+<div class="nav">课程 0003 / ruoyi-api 模块讲解 · <a href="0002.html">← 第 2 课</a> · <a href="0001.html">← 第 1 课</a> · 下一课预告：工作流事件解耦——ProcessEvent / ProcessTaskEvent / ProcessDeleteEvent</div>
+
+</body>
+</html>

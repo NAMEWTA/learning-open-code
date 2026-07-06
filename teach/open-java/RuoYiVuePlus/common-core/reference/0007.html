@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 07 · IP 地址与区域解析 — AddressUtils / RegionUtils</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 07 · IP 地址与区域解析</h1>
+<p class="a">配套课程：<code>lessons/0007.html</code> · AddressUtils、RegionUtils（ip2region）的实现</p>
+
+<h2>一句话定位</h2>
+<div class="chain">两层抽象实现离线 IP 归属地查询：<b>AddressUtils</b>（上层适配：过滤内网/HTML/空值）+ <b>RegionUtils</b>（底层引擎：ip2region xdb 二分查找）+ <b>NetUtils</b>（辅助：IPv4/v6判断、CIDR匹配）。</div>
+
+<h2>两层抽象架构</h2>
+<div class="chain">AddressUtils.getRealAddressByIP(ip)
+  ├─ 空值/HTML过滤 → HtmlUtil.cleanHtmlTag()
+  ├─ IPv4判断 → NetUtils.isIPv4(ip)
+  ├─ IPv6判断 → NetUtils.isIPv6(ip)
+  ├─ 内网判断 → NetUtils.isInnerIP() / isInnerIPv6() → "内网IP"
+  └─ 委托 RegionUtils.getRegion(ip)
+       └─ ip2Region.search(ip) → xdb 二分查找 → "国家|区域|省份|城市|ISP"</div>
+
+<h2>RegionUtils — ip2region 封装</h2>
+<div class="chain">静态初始化 (static {}):
+  ├─ IPv4: ResourceUtil.getStream("ip2region_v4.xdb") → Config.custom()
+  │   .setCachePolicy(Config.BufferCache)           → 全量加载到内存
+  │   .setCacheSliceBytes(15MB)                     → 缓存切片大小
+  │   .asV4()
+  ├─ IPv6: getStreamSafe("ip2region_v6.xdb")        → 可选，缺则仅警告
+  │   .asV6()
+  └─ Ip2Region.create(v4Config, v6Config)           → 构建服务实例
+
+查询方法:
+  getRegion(String ipString) → search() → replace("0","未知") → 返回
+  getRegion(byte[] ipBytes)  → search(ipBytes) → replace → 返回
+  close() / close(Duration)  → 释放资源 (超时10秒)
+
+三种 CachePolicy:
+  BufferCache  → 全量内存 → 零磁盘I/O (RuoYi默认)
+  VIndexCache  → 只缓存索引 → 平衡内存与速度
+  NoCache      → 每次读文件 → 最小内存</div>
+
+<h2>AddressUtils — 业务友好上层</h2>
+<div class="chain">常量:
+  UNKNOWN_IP = "XX XX"      → 无效IP返回值
+  LOCAL_ADDRESS = "内网IP"   → 内网IP返回值
+
+处理流程:
+  ① HtmlUtil.cleanHtmlTag(ip) + blankToDefault → 清理
+  ② isIPv4? → isInnerIP? → "内网IP"
+  ③ isIPv6? → isInnerIPv6? → "内网IP"
+  ④ 皆非 → "XX XX"
+  ⑤ RegionUtils.getRegion(ip) → 真实地址
+
+内网IPv4: 10.x, 172.16-31.x, 192.168.x, 127.x
+内网IPv6: :: (通配符), fe80:: (链路本地), ::1 (环回), fc00::/7 (唯一本地)</div>
+
+<h2>NetUtils — 网络判断工具箱</h2>
+<div class="chain">继承: extends cn.hutool.core.net.NetUtil
+
+扩展方法:
+  isIPv4(ip)      → RegexUtils.isMatch(PatternPool.IPV4, ip)
+  isIPv6(ip)      → InetAddress.getByName(ip) instanceof Inet6Address
+  isInnerIPv6(ip) → isAnyLocalAddress || isLinkLocalAddress
+                     || isLoopbackAddress || isSiteLocalAddress
+  isMatchIpRule(rule, ip)  → 精确/通配符/CIDR 三种匹配
+  isMatchCidr(cidr, ip)    → BigInteger 位运算 (支持IPv6大地址空间)</div>
+
+<h2>完整调用链示例</h2>
+<div class="chain">用户登录 IP="120.236.174.102" (广东深圳)
+
+SysLogininforServiceImpl → logininfor.setLoginLocation(
+    AddressUtils.getRealAddressByIP("120.236.174.102"))
+  → HtmlUtil.cleanHtmlTag() → "120.236.174.102"
+  → NetUtils.isIPv4() → true
+  → NetUtils.isInnerIP() → false (公网地址)
+  → RegionUtils.getRegion()
+    → ip2Region.search() → xdb二分查找
+    → "中国|0|广东省|深圳市|电信"
+    → replace("0","未知")
+    → "中国|未知|广东省|深圳市|电信"
+
+最终: loginLocation = "中国|未知|广东省|深圳市|电信"</div>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>完全离线</b> — 不依赖任何外部 API，xdb 文件做本地二分查找。</li>
+<li><b>IPv4 必须，IPv6 可选</b> — IPv4 xdb 缺失抛异常，IPv6 缺失仅 warn。</li>
+<li><b>BufferCache 策略</b> — 全量加载 xdb 到内存，牺牲内存换零 I/O 查询速度。</li>
+<li><b>内网优先判断</b> — 内网 IP 不需要查 xdb，直接返回"内网IP"。</li>
+<li><b>isMatchCidr 用 BigInteger</b> — 因为 IPv6 地址是 128 位，超出 long 范围。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：ip2region, xdb, CachePolicy, BufferCache</p>
+</body>
+</html>

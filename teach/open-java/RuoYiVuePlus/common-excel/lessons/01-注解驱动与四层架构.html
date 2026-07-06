@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>注解驱动与四层架构</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>注解驱动与四层架构</h1>
+<div class="mission"><strong>🎯 本节目标：</strong>学完你能用一句话说清 <code>ruoyi-common-excel</code> 与 Fesod Sheet 的关系，画出模块的「注解层 - 转换器层 - 处理器层 - 工具层」四层架构，并逐一解释 6 个自定义注解各自挂在哪一层、最终由哪个处理器/转换器消费。这是整个模块的地图——先有全景，再走小路。</div>
+
+<h2>一、先看全景：Fesod Sheet 与本模块的关系</h2>
+
+<p>在 RuoYi-Vue-Plus 的后台管理系统中，几乎没有哪个业务模块不需要导入导出。导出用户列表、导入部门数据、导出操作日志——这些需求高度重复。如果把每个 Controller 里都写一遍 POI 的 <code>Workbook</code>、<code>Sheet</code>、<code>Cell</code> 操作代码，会是灾难性的。</p>
+
+<p>RuoYi-Vue-Plus 的解决方式是：</p>
+
+<blockquote>
+<strong>Fesod Sheet</strong>（fesod 是 Apache 的 Java 命名规范变形）是对 Apache POI 的高层封装，提供注解驱动的 Excel 读写、类型转换器扩展点（Converter）、写处理器链（WriteHandler）、事件监听（AnalysisEventListener）等基础设施。<br><br>
+<strong>ruoyi-common-excel</strong> 不是框架本身，而是对 Fesod Sheet 的<strong>项目级定制</strong>——通过实现 Fesod Sheet 的 Converter / WriteHandler / ReadListener 接口，注入项目字典服务、接入 Jakarta Validation、挂载自定义写处理器，把 Fesod Sheet 的通用能力"项目化"。<br><br>
+一句话：<strong>Fesod Sheet 说"我提供插槽"，本模块说"我在插槽里装上 RuoYi 的东西"。</strong>
+</blockquote>
+
+<p>这意味着本模块的 21 个 Java 文件中，几乎没有直接 <code>import org.apache.poi</code> 的——所有 POI 操作都通过 Fesod Sheet 间接完成。唯一例外是涉及合并区域（<code>CellRangeAddress</code>）、下拉校验（<code>DataValidation</code>）、名称管理器（<code>Name</code>）等 Fesod Sheet 未完全封装的部分，才会直接操作 POI API。</p>
+
+<h2>二、四层架构：21 个文件的归属</h2>
+
+<p>打开模块源码，你会看到 4 个包。这不是随意组织的——它对应了从"声明意图"到"执行动作"到"对外暴露"的完整分层：</p>
+
+<table>
+<tr><th>层级</th><th>包路径</th><th>文件数</th><th>核心职责</th><th>代表文件</th></tr>
+<tr>
+  <td><strong>注解层</strong></td>
+  <td><code>annotation/</code></td>
+  <td>6</td>
+  <td>声明式标注字段行为——"这个字段要合并""那个字段走字典转换"</td>
+  <td><code>CellMerge.java</code>, <code>ExcelDictFormat.java</code></td>
+</tr>
+<tr>
+  <td><strong>转换器层</strong></td>
+  <td><code>convert/</code></td>
+  <td>3</td>
+  <td>类型双向转换——Java 对象字段 ↔ Excel 单元格字符串</td>
+  <td><code>ExcelDictConvert.java</code>, <code>ExcelEnumConvert.java</code>, <code>ExcelBigNumberConvert.java</code></td>
+</tr>
+<tr>
+  <td><strong>处理器层</strong></td>
+  <td><code>core/</code> + <code>handler/</code></td>
+  <td>9+1</td>
+  <td>生命周期钩子——合并单元格、生成下拉、标红必填、监听导入事件</td>
+  <td><code>ExcelDownHandler.java</code>, <code>CellMergeStrategy.java</code>, <code>DataWriteHandler.java</code>, <code>DefaultExcelListener.java</code></td>
+</tr>
+<tr>
+  <td><strong>工具层</strong></td>
+  <td><code>utils/</code></td>
+  <td>2</td>
+  <td>对外 DSL 入口——业务代码唯一打交道的 API</td>
+  <td><code>ExcelBuilder.java</code>, <code>ExcelWriterWrapper.java</code></td>
+</tr>
+</table>
+
+<h3>2.1 四层之间的数据流</h3>
+
+<p>一次典型的导出操作，四层如何协作：</p>
+
+<pre>业务 Controller
+  │
+  ▼
+ExcelBuilder.of(data, UserExportVO.class)          ← 【工具层】链式 DSL 入口
+  .toResponse(response)
+  │
+  ▼
+createWriterBuilder() 内部：
+  ├─ 注册 ExcelBigNumberConvert                    ← 【转换器层】自动挂载
+  ├─ 注册 DataWriteHandler                         ← 【处理器层】批注/必填
+  ├─ 注册 ExcelDownHandler                         ← 【处理器层】下拉生成
+  └─ 扫描字段注解                                   ← 【注解层】读取元数据
+  │
+  ▼
+Fesod Sheet WriteSheet 内部：
+  ├─ Converter.convertToExcelData() 逐字段调用     ← 【转换器层】执行转换
+  ├─ CellWriteHandler.afterCellDispose() 逐格回调  ← 【处理器层】样式/批注
+  └─ SheetWriteHandler.afterSheetCreate() 回调     ← 【处理器层】下拉/合并
+  │
+  ▼
+浏览器下载 Excel 文件</pre>
+
+<div class="insight"><strong>💡 设计洞察：</strong>注解层只负责"声明元数据"，自己不执行任何逻辑。转换器层和处理器层各自读取自己关心的注解，独立消费。这种"声明与执行分离"的设计，使得新增一个注解不需要修改已有处理器，新增一个处理器不需要修改注解——完全符合开闭原则。</div>
+
+<h2>三、注解层详解：6 个注解，3 种消费模式</h2>
+
+<p>6 个自定义注解是模块的"元数据接口"。每个注解定义在 <code>annotation/</code> 包下，标注在实体类的字段上，声明该字段在 Excel 读写时的特殊行为。关键是理解：<strong>谁声明它、谁读取它、谁执行它</strong>。</p>
+
+<h3>3.1 @CellMerge —— 列值合并</h3>
+
+<p>文件：<code>annotation/CellMerge.java</code></p>
+
+<p>当一个字段在连续行中值相同时，导出 Excel 时自动合并这些行的单元格。最典型的场景是"部门名称"列——10 个员工在同一部门，部门名只显示一次，占据合并后的 10 行高度。</p>
+
+<pre>// 注解定义（精简）
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface CellMerge {
+    int index() default -1;        // 列索引，-1 时自动推断
+    String[] mergeBy() default {};  // 合并依赖字段——依赖字段也相同时才合并
+}</pre>
+
+<table>
+<tr><th>属性</th><th>含义</th><th>示例场景</th></tr>
+<tr>
+  <td><code>index</code></td>
+  <td>指定合并列索引，-1 时取字段声明顺序</td>
+  <td>第 3 列合并：<code>@CellMerge(index = 2)</code></td>
+</tr>
+<tr>
+  <td><code>mergeBy</code></td>
+  <td>声明依赖字段，依赖字段值也相同时才合并</td>
+  <td>合并"部门名称"时必须同"部门编号"：<code>@CellMerge(mergeBy = "deptId")</code></td>
+</tr>
+</table>
+
+<p><code>mergeBy</code> 是最容易忽略但最重要的属性。假设两个部门都叫"技术部"但编号不同——如果只看部门名称就合并，会错误地把两个不同部门的行合并到一起。声明 <code>mergeBy = "deptId"</code> 后，只有部门编号也相同的相邻行才会被合并。</p>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发在导出 VO 的字段上标注<br>
+<strong>谁解析</strong>：<code>CellMergeHandler.java</code>（静态工厂，扫描注解生成 <code>List&lt;CellRangeAddress&gt;</code>）<br>
+<strong>谁执行</strong>：<code>CellMergeStrategy.java</code>（继承 AbstractMergeStrategy，在 afterSheetCreate 中写入合并区域）
+</blockquote>
+
+<h3>3.2 @ExcelDictFormat —— 字典转换</h3>
+
+<p>文件：<code>annotation/ExcelDictFormat.java</code></p>
+
+<p>这是最常用的注解——将数据库中存储的编码（如 <code>"0"</code>、<code>"1"</code>）与 Excel 中显示的标签（如"男"、"女"）互相转换。支持两种数据来源：</p>
+
+<pre>// 注解定义（精简）
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ExcelDictFormat {
+    String dictType() default "";             // 字典类型，走项目 DictService 查库
+    String readConverterExp() default "";     // 内联表达式，如 "0=男,1=女,2=未知"
+    String separator() default ",";           // 分隔符
+}</pre>
+
+<table>
+<tr><th>数据来源</th><th>属性</th><th>适用场景</th><th>示例</th></tr>
+<tr>
+  <td>字典服务（查库）</td>
+  <td><code>dictType</code></td>
+  <td>数据量大、频繁变更、跨模块复用</td>
+  <td><code>@ExcelDictFormat(dictType = "sys_user_sex")</code></td>
+</tr>
+<tr>
+  <td>内联表达式（写死）</td>
+  <td><code>readConverterExp</code></td>
+  <td>数据量小、固定不变、无需查库</td>
+  <td><code>@ExcelDictFormat(readConverterExp = "0=启用,1=停用")</code></td>
+</tr>
+</table>
+
+<p>两种方式可以同时指定。优先使用哪个？<strong>如果 <code>dictType</code> 不为空，走字典服务；否则解析 <code>readConverterExp</code>。</strong>这个优先级判断逻辑在 <code>ExcelDictConvert.java</code> 中。</p>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发在实体字段上标注<br>
+<strong>谁解析（转换）</strong>：<code>ExcelDictConvert.java</code>（导出：编码→标签；导入：标签→编码）<br>
+<strong>谁解析（下拉）</strong>：<code>ExcelDownHandler.java</code>（导出模板时根据字典选项生成下拉列表）<br>
+<strong>谁执行</strong>：Fesod Sheet 在读写单元格时自动调用 Converter
+</blockquote>
+
+<h3>3.3 @ExcelEnumFormat —— 枚举转换</h3>
+
+<p>文件：<code>annotation/ExcelEnumFormat.java</code></p>
+
+<p>与字典转换类似，但数据源是 Java 枚举类。适合"选项固定、不会频繁变更"的场景。</p>
+
+<pre>// 注解定义（精简）
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ExcelEnumFormat {
+    Class<? extends Enum<?>> enumClass();  // 枚举类
+    String codeField() default "code";      // 枚举中表示"编码"的属性名
+    String textField() default "text";      // 枚举中表示"文本"的属性名
+}
+
+// 使用示例
+public enum UserStatus {
+    OK("0", "正常"),
+    DISABLE("1", "停用"),
+    DELETED("2", "删除");
+    private String code;
+    private String text;
+    // ...
+}
+
+// 实体字段标注
+@ExcelEnumFormat(enumClass = UserStatus.class)
+private String status;</pre>
+
+<p>导出时，<code>status = "0"</code> 会被转换为 Excel 中的 <code>"正常"</code>。导入时，用户填的 <code>"正常"</code> 会被反向映射回 <code>"0"</code>。</p>
+
+<p>关键设计：<strong>双 Map 缓存</strong>。因为枚举的 <code>code</code> 和 <code>text</code> 通过反射读取，每次都反射会很慢。<code>ExcelEnumConvert</code> 内部使用 <code>ConcurrentHashMap</code> 维护两个缓存：</p>
+
+<ul>
+  <li><code>ENUM_MAP_CACHE</code>：<code>enumClass → Map&lt;code, text&gt;</code>，导出时用 code 查 text</li>
+  <li><code>ENUM_REVERSE_MAP_CACHE</code>：<code>enumClass → Map&lt;text, code&gt;</code>，导入时用 text 查 code</li>
+</ul>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发在实体字段上标注<br>
+<strong>谁解析（转换）</strong>：<code>ExcelEnumConvert.java</code>（双 Map 缓存，避免反射开销）<br>
+<strong>谁解析（下拉）</strong>：<code>ExcelDownHandler.java</code>（导出模板时从枚举中提取选项生成下拉）<br>
+<strong>谁执行</strong>：Fesod Sheet 在读写单元格时自动调用 Converter
+</blockquote>
+
+<h3>3.4 @ExcelDynamicOptions —— 动态下拉</h3>
+
+<p>文件：<code>annotation/ExcelDynamicOptions.java</code></p>
+
+<p>前两种注解的数据来源是"静态的"——字典表或枚举类中的值在编码阶段就已经确定。<strong>但如果下拉选项需要从数据库中实时查询呢？</strong>比如"所属部门"的下拉，每次导出模板时都应该查询最新的部门列表。这就是 <code>@ExcelDynamicOptions</code> 的用武之地。</p>
+
+<pre>// 注解定义
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ExcelDynamicOptions {
+    Class<? extends ExcelOptionsProvider> providerClass();
+}
+
+// ExcelOptionsProvider 接口
+public interface ExcelOptionsProvider {
+    Set&lt;String&gt; getOptions();
+}
+
+// 使用示例
+@Component
+public class DeptOptionsProvider implements ExcelOptionsProvider {
+    @Autowired
+    private ISysDeptService deptService;
+
+    @Override
+    public Set&lt;String&gt; getOptions() {
+        return deptService.list().stream()
+            .map(SysDept::getDeptName)
+            .collect(Collectors.toSet());
+    }
+}
+
+// 实体字段标注
+@ExcelDynamicOptions(providerClass = DeptOptionsProvider.class)
+private String deptName;</pre>
+
+<p>执行流程：<code>ExcelDownHandler</code> 发现 <code>@ExcelDynamicOptions</code> 后，通过 Spring 容器获取 <code>providerClass</code> 的实例，调用 <code>getOptions()</code> 拿到运行时选项集合，然后生成下拉。</p>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发标注字段 + 实现 <code>ExcelOptionsProvider</code> 接口并注册为 Spring Bean<br>
+<strong>谁解析</strong>：<code>ExcelDownHandler.java</code>（通过 Spring 容器获取 provider 实例）<br>
+<strong>谁执行</strong>：<code>ExcelDownHandler</code> 在 afterSheetCreate 中生成下拉
+</blockquote>
+
+<h3>3.5 @ExcelRequired —— 必填标注</h3>
+
+<p>文件：<code>annotation/ExcelRequired.java</code></p>
+
+<p>纯粹的<strong>视觉标注</strong>——将表头字体标红（默认 <code>IndexedColors.RED</code>），提示用户该列必填。不参与任何校验逻辑。</p>
+
+<pre>// 注解定义
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ExcelRequired {
+}
+
+// 使用示例
+@ExcelRequired
+private String userName;  // 导出模板时"用户名"表头标红</pre>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发在必填字段上标注<br>
+<strong>谁解析 + 谁执行</strong>：<code>DataWriteHandler.java</code>（在 afterCellDispose 中检测表头行 + 注解，设置字体颜色）
+</blockquote>
+
+<h3>3.6 @ExcelNotation —— 列头批注</h3>
+
+<p>文件：<code>annotation/ExcelNotation.java</code></p>
+
+<p>在导出模板时，给表头单元格添加 Excel 批注（Comment），内容是注解的 <code>value</code> 字符串。典型用途是告诉用户"这一列应该填什么格式"。</p>
+
+<pre>// 注解定义
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ExcelNotation {
+    String value();  // 批注内容
+}
+
+// 使用示例
+@ExcelNotation("请输入手机号，格式如 13800138000")
+private String phonenumber;</pre>
+
+<p>限制：仅适用于单表头场景（多级表头不做批注处理）。同样由 <code>DataWriteHandler</code> 消费。</p>
+
+<blockquote>
+<strong>谁声明</strong>：业务开发在字段上标注<br>
+<strong>谁解析 + 谁执行</strong>：<code>DataWriteHandler.java</code>（在 afterCellDispose 中检测表头行 + @ExcelNotation，创建 POI Comment 并设置到单元格）
+</blockquote>
+
+<h2>四、注解消费者矩阵：一张表看清全貌</h2>
+
+<table>
+<tr><th>注解</th><th>Converter 消费者</th><th>WriteHandler 消费者</th><th>作用方向</th><th>关键文件</th></tr>
+<tr>
+  <td><code>@CellMerge</code></td>
+  <td>—</td>
+  <td><code>CellMergeHandler</code> + <code>CellMergeStrategy</code></td>
+  <td>仅导出</td>
+  <td><code>core/CellMergeHandler.java</code>, <code>core/CellMergeStrategy.java</code></td>
+</tr>
+<tr>
+  <td><code>@ExcelDictFormat</code></td>
+  <td><code>ExcelDictConvert</code></td>
+  <td><code>ExcelDownHandler</code></td>
+  <td>导入+导出</td>
+  <td><code>convert/ExcelDictConvert.java</code>, <code>core/ExcelDownHandler.java</code></td>
+</tr>
+<tr>
+  <td><code>@ExcelEnumFormat</code></td>
+  <td><code>ExcelEnumConvert</code></td>
+  <td><code>ExcelDownHandler</code></td>
+  <td>导入+导出</td>
+  <td><code>convert/ExcelEnumConvert.java</code>, <code>core/ExcelDownHandler.java</code></td>
+</tr>
+<tr>
+  <td><code>@ExcelDynamicOptions</code></td>
+  <td>—</td>
+  <td><code>ExcelDownHandler</code></td>
+  <td>仅导出（模板）</td>
+  <td><code>core/ExcelDownHandler.java</code>, <code>core/ExcelOptionsProvider.java</code></td>
+</tr>
+<tr>
+  <td><code>@ExcelRequired</code></td>
+  <td>—</td>
+  <td><code>DataWriteHandler</code></td>
+  <td>仅导出（模板）</td>
+  <td><code>handler/DataWriteHandler.java</code></td>
+</tr>
+<tr>
+  <td><code>@ExcelNotation</code></td>
+  <td>—</td>
+  <td><code>DataWriteHandler</code></td>
+  <td>仅导出（模板）</td>
+  <td><code>handler/DataWriteHandler.java</code></td>
+</tr>
+</table>
+
+<div class="insight"><strong>💡 设计洞察：为什么有些注解有 Converter 消费者，有些只有 Handler 消费者？</strong><br><br>
+注解分为两大类：<strong>数据转换类</strong>（@ExcelDictFormat、@ExcelEnumFormat）影响的是"单元格里的值是什么"，需要介入 Fesod Sheet 的类型转换流程，所以通过 Converter 实现；<strong>展现格式类</strong>（@CellMerge、@ExcelRequired、@ExcelNotation）影响的是"单元格长什么样"，需要介入单元格写入生命周期，所以通过 WriteHandler 实现。<br><br>
+@ExcelDynamicOptions 是个特例——它既不转换值，也不改变展现，而是<strong>为模板添加数据验证约束</strong>，所以只被 ExcelDownHandler 消费。@ExcelDictFormat 和 @ExcelEnumFormat 之所以同时被 Converter 和 ExcelDownHandler 消费，是因为它们身兼二职：既要在读写时做值转换（Converter），又要在模板导出时生成下拉选项（Handler）。
+</div>
+
+<h2>五、回到全景：四层架构的价值</h2>
+
+<p>现在你看到了完整的四层架构和 6 个注解的消费者关系。这个架构的核心价值在于：</p>
+
+<ol>
+  <li><strong>注解层</strong>让业务开发用声明式方式描述需求——"这个字段要合并""那个字段走字典"，不需要写任何 POI 代码。</li>
+  <li><strong>转换器层</strong>封装了"Java 值 ↔ Excel 文本"的映射逻辑，每种映射策略独立实现、互不干扰。</li>
+  <li><strong>处理器层</strong>封装了 Excel 生命周期钩子中的"副作用"——合并、下拉、标红、批注。每个处理器只关心自己的注解，独立运作。</li>
+  <li><strong>工具层</strong>把所有复杂性封装在一个链式 DSL 中——<code>ExcelBuilder.of(data, clazz).toResponse(response)</code> 一行代码完成全部导出。</li>
+</ol>
+
+<p>后续两课将分别追踪导出链路和导入链路的完整执行流程，你会看到这四层如何在真实调用链中协作。</p>
+
+<div class="quiz">
+<details>
+<summary>📝 自检问答：注解消费者匹配</summary>
+<p>1. 用户标注了 <code>@ExcelDictFormat(dictType = "sys_user_sex")</code>，导出时"男""女"这些中文标签是怎么来的？哪个类负责这个转换？</p>
+<p>2. <code>@CellMerge(mergeBy = "deptId")</code> 中的 <code>mergeBy</code> 是干什么的？如果去掉它会有什么风险？</p>
+<p>3. <code>@ExcelNotation</code> 和 <code>@ExcelRequired</code> 都被同一个处理器消费。这个处理器叫什么？它如何区分应该标红还是加批注？</p>
+<p>4. <code>@ExcelDynamicOptions</code> 和 <code>@ExcelDictFormat</code> 都能生成下拉选项，它们的本质区别是什么？什么时候用哪个？</p>
+</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<br>
+注解层：<code>ruoyi-common-excel/src/main/java/org/dromara/common/excel/annotation/CellMerge.java</code>, <code>ExcelDictFormat.java</code>, <code>ExcelEnumFormat.java</code>, <code>ExcelDynamicOptions.java</code>, <code>ExcelRequired.java</code>, <code>ExcelNotation.java</code><br>
+转换器层：<code>convert/ExcelBigNumberConvert.java</code>, <code>ExcelDictConvert.java</code>, <code>ExcelEnumConvert.java</code><br>
+处理器层：<code>core/CellMergeHandler.java</code>, <code>core/CellMergeStrategy.java</code>, <code>core/ExcelDownHandler.java</code>, <code>handler/DataWriteHandler.java</code><br>
+工具层：<code>utils/ExcelBuilder.java</code>, <code>utils/ExcelWriterWrapper.java</code></div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。</div>
+
+<div class="nav"><a href="../">← 模块首页</a><a href="02-导出链路详解.html">下一课 →</a></div>
+</body>
+</html>

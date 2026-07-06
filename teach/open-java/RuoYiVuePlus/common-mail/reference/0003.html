@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · MailBuilder 流式构建器</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · MailBuilder 流式构建器</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code></p>
+
+<h2>一句话</h2>
+<div class="chain">400 行的 <b>私有构造器 + 静态工厂 + 链式 API</b> 的 Builder 模式实现——设参数（to/cc/subject/text/html/files/image）→ 校验 → 拿账户（可能克隆）→ JakartaMail.send() → 关闭图片流 → 返回 message-id。</div>
+
+<h2>两个静态工厂入口</h2>
+<table>
+<tr><th>方法</th><th>使用场景</th></tr>
+<tr><td><code>MailBuilder.of()</code></td><td>常规发送，使用 yml 全局 MailAccount Bean</td></tr>
+<tr><td><code>MailBuilder.of(MailAccount)</code></td><td>多账户/动态账户发送</td></tr>
+</table>
+
+<h2>send() 执行路径（7 步）</h2>
+<div class="chain">① validate() — 校验收件人/标题/正文必填
+② resolveMailAccount() — 解析账户
+   ├─ mailAccount!=null && 无覆盖 → 返回传入的
+   ├─ mailAccount==null && 无覆盖 → SpringUtils.getBean(MailAccount.class)
+   └─ 有覆盖(from/user/pass) → ObjectUtil.clone + 字段覆盖
+③ JakartaMail.create(account).setUseGlobalSession(...)
+④ setTos / setCcs / setBccs / setTitle / setContent / setHtml / setFiles
+⑤ try { images.forEach(mail::addImage) }
+⑥ mail.send() → 返回 message-id
+⑦ finally { images.forEach(IoUtil::close) }</div>
+
+<h2>链式方法一览（约 18 个）</h2>
+<h3>账户覆盖（4 个，设了后 useGlobalSession=false）</h3>
+<table>
+<tr><th>方法</th><th>行号</th><th>说明</th></tr>
+<tr><td><code>account(MailAccount)</code></td><td>118</td><td>使用指定账户</td></tr>
+<tr><td><code>from(String)</code></td><td>130</td><td>覆盖发件人</td></tr>
+<tr><td><code>user(String)</code></td><td>142</td><td>覆盖用户名</td></tr>
+<tr><td><code>pass(String)</code></td><td>154</td><td>覆盖密码</td></tr>
+</table>
+
+<h3>内容设置（10 个）</h3>
+<table>
+<tr><th>方法</th><th>重载</th><th>行号</th></tr>
+<tr><td><code>to()</code></td><td>String / Collection&lt;String&gt;</td><td>166 / 177</td></tr>
+<tr><td><code>cc()</code></td><td>String / Collection&lt;String&gt;</td><td>188 / 199</td></tr>
+<tr><td><code>bcc()</code></td><td>String / Collection&lt;String&gt;</td><td>210 / 221</td></tr>
+<tr><td><code>subject()</code></td><td>—</td><td>232</td></tr>
+<tr><td><code>text()</code></td><td>—</td><td>243</td></tr>
+<tr><td><code>html()</code></td><td>—</td><td>255</td></tr>
+<tr><td><code>content()</code></td><td>(String, boolean)</td><td>268</td></tr>
+</table>
+
+<h3>附件/图片（3 个）</h3>
+<table>
+<tr><th>方法</th><th>行号</th><th>注意</th></tr>
+<tr><td><code>image(String cid, InputStream)</code></td><td>281</td><td>cid 对应 HTML 中 &lt;img src="cid:xxx"&gt;</td></tr>
+<tr><td><code>images(Map)</code></td><td>294</td><td>批量添加</td></tr>
+<tr><td><code>files(File...)</code></td><td>307</td><td>覆盖式（不是追加）</td></tr>
+</table>
+
+<h2>resolveMailAccount() 三种分支</h2>
+<table>
+<tr><th>条件</th><th>返回值</th></tr>
+<tr><td><code>mailAccount != null</code> 且无覆盖</td><td>直接返回传入的账户</td></tr>
+<tr><td><code>mailAccount == null</code> 且无覆盖</td><td><code>SpringUtils.getBean(MailAccount.class)</code></td></tr>
+<tr><td>任一覆盖字段非空</td><td><code>ObjectUtil.clone(account)</code> + 覆盖非空字段</td></tr>
+</table>
+
+<h2>记忆锚点</h2>
+<ul>
+<li><b>private 构造器</b>：强制通过 <code>of()</code> 创建，符合 Builder 模式规范。</li>
+<li><b>覆盖字段 → 克隆账户</b>：不污染全局 Bean，<code>ObjectUtil.clone()</code> 基于序列化做深拷贝。</li>
+<li><b>files() 是覆盖式</b>：第二次调用会覆盖第一次的附件列表。</li>
+<li><b>try-finally 关图片流</b>：防止资源泄漏，即使发送失败也关。</li>
+<li><b>to/cc/bcc 支持逗号分号混合分隔</b>：<code>splitAddress()</code> 中先 replace(';',',') 再 splitTrim。</li>
+<li><code>text()</code> 设 html=false，<code>html()</code> 设 html=true，<code>content(str,bool)</code> 自由指定。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：MailBuilder、JakartaMail、useGlobalSession、Builder 模式 · 前序速查：01 模块全景、02 MailConfig/MailProperties</p>
+</body>
+</html>

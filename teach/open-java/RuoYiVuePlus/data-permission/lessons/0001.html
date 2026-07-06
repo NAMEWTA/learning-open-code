@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>01 全局心智模型 — 一条 SQL 的"变身"</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .badge { display: inline-block; padding: 0.15em 0.6em; border-radius: 10px; font-size: 0.78rem; font-weight: 600; }
+  .badge-before { background: #fff1f0; color: #cf1322; }
+  .badge-after { background: #f6ffed; color: #389e0d; }
+</style>
+</head>
+<body>
+
+<h1>01 全局心智模型 — 一条 SQL 的"变身"</h1>
+
+<blockquote><strong>本节目标：</strong>在你脑中种下一张"数据权限全链路地图"。学完后，你能不看代码说出从 Mapper 方法被调用到最终 SQL 多出 WHERE 片段，中间经过了哪几个关键步骤。</blockquote>
+
+<h2>先看效果：同一条 SQL，不同角色看到不同数据</h2>
+
+<p>假设有这样一个用户列表查询：</p>
+
+<pre><code>SELECT * FROM sys_user WHERE status = '0'</code></pre>
+
+<p>当<strong>超级管理员</strong>执行时，SQL 不变——看到所有启用用户。但当一个<strong>普通部门经理</strong>（角色配置为「本部门及以下」）执行时，最终发给数据库的 SQL 变成了：</p>
+
+<pre><code><span class="badge badge-before">BEFORE</span> SELECT * FROM sys_user WHERE status = '0'
+
+<span class="badge badge-after">AFTER</span>  SELECT * FROM sys_user WHERE status = '0' AND ( dept_id IN ( 103, 104, 105 ) )</code></pre>
+
+<p>数据权限做的就是这件事：<strong>在 SQL 执行前，自动往 WHERE 里塞一段"你是谁，你只能看什么"的条件</strong>。</p>
+
+<h2>全链路六大环节</h2>
+
+<p>这是 RuoYi-Vue-Plus 数据权限体系从入口到结果的全景地图：</p>
+
+<table>
+<tr><th>#</th><th>环节</th><th>发生了什么</th><th>核心代码</th></tr>
+<tr>
+  <td>①</td>
+  <td><strong>注解声明</strong></td>
+  <td>开发者在 Mapper 方法上加 <code>@DataPermission</code> + <code>@DataColumn</code>，声明"这条 SQL 的哪些列要受数据权限控制"</td>
+  <td><code>SysUserMapper:37-39</code> — key=deptName → value=dept_id</td>
+</tr>
+<tr>
+  <td>②</td>
+  <td><strong>AOP 切面入栈</strong></td>
+  <td>Mapper 方法被调用时，Spring AOP 切面把注解塞进 <code>ThreadLocal</code></td>
+  <td><code>DataPermissionAdvice:26-37</code> — setPermission → proceed → removePermission</td>
+</tr>
+<tr>
+  <td>③</td>
+  <td><strong>角色数据配置</strong></td>
+  <td>登录时从 DB 读出当前用户所属角色及其 dataScope（1-6），存进 LoginUser</td>
+  <td><code>SysLoginService:149</code> — buildLoginUser 组装 roles + dataScopeRoleMap</td>
+</tr>
+<tr>
+  <td>④</td>
+  <td><strong>MyBatis 拦截器</strong></td>
+  <td>MyBatis 执行 SQL 前，拦截器检查 ThreadLocal 有无注解，有则进入改写流程</td>
+  <td><code>PlusDataPermissionInterceptor:55-67</code> — beforeQuery 拦截 SELECT</td>
+</tr>
+<tr>
+  <td>⑤</td>
+  <td><strong>Handler 拼 WHERE</strong></td>
+  <td>Handler 从 ThreadLocal 取出当前注解和当前用户角色 → 遍历角色 → 拿每个角色的 dataScope → 找到对应 SpEL 模板 → 渲染成 SQL 片段 → 拼回原 WHERE</td>
+  <td><code>PlusDataPermissionHandler:72-97</code> — getSqlSegment</td>
+</tr>
+<tr>
+  <td>⑥</td>
+  <td><strong>最终 SQL 执行</strong></td>
+  <td>改写后的 SQL 发给数据库，包含权限条件的行返回，不该看的行被过滤</td>
+  <td>无特定代码——这就是改写后的 SQL</td>
+</tr>
+</table>
+
+<h2>这幅图的核心设计理念</h2>
+
+<p>理解这六个环节，你需要抓住三个关键设计决策：</p>
+
+<p><strong>1. 注解和拦截器是"配置"层，Handler 是"引擎"层。</strong><br>
+注解 (<code>@DataColumn</code>) 告诉 Handler "用 dept_id 这列去做过滤"。Handler 不管 Mapper 的业务逻辑，它只做一件事：往 WHERE 里拼片段。</p>
+
+<p><strong>2. DataScopeType 是真正的"规则引擎"。</strong><br>
+六种数据范围不是写死的 if-else，而是六条 <strong>SpEL 模板</strong>（见 <code>DataScopeType:36-56</code>）。模板里用 <code>#{#deptName}</code> 引用列名、用 <code>#{@sdss.xxx}</code> 调用方法。新增一种规则只要加一条枚举 + 写一个对应的 SpEL 模板。</p>
+
+<p><strong>3. "ALL" 是短路器。</strong><br>
+用户角色中<strong>只要有一个</strong>是「全部数据权限」(code=1)，整个数据过滤就被跳过。这是通过 <code>buildDataFilter</code> 里的 <code>return StringUtils.EMPTY</code> 实现的（Handler:148-149）。</p>
+
+<h2>一个具体例子走一遍</h2>
+
+<p>场景：部门经理张三（deptId=103，角色 dataScope=4「本部门及以下」）查看用户列表。</p>
+
+<pre><code>步骤① Mapper: SysUserMapper.selectPageUserList() 被调用
+       注解: @DataPermission({
+           @DataColumn(key="deptName", value="dept_id"),
+           @DataColumn(key="userName", value="create_by")
+       })
+
+步骤② Advice: DataPermissionHelper.setPermission(注解) → proceed()
+
+步骤④ Interceptor: beforeQuery → ThreadLocal 里 != null → 进入改写
+
+步骤⑤ Handler:
+       currentUser() → 张三 deptId=103, roles=[经理(dataScope=4)]
+       buildDataFilter():
+         dataScope=4 → DataScopeType.DEPT_AND_CHILD
+         模板: #{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )
+         渲染: dept_id IN ( 103, 104, 105 )    ← sdss查了子部门
+         注: key="deptName" → value="dept_id" 映射了列名
+       getSqlSegment: 原WHERE AND ( dept_id IN (103,104,105) )
+
+步骤⑥ 最终SQL: SELECT ... FROM sys_user WHERE status='0'
+                                AND ( dept_id IN (103,104,105) )</code></pre>
+
+<h2>现在你知道什么</h2>
+<ul>
+  <li>数据权限体系有六个环节：注解 → AOP 切面 → 角色配置 → MyBatis 拦截器 → Handler 拼 WHERE → 最终 SQL</li>
+  <li>核心决策：注解是配置、DataScopeType 是规则引擎、"ALL" 是短路器</li>
+  <li>一条简单的用户查询，最终会被塞进 <code>AND ( dept_id IN (...) )</code></li>
+</ul>
+
+<p><strong>下一节</strong>我们深入环节①——注解层，学习 <code>@DataPermission</code> 和 <code>@DataColumn</code> 的正确写法。</p>
+
+<div class="cite">📖 推荐一手资料：<a href="https://baomidou.com/plugins/data-permission/">MyBatis-Plus 数据权限插件官方文档</a> — RuoYi 的拦截器继承自 MP 的 InnerInterceptor，理解 MP 的插件机制有助后续深入。</div>
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。试试问"如果用户有多个角色，每个角色的 dataScope 不同，最终 SQL 会变成什么样？"</div>
+
+</body>
+</html>

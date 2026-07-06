@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 注解层 — @DataPermission 与 @DataColumn 怎么写</title>
+<style>
+  body { max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.75; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; margin-top: 2.5rem; border-bottom: 2px solid #1677ff; padding-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; color: #1677ff; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.88rem; line-height: 1.55; }
+  code { font-size: 0.9em; background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; }
+  pre code { background: none; padding: 0; }
+  blockquote { border-left: 3px solid #1677ff; margin-left: 0; padding-left: 1rem; color: #444; background: #f0f6ff; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.5rem 0.75rem; text-align: left; font-size: 0.9rem; }
+  th { background: #f5f5f5; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #fffbe6; border: 1px solid #ffe58f; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  .warn { background: #fff2f0; border: 1px solid #ffccc7; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+  .tip { background: #f6ffed; border: 1px solid #b7eb8f; padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>02 注解层 — @DataPermission 与 @DataColumn 怎么写</h1>
+
+<blockquote><strong>本节目标：</strong>你能够在自己的 Mapper 方法上正确写出 <code>@DataPermission</code> + <code>@DataColumn</code>，覆盖单表查询、多表 join 别名、update/delete 三种场景。</blockquote>
+
+<h2>两个注解的关系</h2>
+
+<p><code>@DataColumn</code> 是子注解，<code>@DataPermission</code> 是容器。关系像这样：</p>
+
+<pre><code>@DataPermission(              ← 容器，默认 select 用 OR 连接多角色条件
+    joinStr = "",             ← 可选，指定 OR 或 AND
+    value = {
+        @DataColumn(           ← 子注解，声明"占位符 → 列名"映射
+            key = "deptName",  ← SpEL 模板里的变量名（#deptName）
+            value = "dept_id"  ← 真实数据库列名
+        ),
+        @DataColumn(
+            key = "userName",
+            value = "create_by"
+        )
+    }
+)</code></pre>
+
+<h2>注解源码速览</h2>
+
+<p><strong>@DataColumn</strong>（<a href="../reference/0002.html">源码 DataColumn.java:17-31</a>）定义了两个 String 数组属性：</p>
+
+<pre><code>String[] key() default "deptName";     // SpEL 里的变量名，可多个
+String[] value() default "dept_id";   // 对应的列名，与 key 等长</code></pre>
+
+<p><strong>@DataPermission</strong>（<a href="../reference/0002.html">源码 DataPermission.java:14-28</a>）：</p>
+
+<pre><code>DataColumn[] value();                 // 一组 DataColumn
+String joinStr() default "";         // 多角色条件拼接符，默认 select=OR, update/delete=AND</code></pre>
+
+<p>两个注解都标注 <code>@Target(ElementType.METHOD)</code>（<code>@DataPermission</code> 额外支持 <code>TYPE</code>），所以可以放在方法或接口上。</p>
+
+<h2>场景一：单表查询（最常见的用法）</h2>
+
+<p>看用户列表查询，<code>SysUserMapper.java:37-42</code>：</p>
+
+<pre><code>@DataPermission({
+    @DataColumn(key = "deptName", value = "dept_id"),
+    @DataColumn(key = "userName", value = "create_by")
+})
+default Page&lt;SysUserVo&gt; selectPageUserList(Page&lt;SysUser&gt; page, Wrapper&lt;SysUser&gt; queryWrapper) {
+    return this.selectVoPage(page, queryWrapper);
+}</code></pre>
+
+<p>这里用了<strong>双列模板</strong>（dept_id + create_by）。为什么两个？因为 <code>DataScopeType.DEPT_AND_CHILD</code> 的模板是：</p>
+
+<pre><code>#{#deptName} IN ( #{@sdss.getDeptAndChild( #user.deptId )} )</code></pre>
+
+<p>而 <code>DataScopeType.SELF</code> 的模板是：</p>
+
+<pre><code>#{#userName} = #{#user.userId}</code></pre>
+
+<p>——如果你只声明 key=deptName，那仅本人的角色就不会产生任何过滤条件（因为模板里不含 #deptName）。只有两个 key 都声明，两个角色类型才都生效。</p>
+
+<div class="tip"><strong>铁律：</strong>声明哪些列取决于你希望覆盖哪些 DataScopeType。至少要有 <code>deptName</code> 和 <code>userName</code> 两个 key，才能让部门过滤和本人过滤同时生效。</div>
+
+<h2>场景二：多表 join 用别名</h2>
+
+<p>当 Mapper 涉及多表 join 时，列名必须带表别名前缀，否则会列名冲突。看 <code>SysUserMapper.java:66-69</code>：</p>
+
+<pre><code>@DataPermission({
+    @DataColumn(key = "deptName", value = "d.dept_id"),   ← 注意表别名 d
+    @DataColumn(key = "userName", value = "u.create_by")   ← 注意表别名 u
+})
+default List&lt;SysUserExportVo&gt; selectUserExportList(SysUserBo user, List&lt;Long&gt; deptIds) {
+    MPJLambdaWrapper&lt;SysUser&gt; wrapper = QueryBuilder.lambdaJoin("u", SysUser.class)
+        .leftJoin(SysDept.class, "d", SysDept::getDeptId, SysUser::getDeptId)
+        // ...
+    return this.selectJoinList(SysUserExportVo.class, wrapper);
+}</code></pre>
+
+<p>这里 MPJ（MyBatis-Plus-Join）给用户表起了别名 <code>u</code>，部门表起了别名 <code>d</code>。所以 value 必须写 <code>"d.dept_id"</code> 而非 <code>"dept_id"</code>。</p>
+
+<div class="warn"><strong>常见错误：</strong>join 查询忘记改别名。SQL 会变成 <code>WHERE ... AND (dept_id IN (...))</code> 但 join 后实际列名叫 <code>d.dept_id</code>，<code>dept_id</code> 不明确导致 SQL 报错。</div>
+
+<h2>场景三：update / delete 也要过滤</h2>
+
+<p>数据权限对 update 和 delete 同样生效。看 <code>SysUserMapper.java:146-163</code>：</p>
+
+<pre><code>@Override
+@DataPermission({
+    @DataColumn(key = "deptName", value = "dept_id"),
+    @DataColumn(key = "userName", value = "create_by")
+})
+int update(@Param(Constants.ENTITY) SysUser user, @Param(Constants.WRAPPER) Wrapper&lt;SysUser&gt; updateWrapper);
+
+@Override
+@DataPermission({
+    @DataColumn(key = "deptName", value = "dept_id"),
+    @DataColumn(key = "userName", value = "create_by")
+})
+int updateById(@Param(Constants.ENTITY) SysUser user);</code></pre>
+
+<p>update/delete 与 select 的关键区别是 <code>joinStr</code> 默认值不同：select 默认 <code>OR</code>（任一角色匹配即通过），update/delete 默认 <code>AND</code>（所有角色条件都满足才允许）。这更严格，防止误修改不属于自己范围的数据。</p>
+
+<h2>joinStr 指定：什么时候用 AND？</h2>
+
+<p>在 demo 模块里可以看到 <code>TestDemoMapper.java:77</code> 用 <code>joinStr="AND"</code> 覆盖默认值：</p>
+
+<pre><code>@DataPermission(
+    joinStr = "AND",
+    value = { @DataColumn(key = "deptName", value = "dept_id") }
+)
+default List&lt;TestDemoVo&gt; selectByIds(Collection&lt;Long&gt; ids) {
+    return this.selectVoBatchIds(ids);
+}</code></pre>
+
+<p>什么时候用 AND？当你要求用户<strong>必须同时满足</strong>多个角色的所有数据约束。但实际业务中极少使用，默认的 OR 更符合直觉：「任意角色拥有某数据的查看权限，用户就能看到」。</p>
+
+<h2>实践检查清单</h2>
+
+<p>加数据权限注解前，问自己三个问题：</p>
+
+<ol>
+  <li><strong>这张表的哪列代表"所属部门"？</strong> → 填入 <code>key="deptName"</code> 对应的 value（通常 dept_id）</li>
+  <li><strong>这张表的哪列代表"创建人/所属人"？</strong> → 填入 <code>key="userName"</code> 对应的 value（通常 create_by 或 user_id）</li>
+  <li><strong>有 join 吗？</strong> → 有则给列名加表别名前缀</li>
+</ol>
+
+<div class="cite">📖 推荐一手资料：<a href="https://docs.spring.io/spring-framework/reference/core/expressions.html">Spring SpEL 官方文档</a> — 理解 <code>#{#var}</code> 和 <code>#{@bean.method()}</code> 的语法含义，对你接下来理解 DataScopeType 的模板至关重要。</div>
+<div class="reminder">💡 有疑问？试试问"如果我想按 '所属单位' 做数据过滤（不是部门），注解怎么写？在哪里改？"</div>
+
+</body>
+</html>

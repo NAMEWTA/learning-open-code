@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 05 · Map 任务（动态分片）</title>
+<style>
+  body { max-width: 760px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 05 · Map 任务（动态分片）</h1>
+<p class="a">配套课程：<code>lessons/0005.html</code></p>
+
+<h2>一句话</h2>
+<div class="chain">Map 任务 = <b>根 Map 动态拆分数据 → MapHandler.doMap() 分发子任务 → 子 Map 并行执行 → 结果各自返回（不汇总）</b></div>
+
+<h2>三个角色</h2>
+<table>
+<tr><th>角色</th><th>注解</th><th>方法签名</th><th>职责</th></tr>
+<tr><td>根 Map</td><td><code>@MapExecutor</code>（无 taskName）</td><td><code>ExecuteResult root(MapArgs, MapHandler)</code></td><td>拆分数据，调用 doMap 分发</td></tr>
+<tr><td>子 Map</td><td><code>@MapExecutor(taskName="xxx")</code></td><td><code>ExecuteResult sub(MapArgs)</code></td><td>处理一片数据，返回结果</td></tr>
+<tr><td>MapHandler</td><td>框架注入</td><td><code>doMap(List, taskName)</code></td><td>将数据列表分发给集群中的子任务</td></tr>
+</table>
+
+<h2>最小模板</h2>
+<div class="chain">@Component
+@JobExecutor(name = "testMapJob")
+public class TestMapJob {
+
+    @MapExecutor  // ← 根 Map：拆分数据
+    public ExecuteResult rootMap(MapArgs mapArgs, MapHandler mapHandler) {
+        List&lt;List&lt;?&gt;&gt; partitions = splitData();  // 拆分成 N 片
+        return mapHandler.doMap(partitions, "subTask");  // 分发给子任务
+    }
+
+    @MapExecutor(taskName = "subTask")  // ← 子 Map：处理一片
+    public ExecuteResult subMap(MapArgs mapArgs) {
+        List&lt;?&gt; data = (List&lt;?&gt;) mapArgs.getMapResult();  // 拿到一片数据
+        Object result = process(data);  // 处理
+        return ExecuteResult.success(result);
+    }
+}</div>
+
+<h2>执行模型</h2>
+<div class="chain">根 Map 执行 → 拆分数据 → doMap(list, taskName) 提交 N 个子任务
+  → 子任务进入 SnailJob 队列
+  → 集群中执行器认领（负载均衡）
+  → 各子任务并行执行
+  → 各自独立返回 ExecuteResult
+  → <b>没有汇总阶段</b>（需要汇总请用 MapReduce）</div>
+
+<h2>关键注意事项</h2>
+<ul>
+<li>doMap 是<b>异步分发</b>——根任务返回时子任务可能还在排队</li>
+<li>一个类里只能有一个不带 taskName 的 @MapExecutor（根任务）</li>
+<li>子任务失败不影响其他子任务（各自独立）</li>
+<li>Map 不汇总——如果需要最终聚合结果，升级到 MapReduce</li>
+</ul>
+
+<p class="a">→ 相关术语：@MapExecutor、MapHandler、doMap()、MapArgs、动态分片</p>
+</body>
+</html>

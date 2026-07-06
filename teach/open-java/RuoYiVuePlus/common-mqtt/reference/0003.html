@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>速查 03 · 监听器与消息收发</title>
+<style>
+  body { max-width: 720px; margin: 1.5rem auto; padding: 0 1rem; font-family: system-ui, "PingFang SC", sans-serif; line-height: 1.5; color: #222; }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid #2c3e50; padding-bottom: 0.3rem; }
+  h2 { font-size: 1rem; margin-top: 1.3rem; color: #2c3e50; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82rem; margin: 0.5rem 0; }
+  th, td { border: 1px solid #ddd; padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  code { background: #f0f2f5; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.85em; color: #c0341d; font-family: Consolas, monospace; }
+  pre { background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; overflow-x: auto; line-height: 1.6; }
+  .chain { font-family: Consolas, monospace; font-size: 0.8rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  .a { color: #888; font-size: 0.8rem; }
+  ul { font-size: 0.85rem; }
+  @media print { body { margin: 0; } }
+</style>
+</head>
+<body>
+<h1>速查 03 · 监听器与消息收发</h1>
+<p class="a">配套课程：<code>lessons/0003.html</code> · 使命：读懂 ruoyi-common-mqtt 模块</p>
+
+<h2>两个监听器对比</h2>
+<table>
+<tr><th>维度</th><th>MqttClientConnectListener</th><th>MqttClientGlobalMessageListener</th></tr>
+<tr><td>实现接口</td><td><code>IMqttClientConnectListener</code></td><td><code>IMqttClientGlobalMessageListener</code></td></tr>
+<tr><td>关注点</td><td><b>连接</b>生命周期</td><td><b>消息</b>处理</td></tr>
+<tr><td>触发频率</td><td>低频（每次连接/断连一次）</td><td>高频（每条消息一次）</td></tr>
+<tr><td>构造参数</td><td>需要 <code>MqttClientCreator</code></td><td>无参数</td></tr>
+</table>
+
+<h2>MqttClientConnectListener 回调速查</h2>
+<table>
+<tr><th>方法</th><th>参数</th><th>关键逻辑</th></tr>
+<tr><td><code>onConnected</code></td>
+<td><code>ChannelContext</code>, <code>boolean isReconnect</code></td>
+<td><code>isReconnect=false</code> → 首次连接（可做初始化/订阅）<br><code>isReconnect=true</code> → 重连（恢复状态）</td></tr>
+<tr><td><code>onDisconnect</code></td>
+<td><code>ChannelContext</code>, <code>Throwable</code>, <code>String remark</code>, <code>boolean isRemove</code></td>
+<td><code>throwable!=null</code> → 异常断连（需告警）<br><code>throwable==null</code> → 正常断开<br>可动态更新 clientId/username/password</td></tr>
+</table>
+
+<h2>MqttClientGlobalMessageListener 参数速查</h2>
+<table>
+<tr><th>参数</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>context</code></td><td><code>ChannelContext</code></td><td>通道上下文（含连接信息）</td></tr>
+<tr><td><code>topic</code></td><td><code>String</code></td><td>实际匹配到的 Topic（非通配符）</td></tr>
+<tr><td><code>message</code></td><td><code>MqttPublishMessage</code></td><td>MQTT PUBLISH 报文（含 QoS/Retain/MessageId）</td></tr>
+<tr><td><code>payload</code></td><td><code>byte[]</code></td><td>原始字节载荷（需按约定解码）</td></tr>
+</table>
+
+<h2>消息收发 API 速查</h2>
+<table>
+<tr><th>操作</th><th>API</th><th>返回</th></tr>
+<tr><td>发布消息</td><td><code>mqttClientCreator.publish(topic, payload)</code></td><td><code>CompletableFuture&lt;Void&gt;</code></td></tr>
+<tr><td>订阅 Topic</td><td><code>mqttClientCreator.subscribe(topic)</code></td><td>void</td></tr>
+<tr><td>订阅 + QoS</td><td><code>mqttClientCreator.subscribe(topic, qos)</code></td><td>void</td></tr>
+<tr><td>取消订阅</td><td><code>mqttClientCreator.unsubscribe(topic)</code></td><td>void</td></tr>
+</table>
+
+<h2>实战代码骨架</h2>
+<pre>// 发布消息
+@Autowired MqttClientCreator creator;
+
+creator.publish("ruoyi/device/001/command",
+    "{\"action\":\"shutdown\"}".getBytes(StandardCharsets.UTF_8))
+    .whenComplete((v, e) -> log.info("发送{}", e==null?"成功":"失败"));
+
+// 扩展监听器
+@Component
+class MyListener implements IMqttClientGlobalMessageListener {
+    public void onMessage(ChannelContext ctx, String topic,
+                          MqttPublishMessage msg, byte[] payload) {
+        String body = new String(payload, StandardCharsets.UTF_8);
+        if (topic.startsWith("ruoyi/device/") && topic.endsWith("/data")) {
+            // 处理设备数据
+        }
+    }
+}
+
+// 订阅 Topic
+@PostConstruct
+void init() {
+    creator.subscribe("ruoyi/device/+/data");
+    creator.subscribe("ruoyi/device/+/status");
+}</pre>
+
+<h2>Topic 命名规范建议</h2>
+<div class="chain">ruoyi/device/{deviceId}/data     — 设备数据上报
+ruoyi/device/{deviceId}/status   — 设备状态上报
+ruoyi/device/{deviceId}/command  — 下发给设备的指令
+ruoyi/device/{deviceId}/event    — 设备事件（告警/故障）
+ruoyi/broadcast/{type}           — 广播消息（全体设备）</div>
+
+<h2>常见扩展点</h2>
+<ul>
+<li><b>凭证轮换</b>：<code>onDisconnect</code> 中更新 clientId/username/password</li>
+<li><b>消息分流</b>：<code>onMessage</code> 中按 topic.startsWith() 路由</li>
+<li><b>格式转换</b>：<code>payload</code> 解码 JSON / Protobuf 后分发</li>
+<li><b>订阅恢复</b>：<code>onConnected(isReconnect=false)</code> 中重新订阅</li>
+</ul>
+
+<h2>记忆锚点</h2>
+<ul>
+<li>连接监听器 = 低频 + 连接生命周期 + 凭证轮换扩展点。</li>
+<li>消息监听器 = 高频 + 所有 Topic 统一入口 + 按 topic 分流业务。</li>
+<li><code>isReconnect</code> 区分首次连接和重连（决定是否需恢复订阅）。</li>
+<li><code>payload</code> 是 <code>byte[]</code>，需按约定编码解码。</li>
+<li>发布返回 <code>CompletableFuture</code>，可异步处理结果。</li>
+<li><code>publish()</code> 自动借用 Mica MQTT 的连接池，无需手动管理。</li>
+</ul>
+
+<p class="a">→ 相关术语见 <code>GLOSSARY.md</code>：IMqttClientConnectListener、IMqttClientGlobalMessageListener、client-id</p>
+</body>
+</html>

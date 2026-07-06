@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查表 · 实战整合与故障排查</title>
+<style>
+  body { max-width: 780px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.78; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.28rem; margin-top: 2.5rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.06rem; margin-top: 1.7rem; color: #2c3e50; }
+  p, li { font-size: 0.97rem; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.86em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  .region { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.5rem 1.1rem 0.9rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .region h3 { margin-top: 0.9rem; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .why b { color: #1f9d4d; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 0.6rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a { color: #1d6fd6; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .chain { font-family: Consolas, monospace; font-size: 0.78rem; background: #f7f9fc; border: 1px solid #e0e6ed; border-radius: 6px; padding: 0.7rem; line-height: 1.7; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+</style>
+</head>
+<body>
+
+<h1>速查表 · 实战整合与故障排查 <span class="tag">快速参考</span></h1>
+
+<div class="mission">
+<b>用途</b>：对应第 8 课。数据权限全链路追踪、DataScopeType 对照、自定义扩展步骤、常见故障排查、模块间协作全景。
+</div>
+
+<h2>一、数据权限四阶段执行链路</h2>
+
+<div class="chain">
+【阶段1：AOP 注解捕获】
+  DataPermissionPointcut 匹配 @DataPermission → DataPermissionAdvice.invoke()
+    → 获取注解（方法级优先 → 类级 → JDK 代理接口级）
+    → DataPermissionHelper.setPermission(dataPermission) 存入 ThreadLocal
+    → invocation.proceed()
+    → finally: DataPermissionHelper.removePermission() 清理
+
+【阶段2：MyBatis 拦截器检查】
+  PlusDataPermissionInterceptor.beforeQuery() / beforePrepare()
+    → InterceptorIgnoreHelper.willIgnoreDataPermission() 检查忽略标记
+    → dataPermissionHandler.invalid() 检查 ThreadLocal 中是否有 @DataPermission
+    → parserSingle(sql, msId) 解析并改写 SQL
+
+【阶段3：SQL 改写入口】
+  PlusDataPermissionHandler.getSqlSegment(where, msId, isSelect)
+    → LoginHelper.isSuperAdmin() → 超管直接返回原 where
+    → 非超管 → buildDataFilter()
+
+【阶段4：数据过滤构建】
+  buildDataFilter()
+    → 确定连接词（SELECT → OR，UPDATE/DELETE → AND）
+    → 构建 NullSafeStandardEvaluationContext（null 变量返回 "-1"）
+    → currentAccess() 解析 @SaCheckPermission/@SaCheckRole
+    → scopeRoles() 筛选用户角色 → 按 dataScope 值匹配 DataScopeType
+    → SpEL 解析 sqlTemplate → JSqlParser 构建 WHERE 条件
+    → 多角色用 joinStr 连接
+</div>
+
+<h2>二、DataScopeType 枚举对照表</h2>
+
+<table>
+<tr><th>code</th><th>枚举值</th><th>SpEL 模板（简化）</th><th>SQL 效果</th></tr>
+<tr><td>"1"</td><td><code>ALL</code></td><td>（空字符串）</td><td>不追加任何条件 — 查看全部数据</td></tr>
+<tr><td>"2"</td><td><code>CUSTOM</code></td><td><code>#{#deptName} IN ( #{@sdss.getRoleCustom(...)} )</code></td><td>dept_id IN (自定义部门列表)</td></tr>
+<tr><td>"3"</td><td><code>DEPT</code></td><td><code>#{#deptName} = #{#user.deptId}</code></td><td>dept_id = 当前用户部门</td></tr>
+<tr><td>"4"</td><td><code>DEPT_AND_CHILD</code></td><td><code>#{#deptName} IN ( #{@sdss.getDeptAndChild(...)} )</code></td><td>dept_id IN (本部门 + 所有子部门)</td></tr>
+<tr><td>"5"</td><td><code>SELF</code></td><td><code>#{#userName} = #{#user.userId}</code></td><td>user_id = 当前用户</td></tr>
+<tr><td>"6"</td><td><code>DEPT_AND_CHILD_OR_SELF</code></td><td><code>(...SELF...) OR (...DEPT_AND_CHILD...)</code></td><td>本人数据 OR 下级部门数据</td></tr>
+</table>
+
+<h2>三、@DataPermission 注解放置决策</h2>
+
+<table>
+<tr><th>放置位置</th><th>适用场景</th><th>优先级</th><th>查找位置</th></tr>
+<tr><td>方法级</td><td>同一 Mapper 不同方法需不同权限配置</td><td><b>最高</b></td><td><code>method.getAnnotation()</code></td></tr>
+<tr><td>类级</td><td>整个 Mapper 所有方法统一规则</td><td>次之</td><td><code>class.getAnnotation()</code></td></tr>
+<tr><td>接口级</td><td>JDK 动态代理场景</td><td>再次</td><td><code>class.getInterfaces()[i].getAnnotation()</code></td></tr>
+</table>
+
+<h2>四、SpEL 上下文变量速查</h2>
+
+<table>
+<tr><th>变量名</th><th>来源</th><th>示例值</th></tr>
+<tr><td><code>#deptName</code></td><td>@DataColumn 的 key 数组，值为对应字段名</td><td><code>"dept_id"</code></td></tr>
+<tr><td><code>#userName</code></td><td>@DataColumn 的 key 数组，值为对应字段名</td><td><code>"user_id"</code> 或 <code>"create_by"</code></td></tr>
+<tr><td><code>#user</code></td><td><code>LoginHelper.getLoginUser()</code> 获取的当前用户对象</td><td>LoginUser 实例（含 userId、deptId）</td></tr>
+<tr><td><code>#roleId</code></td><td>当前角色的 roleId</td><td>100</td></tr>
+<tr><td><code>@sdss</code></td><td>Spring Bean — ISysDataScopeService</td><td>通过 BeanFactoryResolver 解析</td></tr>
+</table>
+
+<h2>五、自定义 DataScopeType 五步法</h2>
+
+<table>
+<tr><th>步骤</th><th>操作</th><th>关键代码</th></tr>
+<tr><td>1. 加枚举</td><td>在 <code>DataScopeType</code> 添加新的 code + sqlTemplate + elseSql</td><td><code>DEPT_AND_LINKED("7", " ... ", " 1 = 0 ")</code></td></tr>
+<tr><td>2. 加接口</td><td>在 <code>ISysDataScopeService</code> 声明方法</td><td><code>Set&lt;Long&gt; getDeptAndLinked(Long deptId);</code></td></tr>
+<tr><td>3. 加实现</td><td>在 <code>SysDataScopeServiceImpl</code> 实现</td><td>查询关联部门表，通过 <code>@sdss.xxx()</code> 调用</td></tr>
+<tr><td>4. 配角色</td><td>角色管理页面设置 dataScope 值</td><td>sys_role.data_scope = "7"</td></tr>
+<tr><td>5. 加注解</td><td>Mapper 方法/类上加注解</td><td><code>@DataPermission({@DataColumn(key="deptName", value="dept_id")})</code></td></tr>
+</table>
+
+<div class="why">
+<b>扩展原理</b>：<code>buildDataFilter()</code> 通过 <code>DataScopeType.findCode(role.getDataScope())</code> 动态匹配枚举。新增后框架自动识别，无需修改框架代码。
+</div>
+
+<h2>六、五种常见故障速查</h2>
+
+<table>
+<tr><th>故障现象</th><th>最可能原因</th><th>快速修复</th></tr>
+<tr><td>数据权限不生效</td><td>未加 @DataPermission 注解 / 超管账号测试</td><td>检查 Mapper 注解；换非超管账号测试</td></tr>
+<tr><td>列表始终返回空</td><td>SpEL 变量缺失 → elseSql 生成 "1 = 0"</td><td>检查 @DataColumn key 是否匹配 sqlTemplate 变量名；确保 SpEL 上下文变量已设置</td></tr>
+<tr><td>"未找到数据源" 500 错误</td><td>@DS 值与 YAML 配置不匹配 / 数据源未定义</td><td>检查 application-dev.yml 中 datasource 名称和 @DS 注解值一致</td></tr>
+<tr><td>ThreadLocal 数据串扰</td><td>DataPermissionHelper 未清理</td><td>确保 afterCompletion / finally 中调用 removePermission()</td></tr>
+<tr><td>SQL 日志无参数值</td><td><code>mybatis-plus.sql-log.enabled</code> 未开启</td><td>设置 <code>enabled=true</code>；确认 logImpl 为 NoLoggingImpl 避免冲突</td></tr>
+</table>
+
+<h2>七、三种查询构建器选择</h2>
+
+<table>
+<tr><th>构建器</th><th>入口方法</th><th>适用场景</th><th>终结方式</th></tr>
+<tr><td><code>LambdaQueryBuilder</code></td><td><code>QueryBuilder.lambda(Class)</code></td><td>单表查询、聚合统计、子查询</td><td><code>build()</code> 返回 Wrapper，需传 Mapper</td></tr>
+<tr><td><code>LambdaJoinQueryBuilder</code></td><td><code>QueryBuilder.lambdaJoin(Class)</code></td><td>多表 LEFT JOIN 联表查询</td><td><code>list(R) / page(P,R) / count() / build()</code></td></tr>
+<tr><td><code>LambdaCrudChainWrapper</code></td><td><code>baseMapper.lambda()</code></td><td>Mapper 层链式全 CRUD</td><td><code>list() / one() / page() / update() / delete()</code></td></tr>
+</table>
+
+<h2>八、模块间协作全景</h2>
+
+<table>
+<tr><th>协作模块</th><th>协作点</th><th>关键类/组件</th></tr>
+<tr><td>ruoyi-common-satoken</td><td>登录用户获取、角色权限判断</td><td><code>LoginHelper</code> → 获取 LoginUser；<code>SaCheckPermission</code> → 权限注解</td></tr>
+<tr><td>ruoyi-common-core</td><td>基础实体、工具类、异常体系</td><td><code>BaseEntity</code>、<code>ServiceException</code>、<code>SpringUtils</code>、<code>ReflectUtils</code></td></tr>
+<tr><td>ruoyi-common-web</td><td>请求级 ThreadLocal 生命周期管理</td><td>Filter/Interceptor 链 → SaToken 上下文传递</td></tr>
+<tr><td>ruoyi-common-json</td><td>查询结果 JSON 序列化</td><td>Jackson → 响应输出</td></tr>
+<tr><td>dynamic-datasource</td><td>多数据源路由、@DS 注解</td><td><code>DynamicRoutingDataSource</code>、<code>@DSTransactional</code></td></tr>
+<tr><td>mybatis-plus-join</td><td>多表联查 Lambda 语法支持</td><td><code>MPJLambdaWrapper</code> → LambdaJoinQueryBuilder</td></tr>
+</table>
+
+<h2>九、配置文件总览</h2>
+
+<pre><code># common-mybatis.yml — 模块默认配置
+mybatis-plus:
+  configuration:
+    mapUnderscoreToCamelCase: true       # 驼峰映射
+    logImpl: NoLoggingImpl               # 关闭原生日志（避免与 SqlLogInterceptor 重复）
+  global-config:
+    dbConfig:
+      idType: ASSIGN_ID                  # 雪花 ID
+      logicDeleteValue: 1                # 逻辑删除值
+      logicNotDeleteValue: 0
+  enableLogicDelete: true                # PlusPostInitTableInfoHandler 全局开关
+  sql-log:
+    enabled: false                       # SqlLogInterceptor 开关
+    output: console                      # console / log
+  mapperPackage: org.dromara.**.mapper   # Mapper 扫描路径
+
+# application-dev.yml — 数据源配置
+spring:
+  datasource:
+    dynamic:
+      primary: master
+      strict: true
+      datasource:
+        master: ...                      # 主库（必须）
+#       slave: {lazy: true}              # 从库（可选）</code></pre>
+
+<h2>十、Mapper 代码组织最佳实践</h2>
+
+<div class="chain">
+// 推荐模式
+@Mapper
+@DataPermission({                          // 类级数据权限（所有方法共享）
+    @DataColumn(key = "deptName", value = "dept_id"),
+    @DataColumn(key = "userName", value = "create_by")
+})
+public interface SysUserMapper extends BaseMapperPlus&lt;SysUser, SysUser&gt; {
+
+    // 使用 Lambda 查询：类型安全 + 可读性强
+    default List&lt;SysUser&gt; selectByDept(Long deptId) {
+        return selectList(QueryBuilder.lambda(SysUser.class)
+            .eq(SysUser::getDeptId, deptId)
+            .build());
+    }
+
+    // @InterceptorIgnore 跳过特定拦截器（如数据权限、租户）
+    @InterceptorIgnore(dataPermission = "true")
+    List&lt;SysUser&gt; selectAllIgnorePermission();
+
+    // 方法级注解覆盖类级（如某些方法需要不同的权限字段）
+    @DataPermission({
+        @DataColumn(key = "userName", value = "user_id")   // 方法级覆盖
+    })
+    List&lt;SysUser&gt; selectOwnData();
+}
+</div>
+
+<div class="side">
+<b>核心设计原则</b>：AOP + MyBatis Interceptor 实现"权限检查"与"业务查询"彻底解耦。业务代码不需要写任何 <code>WHERE dept_id = ?</code>，数据权限是<b>透明注入</b>的。双重控制 = @DataPermission（数据级） + @SaCheckPermission（功能级）。
+</div>
+
+<div class="cite">
+<b>涉及文件</b>：
+<a href="#">DataPermission.java / DataColumn.java</a> —
+<a href="#">DataPermissionAdvice.java</a> —
+<a href="#">PlusDataPermissionInterceptor.java</a> —
+<a href="#">PlusDataPermissionHandler.java</a> —
+<a href="#">DataPermissionHelper.java</a> —
+<a href="#">DataScopeType.java</a> —
+<a href="#">MybatisPlusConfig.java</a> —
+<a href="#">application-dev.yml</a> —
+<a href="#">common-mybatis.yml</a>
+</div>
+
+<div class="nav"><a href="0006.html">&laquo; 上一张</a> | 速查表 0007 | <a href="../lessons/0008.html">返回第 8 课 &raquo;</a></div>
+
+</body>
+</html>

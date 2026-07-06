@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 认证策略工厂 — IAuthStrategy 与路由分发</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .arrow { color: #e6a23c; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 认证策略工厂 — IAuthStrategy 与路由分发 <span class="tag">核心架构</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能完整追踪一次登录请求从 <code>AuthController</code> 到具体策略实现类的分发链路，能独立新增第六种认证方式而无需改动任何已有代码。
+</div>
+
+<p>上一课我们看到了启动入口和配置全景。现在深入核心：<strong>一个 <code>/auth/login</code> 请求进来后，系统怎么决定用密码、短信、邮箱、第三方还是小程序来认证？</strong> 答案是：策略模式 + Spring Bean 命名约定。</p>
+
+<h2>一、请求入口：AuthController.login()</h2>
+
+<p>先看控制器如何接收和处理登录请求：</p>
+
+<pre><code>@SaIgnore                              // 登录接口不需要鉴权
+@PostMapping("/login")
+@ApiEncrypt                            // 请求体加密传输
+public R&lt;LoginVo&gt; login(@RequestBody String body) {
+    // 1. 解析 JSON → LoginBody
+    LoginBody loginBody = JsonUtils.parseObject(body, LoginBody.class);
+    ValidatorUtils.validate(loginBody);
+
+    // 2. 提取两个关键字段
+    String clientId = loginBody.getClientId();   // 客户端标识
+    String grantType = loginBody.getGrantType();  // 授权类型
+
+    // 3. 校验客户端合法性与状态
+    SysClientVo client = clientService.queryByClientId(clientId);
+    if (ObjectUtil.isNull(client) || !StringUtils.contains(client.getGrantType(), grantType)) {
+        return R.fail("授权类型不正确!");
+    }
+    if (!SystemConstants.NORMAL.equals(client.getStatus())) {
+        return R.fail("授权类型已被停用!");
+    }
+
+    // 4. 策略分发 — 关键一步
+    LoginVo loginVo = IAuthStrategy.login(body, client, grantType);
+
+    // 5. 延时 5 秒发送欢迎消息
+    scheduledExecutorService.schedule(() -> {
+        messageService.publishMessage(...);
+    }, 5, TimeUnit.SECONDS);
+
+    return R.ok(loginVo);
+}</code></pre>
+
+<div class="warn">
+⚠️ <b>注意 <code>@SaIgnore</code></b>：整个 <code>AuthController</code> 类上标注了 <code>@SaIgnore</code>，意思是这个 Controller 的所有接口都不需要登录就能访问。这是必需的——用户还没登录呢，不能要求登录态。其他 Controller（如 <code>system</code> 模块的接口）则默认需要鉴权。
+</div>
+
+<h2>二、策略接口：IAuthStrategy 的设计</h2>
+
+<p>这是整个认证架构的灵魂。只有 81 行代码，但设计精妙：</p>
+
+<pre><code>public interface IAuthStrategy {
+
+    String BASE_NAME = "AuthStrategy";  // Bean 名称后缀
+
+    // ── 静态工厂方法：核心路由逻辑 ──
+    static LoginVo login(String body, SysClientVo client, String grantType) {
+        String beanName = grantType + BASE_NAME;  // 例: "passwordAuthStrategy"
+        if (!SpringUtils.containsBean(beanName)) {
+            throw new ServiceException("授权类型不正确!");
+        }
+        IAuthStrategy instance = SpringUtils.getBean(beanName);
+        return instance.login(body, client);
+    }
+
+    // ── 构建 Sa-Token 登录参数 ──
+    static SaLoginParameter buildLoginParameter(SysClientVo client) { ... }
+    static SaLoginParameter buildLoginParameter(SysClientVo client, Consumer&lt;SaLoginParameter&gt; customizer) { ... }
+
+    // ── 子类必须实现的登录方法 ──
+    LoginVo login(String body, SysClientVo client);
+}</code></pre>
+
+<div class="step">
+<span class="num">1</span> <b>Bean 名称约定</b>：<code>grantType + "AuthStrategy"</code>。例如前端传 <code>grantType: "password"</code>，则寻找名为 <code>passwordAuthStrategy</code> 的 Bean。每个策略实现类用 <code>@Service("passwordAuthStrategy")</code> 注册。<span class="where">IAuthStrategy.java:33</span>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>安全校验</b>：<code>SpringUtils.containsBean(beanName)</code> 先检查 Bean 是否存在，不存在则抛异常。防止传入任意 <code>grantType</code> 值。注意这里 <b>不是</b> <code>applicationContext.getBean()</code> 直接拿——先校验再取，更安全。<span class="where">IAuthStrategy.java:34-36</span>
+</div>
+
+<div class="step">
+<span class="num">3</span> <b>实例方法委托</b>：拿到策略实例后，调用其 <code>login(body, client)</code> 实例方法。每个策略自己负责解析 body 为具体类型（如 <code>PasswordLoginBody</code>、<code>SmsLoginBody</code>）、执行校验、构建 LoginUser、签发 token。<span class="where">IAuthStrategy.java:37-38</span>
+</div>
+
+<details>
+<summary>💡 Java 接口中可以有静态方法吗？</summary>
+<p>Java 8 引入了接口静态方法。这里 <code>IAuthStrategy.login()</code> 是一个静态工厂方法，不属于任何实例。它的作用是"知道去哪找策略实现"，而不是自己完成登录。这比传统的 <code>AuthStrategyFactory</code> 类更内聚——工厂逻辑和策略契约放在同一个接口里。</p>
+</details>
+
+<h2>三、完整请求链路追踪</h2>
+
+<div class="diagram">POST /auth/login
+  Body: {"clientId":"eureka","grantType":"password","username":"admin","password":"admin123","code":"1234","uuid":"abc"}
+    │
+    ▼
+AuthController.login()
+    │
+    ├── 1. JsonUtils.parseObject(body, LoginBody.class)
+    │      → LoginBody {clientId, grantType, username, password, code, uuid}
+    │
+    ├── 2. clientService.queryByClientId("eureka")
+    │      → SysClientVo {clientId, grantType:"password,sms,email,...", status:"0", timeout:...}
+    │      → 校验: "password" ∈ "password,sms,email,..." ✓
+    │
+    └── 3. IAuthStrategy.login(body, client, "password")  ←── 策略分发点
+           │
+           ├── beanName = "password" + "AuthStrategy" = "passwordAuthStrategy"
+           ├── SpringUtils.containsBean("passwordAuthStrategy") → true
+           ├── instance = SpringUtils.getBean("passwordAuthStrategy")
+           │                → PasswordAuthStrategy@1234
+           │
+           └── instance.login(body, client)
+                  │
+                  ├── JsonUtils.parseObject(body, PasswordLoginBody.class)
+                  ├── validateCaptcha(username, code, uuid)  [如果 captcha.enable=true]
+                  ├── userMapper.lambda().eq(SysUser::getUserName, username).voOne()
+                  ├── BCrypt.checkpw(password, user.getPassword())
+                  ├── loginService.buildLoginUser(user) → LoginUser
+                  ├── LoginHelper.login(loginUser, model)  → Sa-Token 签发 token
+                  └── return LoginVo {accessToken, expireIn, clientId}</div>
+
+<h2>四、5 个策略 Bean 的注册方式</h2>
+
+<table>
+  <tr><th>grantType</th><th>Bean 名称</th><th>实现类</th><th>@Service 注解</th></tr>
+  <tr><td><code>password</code></td><td><code>passwordAuthStrategy</code></td><td><code>PasswordAuthStrategy</code></td><td><code>@Service("passwordAuthStrategy")</code></td></tr>
+  <tr><td><code>sms</code></td><td><code>smsAuthStrategy</code></td><td><code>SmsAuthStrategy</code></td><td><code>@Service("smsAuthStrategy")</code></td></tr>
+  <tr><td><code>email</code></td><td><code>emailAuthStrategy</code></td><td><code>EmailAuthStrategy</code></td><td><code>@Service("emailAuthStrategy")</code></td></tr>
+  <tr><td><code>social</code></td><td><code>socialAuthStrategy</code></td><td><code>SocialAuthStrategy</code></td><td><code>@Service("socialAuthStrategy")</code></td></tr>
+  <tr><td><code>xcx</code></td><td><code>xcxAuthStrategy</code></td><td><code>XcxAuthStrategy</code></td><td><code>@Service("xcxAuthStrategy")</code></td></tr>
+</table>
+
+<p>每个 Bean 名称严格遵循 <code>grantType + "AuthStrategy"</code> 的约定。这就是策略工厂能找到它的原因。</p>
+
+<h2>五、共享方法：buildLoginParameter</h2>
+
+<p>所有策略在签发 token 前都调用同一个方法构建登录参数：</p>
+
+<pre><code>static SaLoginParameter buildLoginParameter(SysClientVo client, Consumer&lt;SaLoginParameter&gt; customizer) {
+    SaLoginParameter model = new SaLoginParameter();
+    model.setDeviceType(client.getDeviceType());                 // PC / App / 小程序
+    model.setTimeout(client.getTimeout());                       // token 总有效期
+    model.setActiveTimeout(client.getActiveTimeout());           // 无操作超时
+    model.setExtra(LoginHelper.CLIENT_KEY, client.getClientId());// 客户端标识
+    model.setExtra(LoginHelper.CLIENT_ACCESS_PATH_KEY, client.getAccessPath());
+    model.setExtra(LoginHelper.CLIENT_IP_WHITELIST_KEY, client.getIpWhitelist());
+    if (ObjectUtil.isNotNull(customizer)) {
+        customizer.accept(model);  // 策略可以追加自定义参数
+    }
+    return model;
+}</code></pre>
+
+<div class="side">
+💡 <b>为什么用 Consumer 回调而不是子类重写？</b> 这个方法在接口中定义为静态方法，不能被子类重写。通过 <code>Consumer&lt;SaLoginParameter&gt;</code> 参数，每个策略可以在调用时传入 lambda 来追加自己的逻辑（比如小程序策略追加 openid）。这是函数式编程在策略模式中的优雅应用。
+</div>
+
+<h2>六、新增第六种认证方式（实操）</h2>
+
+<p>假设要新增 <strong>LDAP 域账号登录</strong>，只需两步：</p>
+
+<div class="step">
+<span class="num">1</span> <b>新建实现类</b>：<pre><code>@Service("ldapAuthStrategy")
+public class LdapAuthStrategy implements IAuthStrategy {
+    @Override
+    public LoginVo login(String body, SysClientVo client) {
+        // 1. 解析 LdapLoginBody
+        // 2. 调用 LDAP 服务器认证
+        // 3. 加载/同步本地用户
+        // 4. buildLoginUser → LoginHelper.login
+        // 5. 返回 LoginVo
+    }
+}</code></pre>
+</div>
+
+<div class="step">
+<span class="num">2</span> <b>数据库配置</b>：在 <code>sys_client</code> 表中，确保目标客户端的 <code>grant_type</code> 字段包含 <code>"ldap"</code>。
+</div>
+
+<p>完成了。<strong>不需要修改 AuthController、IAuthStrategy 接口、或任何已有策略类。</strong> Spring 容器启动时会自动扫描到新的 <code>@Service("ldapAuthStrategy")</code>，<code>SpringUtils.getBean("ldapAuthStrategy")</code> 即可获取。</p>
+
+<h2>七、客户端校验的两道防线</h2>
+
+<p>在策略分发之前，<code>AuthController.login()</code> 做了两层前置校验：</p>
+
+<table>
+  <tr><th>校验</th><th>代码</th><th>失败返回</th></tr>
+  <tr><td>clientId 是否存在 + grantType 是否在客户端的授权列表内</td><td><code>ObjectUtil.isNull(client) || !StringUtils.contains(client.getGrantType(), grantType)</code></td><td>"授权类型不正确!"</td></tr>
+  <tr><td>客户端状态是否正常</td><td><code>!SystemConstants.NORMAL.equals(client.getStatus())</code></td><td>"授权类型已被停用!"</td></tr>
+</table>
+
+<p>这意味着：即使实现类存在，如果该客户端没有被授权使用某种登录方式，请求也会被拦截。这是一个运行时特征——不需要重启应用，只需修改数据库 <code>sys_client</code> 表。</p>
+
+<h2>八、自测</h2>
+
+<div class="quiz">
+<p>1. <code>IAuthStrategy.login()</code> 静态方法里，Bean 名称的拼接规则是什么？</p>
+<label class="opt"><input type="radio" name="q1"> A. <code>"auth" + grantType + "Strategy"</code></label>
+<label class="opt"><input type="radio" name="q1"> B. <code>grantType + "AuthStrategy"</code></label>
+<label class="opt"><input type="radio" name="q1"> C. <code>grantType.toUpperCase() + "_AUTH"</code></label>
+<label class="opt"><input type="radio" name="q1"> D. 随机生成，无固定规则</label>
+</div>
+
+<div class="quiz">
+<p>2. 为什么 AuthController 类上要标注 <code>@SaIgnore</code>？</p>
+<label class="opt"><input type="radio" name="q2"> A. 为了提高性能，跳过不必要的鉴权</label>
+<label class="opt"><input type="radio" name="q2"> B. 登录接口本身不需要登录态——用户还没登录</label>
+<label class="opt"><input type="radio" name="q2"> C. 这是一个 bug</label>
+<label class="opt"><input type="radio" name="q2"> D. 为了兼容老版本 Sa-Token</label>
+</div>
+
+<div class="quiz">
+<p>3. 新增 LDAP 登录策略后，需要改 AuthController 吗？</p>
+<label class="opt"><input type="radio" name="q3"> A. 需要，在 login() 方法里加一个 if-else 分支</label>
+<label class="opt"><input type="radio" name="q3"> B. 不需要，策略工厂自动发现新 Bean</label>
+<label class="opt"><input type="radio" name="q3"> C. 需要，在 Controller 上加 @LdapMapping 注解</label>
+<label class="opt"><input type="radio" name="q3"> D. 需要，修改 application.yml 配置文件</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案</summary>
+<p><b>1. B</b> — <code>beanName = grantType + BASE_NAME</code>，其中 <code>BASE_NAME = "AuthStrategy"</code>。<br>
+<b>2. B</b> — 登录、注册、获取验证码等接口必须在用户未登录状态下访问。<br>
+<b>3. B</b> — 这就是策略模式的核心优势：对扩展开放，对修改封闭。</p>
+</details>
+
+<div class="nav">← <a href="01-springboot-startup.html">第 1 课 · Spring Boot 启动入口</a> | 下一课：<a href="03-five-strategies.html">第 3 课 · 五种认证策略深度对比 →</a></div>
+
+<div class="cite">
+📖 推荐一手资料：
+<a href="https://www.baeldung.com/spring-boot-strategy-pattern" target="_blank">Strategy Pattern with Spring Boot — Baeldung</a> ·
+<a href="https://sa-token.cc/doc.html#/up/login-auth" target="_blank">Sa-Token 登录认证文档</a>
+</div>
+<div class="reminder">💡 有疑问？直接问我。相关课程：<a href="../../2026-06-30-teach-ruoyi-auth/lessons/">ruoyi-auth 认证模块课程</a> 讲解了 Sa-Token 的更底层封装。</div>
+
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>02 API加解密通道</title>
+<style>
+  body { max-width: 680px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui; line-height: 1.7; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; margin-top: 2.5rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #eee; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; }
+  blockquote { border-left: 3px solid #1a73e8; margin-left: 0; padding-left: 1rem; color: #555; background: #f8fbff; padding: 0.5rem 1rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: #f8f8f8; padding: 0.8rem; border-radius: 6px; overflow-x: auto; font-size: 0.85em; border: 1px solid #eee; line-height: 1.5; }
+  .mission { background: #fff8e1; border-left: 4px solid #ffc107; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .insight { background: #e8f5e9; border-left: 4px solid #4caf50; padding: 0.8rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+  .nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.9rem; }
+  .quiz { background: #f5f5f5; padding: 1rem; border-radius: 8px; margin: 1.5rem 0; }
+  .quiz summary { font-weight: 600; cursor: pointer; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 0.5rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 2rem; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9em; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>02 API 加解密通道</h1>
+<div class="mission"><strong>本节目标：</strong>理解 API 加解密通道的完整工作流程：@ApiEncrypt 注解控制、CryptoFilter 拦截协调、双 Wrapper 的请求解密与响应加密机制，以及 RSA+AES 混合加密的密钥协商过程。</div>
+
+<h2>1. 通道入口：CryptoFilter</h2>
+<p>API 加解密通道在 <strong>Servlet Filter 层</strong> 工作，属于 Web 容器层面的拦截。核心类是 <code>org.dromara.common.encrypt.filter.CryptoFilter</code>，实现 <code>javax.servlet.Filter</code>。</p>
+<p>Filter 在 Spring Security 过滤器链中注册，拦截所有请求。根据请求方法和 <code>@ApiEncrypt</code> 注解决定是否解密请求体、是否加密响应体。</p>
+
+<h2>2. @ApiEncrypt 注解</h2>
+<p>标记在 Controller 方法上，控制加解密行为：</p>
+<pre>@ApiEncrypt(response = true)   // 需要加密响应体
+@PostMapping("/save")
+public R&lt;Void&gt; save(@RequestBody User user) { ... }
+
+@ApiEncrypt                    // 默认 response=false，只解密请求体
+@PostMapping("/login")
+public R&lt;String&gt; login(@RequestBody LoginBody body) { ... }</pre>
+<p>只有一个属性 <code>response()</code>：<code>false</code>（默认）时只解密请求，<code>true</code> 时同时加密响应。</p>
+
+<h2>3. 请求解密：DecryptRequestBodyWrapper</h2>
+<p><code>org.dromara.common.encrypt.filter.DecryptRequestBodyWrapper</code> 继承 <code>HttpServletRequestWrapper</code>，构造时执行解密：</p>
+<ol>
+  <li>从请求头获取 <code>encrypt-key</code>（RSA 公钥加密后的 AES 密钥）</li>
+  <li>用 RSA 私钥解密 <code>encrypt-key</code>，得到 Base64 编码的 AES 密钥</li>
+  <li>Base64 解码得到 AES 密钥明文</li>
+  <li>读取原始请求体（密文）</li>
+  <li>用 AES 密钥解密得到 JSON 明文</li>
+  <li>将明文字节缓存为 <code>ByteArrayInputStream</code>，支持重复读取</li>
+</ol>
+<pre>// 密钥协商（客户端侧）
+const aesKey = randomBytes(24);                      // 1. 生成随机 AES 密钥
+const encryptedKey = rsaEncrypt(aesKey, publicKey);  // 2. 用 RSA 公钥加密
+headers['encrypt-key'] = base64(encryptedKey);       // 3. 放入请求头
+const body = aesEncrypt(JSON.stringify(data), aesKey);// 4. AES 加密请求体</pre>
+
+<h2>4. 响应加密：EncryptResponseBodyWrapper</h2>
+<p><code>org.dromara.common.encrypt.filter.EncryptResponseBodyWrapper</code> 继承 <code>HttpServletResponseWrapper</code>，关键方法 <code>getEncryptContent()</code>：</p>
+<ol>
+  <li>用 <code>ByteArrayOutputStream</code> 拦截并缓存原始响应内容</li>
+  <li>生成 24 字节随机 AES 密钥</li>
+  <li>Base64 编码 AES 密钥，再用 RSA 公钥加密，放入响应头 <code>encrypt-key</code></li>
+  <li>用 AES 密钥加密业务响应内容</li>
+  <li>设置 <code>Content-Length</code> 为加密后的长度（避免分块传输问题）</li>
+</ol>
+
+<h2>5. 完整密钥协商流程</h2>
+<pre>客户端                                服务端
+  |                                     |
+  |--[1] 生成随机 AES Key (24字节)------>
+  |--[2] RSA公钥加密 AES Key ----------->
+  |--[3] AES加密请求体 ---------------->
+  |         POST /api/xxx               |
+  |         Header: encrypt-key          |
+  |         Body: AES密文                |
+  |                                     |--[4] RSA私钥解密 encrypt-key
+  |                                     |--[5] Base64解码得 AES Key
+  |                                     |--[6] AES解密请求体 -> JSON明文
+  |                                     |--[7] Controller处理业务
+  |                                     |--[8] AES加密响应体
+  |                                     |--[9] RSA公钥加密新AES Key -> 放响应头
+  |<--[10] 响应头 encrypt-key ---------|
+  |<--[11] AES密文响应体 -------------|
+  |--[12] RSA私钥解密 encrypt-key ----->
+  |--[13] AES解密响应体 -> JSON明文 ---></pre>
+<div class="insight"><strong>设计洞察：</strong>之所以用 RSA（非对称）+ AES（对称）混合加密，是因为 RSA 加密大数据很慢，AES 加密快但密钥分发不安全。混合方案取长补短：用 RSA 安全传输 AES 密钥（仅 24 字节），用 AES 高速加密业务数据（可能数 KB）。每次请求生成随机 AES 密钥，实现一次一密。</div>
+
+<details class="quiz"><summary>提取练习（点击展开）</summary>
+<p><strong>Q1:</strong> 为什么用 RSA+AES 混合加密，而不是全部用 RSA？</p>
+<p><strong>Q2:</strong> <code>@ApiEncrypt(response=false)</code> 和 <code>@ApiEncrypt(response=true)</code> 的加解密行为有什么区别？</p>
+<p><strong>Q3:</strong> 如果客户端忘记发 <code>encrypt-key</code> 请求头，服务端会怎样处理？</p>
+</details>
+
+<div class="cite">一手资料：<a href="#">ruoyi-common-encrypt/src/main/java/org/dromara/common/encrypt/filter/CryptoFilter.java</a> | <a href="#">ruoyi-common-encrypt/src/main/java/org/dromara/common/encrypt/filter/DecryptRequestBodyWrapper.java</a> | <a href="#">ruoyi-common-encrypt/src/main/java/org/dromara/common/encrypt/filter/EncryptResponseBodyWrapper.java</a></div>
+<div class="reminder">有疑问？直接问我。例如："如果前端是 HTTPS 的，还需要这层加密吗？"</div>
+<div class="nav"><a href="01-双通道架构概览.html">上一课</a><a href="03-DB字段加解密.html">下一课</a></div>
+</body>
+</html>
