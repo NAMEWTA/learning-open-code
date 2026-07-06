@@ -75,6 +75,7 @@ teach/<path>/
 **主题首次教学**（`teach/<path>/<topic-teach>/` 不存在）：
 ```
 teach/<path>/<topic-teach>/
+├── SNAPSHOT.md
 ├── MISSION.md
 ├── RESOURCES.md
 ├── NOTES.md
@@ -85,6 +86,87 @@ teach/<path>/<topic-teach>/
 ```
 
 创建主题目录后，立即更新 `teach/<path>/index.md`，新增该主题的索引条目。
+
+> 💡 **自动化脚本**：使用 `scripts/init_topic.sh <project-path> <topic-slug>` 一键创建目录结构、占位文件并更新 index.md。
+
+## 源项目版本快照
+
+每个教学主题目录下的 `SNAPSHOT.md` 记录课程生成时所基于的源项目 git 版本和参考文件清单。当源项目更新后，用它作为 diff 基准，识别哪些课程需要更新。
+
+### 创建快照
+
+> 💡 **自动化脚本**：使用 `scripts/generate_snapshot.py <topic-path>` 自动提取课程引用、获取 git 版本、生成 SNAPSHOT.md。
+> 批量处理：`scripts/generate_snapshot.py <project-path> --all`
+
+**首次生成课程时**，在创建 `teach/<path>/<topic-teach>/` 目录后，立即生成 `SNAPSHOT.md`：
+
+1. **采集源项目 git 版本**：
+   ```bash
+   git -C <源项目路径> rev-parse HEAD          # 完整 commit hash
+   git -C <源项目路径> rev-parse --abbrev-ref HEAD  # 分支名
+   ```
+   如果源是子模块（只读副本），`git -C` 无法获取远程信息，则用子模块记录的分支/commit 作为近似值：
+   ```bash
+   git -C <工作区根目录> ls-tree HEAD <子模块path>
+   ```
+
+2. **记录课程引用的源文件**——列出所有被课程分析、引用、摘录的源文件路径及用途说明。
+
+3. **写入 SNAPSHOT.md**，格式如下：
+
+```markdown
+# 课程快照：{主题名}
+
+## 源项目信息
+- **仓库路径**：`open-java/RuoYiVuePlus`
+- **Git Commit**：`abc123def456789...`（完整 hash）
+- **短 Commit**：`abc123d`
+- **分支**：`master`
+- **快照时间**：2026-07-06T15:30:00+08:00
+
+## 课程引用的源文件
+
+| 源文件路径 | 用途 | 关键度 |
+|-----------|------|--------|
+| `ruoyi-admin/src/.../AuthController.java` | 认证控制器全链路分析 | 🔴 核心 |
+| `ruoyi-admin/src/.../IAuthStrategy.java` | 策略接口设计分析 | 🔴 核心 |
+| `ruoyi-common/.../RedisUtils.java` | 缓存工具类参考 | 🟡 辅助 |
+
+## 已生成课程
+
+| 编号 | 课程文件 | 描述 |
+|------|---------|------|
+| 01 | `lessons/01-springboot-startup.html` | Spring Boot 启动流程分析 |
+| 02 | `lessons/02-strategy-pattern.html` | 策略模式在认证中的应用 |
+
+## 快照摘要
+- 课程数：4
+- 引用源文件数：12
+- 学习记录数：3
+```
+
+### 源项目更新后同步课程
+
+> 💡 **自动化脚本**：使用 `scripts/check_updates.py <topic-path> [-v]` 自动对比快照版本与当前 HEAD。
+> 批量检测：`scripts/check_updates.py <project-path> --all [-v]`
+
+当用户告知源项目已更新（如 `git pull` 了子模块），按以下流程判断课程是否需要更新：
+
+1. **读取旧快照**——加载 `teach/<path>/<topic-teach>/SNAPSHOT.md`，获取上次记录的 `Git Commit`
+2. **获取当前源项目 HEAD**：
+   ```bash
+   git -C <源项目路径> rev-parse HEAD
+   ```
+3. **若两个 commit 相同**——源项目未变更，无需更新课程，告知用户即可
+4. **若 commit 不同**——执行 diff 识别变更范围：
+   ```bash
+   git -C <源项目路径> diff --name-only <旧commit>..HEAD -- <快照中列出的源文件路径>
+   ```
+5. **逐文件分析影响**：
+   - 源文件有变更 → 检查对应课程是否需要更新（API 签名变了？逻辑重构了？新增功能？）
+   - 源文件被删除 → 标记对应课程为「需大修」，与用户确认后决定是否重写或归档
+   - 新增源文件（不在快照中但在同一模块）→ 提示用户是否需要新增课程覆盖
+6. **更新快照**——同步课程后，将 SNAPSHOT.md 中的 `Git Commit` 更新为当前 HEAD，重新记录引用文件清单
 
 ## 教学工作区
 

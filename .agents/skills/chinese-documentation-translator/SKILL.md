@@ -9,6 +9,29 @@ description: "将英文技术文档仓库（插件市场、SKILL.md、command.md
 
 将英文技术文档仓库全面翻译为中文的端到端流程。基于 `chinese-documentation` 技能的排版规范，覆盖项目级文档、SKILL.md、Command .md、README、JSON 配置、Python 脚本注释等所有文件类型。核心原则：*排版服务于阅读体验，规范服务于一致性，功能完整性不可妥协。*
 
+## 🚨 红线规则：源文件绝对不可修改
+
+> **这是翻译工作中最严重的错误，发生一次即视为翻译失败。**
+
+| 规则 | 说明 |
+|------|------|
+| **源文件只读** | `open-ai-skills/`、`open-java/` 等目录下的所有源文件**绝对不可修改**。它们是翻译的输入，不是输出目标。 |
+| **翻译输出到 translator/** | 所有翻译后的文件**必须写入** `translator/<path>/` 目录下，目录结构镜像源目录。 |
+| **写入前确认路径** | 每次 Write 操作前，**必须确认目标路径以 `translator/` 开头**。如果路径中包含 `open-ai-skills/`、`open-java/` 等源目录前缀，说明写错了位置。 |
+
+**错误案例（2026-07-06 addyosmani-agent-skills 翻译事故）：**
+- ❌ 将翻译后的 27 个文件写回了 `open-ai-skills/addyosmani-agent-skills/skills/`（源文件目录）
+- ✅ 正确做法：写入 `translator/open-ai-skills/addyosmani-agent-skills/skills/`
+- **后果**：源子模块文件被修改，需通过 `git checkout` 恢复，然后全部重新翻译到正确目录
+- **根因**：代理在 Write 时直接将目标路径指向了源文件路径，未将路径映射到 `translator/` 目录
+
+**路径映射示例：**
+```
+源文件：open-ai-skills/<project>/skills/<name>/SKILL.md
+翻译后：translator/open-ai-skills/<project>/skills/<name>/SKILL.md
+                    ↑ 注意：源路径前缀替换为 translator/
+```
+
 ### 新增：翻译状态追踪
 
 此技能现在包含一个 **JSON 状态文件**（`translation-state.json`），用于：
@@ -19,6 +42,93 @@ description: "将英文技术文档仓库（插件市场、SKILL.md、command.md
 
 状态文件格式见：[references/translation-state.schema.json](references/translation-state.schema.json)
 示例文件见：[references/translation-state.example.json](references/translation-state.example.json)
+
+## 翻译存储根目录
+
+> ⚠️ **关键区分：这是翻译输出目录，不是源文件目录。源文件在 `open-ai-skills/<project>/` 下且保持只读，翻译后的文件输出到 `translator/<project>/` 下。**
+
+所有翻译持久化内容（状态文件、快照、索引）以及**翻译后的文件**存放在工作区根目录下的 `translator/` 目录中。目录结构遵循与 `teach/` 技能相同的 `<path>` 派生规则。
+
+### `<path>` 派生规则（与 teach 技能一致）
+
+`<path>` 对应一个逻辑开源项目。通常是 `.gitmodules` 中的单个 `path`，但当多个子模块属于同一系统时，使用它们的**公共父目录**作为项目根。
+
+**识别规则：** 扫描 `.gitmodules` 中所有 `path`，如果多个条目共享同一父目录，则该父目录即为逻辑项目 `<path>`。
+
+### 确定翻译存储根目录
+
+1. 当用户指定要翻译某个开源项目时，查找 `.gitmodules` 中与该项目匹配的所有条目
+2. 如果匹配到**多个共享父目录的子模块**，以公共父目录作为 `<path>`（例如 `open-java/RuoYiVuePlus`）
+3. 如果匹配到**单个子模块**，以该子模块的 `path` 作为 `<path>`
+4. 翻译存储根目录 = `translator/<path>/`
+5. 如果 `.gitmodules` 中找不到对应项目，与用户确认后再创建目录
+
+**示例：**
+
+| 翻译目标 | `.gitmodules` 中的条目 | `<path>`（逻辑项目） | 翻译存储根目录 |
+|---|---|---|---|
+| matt-pocock-skills | 单个子模块 `open-ai-skills/matt-pocock-skills` | `open-ai-skills/matt-pocock-skills` | `translator/open-ai-skills/matt-pocock-skills/` |
+| claude-code | 单个子模块 `open-ai-agent/claude-code` | `open-ai-agent/claude-code` | `translator/open-ai-agent/claude-code/` |
+| RuoYiVuePlus | **3 个子模块共享父目录** `open-java/RuoYiVuePlus/` | `open-java/RuoYiVuePlus` | `translator/open-java/RuoYiVuePlus/` |
+
+### 目录结构
+
+```
+translator/<path>/
+├── index.md                    # 项目翻译索引
+├── SNAPSHOT.md                 # 翻译快照（当前版本的翻译记录）
+├── translation-state.json      # 机器可读的细粒度翻译状态
+└── skills/                     # 翻译后的文件（镜像源目录结构）
+    └── <skill-name>/
+        └── SKILL.md            # 翻译后的 SKILL.md
+```
+
+> ⚠️ **翻译后的文件放在 `translator/<path>/` 下，镜像源项目的目录结构。例如源文件 `open-ai-skills/matt-pocock-skills/skills/xstate/SKILL.md` 的翻译输出为 `translator/open-ai-skills/matt-pocock-skills/skills/xstate/SKILL.md`。**
+
+- **`index.md`**：列出该项目下每次翻译的摘要（日期、源版本、翻译范围、状态）。格式参考下方模板。
+- **`SNAPSHOT.md`**：记录当前翻译所基于的源项目 git 版本、翻译文件清单和摘要统计。用于后续增量翻译的 diff 基准。格式见下方模板。
+- **`translation-state.json`**：机器可读的细粒度状态文件，遵循 [references/translation-state.schema.json](references/translation-state.schema.json)。
+
+### 项目索引：`index.md`
+
+```markdown
+# {项目名} 翻译索引
+
+## 翻译记录
+
+| 日期 | 源 Commit | 翻译范围 | 状态 |
+|------|----------|---------|------|
+| 2026-07-06 | `abc123d` | 全量翻译（45 个文件） | ✅ 完成 |
+| 2026-08-15 | `def456a` | 增量翻译（3 个文件更新） | ✅ 完成 |
+```
+
+### 翻译快照：`SNAPSHOT.md`
+
+```markdown
+# 翻译快照：{项目名}
+
+## 源项目信息
+- **仓库路径**：`open-ai-skills/matt-pocock-skills`
+- **Git Commit**：`abc123def456789...`（完整 hash）
+- **短 Commit**：`abc123d`
+- **分支**：`main`
+- **快照时间**：2026-07-06T15:30:00+08:00
+- **翻译器版本**：1.0.0
+
+## 翻译文件清单
+
+| 文件路径 | 类型 | 状态 | 源文件 SHA-256 |
+|---------|------|------|---------------|
+| `skills/xstate/SKILL.md` | SKILL.md | ✅ 已完成 | `def789...` |
+| `skills/xstate/README.md` | README | ✅ 已完成 | `ghi012...` |
+| `LICENSE` | LICENSE | ⏭️ 跳过 | — |
+
+## 翻译摘要
+- 总文件数：45
+- 已翻译：42
+- 已跳过：3
+- 完成阶段：0–7
+```
 
 ## 项目类型自动检测
 
@@ -42,30 +152,41 @@ description: "将英文技术文档仓库（插件市场、SKILL.md、command.md
 
 ### 阶段 0：初始化状态追踪（新增，必做）
 
-**目的**：创建翻译状态文件，捕获源文件版本，为后续增量翻译打基础。
+**目的**：确定翻译存储目录，创建状态文件和快照文件，捕获源文件版本，为后续增量翻译打基础。
 
 **步骤：**
 
 1. **探索目录结构**——列出所有文件，按类型分类（SKILL.md、README.md、辅助 .md、JSON、Python 等）
 2. **检测项目类型**——根据上表匹配流程
-3. **采集源版本**：
+3. **确定翻译存储根目录**：
+   - 按照[翻译存储根目录](#翻译存储根目录)中的规则，从 `.gitmodules` 推导 `<path>`
+   - 确保 `translator/<path>/` 目录存在（不存在则创建）
+   - **创建镜像目录结构**：在 `translator/<path>/` 下创建与源项目相同的子目录结构（如 `skills/<name>/`），确保翻译后的文件有正确的存放位置
+   - **首次翻译此项目**：创建 `translator/<path>/index.md`（翻译索引）
+   - ⚠️ **此步骤创建的目录就是翻译文件的输出目标，而不是源目录**
+4. **采集源版本**：
    ```bash
    git -C <源目录> rev-parse HEAD 2>/dev/null  # 获取 commit hash
    git -C <源目录> rev-parse --abbrev-ref HEAD 2>/dev/null  # 获取分支名
    ```
-   如果源是子模块（只读副本），记录 `"_note": "源为子模块只读副本"`，后续再补充。
+   如果源是子模块（只读副本），使用子模块记录的 commit：
+   ```bash
+   git -C <工作区根目录> ls-tree HEAD <子模块path> | awk '{print $3}'
+   ```
+   若仍无法获取，记录 `"_note": "源为子模块只读副本，无法获取完整 git 信息"`，后续再补充。
 
-4. **检查是否有旧状态文件**——如果存在 `<项目名>-translation-state.json`：
-   - 读取旧状态，对比新旧文件列表
+5. **检查是否有旧状态文件**——如果存在 `translator/<path>/translation-state.json`：
+   - 读取旧状态，同时读取 `translator/<path>/SNAPSHOT.md` 中的旧 commit
+   - 对比新旧文件列表
    - 对于源 hash 已变更的文件，标记为 `needs-update`
    - 对于新增文件，标记为 `pending`
    - 保持已完成文件的 `completed` 状态
 
-5. **创建/更新状态文件**——命名为 `<项目名>-translation-state.json`，放在翻译目标目录下（如 `self/matt-pocock-skills/matt-pocock-skills-translation-state.json`），内容遵循 [references/translation-state.schema.json](references/translation-state.schema.json)。所有文件初始状态为 `pending`（增量模式则按上一步设置）。
+6. **创建/更新状态文件**——在 `translator/<path>/` 下创建 `translation-state.json`，内容遵循 [references/translation-state.schema.json](references/translation-state.schema.json)。所有文件初始状态为 `pending`（增量模式则按上一步设置）。JSON 中 `project.source_path` 字段记录源项目在 `.gitmodules` 中的路径。
 
-6. **确认项目类型和翻译范围**——向用户展示检测结果，确认后开始翻译。
+7. **确认项目类型和翻译范围**——向用户展示检测结果，确认后开始翻译。
 
-**完成标准**：状态文件存在，`summary.total_files` 准确，`source_version.git_commit` 已填充（或已记录无法获取的原因）。
+**完成标准**：`translator/<path>/` 目录存在，`translation-state.json` 中 `summary.total_files` 准确，`source_version.git_commit` 已填充（或已记录无法获取的原因）。
 
 ### 阶段 1：基础文档（低风险，快速验证）
 
@@ -107,6 +228,8 @@ description: "将英文技术文档仓库（插件市场、SKILL.md、command.md
 - **技巧提示部分**：适当精简，保留核心要点。参考原文件密度决定详略。
 
 **推荐工具**：`multi_replace_string_in_file` 一次处理 2-5 个短文件或 1-2 个长文件。长文件（>150 行）可以分两次替换（先 frontmatter + 开头，再剩余部分）。
+
+**⚠️ 写入位置**：翻译后的文件写入 `translator/<path>/skills/<name>/SKILL.md`，**不是**源文件路径 `open-ai-skills/<project>/skills/<name>/SKILL.md`。使用子代理时，prompt 必须明确指定目标路径前缀为 `translator/`。
 
 **状态更新**：每完成一个分类，批量更新状态文件中的对应条目。
 
@@ -195,23 +318,36 @@ python3 validate_plugins.py
   shasum -a 256 <文件路径>
   ```
 
+**生成翻译快照：**
+- 根据 `translation-state.json` 的内容，生成/更新 `translator/<path>/SNAPSHOT.md`
+- 确保快照中的 git commit、文件清单、摘要统计与状态文件一致
+- 更新 `translator/<path>/index.md`，追加本次翻译记录行
+
 ## 增量翻译工作流
 
 当源文件更新后，无需重新翻译整个项目：
 
-1. **读取旧状态文件**——加载 `<项目名>-translation-state.json`
-2. **对比检测**——遍历 `files` 数组，对每个文件：
+1. **确定翻译存储根目录**——按照[翻译存储根目录](#翻译存储根目录)规则推导 `translator/<path>/`
+2. **读取旧快照和状态文件**：
+   - 加载 `translator/<path>/SNAPSHOT.md`，获取上次翻译时的 `Git Commit`
+   - 加载 `translator/<path>/translation-state.json`
+3. **获取当前源项目 HEAD**：
+   ```bash
+   git -C <源目录> rev-parse HEAD
+   ```
+   与 SNAPSHOT.md 中的旧 commit 对比。若相同 → 源项目未变更，无需翻译。
+4. **对比检测**——遍历 `translation-state.json` 的 `files` 数组，对每个文件：
    ```bash
    # 计算当前源文件 hash
    shasum -a 256 <文件路径>
    ```
    与 `source_hash` 对比。不一致 → 标记为 `needs-update`。
-3. **检测新增/删除文件**——对比目录实际文件列表与状态文件中的列表
+5. **检测新增/删除文件**——对比目录实际文件列表与状态文件中的列表
    - 新增文件 → 追加并标记 `pending`
    - 已删除文件 → 标记为 `skipped`，添加 `translator_notes: "源文件已删除"`
-4. **更新源版本**——采集新的 `git_commit`，更新 `source_version`
-5. **仅翻译变更文件**——对 `needs-update` 和新增 `pending` 文件执行阶段 1-6 的对应流程
-6. **更新状态**——完成后更新 `source_hash`、`translated_at`、`status`
+6. **更新源版本**——采集新的 `git_commit`，更新 `source_version`
+7. **仅翻译变更文件**——对 `needs-update` 和新增 `pending` 文件执行阶段 1-6 的对应流程
+8. **更新状态和快照**——完成后更新 `source_hash`、`translated_at`、`status`，然后重新生成 `translator/<path>/SNAPSHOT.md`，更新 `translator/<path>/index.md`
 
 ## 核心翻译原则
 
@@ -240,6 +376,15 @@ python3 validate_plugins.py
 - 图片文件（.webp、.png、.gif）
 
 ## 执行注意事项
+
+### 🔴 最高优先级：保护源文件
+
+- **源文件绝对不可修改**。翻译前确认写入路径以 `translator/` 开头。
+- **使用代理时**：每个代理的 prompt 中必须显式指定目标路径为 `translator/<path>/...`，不能模糊写成"写回原文件"。
+- **每次 Write 前**：检查目标路径——如果路径中包含 `open-ai-skills/`、`open-java/` 等源目录前缀，立即停止并修正为 `translator/` 前缀。
+- **事后验证**：翻译完成后，检查源项目 git 状态（`git status` 或子模块状态），确认源文件未被修改。
+
+### 常规注意事项
 
 - **分批次执行**：不要一次性修改所有文件。按阶段、按分类逐个进行，便于定位问题。
 - **每批后更新状态**：翻译完一个分类的文件后，立即更新状态文件中的对应条目，避免丢失进度。
