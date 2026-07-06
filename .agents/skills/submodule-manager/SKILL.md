@@ -6,7 +6,10 @@ description: |
       record the tracking branch in .gitmodules, clone the repo, and update README.md index.
   (2) Sync all existing submodules to their configured branches (git fetch + checkout branch + pull).
   (3) Update the root README.md with an up-to-date index of all synced projects grouped by category.
-  Trigger keywords: submodule, git submodule, 子模块, add submodule, sync submodule, update submodule, submodule branch, README index, 更新索引.
+  (4) Initialize submodules after git clone — when open-*/ directories are empty or git submodule status returns nothing,
+      guide through the full SOP (git submodule update --init --recursive [--remote]).
+  Trigger keywords: submodule, git submodule, 子模块, add submodule, sync submodule, update submodule,
+  submodule branch, README index, 更新索引, clone, init, 初始化子模块, submodule init, 拉取子模块.
 ---
 
 # Submodule Manager
@@ -68,6 +71,60 @@ python3 .agents/skills/submodule-manager/scripts/update_readme.py
 - For each submodule, extracts GitHub description from the local clone's remote URL.
 - Generates a markdown table per category with: submodule name, description, URL, branch.
 - Writes `README.md` at the repo root.
+
+### 4. Clone 后初始化所有子模块（SOP）
+
+> **适用场景：** 新成员 `git clone` 本仓库后，或本地 `open-*/` 目录为空、`git submodule status` 返回空时。
+
+#### 4.1 标准初始化（锁定 gitlink 记录的 commit）
+
+拉取所有子模块到 `.gitmodules` 中注册的 gitlink commit：
+
+```bash
+git submodule update --init --recursive
+```
+
+- 每个子模块会 checkout 到仓库 `.gitmodules` + gitlink 锁定的 commit
+- **适用：** 需要可复现的构建环境、CI/CD、代码审查场景
+
+#### 4.2 拉取最新代码（跟踪远端分支 HEAD）
+
+拉取所有子模块的远端最新 commit（忽略 gitlink 锁定）：
+
+```bash
+git submodule update --init --recursive --remote
+```
+
+- 每个子模块会 checkout 到 `.gitmodules` 中 `branch = ...` 配置的分支最新 commit
+- **适用：** 学习最新源码、探索最新特性
+
+#### 4.3 完整 SOP 流程
+
+```bash
+# 1. 克隆主仓库
+git clone <本仓库 URL>
+cd learning-open-code
+
+# 2. 初始化并拉取所有子模块（二选一）
+# 方式 A：锁定版本（推荐用于可复现环境）
+git submodule update --init --recursive
+
+# 方式 B：拉取最新（推荐用于学习探索）
+git submodule update --init --recursive --remote
+
+# 3. 验证
+git submodule status        # 应显示全部 33 个子模块及 commit hash
+ls open-ai-agent/           # 应有 8 个子目录，每个都有内容
+```
+
+#### 4.4 常见问题
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| `git submodule status` 返回空 | 本地未注册 gitlink 或未 init | 执行 `git submodule update --init --recursive` |
+| `open-*/` 目录为空 | 同上 | 同上 |
+| 部分子模块拉取失败 | 网络问题或 URL 失效 | 检查 `.gitmodules` 中 URL 是否可访问 |
+| `fatal: not a git repository` | `.gitmodules` 存在但 gitlink 未提交 | 需要仓库维护者提交 gitlink（参考 AGENTS.md） |
 
 ## Example Usage
 

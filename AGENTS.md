@@ -110,6 +110,27 @@ learning-open-code/
 - 同步子模块使用 `git submodule update --remote` 或 submodule-manager skill。
 - 某些子模块共享父目录（如 `RuoYiVuePlus`），在分析与教学时应作为逻辑整体处理。
 
+### ⚠️ Clone 后必须初始化子模块
+
+> **AI Agent 必读：** 如果检测到 `open-*/` 目录为空、`git submodule status` 返回空、或用户是新 clone 的环境，**必须调用 `.agents/skills/submodule-manager/` skill 执行完整 SOP**，不要跳过子模块初始化直接进行代码分析。
+
+新成员 clone 本仓库后，必须执行以下命令之一来拉取所有子模块：
+
+```bash
+# 方式 A：锁定 gitlink 记录的版本（推荐用于可复现环境）
+git submodule update --init --recursive
+
+# 方式 B：拉取远端分支最新代码（推荐用于学习探索）
+git submodule update --init --recursive --remote
+```
+
+> 详细 SOP 见 `.agents/skills/submodule-manager/SKILL.md` 第 4 节「Clone 后初始化所有子模块」。
+
+**常见错误排查：**
+- `git submodule status` 返回空 → gitlink 未提交或未 init，需联系维护者或手动 `git submodule add`
+- `open-*/` 目录存在但为空 → 子模块未初始化，执行上述命令
+- 部分子模块拉取失败 → 检查网络和 `.gitmodules` 中 URL 可访问性
+
 ---
 
 ## 自有 Skills
@@ -120,7 +141,7 @@ learning-open-code/
 |-------|------|
 | `chinese-documentation` | 中文文档排版规范（中英空格、全半角标点、术语保留） |
 | `chinese-documentation-translator` | 英文→中文文档系统化翻译工作流 |
-| `submodule-manager` | Git 子模块添加/同步/索引管理 |
+| `submodule-manager` | Git 子模块添加/同步/索引管理 + clone 后初始化 SOP |
 | `teach` | 交互式教学系统，在工作区内按项目+主题组织课程 |
 
 ---
@@ -129,6 +150,7 @@ learning-open-code/
 
 - 查看完整项目列表与描述 → `README.md`
 - 查看子模块定义 → `.gitmodules`
+- **⚠️ clone 后子模块初始化 SOP** → `.agents/skills/submodule-manager/SKILL.md` 第 4 节
 - 需要教学某个项目 → 使用 `teach` skill
 - 需要添加/同步子模块 → 使用 `submodule-manager` skill
 - 需要翻译文档 → 使用 `chinese-documentation-translator` skill
