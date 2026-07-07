@@ -172,10 +172,10 @@ teach/<path>/<topic-teach>/
 
 教学根目录（`teach/<path>/<topic-teach>/`）即为当前教学工作区。用户的学习状态记录在此目录中的几个文件中：
 
-- `MISSION.md`：一份记录用户对该主题感兴趣 _原因_ 的文档。所有教学都应当以此为基础。使用 [MISSION-FORMAT.md](./MISSION-FORMAT.md) 中的格式。
+- `MISSION.md`：一份记录用户对该主题感兴趣 _原因_ 的文档。所有教学都应当以此为基础。使用 [references/MISSION-FORMAT.md](references/MISSION-FORMAT.md) 中的格式。
 - `./reference/*.html`：参考资料目录。这些是课程中提炼出的学习要点——速查表、参考算法、语法、瑜伽体式、词汇表。它们是学习的原始单元。它们应该是美观的文档，打印效果好，专为快速查阅而设计。
-- `RESOURCES.md`：一份资源列表，可供探索以为教学提供上下文知识，或获取知识与智慧。使用 [RESOURCES-FORMAT.md](./RESOURCES-FORMAT.md) 中的格式。
-- `./learning-records/*.md`：学习记录目录，记录用户学到的东西。它们大致相当于软件开发中的架构决策记录（ADR）——记录那些非显而易见的经验教训和关键洞察，这些内容可能以后需要修正，或推动未来的学习会话。它们用于计算最近发展区。文件命名格式为 `0001-<短横线命名>.md`，编号每次递增。使用 [LEARNING-RECORD-FORMAT.md](./LEARNING-RECORD-FORMAT.md) 中的格式。
+- `RESOURCES.md`：一份资源列表，可供探索以为教学提供上下文知识，或获取知识与智慧。使用 [references/RESOURCES-FORMAT.md](references/RESOURCES-FORMAT.md) 中的格式。
+- `./learning-records/*.md`：学习记录目录，记录用户学到的东西。它们大致相当于软件开发中的架构决策记录（ADR）——记录那些非显而易见的经验教训和关键洞察，这些内容可能以后需要修正，或推动未来的学习会话。它们用于计算最近发展区。文件命名格式为 `0001-<短横线命名>.md`，编号每次递增。使用 [references/LEARNING-RECORD-FORMAT.md](references/LEARNING-RECORD-FORMAT.md) 中的格式。
 - `./lessons/*.html`：课程目录。一节课是一个独立、自包含的 HTML 输出，教授与使命紧密相关的一项内容。这是本工作区的主要教学单元。
 - `./assets/*`：课程间共享的可复用**组件**。参见[资产](#assets)。
 - `NOTES.md`：一个便签本，供你记录用户偏好或工作笔记。
