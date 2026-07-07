@@ -63,13 +63,16 @@ public R&lt;Void&gt; fail(String msg) { return R.fail(msg); }
 | 0002 | `lessons/0002.html` | 第 2 课 · 自动配置与用户身份桥接 |
 | 0003 | `lessons/0003.html` | 第 3 课 · 异常处理双轨制与 SSE 流式对话 |
 | 0004 | `lessons/0004.html` | 第 4 课 · 双前端集成路线对比：React 原生组件 vs Vue iframe 嵌入 |
+| 0005 | `lessons/0005.html` | 第 5 课 · chat.ui.embed 配置溯源：SDK 内置还是 RuoYi 自造？ |
+| 0006 | `lessons/0006.html` | 第 6 课 · UI 页面嵌入与免登入机制全链路详解 |
+| 0007 | `lessons/0007.html` | 第 7 课 · API 转发到 SDK Controller 的完整机制 |
 
 ## 参考资料
 
 - `reference/0004.html`
 
 ## 快照摘要
-- 课程数：4
+- 课程数：7
 - 引用源文件数：32
 - 学习记录数：1
 - 参考资料数：1

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 12 课 · 会话存储架构 — SaLoginParameter、LoginUser、TokenSession 三者关系</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .warn { background: #fdf6ec; border-left: 3px solid #E6A23C; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .diagram { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+  .key { background:#e8f5e9; border:1px solid #a5d6a7; border-radius:6px; padding:0.5rem 0.8rem; margin:0.6rem 0; font-size:0.9rem; }
+  .flow { background: #f0f8f0; border: 1px solid #c8e6c9; border-radius: 8px; padding: 0.8rem 1.1rem; margin: 1rem 0; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<h1>第 12 课 · 会话存储架构 <span class="tag">深度解析</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：彻底搞懂四个深度问题——① SaLoginParameter 的完整参数表与内在逻辑，以及它和 LoginUser 为什么"看起来重复"却不冗余；② user_type 的设计初衷和同一用户的多身份问题；③ Convert.toLong() 的类型转换机制；④ StpUtil.getTokenSession() 的底层结构、数据存取全链路，以及如何在后续请求中取回数据。
+</div>
+
+<h2>一、SaLoginParameter 全景：不只是"参数对象"</h2>
+
+<h3>1.1 全部 18 个字段分类</h3>
+
+<p><code>SaLoginParameter</code> 是 Sa-Token 框架的登录配置对象，不是 RuoYi 定义的。它在 <code>StpUtil.login(loginId, parameter)</code> 时传入，控制本次登录的<b>全部行为</b>。按职责分为四类：</p>
+
+<table>
+  <tr><th>分类</th><th>字段</th><th>类型</th><th>默认值</th><th>作用</th></tr>
+  <tr><td rowspan="2"><b>设备标识</b></td><td><code>deviceType</code></td><td>String</td><td>null</td><td>设备类型：pc/app/xcx，用于多端隔离</td></tr>
+  <tr><td><code>deviceId</code></td><td>String</td><td>null</td><td>设备唯一ID，比 deviceType 更细粒度</td></tr>
+  <tr><td rowspan="5"><b>会话超时</b></td><td><code>timeout</code></td><td>long</td><td>-1</td><td>Token 有效期（秒），-1 永不过期</td></tr>
+  <tr><td><code>activeTimeout</code></td><td>Long</td><td>null</td><td>最低活跃频率（秒），超时不操作自动踢出</td></tr>
+  <tr><td><code>isLastingCookie</code></td><td>Boolean</td><td>null</td><td>是否持久化 Cookie（浏览器关闭后保留）</td></tr>
+  <tr><td><code>isWriteHeader</code></td><td>Boolean</td><td>null</td><td>是否将 token 写入响应头</td></tr>
+  <tr><td><code>cookie</code></td><td>SaCookieConfig</td><td>—</td><td>Cookie 详细配置（domain、path、httpOnly…）</td></tr>
+  <tr><td rowspan="5"><b>登录策略</b></td><td><code>isConcurrent</code></td><td>Boolean</td><td>null</td><td>是否允许同一账号多地同时登录（false=顶替）</td></tr>
+  <tr><td><code>isShare</code></td><td>Boolean</td><td>null</td><td>同一账号多端登录时是否共用同一个 token</td></tr>
+  <tr><td><code>maxLoginCount</code></td><td>int</td><td>-1</td><td>最大同时登录数量（-1 不限）</td></tr>
+  <tr><td><code>maxTryTimes</code></td><td>int</td><td>-1</td><td>创建 token 时的最大循环次数（防碰撞）</td></tr>
+  <tr><td><code>rightNowCreateTokenSession</code></td><td>Boolean</td><td>null</td><td>是否登录成功后立即创建 TokenSession</td></tr>
+  <tr><td rowspan="2"><b>踢人策略</b></td><td><code>replacedLoginExitMode</code></td><td>枚举</td><td>—</td><td>新旧设备谁放弃会话（新踢旧 / 旧不让新）</td></tr>
+  <tr><td><code>replacedRange</code></td><td>枚举</td><td>—</td><td>顶人下线的范围（仅同端 / 所有端）</td></tr>
+  <tr><td rowspan="3"><b>扩展数据</b></td><td><code>extraData</code></td><td>Map</td><td>new HashMap</td><td>扩展数据（JWT 模式下嵌入 token payload）</td></tr>
+  <tr><td><code>terminalExtraData</code></td><td>Map</td><td>new HashMap</td><td>终端信息扩展数据</td></tr>
+  <tr><td><code>token</code></td><td>String</td><td>null</td><td>预定 token 值（自定义 token 内容）</td></tr>
+</table>
+
+<div class="warn">
+⚠️ <b>重要：</b>以上所有字段都有对应的 setter，且 setter 返回 <code>this</code>，支持<b>链式调用</b>。大部分字段类型是包装类（Long、Boolean），null 表示"使用全局默认配置"。如果显式设值，则覆盖全局配置。这是 Sa-Token 的"约定优于配置"思想的体现。
+</div>
+
+<h3>1.2 RuoYi 用了哪些字段？</h3>
+
+<p>在 <code>IAuthStrategy.buildLoginParameter()</code> 中只设置了其中 5 个：</p>
+
+<pre><code>static SaLoginParameter buildLoginParameter(SysClientVo client, Consumer&lt;SaLoginParameter&gt; customizer) {
+    SaLoginParameter model = new SaLoginParameter();
+    model.setDeviceType(client.getDeviceType());       // ← 只设了这 5 个
+    model.setTimeout(client.getTimeout());             //    其余 13 个字段使用
+    model.setActiveTimeout(client.getActiveTimeout()); //    Sa-Token 全局默认值
+    model.setExtra(LoginHelper.CLIENT_KEY, client.getClientId());
+    model.setExtra(LoginHelper.CLIENT_ACCESS_PATH_KEY, client.getAccessPath());
+    model.setExtra(LoginHelper.CLIENT_IP_WHITELIST_KEY, client.getIpWhitelist());
+    return model;
+}
+// 然后在 LoginHelper.login() 中继续追加：
+model.setExtra(USER_KEY, loginUser.getUserId())       // 再追加 5 个 extra
+     .setExtra(USER_NAME_KEY, loginUser.getUsername())
+     .setExtra(DEPT_KEY, loginUser.getDeptId())
+     .setExtra(DEPT_NAME_KEY, loginUser.getDeptName())
+     .setExtra(DEPT_CATEGORY_KEY, loginUser.getDeptCategory())
+</pre></code>
+
+<div class="side">
+💡 <b>没有设置的字段（isConcurrent、isShare、maxLoginCount 等）</b> 全部走 Sa-Token 全局配置文件 <code>sa-token.timeout</code>、<code>sa-token.is-concurrent</code> 等全局默认值。这是"全局配置 + 客户端级覆盖"的两级配置策略。
+</div>
+
+<h2>二、LoginUser 与 SaLoginParameter：不会重复吗？</h2>
+
+<p>你问"不会重复吗？"——答案是：<b>部分字段确实存在于两个对象中，但用途不同，不是冗余</b>。</p>
+
+<h3>2.1 两者职责对比</h3>
+
+<table>
+  <tr><th>维度</th><th>SaLoginParameter</th><th>LoginUser</th></tr>
+  <tr><td><b>定义方</b></td><td>Sa-Token 框架</td><td>RuoYi 业务层</td></tr>
+  <tr><td><b>生命周期</b></td><td>登录时传入，之后被 Sa-Token 消费</td><td>登录时构建，随会话存在整个登录周期</td></tr>
+  <tr><td><b>存储位置</b></td><td>① extra 数据 → Token payload (JWT)<br>② 参数本身 → Sa-Token 内部</td><td>① TokenSession.dataMap["loginUser"]<br>② 序列化到 Redis</td></tr>
+  <tr><td><b>主要内容</b></td><td><b>登录行为配置：</b>超时、并发策略、设备类型、Cookie 等</td><td><b>用户业务数据：</b>userId、username、角色、权限、部门等</td></tr>
+  <tr><td><b>读取方式</b></td><td>登录时：直接用对象<br>登录后：StpUtil.getExtra(key)</td><td>登录后：LoginHelper.getLoginUser()<br>→ TokenSession.get("loginUser")</td></tr>
+  <tr><td><b>不可变？</b></td><td>登录后不可变（token 已签发）</td><td>可变（如角色权限变更时需刷新）</td></tr>
+</table>
+
+<h3>2.2 为什么 deviceType 在两处都出现？</h3>
+
+<p>这是最典型的"看似重复"——<code>deviceType</code> 同时存在于 <code>LoginUser</code> 和 <code>SaLoginParameter</code>：</p>
+
+<pre><code>// deviceType 的三份副本：
+
+// ① LoginUser 中的（登录态上下文，用于后续请求读取）
+loginUser.setDeviceType(client.getDeviceType());
+
+// ② SaLoginParameter 中的（传给 Sa-Token 框架，控制多端隔离）
+model.setDeviceType(client.getDeviceType());
+
+// ③ LoginHelper.fillRequestContext() 兜底逻辑
+//    如果 loginUser.deviceType 为空，从 model 回填
+if (StringUtils.isBlank(loginUser.getDeviceType())
+    && StringUtils.isNotBlank(model.getDeviceType())) {
+    loginUser.setDeviceType(model.getDeviceType());
+}</code></pre>
+
+<p><strong>为什么需要两份？</strong></p>
+<ol>
+  <li><b>SaLoginParameter.deviceType</b> 是给 Sa-Token 框架用的——框架用它来决定是否允许同端多登、是否顶替旧会话。这是<b>框架级别的行为控制</b>。</li>
+  <li><b>LoginUser.deviceType</b> 是给业务代码用的——日志切面记录操作来自哪个设备、在线用户列表展示设备图标。这是<b>业务级别的数据展示</b>。</li>
+</ol>
+
+<p>两者本质上是从同一个源（<code>sys_client.device_type</code>）复制的同一个值，但作用的系统层级不同。这就像你把同一个地址写在信封上（给邮局用）和备忘录上（给自己看）——不是冗余，是不同的使用场景。</p>
+
+<h3>2.3 真正"重复"的数据——extra vs TokenSession</h3>
+
+<div class="diagram">同一个 userId=1 被存了两次：
+
+位置一：Token 的 extra 数据（JWT payload 中）
+  StpUtil.login(loginId, model.setExtra("userId", 1))
+  → 后续通过 StpUtil.getExtra("userId") 读取
+  → LoginHelper.getUserId() 实际就是读这里
+
+位置二：TokenSession 的 dataMap
+  StpUtil.getTokenSession().set("loginUser", loginUser)
+  → loginUser 对象中包含 userId=1
+  → 后续通过 LoginHelper.getLoginUser().getUserId() 读取</div>
+
+<p>这确实是冗余，但是<b>有意为之的设计选择</b>：</p>
+
+<table>
+  <tr><th>读 extra</th><th>读 TokenSession</th></tr>
+  <tr><td>API：<code>StpUtil.getExtra("userId")</code></td><td>API：<code>session.get("loginUser").getUserId()</code></td></tr>
+  <tr><td>性能：极快（JWT token 自带，<b>无需查 Redis</b>）</td><td>性能：需要查 Redis（TokenSession 是 Redis key）</td></tr>
+  <tr><td>适用：高频读取的简单字段（userId、username）</td><td>适用：低频读取的复杂对象（角色、权限、部门）</td></tr>
+  <tr><td>限制：数据量有限（token 会变大）</td><td>限制：无（存 Redis，数据量灵活）</td></tr>
+</table>
+
+<div class="key">
+<b>核心设计思想：</b>LoginHelper 将高频读取的字段（userId、username、deptId）存入 token 的 extra 数据（JWT 模式），实现<b>无 Redis 查询的快速获取</b>；而完整 LoginUser（包含角色列表、权限集合、部门信息等大对象）存入 TokenSession（Redis），按需获取。<code>getUserId()</code> 每秒可能调用数百次，每次都查 Redis 是不必要的开销。
+</div>
+
+<h2>三、user_type 的设计初衷</h2>
+
+<h3>3.1 UserType 枚举定义</h3>
+
+<p><span class="where">UserType.java · ruoyi-common-core/.../enums/UserType.java</span></p>
+
+<pre><code>public enum UserType {
+    SYS_USER("sys_user"),    // 后台管理系统用户
+    APP_USER("app_user");    // 移动客户端用户
+}</code></pre>
+
+<h3>3.2 loginId 的构成规则</h3>
+
+<p><span class="where">LoginUser.java · 第 141-148 行</span></p>
+
+<pre><code>public String getLoginId() {
+    if (userType == null) throw new IllegalArgumentException("用户类型不能为空");
+    if (userId == null) throw new IllegalArgumentException("用户ID不能为空");
+    return userType + ":" + userId;  // 例如："sys_user:1"、"app_user:100"
+}</code></pre>
+
+<h3>3.3 设计意图</h3>
+
+<p><code>user_type</code> 不是用户的一个"标签"，而是 Sa-Token <b>多账户体系</b> 的隔离键。它的设计目标是：</p>
+
+<div class="diagram">同一张 sys_user 表中：
+  user_id=1  user_type="sys_user"  →  后台管理员
+  user_id=1  user_type="app_user"  →  同一个人的移动端身份
+
+这两个 loginId 在 Sa-Token 中完全独立：
+  "sys_user:1"  → Token-A，角色=超级管理员，权限=全部
+  "app_user:1"  → Token-B，角色=普通用户，权限=受限
+
+它们是两个不同的"登录实体"，各有独立的 token、session、权限</div>
+
+<p>这种设计解决的现实问题：</p>
+<ol>
+  <li><b>同一张用户表，不同登录入口：</b>后台管理（Web）和移动端 APP 共用 <code>sys_user</code> 表，但权限体系完全不同</li>
+  <li><b>登录态隔离：</b>管理员在后台的操作不应影响他在 APP 上的登录状态</li>
+  <li><b>权限分级：</b>同样是 userId=1，作为 sys_user 有全部权限，作为 app_user 只有查询权限</li>
+</ol>
+
+<h3>3.4 同一个用户可以拥有多个 userType 吗？</h3>
+
+<p><b>在这个系统中，一个物理用户只有一种 userType。</b> <code>user_type</code> 是 <code>sys_user</code> 表中的一个字段，每个用户记录只有固定的一种类型。从 <code>LoginUser.getLoginId()</code> 的实现看，它直接读取 <code>this.userType</code>，不会返回多个类型。</p>
+
+<div class="side">
+💡 <b>技术上说：</b>你可以在 <code>sys_user</code> 表中插入两条记录（userId=1, userType=sys_user 和 userId=1, userType=app_user），这样同一个"人"就有了两个身份。但 RuoYi 的设计是<b>每个用户记录只有一种 userType</b>——后台用户和 APP 用户通常是不同的物理账号。如果你想实现"一个用户多条 type 记录"，需要自行扩展 <code>LoginUser.getLoginId()</code> 的逻辑。
+</div>
+
+<h3>3.5 LoginHelper 类上的官方注释</h3>
+
+<pre><code>/**
+ * user_type 为 用户类型 同一个用户表 可以有多种用户类型 例如 pc,app
+ * device 为 设备类型 同一个用户类型 可以有 多种设备类型 例如 web,ios
+ * 可以组成 用户类型与设备类型多对多的 权限灵活控制
+ *
+ * 多用户体系 针对 多种用户类型 但权限控制不一致
+ * 可以组成 多用户类型表与多设备类型 分别控制权限
+ */</code></pre>
+
+<p>这是一个<b>预留的扩展点</b>。当前实现只有两种 UserType，但架构设计上支持未来扩展更多类型（如商户、供应商、合作伙伴等），每种类型有独立的权限体系。</p>
+
+<h2>四、Convert.toLong() — Hutool 的类型安全转换</h2>
+
+<p><span class="where">LoginHelper.java · 第 149 行</span></p>
+
+<pre><code>public static Long getUserId() {
+    return Convert.toLong(getExtra(USER_KEY));
+    //     ↑             ↑
+    //     │             └─ getExtra() 返回 Object（实际上是 Integer 或 Long）
+    //     └─ Convert.toLong() 安全转换为 Long
+}</code></pre>
+
+<p><code>Convert.toLong()</code> 是 Hutool 工具库的核心方法，位于 <code>cn.hutool.core.convert.Convert</code>。它接受<b>任意类型</b>的参数，尽最大努力转换为 <code>Long</code>：</p>
+
+<table>
+  <tr><th>输入类型</th><th>输入值</th><th>Convert.toLong() 结果</th></tr>
+  <tr><td>Long</td><td>1L</td><td>1L（原样返回）</td></tr>
+  <tr><td>Integer</td><td>1</td><td>1L</td></tr>
+  <tr><td>String</td><td>"123"</td><td>123L</td></tr>
+  <tr><td>String</td><td>"abc"</td><td>抛出异常</td></tr>
+  <tr><td>null</td><td>null</td><td>null</td></tr>
+  <tr><td>Double</td><td>1.9</td><td>1L（截断，非四舍五入）</td></tr>
+  <tr><td>Boolean</td><td>true</td><td>1L</td></tr>
+</table>
+
+<div class="flow">
+<b>为什么需要它？</b><code>StpUtil.getExtra("userId")</code> 返回 <code>Object</code>——你存入时是 Long，但取回时类型信息丢失了。而且不同场景可能存入 Integer 或 Long，手动 <code>(Long) getExtra(key)</code> 可能抛出 <code>ClassCastException</code>。<code>Convert.toLong()</code> 能安全处理各种数字类型和 null，是防御性编程的体现。
+</div>
+
+<h2>五、StpUtil.getTokenSession().set() 深度拆解</h2>
+
+<h3>5.1 这段代码到底做了什么？</h3>
+
+<pre><code>StpUtil.getTokenSession().set(LOGIN_USER_KEY, loginUser);
+// 拆成三步理解：
+
+// 步骤1：StpUtil.getTokenSession()
+//   获取【当前请求 token 对应的 TokenSession】
+//   TokenSession 是 SaSession 实例，内部有一个 dataMap（ConcurrentHashMap）
+
+// 步骤2：.set(LOGIN_USER_KEY, loginUser)
+//   等价于 session.getDataMap().put("loginUser", loginUser)
+//   然后调用 session.update() 将变更持久化到 Redis
+
+// 步骤3：Key = "loginUser"，Value = 完整的 LoginUser 对象（含角色、权限）
+</code></pre>
+
+<h3>5.2 getTokenSession() 返回的到底是什么？</h3>
+
+<p><code>SaSession</code> 是 Sa-Token 框架的核心数据结构。它有三种类型：</p>
+
+<div class="diagram">SaSession 三种类型对比：
+
+┌─────────────────────────────────────────────────────────────┐
+│ Account-Session（账号会话）                                    │
+│ Key: accountSession:{loginId}  例如 accountSession:sys_user:1│
+│ 生命周期：与账号绑定，同一账号所有设备共享                       │
+│ 用途：存储跨设备的全局数据                                     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ Token-Session（令牌会话）← getTokenSession() 返回这个          │
+│ Key: tokenSession:{tokenValue}  例如 tokenSession:abc123...  │
+│ 生命周期：与 token 绑定，每个设备独立                          │
+│ 用途：存储当前设备的登录态数据   ← RuoYi 存 LoginUser 在这      │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ Custom-Session（自定义会话）                                   │
+│ Key: customSession:{customKey}                               │
+│ 用途：任意自定义维度的数据存储                                  │
+└─────────────────────────────────────────────────────────────┘</div>
+
+<p><strong>为什么 RuoYi 选 Token-Session 而非 Account-Session？</strong></p>
+<ul>
+  <li>如果用 Account-Session，同一账号在 PC、手机、小程序上的 LoginUser 会互相覆盖</li>
+  <li>Token-Session 与 token 一一绑定，每个设备有独立的 LoginUser，互不干扰</li>
+  <li>当你踢出一个设备时，只删除对应的 Token-Session，不影响其他设备</li>
+</ul>
+
+<h3>5.3 SaSession 的内部结构</h3>
+
+<pre><code>SaSession {
+    id:           "tokenSession:abc123def456..."  // 唯一标识
+    type:         "Token"                          // 类型
+    loginType:    "login"                          // 登录类型
+    loginId:      "sys_user:1"                     // 登录ID
+    token:        "abc123def456..."                // token 值
+    createTime:   1750000000000                    // 13位时间戳
+    dataMap:      ConcurrentHashMap {               // ← 核心：数据存储
+        "loginUser" → LoginUser对象,               // RuoYi 存入的
+        // 可以存更多 key-value...
+    }
+    terminalList: [SaTerminalInfo, ...]             // 终端信息列表
+}</code></pre>
+
+<h3>5.4 后续如何取回 LoginUser？</h3>
+
+<p>登录时存入了，后续任何请求都可以通过以下方式取回：</p>
+
+<pre><code>// 方式 1：LoginHelper.getLoginUser() — 最常用（推荐）
+LoginUser user = LoginHelper.getLoginUser();
+// ↓ 内部实现：
+//   StpUtil.getTokenSession()          → 拿到当前请求的 TokenSession
+//   session.get("loginUser")           → 从 dataMap 中取出 LoginUser
+//   返回 (LoginUser) session.get("loginUser")
+
+// 方式 2：通过指定 token 获取（管理员查看在线用户时使用）
+LoginUser user = LoginHelper.getLoginUser("tokenValueHere");
+// ↓ 内部实现：
+//   StpUtil.getTokenSessionByToken("tokenValueHere")
+//   → session.get("loginUser")
+
+// 方式 3：直接读取部分字段（高频场景，绕过 TokenSession）
+Long userId = LoginHelper.getUserId();        // StpUtil.getExtra("userId")
+String username = LoginHelper.getUsername();   // StpUtil.getExtra("userName")
+</code></pre>
+
+<h3>5.5 全链路数据存取图</h3>
+
+<div class="diagram">                            【写入（登录时）】
+
+LoginHelper.login(loginUser, model)
+    │
+    ├─► StpUtil.login(loginId, model.setExtra("userId", 1)
+    │       .setExtra("userName", "admin") ...)
+    │       │
+    │       └─► Sa-Token 内部：
+    │           ├─ 生成 token 字符串
+    │           ├─ extra 数据写入 token payload（JWT模式）
+    │           └─ 触发 SaTokenListener.doLogin()
+    │
+    └─► StpUtil.getTokenSession()        ← 获取/创建 TokenSession
+            .set("loginUser", loginUser)  ← 存入 dataMap
+                │
+                └─► Redis: SET tokenSession:abc123... → 序列化的 SaSession
+
+                            【读取（后续请求）】
+
+请求携带 token: abc123... 到达服务器
+    │
+    ├─► LoginHelper.getUserId()
+    │   └─► StpUtil.getExtra("userId")  → 从 token 中解析（无 Redis 查询！）
+    │
+    ├─► LoginHelper.getUsername()
+    │   └─► StpUtil.getExtra("userName") → 从 token 中解析
+    │
+    └─► LoginHelper.getLoginUser()
+        └─► StpUtil.getTokenSession()     → Redis: GET tokenSession:abc123...
+            └─► session.get("loginUser")  → 从 dataMap 取出完整的 LoginUser
+                └─► 返回 LoginUser 对象（含角色、权限等完整数据）</div>
+
+<div class="quiz">
+<p>🧠 自我检测</p>
+<label class="opt"><input type="radio" name="q1"> 1. SaLoginParameter 中 extra 数据和 TokenSession 中 LoginUser 是同一份数据的两种存储方式，各有利弊</label>
+<label class="opt"><input type="radio" name="q1"> 2. 同一个物理用户可以通过在 sys_user 表插入多条记录来拥有多个 userType</label>
+<label class="opt"><input type="radio" name="q1"> 3. Convert.toLong(null) 会抛出 NullPointerException</label>
+<label class="opt"><input type="radio" name="q1"> 4. 如果在 Account-Session 中存 LoginUser，多设备登录时数据会互相覆盖</label>
+</div>
+
+<details>
+<summary>📖 点击查看答案与解析</summary>
+<p><strong>正确答案：1、2、4</strong></p>
+<p><strong>1 正确：</strong>extra 数据嵌入 token 适合高频读取简单字段（免 Redis），TokenSession 存 Redis 适合低频读取复杂对象（灵活）。两者互补而非冗余。</p>
+<p><strong>2 正确：</strong>技术上可以在 sys_user 表插入两条记录（同一 userId 但不同 userType），实现同一人的多身份。但 RuoYi 当前设计不鼓励这样做——通常不同 userType 的用户是不同的物理账号。</p>
+<p><strong>3 错误：</strong>Convert.toLong(null) 返回 null，不会抛异常。它内部做了 null 安全检查。</p>
+<p><strong>4 正确：</strong>Account-Session 是所有同账号设备共享的。PC 设备 set("loginUser", user1) 后，手机设备 set("loginUser", user2) 会覆盖掉 user1。</p>
+</details>
+
+<div class="reminder">
+💬 有不清楚的地方？向 agent 追问：<br>
+• 如果我想给 TokenSession 中存更多自定义数据，应该用 LoginHelper 还是直接调 StpUtil？<br>
+• JWT 模式下 extra 数据有大小限制吗？token 变大会影响性能吗？<br>
+• 如果系统不用 JWT 只用 Redis 模式，getExtra() 还能工作吗？
+</div>
+
+<div class="cite">
+📚 相关源码：<br>
+• <code>SaLoginParameter.java</code>（sa-token-core JAR）— 18 个字段定义<br>
+• <code>SaSession.java</code>（sa-token-core JAR）— TokenSession 数据结构<br>
+• <code>LoginHelper.java:54-65</code> — 登录时两处存储的核心代码<br>
+• <code>LoginHelper.java:102-141</code> — getLoginUser() 的三层读取逻辑<br>
+• <code>LoginHelper.java:203-209</code> — getExtra() 的防异常包装<br>
+• <code>UserType.java</code> — 用户类型枚举<br>
+• <code>LoginUser.java:141-148</code> — getLoginId() 的 loginId 组装逻辑<br>
+🔗 相关课程：<a href="05-device-type.html">第 5 课 · 设备类型</a> · <a href="09-build-login-parameter.html">第 9 课 · buildLoginParameter</a> · <a href="11-design-patterns.html">第 11 课 · 设计模式总结</a>
+</div>
+
+<div class="nav">
+← <a href="11-design-patterns.html">第 11 课 · 设计模式总结</a> &nbsp;|&nbsp; <a href="../index.html">↑ 课程索引</a>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · UI 页面嵌入与免登入机制全链路详解</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .info { background: #f0f9ff; border-left: 3px solid #1d6fd6; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 6 课 · UI 页面嵌入与免登入机制全链路详解 <span class="tag">iframe 嵌入</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #8 深层延伸）</b>：学完你能画出从「用户点击 AI 聊天菜单」到「Snail AI Chat 页面在 iframe 中渲染」的完整时序图，讲清每一步涉及的系统组件、安全放行机制、身份桥接链路，以及 <code>openId</code> + <code>trustedCredential</code> 双参数的免登原理。
+</div>
+
+<p>第 4 课我们看到了 Vue 端用 82 行代码实现了 iframe 嵌入，但当时只展示了代码片段。这一课我们将<b>逐帧拆解</b>整个嵌入流程——从浏览器发出第一个请求到 Snail AI Chat 页面完全渲染。你会看到这是一个涉及 Vue 前端、RuoYi Admin、Snail AI Server、SDK Controller 四个系统协同运作的精密流程。</p>
+
+<h2>一、全链路时序图</h2>
+
+<p>先看全景，再逐个环节深挖：</p>
+
+<pre><code>时间线 →
+
+[浏览器]                [RuoYi Admin :8080]        [Snail AI Server :8900]
+   │                          │                          │
+   │──1. 用户登录─────────────→│                          │
+   │←── Sa-Token JWT ─────────┤                          │
+   │                          │                          │
+   │──2. 点击 AI Chat 菜单────→│                          │
+   │   (Vue Router 导航)      │                          │
+   │                          │                          │
+   │──3. POST /snail-ai/user/ │                          │
+   │      register ──────────→│                          │
+   │   (请求头带 JWT token)   │                          │
+   │                          │──4. OpenApiUserClient    │
+   │                          │   .register() ──────────→│
+   │                          │←── OpenApiUserVO         │
+   │                          │   {openId: "xxx"} ───────┤
+   │←── {openId: "xxx"} ──────┤                          │
+   │                          │                          │
+   │──5. 构造嵌入 URL         │                          │
+   │   /snail-chat/?          │                          │
+   │   openId=xxx&            │                          │
+   │   trustedCredential=JWT  │                          │
+   │                          │                          │
+   │──6. iframe 加载 URL ────→│                          │
+   │   (浏览器自动发起 GET)   │                          │
+   │                          │                          │
+   │   ⚡ /snail-chat/** 在    │                          │
+   │   security.excludes 中   │                          │
+   │   不经过 Sa-Token 拦截   │                          │
+   │                          │                          │
+   │                          │──7. SnailAiChatGateway   │
+   │                          │   Controller 处理请求    │
+   │                          │   读取 URL 参数 openId   │
+   │                          │   和 trustedCredential   │
+   │                          │   注入 embed 配置        │
+   │                          │                          │
+   │←──8. 返回 Chat HTML 页面──┤                          │
+   │   (含内嵌 JS 配置)       │                          │
+   │                          │                          │
+   │──9. Chat UI 渲染完成     │                          │
+   │   用户开始对话           │                          │
+   │                          │                          │
+   │──10. POST /api/snail/   │                          │
+   │      chat/... ──────────→│                          │
+   │   (内嵌 JS 自动带 token) │──11. gRPC Chat Dispatch──→│
+   │                          │←── Stream Response ──────┤
+   │←── SSE Stream ───────────┤                          │</code></pre>
+
+<h2>二、逐环节剖析</h2>
+
+<h3>环节 1-2：Vue 页面加载与 loadChat() 触发</h3>
+
+<p>用户点击菜单后，Vue Router 导航到 <code>views/ai/chat/index.vue</code>，组件的 <code>onMounted</code> 钩子触发 <code>loadChat()</code>：</p>
+
+<pre><code>// src/views/ai/chat/index.vue（第 18-37 行）
+async function loadChat() {
+  loading.value = true;
+  loadError.value = '';
+  try {
+    const token = getToken();                       // ① 获取 RuoYi 登录 JWT
+    if (!token) {
+      loadError.value = '登录凭证不存在，请重新登录后再试';
+      return;
+    }
+    const { data: user } = await registerCurrentSnailUser(); // ② 注册 Snail AI 用户
+    if (!user?.openId) {
+      loadError.value = '获取 AI 用户身份失败';
+      return;
+    }
+    chatUrl.value = buildChatUrl(user.openId, token); // ③ 拼接嵌入 URL
+  } catch {
+    loadError.value = '加载 AI 聊天失败，请稍后重试';
+  } finally {
+    loading.value = false;
+  }
+}</code></pre>
+
+<p>这里有三个关键调用，每个都是整个免登链条上不可或缺的一环。</p>
+
+<h3>环节 3-4：身份桥接 — registerCurrentSnailUser()</h3>
+
+<p><code>getToken()</code> 返回的是 RuoYi 的 Sa-Token JWT。但这只是 RuoYi 系统的身份凭证，Snail AI 不认识它。需要通过 <b>身份桥接</b> 将 RuoYi 用户映射为 Snail AI 用户。</p>
+
+<pre><code>// 前端 API 调用（src/api/ai/agent/index.ts）
+export const registerCurrentSnailUser = (): AxiosPromise&lt;SnailOpenApiUser&gt; => {
+  return request({
+    url: '/snail-ai/user/register',  // POST 请求
+    method: 'post'
+    // 请求头自动携带 Authorization: Bearer &lt;JWT&gt;（由 Axios 拦截器注入）
+  });
+};
+
+// 后端处理（SnailAiController.java 第 51-71 行）
+private OpenApiUserVO ensureOpenApiUser() {
+    Long userId = LoginHelper.getUserId();           // 从 Sa-Token 会话中取当前用户ID
+    LoginUser loginUser = LoginHelper.getLoginUser(); // 取完整登录用户信息
+
+    OpenApiUserRegisterRequest registerRequest = new OpenApiUserRegisterRequest();
+    registerRequest.setExternalId(String.valueOf(userId)); // RuoYi 用户ID 作为外部标识
+    registerRequest.setNickname(loginUser.getNickname());  // 用户昵称
+
+    Result&lt;OpenApiUserVO&gt; registerResult = userClient.register(registerRequest);
+    // ↑ userClient 是 Snail AI SDK 提供的 OpenApiUserClient
+    // 它通过 HTTP 调用 Snail AI Server 的 OpenAPI 接口
+
+    // 三层防御性检查
+    if (registerResult == null) throw ...;           // 返回为空？
+    if (registerResult.getStatus() != 1) throw ...;   // 状态不是成功？
+    if (registerResult.getData() == null) throw ...;   // 数据为空？
+
+    return registerResult.getData();                  // 返回 {openId, nickname, externalId}
+}</code></pre>
+
+<div class="info">
+🔑 <b>身份桥接的本质</b>：<code>registerCurrentSnailUser()</code> 不是真正的「注册」——它是幂等的「查找或创建」。如果该 <code>externalId</code>（RuoYi 用户ID）已经关联过 Snail AI 用户，直接返回已有的 <code>openId</code>；如果是首次，才创建新用户。这个 <code>openId</code> 就是 Snail AI 系统中的用户唯一标识。
+</div>
+
+<h3>环节 5：URL 参数拼接 — openId + trustedCredential</h3>
+
+<pre><code>// src/views/ai/chat/index.vue（第 13-15 行）
+function buildChatUrl(openId: string, trustedCredential: string) {
+  const params = new URLSearchParams({ openId, trustedCredential });
+  return `${baseUrl}/snail-chat/?${params.toString()}`;
+  // 实际 URL 形如：
+  // /dev-api/snail-chat/?openId=abc123&trustedCredential=eyJhbGciOi...
+}</code></pre>
+
+<p>两个参数的含义与来源：</p>
+
+<table>
+<tr><th>参数</th><th>值</th><th>来源</th><th>作用</th></tr>
+<tr>
+  <td><code>openId</code></td>
+  <td>Snail AI 系统中的用户唯一标识</td>
+  <td><code>registerCurrentSnailUser()</code> 返回的 <code>user.openId</code></td>
+  <td>告诉 Snail AI Chat UI「当前用户是谁」——用于加载该用户的智能体列表、对话历史等</td>
+</tr>
+<tr>
+  <td><code>trustedCredential</code></td>
+  <td>RuoYi 的 Sa-Token JWT</td>
+  <td><code>getToken()</code> 返回的登录凭证</td>
+  <td>Snail AI Chat UI 内嵌的 JavaScript 在调用 <code>/api/snail/chat/**</code> 接口时，将此 token 作为认证凭证——因为 <code>/api/snail/chat/**</code> 也被排除了 Sa-Token 拦截，需要前端主动传 token</td>
+</tr>
+</table>
+
+<div class="danger">
+⚠️ <b>安全关键点</b>：<code>trustedCredential</code> 暴露在 URL 查询参数中。这意味着：(1) 它会被记录在浏览器历史、服务器访问日志、代理日志中；(2) 任何能截获这个 URL 的人都能以该用户身份调用 API。因此，<b>生产环境必须使用 HTTPS</b> 加密传输，并考虑使用短期 token 或一次性 ticket 替代完整的 JWT。
+</div>
+
+<h3>环节 6-7：/snail-chat/** 的安全放行机制</h3>
+
+<p>这是免登入最关键的一环。正常情况下，<code>/snail-chat/**</code> 路径的请求到达 RuoYi Admin 后，Sa-Token 拦截器会要求验证登录状态。但 <code>/snail-chat/**</code> 被配置在了排除列表中：</p>
+
+<pre><code>// application.yml（第 99-114 行）
+security:
+  excludes:
+    - /*.html
+    - /**/*.html
+    - /**/*.css
+    - /**/*.js
+    - /favicon.ico
+    - /error
+    - /*/api-docs
+    - /*/api-docs/**
+    - /warm-flow-ui/config
+    - /snail-chat/**          ← 免登录：Chat UI 页面
+    - /api/snail/chat/**      ← 免登录：Chat API 接口</code></pre>
+
+<p>这个排除列表是如何生效的？看 <code>SecurityConfig.java</code>：</p>
+
+<pre><code>// SecurityConfig.java（第 80-118 行）
+@Override
+public void addInterceptors(InterceptorRegistry registry) {
+    registry.addInterceptor(new SaInterceptor(handler -> {
+            AllUrlHandler allUrlHandler = SpringUtils.getBean(AllUrlHandler.class);
+            SaRouter
+                .match(allUrlHandler.getUrls())  // 匹配所有已注册的 URL
+                .check(() -> {
+                    StpUtil.checkLogin();          // 检查登录状态
+                    // ... 其他校验 ...
+                });
+        })).addPathPatterns("/**")
+        .excludePathPatterns(securityProperties.getExcludes());  // ← 排除列表在这里生效
+}</code></pre>
+
+<div class="step"><span class="num">⚡</span><b>关键细节</b>：<code>excludePathPatterns()</code> 使用的是 Spring MVC 的 Ant 风格路径匹配。当请求路径匹配 <code>/snail-chat/**</code> 时，整个 SaInterceptor 不会执行，请求直接透传到 <code>SnailAiChatGatewayController</code>。</div>
+
+<p>那么 <b>/api/snail/chat/**</b> 也免登了，安全性如何保证？</p>
+
+<p>答案是：虽然这个路径不经过 Sa-Token 拦截器，但 <code>SnailAiChatGatewayController</code>（SDK 提供）内部有自己的认证逻辑——它从请求参数或请求头中读取 <code>trustedCredential</code>（即 JWT），调用 Snail AI Server 验证 token 的有效性，确认用户身份后才处理 Chat 请求。</p>
+
+<pre><code>// SnailAiChatGatewayController 内部的认证逻辑（SDK 实现，推断）
+// 当请求 /api/snail/chat/agent/{agentId}/chat/stream 时：
+// 1. 从 Header/Query 中提取 trustedCredential（JWT）
+// 2. 调用 Snail AI Server 的 token 验证接口
+// 3. 验证通过后才建立 gRPC 连接转发 Chat 请求</code></pre>
+
+<h3>环节 8-9：Chat HTML 页面的渲染</h3>
+
+<p><code>SnailAiChatGatewayController</code> 返回的 Chat HTML 页面是 SDK 预编译的前端资源（打包在 <code>snail-ai-agent-chat-starter</code> JAR 的 <code>classpath:static/</code> 下）。页面加载时：</p>
+
+<pre><code>// Snail AI Chat 前端 JS 的初始化逻辑（SDK 实现，推断）
+(function() {
+    // 1. 从 URL 中提取参数
+    const urlParams = new URLSearchParams(window.location.search);
+    const openId = urlParams.get('openId');
+    const trustedCredential = urlParams.get('trustedCredential');
+
+    // 2. 存储凭证（用于后续 API 调用）
+    window.__SNAIL_AI_TOKEN__ = trustedCredential;
+
+    // 3. 读取嵌入模式配置（由后端注入）
+    const embedConfig = window.__SNAIL_AI_EMBED_CONFIG__;
+    if (embedConfig.enabled) {
+        document.body.classList.add('snail-embed-mode');
+        if (!embedConfig.showHeader) {
+            document.getElementById('snail-header').style.display = 'none';
+        }
+        if (!embedConfig.showSidebarUser) {
+            document.getElementById('snail-sidebar-user').style.display = 'none';
+        }
+        if (!embedConfig.showAgentMarket) {
+            document.getElementById('snail-agent-market').style.display = 'none';
+        }
+        if (embedConfig.compactInput) {
+            document.getElementById('snail-chat-input').classList.add('compact');
+        }
+    }
+
+    // 4. 使用 openId 初始化用户会话
+    SnailAI.init({ openId, token: trustedCredential });
+
+    // 5. 加载智能体列表和对话历史
+    SnailAI.loadAgents();
+    SnailAI.loadConversations();
+})();</code></pre>
+
+<h3>环节 10-11：Chat API 的转发路径</h3>
+
+<p>用户发送消息后，Snail AI Chat 前端 JS 发起请求：</p>
+
+<pre><code>POST /api/snail/chat/agent/{agentId}/chat/stream
+Headers:
+  Authorization: Bearer &lt;trustedCredential&gt;  ← 嵌入模式的特殊处理
+  Content-Type: application/json
+Body:
+  { message: "...", conversationId: "..." }</code></pre>
+
+<p>请求到达 <code>SnailAiChatGatewayController</code> → 验证 token → 通过 gRPC 转发到 Snail AI Server → Server 执行 Agent 推理 → 通过 gRPC Stream 返回结果 → Controller 转为 SSE 流返回前端。</p>
+
+<h2>三、免登入机制的五层安全保障</h2>
+
+<p>尽管 <code>/snail-chat/**</code> 被排除在 Sa-Token 拦截之外，免登入并非「完全不设防」。系统在五个层面提供了安全保障：</p>
+
+<table>
+<tr><th>层次</th><th>机制</th><th>防护目标</th></tr>
+<tr>
+  <td>1. 页面级</td>
+  <td>Vue 端只在用户登录后才调用 <code>loadChat()</code>，未登录用户无法通过 RuoYi 菜单进入 AI Chat 页面</td>
+  <td>防止匿名用户直接访问 iframe 嵌入页</td>
+</tr>
+<tr>
+  <td>2. URL 级</td>
+  <td><code>trustedCredential</code>（JWT）作为 URL 参数，具备时效性（JWT 有过期时间）</td>
+  <td>限制凭证泄露后的有效窗口期</td>
+</tr>
+<tr>
+  <td>3. SDK 内部认证</td>
+  <td><code>SnailAiChatGatewayController</code> 内部独立验证 token 有效性（通过 Snail AI Server 的验证接口）</td>
+  <td>防止伪造或过期的 token 被使用</td>
+</tr>
+<tr>
+  <td>4. 用户身份绑定</td>
+  <td><code>openId</code> 必须与 <code>trustedCredential</code> 对应的用户一致（SDK 验证此绑定关系）</td>
+  <td>防止用户 A 的 token 操作用户 B 的数据</td>
+</tr>
+<tr>
+  <td>5. HTTPS 传输</td>
+  <td>生产环境应强制 HTTPS，防止 URL 参数在网络中被窃听</td>
+  <td>防止中间人攻击截获 URL 参数</td>
+</tr>
+</table>
+
+<div class="side">
+💡 <b>设计权衡</b>：如果完全不用免登机制，Snail AI Chat 页面需要用户重新输入账号密码——这对于已登录 RuoYi 的用户来说体验极差。免登机制用「暴露 token 在 URL」的代价换来了「无缝单点登录」的体验。这是一种有意识的<b>安全 vs 体验权衡</b>，适合企业内部系统环境。
+</div>
+
+<h2>四、为什么 React 端不需要这一切？</h2>
+
+<p>对比 React 端的实现：</p>
+
+<pre><code>// React 端（src/pages/ai/chat/index.tsx）
+// 没有 iframe，没有 URL 参数传 token，没有 embed 配置
+// 直接通过 Axios 拦截器在请求头中带 JWT，调用 /api/snail/chat/** 接口
+// 然后自己用 @ant-design/x 渲染 Chat UI</code></pre>
+
+<p>React 端不经过 iframe 嵌入，也不经过 <code>/snail-chat/**</code> 路径放行——它始终在 RuoYi 的认证体系内运行。每个 API 请求都通过标准的 Axios 拦截器携带 <code>Authorization</code> 头，走到正常的 Sa-Token 校验链路。</p>
+
+<p>这就是两种技术路线最根本的差异：<b>iframe 嵌入需要「跳出」RuoYi 的认证体系再「桥接」回来，而原生组件始终在体系内。</b></p>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. registerCurrentSnailUser() 调用的是哪个后端接口？返回什么关键数据？</p>
+<span class="opt">A. GET /snail-ai/user/info，返回用户详细信息</span>
+<span class="opt">B. POST /snail-ai/user/register，返回 Snail AI 用户的 openId</span>
+<span class="opt">C. POST /api/snail/chat/login，返回 chat session token</span>
+<span class="opt">D. GET /snail-ai/agent/list，返回智能体列表</span>
+<details><summary>看答案</summary><b>B</b>。<code>POST /snail-ai/user/register</code> 将 RuoYi 用户 ID 映射为 Snail AI 的 <code>openId</code>，这是身份桥接的核心步骤。该接口是幂等的——重复调用不会重复创建用户。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. /snail-chat/** 被排除在 Sa-Token 拦截之外，那安全性如何保证？</p>
+<span class="opt">A. 没有任何安全保障，存在安全漏洞</span>
+<span class="opt">B. 由 SnailAiChatGatewayController 内部独立验证 URL 中的 trustedCredential（JWT），并通过 openId 绑定用户身份</span>
+<span class="opt">C. 由 Nginx 反向代理提供安全防护</span>
+<span class="opt">D. 由浏览器的同源策略（CORS）提供安全防护</span>
+<details><summary>看答案</summary><b>B</b>。SDK 的 Chat Gateway Controller 在拦截器放行后自行承担认证职责——它验证 URL 参数中的 JWT 有效性，并校验 openId 与 token 的用户一致性。这是一种「分层安全」设计：外层放行，内层验证。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. trustedCredential 参数的值是什么？为什么这样设计？</p>
+<span class="opt">A. 随机生成的 UUID，用于追踪会话</span>
+<span class="opt">B. Snail AI Server 的 API Key，用于 SDK 认证</span>
+<span class="opt">C. RuoYi 的 Sa-Token JWT，用于 Snail AI Chat 前端在调用 /api/snail/chat/** 接口时携带认证</span>
+<span class="opt">D. Base64 编码的用户名和密码组合</span>
+<details><summary>看答案</summary><b>C</b>。<code>trustedCredential</code> = RuoYi 登录 JWT。设计意图：iframe 内的 Chat 页面运行在 Snail AI SDK 的上下文中，不共享 RuoYi 的 Cookie/LocalStorage，无法自动获取认证 token。通过 URL 参数显式传递，iframe 内的 JS 可以读取并使用它来认证后续 API 请求。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：对比阅读 <code>plus-ui-vue/src/views/ai/chat/index.vue</code>（82 行嵌入实现）和 <code>SnailAiController.java</code>（73 行身份桥接控制器），再查看 <code>ruoyi-admin/src/main/resources/application.yml</code> 的 <code>security.excludes</code> 配置段，验证 <code>/snail-chat/**</code> 的放行规则。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 trustedCredential 过期了，iframe 内的 Chat 页面会发生什么？」「怎么实现 trustedCredential 的自动刷新？」「React 端能否也使用这种免登机制？」下一课将深入 SnailAiChatGatewayController 的 API 转发机制。</div>
+
+<div class="nav">课程 0006 / ruoyi-ai 模块讲解 · <a href="0005.html">← 上一课：chat.ui.embed 配置溯源</a> · <a href="0007.html">下一课：API 转发到 SDK Controller 的机制 →</a></div>
+
+</body>
+</html>

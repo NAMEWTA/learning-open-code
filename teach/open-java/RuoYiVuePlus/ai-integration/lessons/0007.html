@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课 · API 转发到 SDK Controller 的完整机制</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .info { background: #f0f9ff; border-left: 3px solid #1d6fd6; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 7 课 · API 转发到 SDK Controller 的完整机制 <span class="tag">架构核心</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标（对应使命 Success #2、#4、#6 的深层延伸）</b>：学完你能讲清 <code>@EnableSnailAiAgent</code> 注解如何将 SDK JAR 包中的 <code>SnailAiChatGatewayController</code> 注册到 Spring 容器，理解 <code>@RestControllerAdvice(assignableTypes = ...)</code> 限定异常处理器的精妙设计，并能画出从 HTTP 请求 → SDK Controller → gRPC → Snail AI Server 的完整数据流转图。
+</div>
+
+<p>前面两课我们分别讲了 YAML 配置溯源和 iframe 嵌入流程。这一课深入到整个架构的<b>脊梁骨</b>——SDK 的 Controller 是如何被注册到 Spring 容器中的？HTTP 请求是如何转发到 SDK 内部逻辑的？为什么需要一套独立的异常处理体系？</p>
+
+<h2>一、SDK Controller 注册机制：@EnableSnailAiAgent 的秘密</h2>
+
+<h3>1.1 核心入口：SnailAiConfig</h3>
+
+<p>一切从 RuoYi 项目中唯一与 Snail AI 自动配置相关的 Java 文件开始：</p>
+
+<pre><code>// ruoyi-common-ai/src/main/java/.../config/SnailAiConfig.java（仅 16 行！）
+@AutoConfiguration                                           // ① Spring Boot 自动配置
+@ConditionalOnProperty(prefix = "snail-ai", name = "enabled", havingValue = "true") // ② 条件装配
+@EnableSnailAiAgent                                          // ③ 激活 Agent 客户端
+@EnableSnailAiOpenApi                                        // ④ 激活 OpenAPI 客户端
+public class SnailAiConfig {
+    // 空的！没有任何代码
+}</code></pre>
+
+<p>这个 16 行的类是整个 ruoyi-ai 模块的<b>总闸门</b>。它做了什么？</p>
+
+<ol>
+  <li><code>@AutoConfiguration</code>：通过 <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> 文件被 Spring Boot 自动发现和加载</li>
+  <li><code>@ConditionalOnProperty</code>：只有 <code>snail-ai.enabled=true</code> 时才生效——这就是「可拔插」的关键</li>
+  <li><code>@EnableSnailAiAgent</code>：触发 Snail AI SDK 的 Agent 自动配置，注册 <code>SnailAiChatGatewayController</code> 及其他 Agent 相关 Bean</li>
+  <li><code>@EnableSnailAiOpenApi</code>：触发 OpenAPI 客户端自动配置，注册 <code>OpenApiUserClient</code> 等 HTTP 客户端 Bean</li>
+</ol>
+
+<h3>1.2 @EnableSnailAiAgent 注解的内部机制</h3>
+
+<p><code>@EnableSnailAiAgent</code> 定义在 <code>snail-ai-agent-starter</code> JAR 包中（注意：不是 <code>snail-ai-agent-chat-starter</code>）。虽然我们看不到它的完整源码（v1.0.0 的 JAR 未下载到本地），但通过 Spring Boot 的 <code>@EnableXxx</code> 注解惯例，它的实现模式是标准的：</p>
+
+<pre><code>// @EnableSnailAiAgent 注解的典型实现（推断，基于 Spring Boot 惯例）
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@Import(SnailAiAgentConfiguration.class)  // ← 核心：导入配置类
+public @interface EnableSnailAiAgent {
+}
+
+// SnailAiAgentConfiguration（SDK 内部配置类）
+@Configuration
+@ComponentScan("com.aizuda.snail.ai.agent.chat.starter")  // 扫描 SDK 包
+public class SnailAiAgentConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public SnailAiChatGatewayController snailAiChatGatewayController(...) {
+        // 注册 Chat Gateway Controller Bean
+        return new SnailAiChatGatewayController(...);
+    }
+
+    // 同时注册：
+    // - gRPC 客户端（连接到 Snail AI Server）
+    // - Chat Stream 处理器
+    // - 会话管理器
+    // - Token 验证器
+    // ...
+}</code></pre>
+
+<div class="info">
+🔑 <b>Spring Boot 的 @EnableXxx 模式</b>：<code>@EnableXxx</code> 注解通常配合 <code>@Import</code> 导入一个配置类，该配置类通过 <code>@Bean</code> 方法或 <code>@ComponentScan</code> 将 SDK JAR 包中的类注册为 Spring Bean。这是一种「声明式激活」模式——只需在任意配置类上加一个注解，就能将整个 SDK 的能力注入 Spring 容器。
+</div>
+
+<h3>1.3 路径注册的发生时机</h3>
+
+<p><code>SnailAiChatGatewayController</code> 是标准的 Spring MVC <code>@RestController</code>，它通过 <code>@RequestMapping</code> 声明路由：</p>
+
+<pre><code>// SnailAiChatGatewayController（SDK JAR 内部，推断）
+@RestController
+public class SnailAiChatGatewayController {
+
+    // 返回 Chat UI 的 HTML 页面
+    @GetMapping("/snail-chat/")
+    public ModelAndView chatPage() { ... }
+
+    // Chat API 接口
+    @PostMapping("/api/snail/chat/agent/{agentId}/chat/stream")
+    public SseEmitter chatStream(@PathVariable String agentId, ...) { ... }
+
+    @PostMapping("/api/snail/chat/agent/{agentId}/chat/sync")
+    public Result&lt;ChatResponse&gt; chatSync(@PathVariable String agentId, ...) { ... }
+
+    // 智能体相关
+    @GetMapping("/api/snail/chat/agent/list")
+    public Result&lt;List&lt;AgentVO&gt;&gt; agentList() { ... }
+
+    // 对话管理
+    @GetMapping("/api/snail/chat/conversation/list")
+    public Result&lt;List&lt;ConversationVO&gt;&gt; conversationList(...) { ... }
+
+    @PostMapping("/api/snail/chat/conversation")
+    public Result&lt;ConversationVO&gt; createConversation(...) { ... }
+
+    // ... 更多端点
+}</code></pre>
+
+<p>当 Spring Boot 扫描到这个 Controller 并注册后，<code>AllUrlHandler</code>（第 3 课已介绍）会自动收集它的所有 <code>@RequestMapping</code> URL，纳入 Sa-Token 的 URL 匹配范围——但因为 <code>/snail-chat/**</code> 和 <code>/api/snail/chat/**</code> 在 <code>security.excludes</code> 中，这些路径不会被 SaInterceptor 拦截。</p>
+
+<h2>二、双异常处理体系：为什么 Snail AI 需要独立的异常处理器？</h2>
+
+<h3>2.1 问题：两种不兼容的响应格式</h3>
+
+<table>
+<tr><th>响应格式</th><th>来源</th><th>结构</th><th>典型 JSON</th></tr>
+<tr>
+  <td>RuoYi <code>R&lt;T&gt;</code></td>
+  <td><code>ruoyi-common-core</code></td>
+  <td><code>{code, msg, data}</code></td>
+  <td><code>{"code":200,"msg":"操作成功","data":{...}}</code></td>
+</tr>
+<tr>
+  <td>Snail AI <code>Result&lt;T&gt;</code></td>
+  <td><code>snail-ai-commons-core</code></td>
+  <td><code>{status, message, data}</code></td>
+  <td><code>{"status":1,"message":"OK","data":{...}}</code></td>
+</tr>
+</table>
+
+<p>如果 <code>SnailAiChatGatewayController</code> 抛出的异常被 RuoYi 的全局异常处理器（<code>GlobalExceptionHandler</code>）捕获，返回的将是 <code>R.fail("...")</code> 格式——即 <code>{"code":500,"msg":"...","data":null}</code>。但 Chat 前端（无论是 iframe 内的 Snail AI 原生 UI 还是 React 端的 normalize 函数）期望的是 <code>Result</code> 格式（<code>{"status":5001,"message":"...","data":null}</code>）。格式不匹配会导致前端解析失败。</p>
+
+<h3>2.2 解决方案：assignableTypes 限定作用域</h3>
+
+<p>RuoYi 的解决方案极其精巧——使用 <code>@RestControllerAdvice</code> 的 <code>assignableTypes</code> 属性来限定异常处理器的作用范围：</p>
+
+<pre><code>// SnailAiChatExceptionHandler.java（完整 124 行）
+@Slf4j
+@Order(Ordered.HIGHEST_PRECEDENCE)                               // ① 最高优先级
+@RestControllerAdvice(assignableTypes = SnailAiChatGatewayController.class) // ② 限定作用域
+public class SnailAiChatExceptionHandler {
+
+    private static final int AUTHENTICATION_ERROR_STATUS = 5001;
+
+    @ExceptionHandler(SnailAiAuthenticationException.class)      // ③ 认证异常
+    public Result&lt;Void&gt; handleAuthenticationException(SnailAiAuthenticationException e) {
+        return Result.fail(AUTHENTICATION_ERROR_STATUS, "认证失败，请重新登录");
+    }
+
+    @ExceptionHandler(BaseSnailAiException.class)                // ④ SDK 基础异常
+    public Result&lt;Void&gt; handleSnailAiException(BaseSnailAiException e) {
+        return Result.fail(defaultMessage(e, "AI 服务请求失败"));
+    }
+
+    @ExceptionHandler(ModelCallException.class)                  // ⑤ 模型调用异常
+    public Result&lt;Void&gt; handleModelCallException(ModelCallException e) {
+        return Result.fail(defaultMessage(e, "模型调用失败"));
+    }
+
+    @ExceptionHandler({BindException.class, ...})                // ⑥ 参数校验异常
+    public Result&lt;Void&gt; handleValidationException(Exception e) { ... }
+
+    @ExceptionHandler(Exception.class)                           // ⑦ 兜底异常
+    public Result&lt;Void&gt; handleException(Exception e) {
+        return Result.fail("AI 服务异常，请稍后再试");
+    }
+}</code></pre>
+
+<div class="step"><span class="num">🔬</span><b>关键机制拆解</b>：
+<br>1. <code>@Order(HIGHEST_PRECEDENCE)</code>：确保此异常处理器优先于 RuoYi 的 <code>GlobalExceptionHandler</code> 执行
+<br>2. <code>assignableTypes = SnailAiChatGatewayController.class</code>：<b>只处理来自 SDK Controller 的异常</b>，不影响 RuoYi 其他 Controller 的异常处理
+<br>3. 所有方法返回 <code>Result&lt;Void&gt;</code>（Snail AI 格式），而非 <code>R&lt;Void&gt;</code>（RuoYi 格式）</div>
+
+<h3>2.3 为什么限定了 assignableTypes？</h3>
+
+<p>如果没有 <code>assignableTypes</code> 限定，<code>@Order(HIGHEST_PRECEDENCE)</code> 会让这个异常处理器覆盖 RuoYi 所有 Controller 的异常处理——其他业务模块（如 <code>ruoyi-system</code>、<code>ruoyi-workflow</code>）的异常也会被转为 <code>Result</code> 格式，破坏前端的响应解析。</p>
+
+<div class="side">
+💡 <b>设计模式：责任域隔离</b><br>
+<code>@RestControllerAdvice(assignableTypes = ...)</code> 实现了「按控制器类型隔离异常处理」。这是 Spring MVC 中一个容易被忽视但极其强大的特性——它允许多个 <code>@ControllerAdvice</code> 共存于同一应用中，各自负责不同「域」的异常处理，互不干扰。这比在单个全局异常处理器中写大量 <code>if (exceptionFromSnailAI) ... else ...</code> 分支要清晰得多。
+</div>
+
+<h2>三、请求转发的完整数据流</h2>
+
+<p>以一个 Chat 流式对话请求为例，追踪从浏览器到 Snail AI Server 再返回的完整路径：</p>
+
+<pre><code>┌─────────────────────────────────────────────────────────────────┐
+│                        RuoYi Admin Process (:8080)               │
+│                                                                   │
+│  ① 浏览器发起                                                      │
+│     POST /api/snail/chat/agent/42/chat/stream                    │
+│     Header: Authorization: Bearer &lt;JWT or trustedCredential&gt;     │
+│     Body: { "message": "你好", "conversationId": "c001" }        │
+│     │                                                             │
+│     ▼                                                             │
+│  ② Sa-Token 拦截器                                                │
+│     匹配 /api/snail/chat/** → 在 security.excludes 中             │
+│     → 跳过 StpUtil.checkLogin()                                  │
+│     │                                                             │
+│     ▼                                                             │
+│  ③ SnailAiChatGatewayController.chatStream()                     │
+│     a. 从 Request 中提取 token（Header 或 Query 参数）            │
+│     b. 调用 SDK 内部 TokenValidator 验证 token                    │
+│        → 通过 OpenApiUserClient 验证 token 对应的 openId         │
+│     c. 构造 gRPC ChatDispatchRequest                              │
+│     │                                                             │
+│     ▼                                                             │
+│  ④ gRPC Client Stub                                              │
+│     .chatStream(dispatchRequest)                                 │
+│     │                                                           │
+│     │  ╔═══════════════════════ gRPC ═══════════════════════╗    │
+│     │  ║                     (双向流)                       ║    │
+│     │  ╚════════════════════════════════════════════════════╝    │
+│     ▼                                                             │
+│                                                                   │
+│  ┌──────────────────── Snail AI Server (:8900) ────────────────┐ │
+│  │                                                               │ │
+│  │  ⑤ gRPC Server Handler                                       │ │
+│  │     → 反序列化 ChatDispatchRequest                           │ │
+│  │     → 查找 Agent 配置（agentId=42）                          │ │
+│  │     → 加载 LLM 模型配置                                       │ │
+│  │     │                                                         │ │
+│  │     ▼                                                         │ │
+│  │  ⑥ Agent Chain 执行（责任链模式）                            │ │
+│  │     MemoryHandler → SkillHandler → RAGHandler → LLMHandler   │ │
+│  │     │                                                         │ │
+│  │     ▼                                                         │ │
+│  │  ⑦ LLM 调用（OpenAI/Ollama/...)                              │ │
+│  │     → 流式返回 tokens                                         │ │
+│  │     │                                                         │ │
+│  │     ▼                                                         │ │
+│  │  ⑧ gRPC Stream Observer.onNext(token)                        │ │
+│  │     → 逐 token 推送给客户端                                   │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│     │                                                             │
+│     ▼                                                             │
+│  ⑨ gRPC Stream Observer.onNext(token) 回调                       │
+│     → 将 token 封装为 SSE 事件                                    │
+│     → SseEmitter.send(SseEmitter.event().name("message").data(..))│
+│     │                                                             │
+│     ▼                                                             │
+│  ⑩ 浏览器 EventSource.onmessage                                  │
+│     → receive: event:message / data:{"content":"你"}             │
+│     → 累加到 AI 消息气泡中渲染                                    │
+│     ...                                                          │
+│     → receive: event:done / data:{"status":"completed"}          │
+│     → 对话结束，刷新对话列表                                      │
+└─────────────────────────────────────────────────────────────────┘</code></pre>
+
+<div class="side">
+💡 <b>为什么用 gRPC 而不是 HTTP？</b><br>
+gRPC 基于 HTTP/2 的双向流（Bidirectional Streaming）是天生的流式通信方案。Chat 场景下，用户消息是一个请求，AI 的回复是持续的 token 流——gRPC Stream 恰好匹配这种「一问多答」的通信模式。如果用纯 HTTP REST，要么用 SSE（需要单独建立长连接），要么用 WebSocket（需要额外的协议升级），都不如 gRPC 的单一连接双向流来得简洁。
+</div>
+
+<h2>四、异常在转发路径中的传播</h2>
+
+<p>异常可能发生在路径的任何节点，每个节点都有对应的处理：</p>
+
+<table>
+<tr><th>发生位置</th><th>异常类型</th><th>被谁捕获</th><th>返回格式</th></tr>
+<tr>
+  <td>SDK Token 验证</td>
+  <td><code>SnailAiAuthenticationException</code></td>
+  <td><code>SnailAiChatExceptionHandler</code></td>
+  <td><code>Result{status:5001}</code></td>
+</tr>
+<tr>
+  <td>gRPC 连接失败</td>
+  <td><code>BaseSnailAiException</code></td>
+  <td><code>SnailAiChatExceptionHandler</code></td>
+  <td><code>Result{status:..., message:"AI 服务请求失败"}</code></td>
+</tr>
+<tr>
+  <td>LLM 调用超时/报错</td>
+  <td><code>ModelCallException</code></td>
+  <td><code>SnailAiChatExceptionHandler</code></td>
+  <td><code>Result{status:..., message:"模型调用失败"}</code></td>
+</tr>
+<tr>
+  <td>请求参数校验失败</td>
+  <td><code>BindException</code> 等</td>
+  <td><code>SnailAiChatExceptionHandler</code></td>
+  <td><code>Result{status:..., message:"..."}</code></td>
+</tr>
+<tr>
+  <td>未预期的运行时异常</td>
+  <td><code>Exception</code></td>
+  <td><code>SnailAiChatExceptionHandler</code>（兜底）</td>
+  <td><code>Result{status:..., message:"AI 服务异常"}</code></td>
+</tr>
+</table>
+
+<p>注意：所有这些异常都以 <code>Result</code> 格式返回（<code>status</code> + <code>message</code>），与 Chat 前端期望的格式一致。如果这里的 <code>assignableTypes</code> 限定失效（比如写错了类名），异常会落到 RuoYi 的 <code>GlobalExceptionHandler</code> 中，返回 <code>R</code> 格式，导致 Chat 前端解析异常。</p>
+
+<h2>五、snail-ai.enabled=false 时发生了什么？</h2>
+
+<p>这是第 1-3 课已涉及的话题，但在本课的上下文中更清晰：</p>
+
+<pre><code>snail-ai:
+  enabled: false  ← 关闭 AI 功能</code></pre>
+
+<p>当 <code>enabled=false</code> 时：</p>
+
+<ol>
+  <li><code>@ConditionalOnProperty(prefix = "snail-ai", name = "enabled", havingValue = "true")</code> 阻止 <code>SnailAiConfig</code> 加载</li>
+  <li>没有 <code>SnailAiConfig</code>，就没有 <code>@EnableSnailAiAgent</code> 和 <code>@EnableSnailAiOpenApi</code></li>
+  <li>没有这两个注解，<code>SnailAiChatGatewayController</code> 和所有 SDK 相关 Bean 都不会被注册</li>
+  <li><code>AllUrlHandler</code> 不会收集到任何 <code>/snail-chat/**</code> 或 <code>/api/snail/chat/**</code> 路径</li>
+  <li><code>SnailAiChatExceptionHandler</code> 虽然会被加载（它没有 <code>@ConditionalOnProperty</code>），但因为 <code>assignableTypes = SnailAiChatGatewayController.class</code> 指向的类不存在于容器中，该异常处理器实际上是<b>空挂</b>——不会拦截任何异常</li>
+  <li><code>SnailAiController</code>（<code>/snail-ai/user/register</code>）也被 <code>@ConditionalOnProperty(prefix = "snail-ai.open-api", name = "enabled")</code> 阻止加载</li>
+</ol>
+
+<p><b>结果：整个 AI 模块零侵入——没有任何 AI 相关路由、没有任何 AI 相关 Bean、没有任何 AI 相关的异常处理逻辑。</b></p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. @EnableSnailAiAgent 注解的作用是什么？</p>
+<span class="opt">A. 在 YAML 中开启 snail-ai 配置项</span>
+<span class="opt">B. 通过 @Import 导入 SDK 的自动配置类，将 SnailAiChatGatewayController 等 SDK Bean 注册到 Spring 容器，激活 Agent 客户端能力</span>
+<span class="opt">C. 直接启动 Snail AI Server 进程</span>
+<span class="opt">D. 配置 gRPC 连接参数</span>
+<details><summary>看答案</summary><b>B</b>。<code>@EnableXxx</code> 是 Spring Boot 的声明式激活模式——通过 <code>@Import</code> 导入配置类，将 SDK JAR 中的 Bean 注册到容器。它是连接 RuoYi 配置和 SDK 能力的桥梁。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 SnailAiChatExceptionHandler 要使用 assignableTypes = SnailAiChatGatewayController.class？</p>
+<span class="opt">A. 为了提高异常处理的性能</span>
+<span class="opt">B. 为了限制该异常处理器只对 SDK Controller 异常生效，避免覆盖 RuoYi 其他模块的全局异常处理（R 格式 vs Result 格式隔离）</span>
+<span class="opt">C. 因为 Spring 要求每个 Controller 必须有独立的异常处理器</span>
+<span class="opt">D. 为了通过安全审计</span>
+<details><summary>看答案</summary><b>B</b>。没有 <code>assignableTypes</code> 限定，<code>@Order(HIGHEST_PRECEDENCE)</code> 会让这个异常处理器拦截所有 Controller 的异常，把 RuoYi 其他模块的异常也转为 <code>Result</code> 格式（<code>{status, message}</code>），破坏前端对 <code>R</code> 格式（<code>{code, msg}</code>）的解析。这是「责任域隔离」设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 当 snail-ai.enabled=false 时，SnailAiChatExceptionHandler 会被加载吗？它会产生什么影响？</p>
+<span class="opt">A. 不会被加载，因为类上有 @ConditionalOnProperty</span>
+<span class="opt">B. 会被加载但因为 assignableTypes 指向的类不在容器中，实际不拦截任何异常——零影响</span>
+<span class="opt">C. 会被加载并错误地拦截 RuoYi 其他 Controller 的异常</span>
+<span class="opt">D. 会导致应用启动失败</span>
+<details><summary>看答案</summary><b>B</b>。<code>SnailAiChatExceptionHandler</code> 类上没有 <code>@ConditionalOnProperty</code>，所以它会被 Spring 加载。但因为 <code>SnailAiChatGatewayController</code> 没有被注册到容器（被条件装配阻止了），<code>assignableTypes</code> 匹配不到任何 Controller，异常处理器成了空挂——不产生任何副作用。这是一个精妙的「被动安全」设计。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：先读 <code>SnailAiConfig.java</code>（仅 16 行，理解注解组合），再读 <code>SnailAiChatExceptionHandler.java</code>（124 行，理解 <code>assignableTypes</code> 限定和 <code>Result</code> 格式），最后回顾 <code>SecurityConfig.java</code>（180 行，理解 <code>excludePathPatterns</code> 如何让请求绕过拦截器到达 SDK Controller）。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果我想新增一个自定义的 Chat 端点，应该写在哪个模块？」「assignableTypes 可以指定多个 Controller 类吗？」「为什么不在 SnailAiChatExceptionHandler 上也加 @ConditionalOnProperty？」恭喜你完成了 ruoyi-ai 模块的 chat.ui.embed 专题三连课！建议回顾 <a href="0005.html">第 5 课</a> 和 <a href="0006.html">第 6 课</a> 巩固整个嵌入模式的完整认知。</div>
+
+<div class="nav">课程 0007 / ruoyi-ai 模块讲解 · <a href="0006.html">← 上一课：UI 页面嵌入与免登机制</a> · chat.ui.embed 专题完结 🎉</div>
+
+</body>
+</html>
