@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置热加载边界深潜参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; --restart:#b45309; --hot:#1b7f4a; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .tag-restart { color:var(--restart); font-weight:600; }
+    .tag-hot { color:var(--hot); font-weight:600; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>配置热加载边界深潜参考</h1>
+  <p class="lead">
+    L4 速查。短课入口：<a href="../lessons/0001-problem-frame.html">0001-problem-frame.html</a>。
+    L2 总览：<a href="../../slice-config-hot-reload/reference/config-hot-reload-flow-map.html">config-hot-reload-flow-map</a>。
+  </p>
+
+  <h2>注册表 API</h2>
+  <table>
+    <tr><th>符号</th><th>文件</th><th>用途</th></tr>
+    <tr><td><code>STARTUP_ONLY_PREFIX</code></td><td><code>reload_boundary.py</code></td><td>固定字符串 <code>"startup-only:"</code>，schema 与扫描器 pivot</td></tr>
+    <tr><td><code>STARTUP_ONLY_FIELDS</code></td><td><code>reload_boundary.py</code></td><td>顶层段 → reason 字典；机器可读单一事实来源</td></tr>
+    <tr><td><code>format_field_description()</code></td><td><code>reload_boundary.py</code></td><td>合成 <code>Field(description=…)</code>；未知段 <code>KeyError</code> 防漂移</td></tr>
+    <tr><td><code>is_startup_only_field()</code></td><td><code>reload_boundary.py</code></td><td>仅接受顶层路径，如 <code>"database"</code>，不接受 <code>"database.url"</code></td></tr>
+  </table>
+
+  <h2>签名与缓存</h2>
+  <table>
+    <tr><th>符号</th><th>行为</th></tr>
+    <tr><td><code>_get_config_signature(path)</code></td><td>返回 <code>(mtime, size, sha256_hex)</code>；读失败时 digest 为 <code>None</code></td></tr>
+    <tr><td><code>get_app_config()</code></td><td>比较路径 + 完整签名；变化则 <code>AppConfig.from_file()</code> 并更新模块级缓存</td></tr>
+    <tr><td><code>reload_app_config()</code></td><td>强制从磁盘重载（测试 / 显式刷新）</td></tr>
+    <tr><td><code>set_app_config()</code></td><td>注入自定义实例；跳过后续文件签名检测（<code>_app_config_is_custom</code>）</td></tr>
+    <tr><td><code>push_current_app_config()</code></td><td>ContextVar 运行时覆盖；优先于模块级单例</td></tr>
+  </table>
+  <p class="note">日志文案：<code>mtime: … -> …</code> 或 <code>content signature changed</code>。二者都伴随对象重载，但<strong>不</strong>代表启动单例已更新。</p>
+
+  <h2 id="registry">完整 <code>STARTUP_ONLY_FIELDS</code></h2>
+  <table>
+    <tr><th>段</th><th>启动捕获方（摘要）</th><th>在 AppConfig schema</th></tr>
+    <tr><td><code>database</code></td><td><code>init_engine_from_config()</code>，SQLAlchemy 连接池</td><td>是</td></tr>
+    <tr><td><code>checkpointer</code></td><td><code>make_checkpointer()</code>，含 SQLite WAL</td><td>是</td></tr>
+    <tr><td><code>run_events</code></td><td><code>make_run_event_store()</code> + <code>app.state.run_events_config</code></td><td>是</td></tr>
+    <tr><td><code>stream_bridge</code></td><td><code>make_stream_bridge()</code> 单例</td><td>是</td></tr>
+    <tr><td><code>sandbox</code></td><td><code>get_sandbox_provider()</code> 缓存 provider</td><td>是</td></tr>
+    <tr><td><code>log_level</code></td><td><code>apply_logging_level()</code> 仅 lifespan</td><td>是</td></tr>
+    <tr><td><code>logging</code></td><td><code>configure_logging()</code> + TraceMiddleware 构造时读 enhance</td><td>是</td></tr>
+    <tr><td><code>channels</code></td><td><code>start_channel_service()</code>，IM 客户端不重建</td><td><strong>否</strong>（仅 YAML 段）</td></tr>
+    <tr><td><code>channel_connections</code></td><td>连接仓库 + router 缓存 provider 配置</td><td>是</td></tr>
+    <tr><td><code>scheduler</code></td><td><code>ScheduledTaskService</code> 构造与后台 poller</td><td>是</td></tr>
+  </table>
+
+  <h2>lifespan 消费 <code>startup_config</code> 的顺序</h2>
+  <div class="diagram">lifespan(app)
+  ├─ startup_config = get_app_config()
+  ├─ configure_logging(startup_config)
+  ├─ tiktoken warm-up（读 startup_config.memory.token_counting）
+  ├─ langgraph_runtime(app, startup_config)
+  │     ├─ engine / checkpointer / store / RunManager
+  │     └─ stream_bridge 单例
+  ├─ start_channel_service(startup_config)
+  └─ ScheduledTaskService(..., poll/lease/max from startup_config.scheduler)</div>
+
+  <h2 id="false-positives">误报场景对照</h2>
+  <table>
+    <tr><th>现象</th><th>日志/检测</th><th>实际原因</th><th>处理</th></tr>
+    <tr><td>改了 sandbox 仍 local</td><td>有 reloading 日志</td><td><code>AppConfig</code> 新，provider 单例旧</td><td><span class="tag-restart">重启 Gateway</span></td></tr>
+    <tr><td>改了 database.backend 仍 memory</td><td>有 reloading 日志</td><td>engine 启动时创建</td><td><span class="tag-restart">重启</span></td></tr>
+    <tr><td>无 X-Trace-Id 响应头</td><td>可能无 signature 日志</td><td>TraceMiddleware 构造时读 enhance</td><td><span class="tag-restart">重启</span>；查 <code>logging</code> 段</td></tr>
+    <tr><td>改了 models.max_tokens 无效</td><td>无 reloading</td><td>文件未保存或路径错误</td><td>查 <code>DEER_FLOW_CONFIG_PATH</code>、YAML 语法</td></tr>
+    <tr><td>改了 memory 无新事实</td><td>有 reloading 日志</td><td>debounce + 异步 LLM，非边界</td><td>等待；见 memory 切片</td></tr>
+    <tr><td>改了 channels 凭证 bot 仍失败</td><td>有 reloading 日志</td><td>IM 客户端启动绑定</td><td><span class="tag-restart">重启</span></td></tr>
+  </table>
+
+  <h2>测试锚点</h2>
+  <table>
+    <tr><th>测试</th><th>锁定行为</th></tr>
+    <tr><td><code>test_reload_boundary.py</code></td><td>注册表 ↔ <code>AppConfig.model_fields</code> 双向一致；reason 非空</td></tr>
+    <tr><td><code>test_app_config_reload.py</code></td><td>mtime / digest / 路径变化触发重载；校验失败不污染单例</td></tr>
+    <tr><td><code>test_gateway_config_freshness.py</code></td><td>Gateway 请求路径读到新热加载字段</td></tr>
+  </table>
+
+  <h2>排障决策树</h2>
+  <div class="diagram">改 config.yaml 后行为不符
+  │
+  ├─ 顶层段 ∈ STARTUP_ONLY_FIELDS ?
+  │     ├─ 是 → <span class="tag-restart">重启 Gateway</span>（与有无 reloading 日志无关）
+  │     └─ 否 → 查 get_app_config 是否重载（日志 / 改热字段试探）
+  │               ├─ 未重载 → 路径、保存、YAML 校验
+  │               └─ 已重载仍异常 → 代码是否用 startup_config？或异步延迟？
+  │
+  └─ extensions_config.json → 另走 mtime；见 tools-mcp 模块</div>
+</main>
+</body>
+</html>

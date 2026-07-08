@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 TUI 结果渲染与 async widget 模块导览</title>
+  <link rel="stylesheet" href="../assets/module-tui-rendering.css">
+</head>
+<body>
+<main>
+  <h1>TUI 结果渲染与 async widget 模块导览</h1>
+  <p class="meta">学习目标：15 分钟内能读懂执行结果怎样被压缩成终端可读输出，以及后台 async run 怎样变成状态 widget。</p>
+
+  <h2>1. 两个入口</h2>
+  <p><code>open-ai-agent/pi-subagents/src/tui/render.ts</code> 不是执行器，它只把已有状态变成 TUI 组件。入口有两类：<code>renderSubagentResult</code> 处理 foreground tool result，它拿到 <code>Details</code> 和每个 child 的 <code>SingleResult</code>；<code>renderWidget</code> 处理 background async jobs，它拿到 <code>AsyncJobState[]</code>，再调用 <code>ctx.ui.setWidget</code>。后台数据来自 <code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code>，结果块接入点在 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code>。</p>
+  <div class="flow">
+    <div><strong>foreground result</strong>：tool result 已经回来，渲染器判断 single/multi、compact/expanded、running/done/failed。</div>
+    <div><strong>background widget</strong>：async tracker 轮询或接收事件，转换为 job state，widget 只展示当前摘要。</div>
+  </div>
+
+  <h2>2. 结果块先判断“显示模式”</h2>
+  <p>读 <code>renderSubagentResult</code> 时，先不要追每个字段。它的分支顺序是：没有 details 就显示普通文本；single 且一个 result 时走单结果；否则走 multi-result。每条路径又由 <code>expanded</code> 决定是紧凑摘要还是完整详情。紧凑单结果最终会调用 <code>resultStatusLine</code>，把错误、暂停、detached、验收状态、空输出压成一行。</p>
+  <pre><code>function resultStatusLine(result, output) {
+  if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
+  if (result.interrupted) return "Paused";
+  if (result.exitCode !== 0) return `Error: ${result.error ?? firstOutputLine(output)}`;
+  if (result.acceptance?.status && result.acceptance.status !== "not-required") {
+    return `Done · acceptance: ${result.acceptance.status}`;
+  }
+  if (hasEmptyTextOutputWithoutOutputTarget(result.task, output)) return "Done (no text output)";
+  return "Done";
+}</code></pre>
+  <p>这段逻辑的价值是“少而稳”：终端第一屏先告诉用户状态，输出预览、session、artifact 路径再作为次级信息出现。</p>
+
+  <h2>3. async widget 先排序，再降级</h2>
+  <p>async widget 的思路相反：它面对的是一组仍在变化的 jobs。<code>buildWidgetLines</code> 会把 running 放前面，queued 汇总在中间，finished 放后面；单 job 会走 <code>buildSingleWidgetLines</code>，多 job 会显示 <code>Async agents · background</code>。如果终端空间不足，<code>fitAdaptiveWidgetLines</code> 会从 full 降到 progressive，再极限降到 single-line，并用固定 session 高度避免 UI 抖动。</p>
+  <div class="decision">
+    <div><strong>full</strong><br>行数够时展示完整 job 与 step 摘要。</div>
+    <div><strong>progressive</strong><br>行数拥挤时优先保留 active job，并显示隐藏计数。</div>
+    <div><strong>single-line</strong><br>几乎没有剩余行时只保留总状态，例如 running/queued/failed。</div>
+  </div>
+  <p>状态文案不全写在 widget 里。<code>open-ai-agent/pi-subagents/src/shared/status-format.ts</code> 提供 <code>formatActivityLabel</code>、<code>aggregateStepStatus</code>、<code>formatParallelOutcome</code>，所以 result 与 widget 对 “active 2s ago”“1 agent running · 1/3 done” 这类文案保持一致。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="callout check">
+    <p><strong>问题：</strong>如果一个 single subagent 正在运行，并且用户没有展开详情，你应该先去哪个函数找“当前 tool + live detail 提示 + output 路径”的显示逻辑？</p>
+    <p><strong>参考答案：</strong>先看 <code>open-ai-agent/pi-subagents/src/tui/render.ts</code> 的 <code>renderSingleCompact</code>。它在 running 分支里调用 <code>compactCurrentActivity</code>，再显示 live detail hint 和 artifact output 路径。若是后台 async widget 的单 job，则看 <code>buildSingleWidgetLines</code> 与 <code>foregroundStyleWidgetStepLines</code>。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/src/tui/render.ts</code>、<code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/status-format.ts</code>。分支矩阵、helper 角色和测试证据见 <a href="../reference/tui-rendering-overview.html">TUI 渲染参考页</a>。如果某个状态显示不符合直觉，可以继续向 agent 追问具体分支。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue Provider 与日历集成模块参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · Issue Provider、Calendar、Time Block、插件 provider 速查</p>
+    <h1>Issue Provider、日历集成与外部工作项模块参考</h1>
+
+    <h2>模块职责</h2>
+    <p>本模块负责把外部工作系统中的 issue、VTODO、calendar event 和插件工作项统一接入 super-productivity 的任务域。它的边界不是“每个 provider 的 API 细节”，而是五个稳定问题：配置在哪里、如何搜索/导入、如何刷新已有任务、哪些字段能写回远端、日历事件和 time block 是否走独立链路。</p>
+    <p>架构位置：它位于 <code>src/app/features/issue/</code>、<code>src/app/features/calendar-integration/</code>、<code>src/app/plugins/issue-provider/</code> 和少量 Electron IPC 之间，最终依赖 <code>TaskService</code>、<code>ProjectService</code>、<code>WorkContextService</code> 把外部工作项落到本地任务。</p>
+
+    <h2>源码地图</h2>
+    <div class="filetree">src/app/features/
+├── issue/                         ← provider 配置、接口、搜索、导入、轮询、内容展示
+│   ├── issue.model.ts             ← provider key、配置实体、插件/迁移 provider 类型
+│   ├── issue-service-interface.ts ← provider 必须实现的统一合同
+│   ├── issue.service.ts           ← 搜索、导入、刷新、issue-to-task 映射主门面
+│   ├── store/                     ← issueProvider NgRx store 与轮询 effects
+│   ├── providers/                 ← 内置 provider 实现
+│   └── two-way-sync/              ← 写回远端、自动创建、远端删除 adapter 层
+├── calendar-integration/          ← iCal/插件日历读取、banner、自动导入、time block
+└── tasks/                         ← 外部工作项最终写入的 Task 实体</div>
+
+    <h2>入口与接口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>职责</th><th>读法</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>provider 类型</td><td><code>src/app/features/issue/issue.model.ts</code></td><td>声明内置 key、迁移到插件的 key、<code>plugin:*</code> key、<code>IssueProvider</code> 配置实体。</td><td>先确认 provider 是内置实现还是插件实现。</td></tr>
+        <tr><td>provider 合同</td><td><code>src/app/features/issue/issue-service-interface.ts</code></td><td>定义 <code>isEnabled()</code>、<code>testConnection()</code>、<code>getById()</code>、<code>searchIssues()</code>、<code>getAddTaskData()</code>、<code>getFreshDataForIssueTasks()</code>、<code>getNewIssuesToAddToBacklog()</code> 等方法。</td><td>新增 provider 或判断缺能力时先看这里。</td></tr>
+        <tr><td>共享基类</td><td><code>src/app/features/issue/base/base-issue-provider.service.ts</code></td><td>提供配置读取、按 id 获取、搜索、更新时间戳比较、批量刷新默认实现。</td><td>provider 只覆写差异；Calendar、CalDAV、Plainspace 会改刷新逻辑。</td></tr>
+        <tr><td>provider 配置读取</td><td><code>src/app/features/issue/issue-provider.service.ts</code></td><td>从 NgRx store 按 id/key 读取单个 provider 配置。</td><td>远端请求前通常先经过这里。</td></tr>
+        <tr><td>issue 门面</td><td><code>src/app/features/issue/issue.service.ts</code></td><td>搜索所有启用 provider、导入 issue 成任务、刷新 issue task、查链接、查附件、插件 adapter 分发。</td><td>追链路时优先从这里看任务字段如何落地。</td></tr>
+        <tr><td>配置 store</td><td><code>src/app/features/issue/store/issue-provider.actions.ts</code><br><code>src/app/features/issue/store/issue-provider.reducer.ts</code><br><code>src/app/features/issue/store/issue-provider.selectors.ts</code></td><td>保存 provider 配置，创建/更新 action 带 <code>PersistentActionMeta</code>；reducer 迁移旧 GitHub/ClickUp/Gitea/Linear/Trello/Azure DevOps 配置到插件形态。</td><td>区分“配置同步”与“远端 issue 同步”。</td></tr>
+        <tr><td>backlog 拉新</td><td><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></td><td>根据 <code>isAutoAddToBacklog</code>、<code>defaultProjectId</code>、<code>pollingMode</code> 和 poll interval 拉新 issue 到 backlog。</td><td>只处理“还没有本地任务”的外部工作项。</td></tr>
+        <tr><td>已有任务刷新</td><td><code>src/app/features/issue/store/poll-issue-updates.effects.ts</code></td><td>按 provider 找已导入的 issue task，调用 <code>refreshIssueTasks()</code> 拉远端更新。</td><td>当前上下文 provider、always provider、Calendar/插件 provider 的取任务范围不同。</td></tr>
+        <tr><td>双向同步</td><td><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code></td><td>监听本地任务 action，按 adapter 推字段、自动创建远端 issue、删除远端 issue。</td><td>本地变更写回远端时从这里开始。</td></tr>
+        <tr><td>sync adapter</td><td><code>src/app/features/issue/two-way-sync/issue-sync-adapter.interface.ts</code><br><code>src/app/features/issue/two-way-sync/compute-push-decisions.ts</code></td><td>定义字段映射、方向、fetch/push/create/delete；用 baseline 判断本地改动能否推送。</td><td>看 <code>provider-changed</code>、<code>no-baseline</code>、<code>direction-skip</code> 三类跳过原因。</td></tr>
+        <tr><td>插件 provider</td><td><code>src/app/plugins/issue-provider/plugin-issue-provider-registry.service.ts</code><br><code>src/app/plugins/issue-provider/plugin-issue-provider-adapter.service.ts</code></td><td>注册插件 provider，并把插件定义适配成 <code>IssueServiceInterface</code> 和 sync adapter。</td><td>迁移 key 与 <code>plugin:*</code> key 都先查 registry。</td></tr>
+        <tr><td>日历读取</td><td><code>src/app/features/calendar-integration/calendar-integration.service.ts</code></td><td>读取 iCal 与插件 agenda provider，缓存、过滤、隐藏已处理事件。</td><td>Schedule/Agenda 视图需要事件列表时看这里。</td></tr>
+        <tr><td>日历自动导入</td><td><code>src/app/features/calendar-integration/store/calendar-integration.effects.ts</code></td><td>轮询当天事件、显示 banner、按配置自动导入当前日事件。</td><td>导入前会检查初始同步完成且不在 hydration sync window。</td></tr>
+        <tr><td>time block 写回</td><td><code>src/app/features/calendar-integration/time-block/time-block-sync.effects.ts</code></td><td>把本地 scheduled task 创建/更新/删除为插件日历 time block。</td><td>只适用于插件 provider 暴露 <code>timeBlock</code> 且启用 <code>isAutoTimeBlock</code>。</td></tr>
+        <tr><td>Electron Jira</td><td><code>electron/jira.ts</code><br><code>electron/ipc-handlers/jira.ts</code><br><code>src/app/features/issue/providers/jira/jira-api.service.ts</code></td><td>桌面端通过 IPC 代发 Jira 请求，支持代理、自签名证书和附件认证 header。</td><td>这是平台辅助，不是 provider 数据模型本身。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>内部分层</h2>
+    <pre class="diagram">配置层
+  IssueProviderActions / reducer / selectors
+  保存 provider id、key、enabled、defaultProjectId、pollingMode、默认标签、插件配置
+
+provider 适配层
+  IssueServiceInterface + BaseIssueProviderService
+  内置 provider common-interfaces 或 PluginIssueProviderAdapterService
+
+导入与刷新层
+  PollToBacklogEffects → getNewIssuesToAddToBacklog() → addTaskFromIssue()
+  PollIssueUpdatesEffects → getFreshDataForIssueTasks() → TaskService.update()
+
+写回层
+  IssueTwoWaySyncEffects → IssueSyncAdapterResolverService → computePushDecisions()
+  CalDAV / Plainspace 内置 adapter，插件 provider 动态生成 adapter
+
+日历层
+  CalendarIntegrationService → CalendarIntegrationEffects
+  TimeBlockSyncEffects → 插件 provider definition.timeBlock
+
+平台辅助层
+  electron/jira.ts + ipc-handlers/jira.ts 仅服务 Jira 桌面请求执行</pre>
+
+    <h2>provider 速查</h2>
+    <table>
+      <thead>
+        <tr><th>provider</th><th>当前形态</th><th>主要文件</th><th>特殊点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Jira</td><td>内置</td><td><code>src/app/features/issue/providers/jira/jira-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/jira/jira-api.service.ts</code><br><code>src/app/features/issue/providers/jira/jira-issue.effects.ts</code></td><td>支持搜索、JQL backlog 导入、工作日志、状态流转；Electron/扩展/直连 fallback 都在 API service 分支。</td></tr>
+        <tr><td>GitLab</td><td>内置</td><td><code>src/app/features/issue/providers/gitlab/gitlab-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/gitlab/gitlab-issue-map.util.ts</code><br><code>src/app/features/issue/providers/gitlab/gitlab-issue.effects.ts</code></td><td>issue id 使用 full reference；finish day 前可打开工时提交对话框。</td></tr>
+        <tr><td>CalDAV</td><td>内置</td><td><code>src/app/features/issue/providers/caldav/caldav-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/caldav/caldav-client.service.ts</code><br><code>src/app/features/issue/providers/caldav/caldav-sync-adapter.service.ts</code></td><td>VTODO 使用 etag/hash 判断更新；可导入 RELATED-TO 子任务；写回通过 sync adapter。</td></tr>
+        <tr><td>Calendar / iCal</td><td>内置 key 为 <code>ICAL</code></td><td><code>src/app/features/issue/providers/calendar/calendar-common-interfaces.service.ts</code><br><code>src/app/features/calendar-integration/calendar-integration.service.ts</code><br><code>src/app/features/calendar-integration/store/calendar-integration.effects.ts</code></td><td>读取 iCal event；all-day 映射到 <code>dueDay</code>，带时间事件映射到 <code>dueWithTime</code>；普通 iCal 读取为主。</td></tr>
+        <tr><td>OpenProject</td><td>内置</td><td><code>src/app/features/issue/providers/open-project/open-project-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/open-project/open-project-api.service.ts</code><br><code>src/app/features/issue/providers/open-project/open-project.effects.ts</code></td><td>支持 work package 映射、工时提交、状态流转。</td></tr>
+        <tr><td>Redmine</td><td>内置</td><td><code>src/app/features/issue/providers/redmine/redmine-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/redmine/redmine-api.service.ts</code><br><code>src/app/features/issue/providers/redmine/redmine.effects.ts</code></td><td>支持 issue 映射和完成时工时对话框。</td></tr>
+        <tr><td>Nextcloud Deck</td><td>内置</td><td><code>src/app/features/issue/providers/nextcloud-deck/nextcloud-deck-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/nextcloud-deck/nextcloud-deck-api.service.ts</code><br><code>src/app/features/issue/providers/nextcloud-deck/nextcloud-deck-issue.effects.ts</code></td><td>按 Deck card 模型映射为 issue task。</td></tr>
+        <tr><td>Plainspace</td><td>内置</td><td><code>src/app/features/issue/providers/plainspace/plainspace-common-interfaces.service.ts</code><br><code>src/app/features/issue/providers/plainspace/plainspace-api.service.ts</code><br><code>src/app/features/issue/providers/plainspace/plainspace-sync-adapter.service.ts</code></td><td>共享项目协作场景；确定性 task id；<code>dueWithTime</code> 写回 <code>scheduledAt</code>；安全移除不再分配给我的远端任务。</td></tr>
+        <tr><td>GitHub、ClickUp、Gitea、Linear、Trello、Azure DevOps</td><td>迁移到插件</td><td><code>src/app/features/issue/issue.model.ts</code><br><code>src/app/features/issue/store/issue-provider.reducer.ts</code><br><code>src/app/plugins/issue-provider/plugin-issue-provider-adapter.service.ts</code></td><td>key 仍合法，但旧配置会迁移成 <code>pluginId + pluginConfig</code>；具体行为由插件定义决定。</td></tr>
+        <tr><td>自定义插件 provider</td><td><code>plugin:*</code></td><td><code>src/app/plugins/issue-provider/plugin-issue-provider-registry.service.ts</code><br><code>src/app/plugins/issue-provider/plugin-issue-provider.model.ts</code></td><td>可声明搜索、backlog 导入、字段映射、agenda view、timeBlock、create/delete/update。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>链路判断表</h2>
+    <table>
+      <thead>
+        <tr><th>问题</th><th>先读入口</th><th>核心判断</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>为什么 provider 出现在设置里？</td><td><code>src/app/features/issue/issue.const.ts</code>、provider <code>*-cfg-form.const.ts</code>、插件 registry</td><td>内置 provider 来自 <code>ISSUE_PROVIDER_TYPES</code> 和 form map；插件 provider 来自 runtime 注册。</td></tr>
+        <tr><td>新远端 issue 为什么进 backlog？</td><td><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></td><td>需要启用、默认项目、自动 add to backlog、有效 poll interval；agenda view 插件不走这条。</td></tr>
+        <tr><td>已有 issue task 为什么标题/状态更新？</td><td><code>src/app/features/issue/store/poll-issue-updates.effects.ts</code></td><td>轮询取当前上下文、always 全局或 Calendar/插件全局任务，再调用 provider 的 fresh data 方法。</td></tr>
+        <tr><td>本地任务改动为什么写回远端？</td><td><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code></td><td>监听本地 task actions，字段必须在 adapter mapping 中且方向允许 push。</td></tr>
+        <tr><td>为什么没有写回？</td><td><code>src/app/features/issue/two-way-sync/compute-push-decisions.ts</code></td><td>常见原因是方向不允许、没有 baseline，或远端字段已变化导致 provider wins。</td></tr>
+        <tr><td>日历事件为什么显示但不变成任务？</td><td><code>src/app/features/calendar-integration/calendar-integration.service.ts</code></td><td>可能被正则过滤、已 linked、已 skip、已 hidden、reference calendar，或不在自动导入条件内。</td></tr>
+        <tr><td>本地 scheduled task 为什么出现在 Google Calendar 类日历？</td><td><code>src/app/features/calendar-integration/time-block/time-block-sync.effects.ts</code></td><td>只有插件 provider 支持 <code>timeBlock</code> 且配置开启 <code>isAutoTimeBlock</code> 才写回。</td></tr>
+        <tr><td>Jira 在浏览器/Electron 请求路径为何不同？</td><td><code>src/app/features/issue/providers/jira/jira-api.service.ts</code>、<code>electron/jira.ts</code></td><td>Electron 通过 preload IPC 到主进程 fetch；浏览器通常依赖扩展或 fallback。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>issue-to-task 映射规则</h2>
+    <table>
+      <thead>
+        <tr><th>字段来源</th><th>落地位置</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>provider <code>getAddTaskData()</code></td><td><code>Task</code> 部分字段</td><td>返回 <code>title</code>、<code>isDone</code>、<code>issueLastUpdated</code>、点数、附件数、due 字段、notes、baseline 等 provider 专属映射。</td></tr>
+        <tr><td><code>IssueService.addTaskFromIssue()</code></td><td>任务创建参数</td><td>补 <code>issueType</code>、<code>issueProviderId</code>、<code>issueId</code>、默认项目、默认标签、默认 note、backlog 或 Today 行为。</td></tr>
+        <tr><td>Calendar event</td><td><code>dueDay</code> 或 <code>dueWithTime</code></td><td>all-day event 映射到 <code>dueDay</code>，有具体时间的事件映射到 <code>dueWithTime</code>。</td></tr>
+        <tr><td>CalDAV VTODO</td><td><code>dueDay</code>、<code>dueWithTime</code>、deadline 字段</td><td>start/due 分别映射；etag/hash 用作更新时间标记。</td></tr>
+        <tr><td>Plainspace</td><td><code>isDone</code>、<code>title</code>、<code>dueWithTime</code>、baseline</td><td>远端 <code>scheduledAt</code> 进本地 <code>dueWithTime</code>，本地改动可推回远端。</td></tr>
+        <tr><td>插件 provider</td><td>基础 issue 字段 + fieldMappings</td><td>adapter 从插件定义提取 sync values，可按 direction 拉取 tag、due、title、done 等字段。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖</th><th>用途</th><th>证据入口</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>NgRx Store / Effects</td><td>保存 provider 配置、监听本地 task action、触发轮询和写回。</td><td><code>src/app/root-store/feature-stores.module.ts</code></td></tr>
+        <tr><td>RxJS</td><td>timer 轮询、context switch 重启、forkJoin 批量请求、effect side effect 管线。</td><td><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></td></tr>
+        <tr><td>TaskService / ProjectService / WorkContextService</td><td>创建任务、移入 backlog/Today、查当前上下文、查已存在 issue task。</td><td><code>src/app/features/issue/issue.service.ts</code></td></tr>
+        <tr><td>PluginIssueProviderRegistryService / PluginHttpService</td><td>把插件 provider 动态接入搜索、导入、字段同步、agenda view 和 time block。</td><td><code>src/app/plugins/issue-provider/plugin-issue-provider-registry.service.ts</code></td></tr>
+        <tr><td>SyncTriggerService / HydrationStateService</td><td>避免初始同步前或 hydration window 中自动导入日历事件，降低重复 CRT 冲突风险。</td><td><code>src/app/features/calendar-integration/store/calendar-integration.effects.ts</code></td></tr>
+        <tr><td>Electron IPC / node-fetch / session.webRequest</td><td>Jira 桌面端请求代理、代理感知 agent、自签名证书和附件认证 header。</td><td><code>electron/jira.ts</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>阅读示例：追一次 backlog 自动导入</h2>
+    <ol>
+      <li>在 <code>src/app/features/issue/store/poll-to-backlog.effects.ts</code> 找 <code>pollNewIssuesToBacklog$</code> 和 <code>pollNewIssuesToBacklogAlways$</code>，确认触发条件。</li>
+      <li>进入 <code>IssueService.checkAndImportNewIssuesToBacklogForProject()</code>，看它如何收集已有 issue id、调用 provider 的 <code>getNewIssuesToAddToBacklog()</code> 并过滤重复。</li>
+      <li>继续看 <code>IssueService.addTaskFromIssue()</code>，确认默认项目、默认标签、自动导入不继承当前 tag、Calendar/Plainspace 确定性 id、<code>dueDay</code> 与 <code>dueWithTime</code> 的处理。</li>
+      <li>如果 provider 是内置，跳到对应 <code>*-common-interfaces.service.ts</code>；如果是迁移 key 或 <code>plugin:*</code>，跳到 <code>PluginIssueProviderAdapterService</code>。</li>
+      <li>最后回到任务领域 reference，确认创建出的 <code>Task</code> 如何进入 Project、Tag、Today 或 backlog 视图。</li>
+    </ol>
+
+    <h2>维护边界</h2>
+    <table>
+      <thead>
+        <tr><th>改动类型</th><th>应放位置</th><th>不要误放</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>新增内置 provider 配置字段</td><td>provider model、默认配置、cfg form、<code>IssueProvider</code> 类型。</td><td>不要只改 UI form，store 类型和默认值也要跟上。</td></tr>
+        <tr><td>远端字段映射为任务字段</td><td>provider <code>getAddTaskData()</code> 或插件 fieldMappings。</td><td>不要在 polling effect 中硬编码 provider 字段。</td></tr>
+        <tr><td>拉新 issue 进 backlog</td><td>provider <code>getNewIssuesToAddToBacklog()</code> + 通用 PollToBacklogEffects。</td><td>不要在 provider-specific effects 里另起重复轮询。</td></tr>
+        <tr><td>本地字段写回远端</td><td>two-way-sync adapter 和 <code>computePushDecisions()</code>。</td><td>不要放进 <code>getFreshDataForIssueTask()</code>，那是拉远端变化。</td></tr>
+        <tr><td>日历事件显示/隐藏/自动导入</td><td><code>calendar-integration</code> 服务和 effects。</td><td>不要把 iCal 事件当普通 issue API 逐个 <code>getById()</code>。</td></tr>
+        <tr><td>Jira 桌面请求能力</td><td>Electron IPC 与 <code>jira-api.service.ts</code> executor 分支。</td><td>不要让主进程理解业务映射；它只代发请求和设置 header。</td></tr>
+      </tbody>
+    </table>
+
+    <p>配套短课：<a href="../lessons/0001-issue-integrations-module-tour.html">0001 Issue Provider 模块导览</a>。</p>
+  </article>
+</main>
+</body>
+</html>

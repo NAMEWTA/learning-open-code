@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 Gateway 的边界和入口</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5d6b78; --line:#d9e1e8; --soft:#f6f8fa; --accent:#1f6feb; --green:#1b7f4a; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#ffffff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    pre { margin:12px 0; }
+    pre.shell { padding:12px 14px; white-space:pre; overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#0f172a; color:#e2e8f0; font-family:"SF Mono",Consolas,monospace; font-size:.86rem; }
+    .endpoint { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 Gateway 的边界和入口</h1>
+  <p class="lede">学习目标：读完后，你能判断一个请求是否属于 Gateway 职责，知道入口在哪里，并能把 router、认证、CSRF、runtime 单例和 lead agent 接线放回同一张图。</p>
+
+  <h2>1. Gateway 在系统里的位置</h2>
+  <p>deer-flow 默认不是单独跑 LangGraph Server，而是让 <span class="where">backend/app/gateway/app.py</span> 创建 FastAPI 应用，并在同一个进程里接入 embedded agent runtime。它对应 <a href="../../00-overview/reference/00-overview.html">L0 总体架构图</a>里的 Gateway 层。nginx 的 <span class="endpoint">/api/langgraph/*</span> 只是改写到 Gateway 原生 <span class="endpoint">/api/*</span>，所以前端、IM channel 和兼容 LangGraph 的调用最终都会碰到这层外壳。</p>
+  <div class="diagram">Browser / IM / LangGraph-compatible client
+  ↓ nginx same-origin endpoint
+Gateway FastAPI app
+  ↓ middleware: auth、CSRF、CORS、trace
+router family: threads、runs、models、skills、uploads、memory
+  ↓ request dependencies from deps.py
+RunManager + StreamBridge + checkpointer + store
+  ↓
+lead_agent graph and deerflow harness</div>
+
+  <h2>2. app.py 负责四件事</h2>
+  <p>第一，启动时读取配置、配置日志、预热 token 计数、清理上传暂存文件。第二，进入 <span class="where">backend/app/gateway/deps.py</span> 的 <code>langgraph_runtime()</code>，把 <code>stream_bridge</code>、<code>checkpointer</code>、<code>store</code>、<code>run_manager</code>、thread store、feedback repo 等对象放到 <code>app.state</code>。第三，注册全局中间件：认证默认 fail-closed，CSRF 保护状态变更请求，CORS 只在显式 allowlist 时启用，trace 负责请求关联。第四，挂载所有 router，并提供公开的 <span class="endpoint">/health</span>。</p>
+  <div class="filetree">backend/app/gateway/
+├── app.py                 ← FastAPI app、lifespan、middleware、router 注册
+├── config.py              ← GATEWAY_HOST、GATEWAY_PORT、docs 开关
+├── deps.py                ← request 级依赖和 runtime 单例访问
+├── auth_middleware.py     ← session、internal token、auth-disabled 边界
+├── csrf_middleware.py     ← Double Submit Cookie 与 origin 检查
+├── routers/               ← HTTP API 家族，长清单见参考页
+└── auth/                  ← local、OIDC、JWT、用户仓储</div>
+
+  <h2>3. 对外接口先按家族看</h2>
+  <p>不要一上来背每个 endpoint。先把接口分成六组：运行主线是 <code>threads</code>、<code>thread_runs</code>、<code>runs</code>；能力配置是 <code>models</code>、<code>mcp</code>、<code>skills</code>、<code>agents</code>、<code>memory</code>；文件与结果是 <code>uploads</code>、<code>artifacts</code>；账户边界是 <code>auth</code>；集成入口是 <code>channels</code>、<code>github_webhooks</code>；观测和辅助是 <code>console</code>、<code>features</code>、<code>feedback</code>、<code>suggestions</code>。完整接口表放在 <a href="../reference/gateway-overview.html#router-map">Gateway 参考页</a>。</p>
+  <p>最小无认证调用是健康检查：</p>
+  <pre class="shell">curl -s http://localhost:8001/health
+# {"status":"healthy","service":"deer-flow-gateway"}</pre>
+  <p>除 <span class="endpoint">/health</span>、文档页、少量登录/注册/OAuth 和 webhook 外，业务 API 会受 <code>AuthMiddleware</code> 保护。状态变更请求还会受 <code>CSRFMiddleware</code> 校验；登录、注册、初始化这类首个 auth POST 会由中间件发放 <code>csrf_token</code> cookie。</p>
+
+  <h2>4. 你该如何继续读源码</h2>
+  <p>第一遍只读 <code>create_app()</code> 和 <code>lifespan()</code>，确认“启动建单例，路由按组挂载”。第二遍读 <code>deps.py</code> 的 getter，理解 router 为什么通过 request dependency 拿 runtime 对象，而不是直接 import 全局变量。第三遍再选择一个 router 下钻，例如 <code>thread_runs.py</code> 研究一次聊天 run，或 <code>auth.py</code> 研究登录会话。</p>
+  <div class="exercise">
+    <strong>检索练习：</strong>不看上文，判断下面三句话是否正确：A. Gateway 只负责 HTTP 转发，不持有运行时单例。B. <span class="endpoint">/api/langgraph/*</span> 在 nginx 后会进入 Gateway。C. 所有 POST 都必须先有 CSRF token。
+    <div class="answer">参考答案：A 错，<code>langgraph_runtime()</code> 会把 <code>RunManager</code>、<code>StreamBridge</code>、checkpointer 和 store 放进 <code>app.state</code>。B 对，nginx 会改写到 <span class="endpoint">/api/*</span>。C 不完全对，登录、注册、初始化等 auth POST 首次调用不做 double-submit 校验，但会检查 hostile Origin，并在响应里设置 CSRF cookie；webhook 与 auth-disabled 路径还有各自的豁免规则，后续认证切片再展开。</div>
+  </div>
+
+  <p class="note">主要来源：<code>backend/app/gateway/app.py</code>、<code>backend/app/gateway/deps.py</code> 和 <code>backend/README.md</code>。如果某个接口家族不清楚，向 agent 追问“沿着 Gateway 的某个 router 继续展开”。</p>
+</main>
+</body>
+</html>

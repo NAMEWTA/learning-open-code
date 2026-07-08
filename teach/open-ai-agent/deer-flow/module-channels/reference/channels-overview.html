@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IM channels 与 GitHub webhook 参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre.shell { padding:12px 14px; white-space:pre; overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#0f172a; color:#e2e8f0; font-family:"SF Mono",Consolas,monospace; font-size:.86rem; }
+    .endpoint { display:inline-block; font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.08rem .3rem; border-radius:5px; margin:1px 0; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.91rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>IM channels 与 GitHub webhook 参考</h1>
+  <p class="lead">本页承载 L1 channels 模块的速查材料：边界、目录、Gateway API、消息流、平台能力与测试线索。微观 API 字典见 <a href="channels-api.html">channels-api.html</a>（L3）；短课入口：<a href="../lessons/0001-channels-module-tour.html">0001-channels-module-tour.html</a>；整体锚点见 <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>；Gateway 外壳见 <a href="../../module-gateway/reference/gateway-overview.html">module-gateway 参考</a>。</p>
+
+  <h2 id="boundary">模块边界</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码依据</th></tr>
+    <tr><td>职责</td><td>把外部 IM 与 GitHub webhook 转成统一的 <code>InboundMessage</code>，经 <code>ChannelManager</code> 调用 Gateway LangGraph API 触发 run，再把 <code>OutboundMessage</code> 送回平台。</td><td><code>backend/app/channels/</code></td></tr>
+    <tr><td>位置</td><td>运行在 Gateway 进程内（<code>start_channel_service</code> 挂在 lifespan），与 embedded runtime 同进程，通过 internal auth + CSRF 调 <code>/api/*</code>。</td><td><code>backend/app/gateway/app.py</code>、<code>backend/app/channels/manager.py</code></td></tr>
+    <tr><td>非职责</td><td>不实现 lead agent 推理、不定义 MCP/tool、不替代 persistence schema；GitHub 出站评论由 agent 在 sandbox 内用 <code>gh</code> 主动写入。</td><td><code>backend/packages/harness/</code>、<code>backend/app/channels/github.py</code></td></tr>
+    <tr><td>配置入口</td><td><code>config.yaml → channels</code> 控制平台凭证与启停；<code>channel_connections</code> 控制用户绑定层；GitHub webhook 路由由 <code>GITHUB_WEBHOOK_SECRET</code> 决定是否挂载。</td><td><code>config.example.yaml</code>、<code>github_webhooks.py</code></td></tr>
+  </table>
+
+  <h2 id="internal-map">目录结构</h2>
+  <div class="filetree">backend/app/channels/
+├── message_bus.py         ← 入站队列 + 出站回调
+├── manager.py             ← 调度循环、thread 映射、runs.wait/stream/create
+├── service.py             ← ChannelService 单例、平台注册表
+├── store.py               ← channel:chat[:topic] → thread_id（JSON 文件）
+├── base.py                ← Channel ABC：start/stop/send
+├── run_policy.py          ← 每 channel 交互/凭证/fire-and-forget 策略
+├── commands.py            ← /new、/goal、/connect 等命令解析
+├── connection_identity.py ← 平台身份 → 连接记录解析
+├── dingtalk.py / discord.py / feishu.py / slack.py
+├── telegram.py / wechat.py / wecom.py
+└── github.py              ← webhook 驱动；出站仅日志
+
+backend/app/gateway/github/
+├── dispatcher.py          ← fanout_event：绑定过滤 + 入站发布
+├── registry.py            ← 扫描 custom agent 的 github: 配置
+├── triggers.py            ← 事件/动作/mention 触发器
+├── prompts.py             ← 把 payload 编成 agent 输入
+├── identity.py            ← repo/PR/issue 目标提取
+└── run_policy.py          ← GitHub 专用 recursion/credentials</div>
+
+  <h2 id="flow">消息流（速查）</h2>
+  <div class="diagram">[IM worker] platform event
+  → Channel.publish_inbound
+  → MessageBus queue
+  → ChannelManager (dedupe / bound identity)
+  → langgraph_sdk: threads.create | runs.wait | runs.stream | runs.create
+  → OutboundMessage → Channel.send (流式平台可多次 is_final=false)
+
+[GitHub] POST /api/webhooks/github
+  → HMAC verify
+  → fanout_event (per agent binding)
+  → MessageBus (N × InboundMessage)
+  → ChannelManager runs.create (fire_and_forget)
+  → agent 在 sandbox 内 gh comment（非自动 outbound）</div>
+
+  <h2 id="api-map">Gateway API 清单</h2>
+  <h3 id="ops">运维 — channels.py</h3>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>用途</th></tr>
+    <tr><td>GET</td><td><span class="endpoint">/api/channels/</span></td><td>返回 <code>service_running</code> 与各 channel <code>enabled/running</code>。</td></tr>
+    <tr><td>POST</td><td><span class="endpoint">/api/channels/{name}/restart</span></td><td>管理员重启指定平台 worker（需 admin）。</td></tr>
+  </table>
+
+  <h3 id="connections">用户绑定 — channel_connections.py</h3>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>用途</th></tr>
+    <tr><td>GET</td><td><span class="endpoint">/api/channels/providers</span></td><td>列出可连接 provider、凭证字段、连接状态。</td></tr>
+    <tr><td>GET</td><td><span class="endpoint">/api/channels/connections</span></td><td>当前用户的绑定记录。</td></tr>
+    <tr><td>POST</td><td><span class="endpoint">/api/channels/{provider}/connect</span></td><td>生成 600s 有效的一次性绑定码与指令。</td></tr>
+    <tr><td>POST</td><td><span class="endpoint">/api/channels/{provider}/runtime-config</span></td><td>管理员写入 bot 凭证并热启动 worker。</td></tr>
+    <tr><td>DELETE</td><td><span class="endpoint">/api/channels/{provider}/runtime-config</span></td><td>断开 provider 运行时配置。</td></tr>
+    <tr><td>DELETE</td><td><span class="endpoint">/api/channels/connections/{connection_id}</span></td><td>用户撤销自己的绑定。</td></tr>
+  </table>
+  <p class="callout">绑定安全模型靠 connect code 机密性（<code>secrets.token_urlsafe(16)</code>、一次性消费），不是 <code>allowed_users</code> 在绑定时拦截。详见 <code>backend/docs/IM_CHANNEL_CONNECTIONS.md</code>。</p>
+
+  <h3 id="webhook">GitHub — github_webhooks.py</h3>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>用途</th></tr>
+    <tr><td>POST</td><td><span class="endpoint">/api/webhooks/github</span></td><td>接收 GitHub 投递；豁免 auth/CSRF；HMAC 验签；fan-out 到总线。</td></tr>
+  </table>
+  <table>
+    <tr><th>响应码</th><th>场景</th></tr>
+    <tr><td>401</td><td>签名错误或缺失。</td></tr>
+    <tr><td>503</td><td>fan-out 瞬态失败（GitHub 会重试）。</td></tr>
+    <tr><td>200 + skipped</td><td><code>channels.github.enabled=false</code>、未知事件、channel service 未启动等永久态。</td></tr>
+  </table>
+  <p>路由仅在 <code>GITHUB_WEBHOOK_SECRET</code> 已设置，或开发环境 <code>DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1</code> 时挂载。</p>
+
+  <h2 id="platforms">已注册平台</h2>
+  <table>
+    <tr><th>Provider</th><th>模块</th><th>流式 outbound</th><th>备注</th></tr>
+    <tr><td>feishu</td><td><code>feishu.py</code></td><td>是</td><td>运行卡片原地 patch。</td></tr>
+    <tr><td>telegram</td><td><code>telegram.py</code></td><td>是</td><td>deep-link <code>/start &lt;code&gt;</code> 绑定。</td></tr>
+    <tr><td>wecom</td><td><code>wecom.py</code></td><td>是</td><td>企业微信。</td></tr>
+    <tr><td>slack</td><td><code>slack.py</code></td><td>否</td><td><code>runs.wait</code> 一次性回复。</td></tr>
+    <tr><td>discord</td><td><code>discord.py</code></td><td>否</td><td>同上。</td></tr>
+    <tr><td>dingtalk</td><td><code>dingtalk.py</code></td><td>可选</td><td>配置 <code>card_template_id</code> 时 AI Card 流式。</td></tr>
+    <tr><td>wechat</td><td><code>wechat.py</code></td><td>否</td><td></td></tr>
+    <tr><td>github</td><td><code>github.py</code></td><td>否</td><td>webhook 入站；fire-and-forget run。</td></tr>
+  </table>
+
+  <h2 id="github-agents">GitHub event-driven agents</h2>
+  <ul>
+    <li>绑定写在 custom agent 的 <code>config.yaml → github:</code>（repo、installation_id、triggers）。</li>
+    <li><code>fanout_event</code> 为每个匹配 binding 发布一条 <code>InboundMessage</code>，metadata 带 <code>agent_name</code> / <code>preferred_thread_id</code>。</li>
+    <li>全局 <code>channels.github.enabled</code> 是运维 kill-switch，与 webhook 路由是否挂载（secret）独立。</li>
+    <li>安装 token 由 <code>ChannelRunPolicy.credentials_provider</code> 注入 <code>run_context["github_token"]</code>，供 sandbox <code>gh</code> 使用。</li>
+  </ul>
+
+  <h2 id="commands">Channel 命令（manager 处理）</h2>
+  <p><span class="tag">/new</span><span class="tag">/status</span><span class="tag">/models</span><span class="tag">/memory</span><span class="tag">/goal</span><span class="tag">/bootstrap</span><span class="tag">/help</span><span class="tag">/&lt;skill&gt;</span></p>
+  <p><code>/connect &lt;code&gt;</code> 与 Telegram <code>/start &lt;code&gt;</code> 由各 platform adapter 在入站前消费，不进入 manager 命令分支。</p>
+
+  <h2 id="calls">调用速查</h2>
+  <pre class="shell"># 查看 channel 服务状态（需已登录会话）
+curl -b cookies.txt http://localhost:8001/api/channels/
+
+# 健康检查（公开）
+curl -s http://localhost:8001/health</pre>
+
+  <h2 id="tests">测试锚点</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖点</th></tr>
+    <tr><td><code>backend/tests/test_channels.py</code></td><td>ChannelService 启停、manager 与 store 集成。</td></tr>
+    <tr><td><code>backend/tests/test_github_webhooks.py</code></td><td>验签、路由挂载、503/200 分流。</td></tr>
+    <tr><td><code>backend/tests/test_telegram_channel_connections.py</code></td><td>Telegram connect code 与绑定。</td></tr>
+    <tr><td><code>backend/tests/test_slack_channel_connections.py</code></td><td>Slack 绑定与 identity 解析。</td></tr>
+    <tr><td><code>backend/tests/test_github_token_plumbing.py</code></td><td>GitHub installation token 注入 run_context。</td></tr>
+  </table>
+
+  <h2 id="source-index">源码索引</h2>
+  <table>
+    <tr><th>路径</th><th>阅读目的</th><th>关键度</th></tr>
+    <tr><td><code>backend/app/channels/message_bus.py</code></td><td>入站/出站消息契约。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/channels/manager.py</code></td><td>调度循环、thread 映射、三种 run 模式。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/channels/service.py</code></td><td>平台注册、单例生命周期。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/channel_connections.py</code></td><td>用户绑定与 runtime-config API。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/github_webhooks.py</code></td><td>Webhook 验签与 fan-out 入口。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/github/dispatcher.py</code></td><td>多 agent fan-out 与触发器过滤。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/channels.py</code></td><td>运维状态与重启。</td><td>辅助</td></tr>
+    <tr><td><code>backend/docs/IM_CHANNEL_CONNECTIONS.md</code></td><td>运维与用户绑定 SOP。</td><td>辅助</td></tr>
+  </table>
+</main>
+</body>
+</html>

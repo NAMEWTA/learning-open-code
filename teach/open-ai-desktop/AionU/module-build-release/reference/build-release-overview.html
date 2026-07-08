@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 构建与发布模块参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.12rem 0.45rem;
+      border-radius: 999px;
+      background: #eef3ff;
+      color: #1f4fbf;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .warn {
+      border-left: 4px solid #b45309;
+      background: #fff8ed;
+      padding: 0.8rem 1rem;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>AionU 构建与发布模块参考</h1>
+    <p class="subtitle">L1 速查：模块职责、接口清单、分层结构、关键依赖、调用示例、测试证据和已发现风险。</p>
+    <div class="meta">
+      <span class="pill">模块：build-release</span>
+      <span class="pill">源项目：AionU / AionUi</span>
+      <span class="pill">关联：L0、main-entry、web-runtime</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#responsibility">1. 模块职责</a>
+    <a href="#position">2. 架构位置</a>
+    <a href="#layers">3. 分层结构</a>
+    <a href="#interfaces">4. 接口清单</a>
+    <a href="#dependencies">5. 关键依赖</a>
+    <a href="#examples">6. 调用示例</a>
+    <a href="#tests">7. 测试证据</a>
+    <a href="#risks">8. 风险与新发现</a>
+  </nav>
+
+  <h2 id="responsibility">1. 模块职责</h2>
+  <p><strong>一句话概括：</strong>构建与发布模块把 AionU 源码、Electron 三端 bundle、aioncore runtime、Hub 离线资源、WebCLI tarball 和平台安装包组织成可分发、可更新、可校验的发布资产。</p>
+  <p>它不是独立 npm package，而是跨根脚本、桌面配置、共享脚本、Homebrew 模板、Dockerfile 和测试目录形成的“发布子系统”。从 L0 视角看，它对应 <a href="../../00-overview/reference/00-overview.html#deploy">项目总览中的构建与部署层</a>；它产出的桌面包会被 <a href="../../module-main-entry/reference/main-entry-overview.html">主入口模块</a> 运行，WebCLI tarball 运行后则进入 <a href="../../module-web-runtime/reference/web-runtime-overview.html">Web 运行时模块</a>。</p>
+
+  <h2 id="position">2. 架构位置</h2>
+  <table>
+    <thead>
+      <tr><th>方向</th><th>连接对象</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>上游输入</td><td><code>package.json</code>、源码、public、resources、bun.lock</td><td>命令入口、依赖锁、静态资源和 runtime 资源是构建输入。</td></tr>
+      <tr><td>编译层</td><td><code>electron.vite.config.ts</code></td><td>输出 main、preload、renderer，多页面 renderer 和内置 MCP server bundle。</td></tr>
+      <tr><td>打包层</td><td><code>electron-builder.yml</code>、<code>build-with-builder.js</code></td><td>生成 dmg/zip、NSIS、deb，并控制 asar、extraResources、afterPack、afterSign。</td></tr>
+      <tr><td>runtime 资源</td><td><code>prepare-aioncore.js</code>、<code>prepareHubResources.js</code></td><td>把 aioncore、managed resources、Hub index 和扩展压缩包放入可分发包。</td></tr>
+      <tr><td>发布整理</td><td><code>prepare-release-assets.sh</code>、<code>verify-release-assets.sh</code></td><td>把 CI 多平台产物整理成扁平 release-assets，并验证 updater metadata 与 WebCLI 资产。</td></tr>
+      <tr><td>安装分发</td><td><code>install-web.sh</code>、<code>install-ubuntu.sh</code>、<code>homebrew/aionui.rb.example</code></td><td>提供 WebCLI 一键安装、Ubuntu/Debian 安装和 Homebrew cask 模板。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">3. 分层结构</h2>
+  <div class="filetree">AionU 构建发布相关文件
+├── package.json                                ← npm/bun 脚本、版本、aioncoreVersion
+├── packages/
+│   ├── desktop/
+│   │   ├── electron.vite.config.ts             ← Electron 三端编译配置
+│   │   └── electron-builder.yml                ← 平台打包、资源、签名、发布配置
+│   └── shared-scripts/
+│       └── src/
+│           ├── prepare-aioncore.js             ← aioncore bundle 准备
+│           └── verify-bundled-aioncore-resources.js ← 打包后资源校验
+├── scripts/
+│   ├── build-with-builder.js                   ← 桌面构建主控
+│   ├── afterPack.js                            ← 资源校验与原生模块重建
+│   ├── afterSign.js                            ← macOS 签名后 notarize
+│   ├── pack-web-cli.js                         ← WebCLI tarball
+│   ├── prepare-release-assets.sh               ← release-assets 归档
+│   ├── install-web.sh                          ← WebCLI 一键安装
+│   └── verify-release-assets.sh                ← 发布资产验证
+├── homebrew/
+│   └── aionui.rb.example                       ← Homebrew cask 参考模板
+├── Dockerfile                                  ← 容器化 Web 运行尝试
+└── tests/
+    └── unit/                                   ← 构建脚本与资源校验测试</div>
+
+  <h2 id="interfaces">4. 接口清单</h2>
+  <h3>4.1 命令入口</h3>
+  <table>
+    <thead>
+      <tr><th>接口</th><th>来源</th><th>职责</th><th>主要输出</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>bun run package</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>只运行 Electron Vite 编译。</td><td><code>out/main</code>、<code>out/preload</code>、<code>out/renderer</code></td></tr>
+      <tr><td><code>bun run dist</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>进入构建主控脚本，按当前平台和参数生成分发物。</td><td><code>out/</code> 下平台安装包</td></tr>
+      <tr><td><code>bun run dist:mac</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>自动选择架构并构建 macOS 包。</td><td><code>AionUi-版本-mac-架构.dmg</code>、<code>.zip</code></td></tr>
+      <tr><td><code>bun run dist:win</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>构建 Windows NSIS 安装包。</td><td><code>AionUi-版本-win-架构.exe</code></td></tr>
+      <tr><td><code>bun run dist:linux</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>构建 Linux deb 包。</td><td><code>AionUi-版本-linux-架构.deb</code></td></tr>
+      <tr><td><code>bun run build-mac</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>macOS arm64 与 x64 多架构构建。</td><td>两个架构的 dmg/zip</td></tr>
+      <tr><td><code>bun run build-win:x64:fast</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>Windows 本地快速构建，降低压缩并跳过 exe 编辑。</td><td>x64 NSIS 快速产物</td></tr>
+      <tr><td><code>node scripts/pack-web-cli.js</code></td><td><span class="where">open-ai-desktop/AionU/scripts/pack-web-cli.js</span></td><td>编译 WebCLI 独立二进制并打包静态资源与 aioncore。</td><td><code>dist-web-cli/aionui-web-*.tar.gz</code> 与 checksum</td></tr>
+      <tr><td><code>./scripts/prepare-release-assets.sh</code></td><td><span class="where">open-ai-desktop/AionU/scripts/prepare-release-assets.sh</span></td><td>收集多平台桌面包、WebCLI tarball、updater metadata 和安装脚本。</td><td><code>release-assets/</code></td></tr>
+      <tr><td><code>./scripts/install-web.sh</code></td><td><span class="where">open-ai-desktop/AionU/scripts/install-web.sh</span></td><td>下载、校验、解压并链接 WebCLI。</td><td>本机 <code>aionui-web</code> 命令</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.2 脚本参数与环境变量</h3>
+  <table>
+    <thead>
+      <tr><th>接口</th><th>参数或变量</th><th>作用</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>build-with-builder.js</code></td><td><code>auto</code>、<code>--mac</code>、<code>--win</code>、<code>--linux</code>、<code>--x64</code>、<code>--arm64</code></td><td>选择平台和架构，并把剩余参数透传给 electron-builder。</td></tr>
+      <tr><td><code>build-with-builder.js</code></td><td><code>--skip-vite</code>、<code>--pack-only</code>、<code>--force</code></td><td>控制增量编译、只编译不产出分发物和强制重建。</td></tr>
+      <tr><td><code>build-with-builder.js</code></td><td><code>--skip-native</code></td><td>当前脚本只解析并打印该 flag，未实际跳过 native rebuild；原生模块重建由 <code>scripts/afterPack.js</code> 根据跨架构、Windows 和 <code>FORCE_NATIVE_REBUILD</code> 等条件决定。</td></tr>
+      <tr><td><code>build-with-builder.js</code></td><td><code>AIONUI_DEBUG_AUTO_UPDATE_CURRENT_VERSION</code></td><td>临时覆盖 package version，finally 中恢复原文件。</td></tr>
+      <tr><td><code>prepare-aioncore.js</code></td><td><code>AIONUI_BACKEND_RUN_ID</code></td><td>从 AionCore Manual Build 的 Actions artifact 下载 runtime。</td></tr>
+      <tr><td><code>prepare-aioncore.js</code></td><td><code>AIONUI_BACKEND_VERSION</code></td><td>覆盖根 package 的 <code>aioncoreVersion</code>。</td></tr>
+      <tr><td><code>prepare-aioncore.js</code></td><td><code>AIONUI_BACKEND_LOCAL_BUNDLE_DIR</code>、<code>AIONUI_BACKEND_LOCAL_BINARY</code></td><td>网络不可用或本地调试时使用本地 bundle 或本地 binary。</td></tr>
+      <tr><td><code>pack-web-cli.js</code></td><td><code>PACK_PLATFORM</code>、<code>PACK_ARCH</code></td><td>覆盖目标平台和架构，决定 tarball 名称和 Bun compile target。</td></tr>
+      <tr><td><code>prepareHubResources.js</code></td><td><code>AIONUI_HUB_TAG</code>、<code>AIONUI_HUB_SKIP</code></td><td>选择 AionHub tag 或跳过离线 Hub 资源准备。</td></tr>
+      <tr><td><code>install-web.sh</code></td><td><code>VERSION</code>、<code>INSTALL_DIR</code>、<code>BIN_DIR</code>、<code>MIRROR</code></td><td>控制安装版本、目录、软链接位置和下载源。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 Node 导出接口</h3>
+  <table>
+    <thead>
+      <tr><th>导出</th><th>文件</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>prepareAioncore(options)</code></td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span></td><td>生成 <code>resources/bundled-aioncore/{platform}-{arch}</code>，写入 binary、managed resources 和 manifest。</td></tr>
+      <tr><td><code>getActionsArtifactName(platform, arch)</code></td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span></td><td>把平台架构映射到 AionCore Manual Build artifact 名称。</td></tr>
+      <tr><td><code>getActionsArtifactMissingMessage(...)</code></td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span></td><td>生成缺失 artifact 的可操作错误信息。</td></tr>
+      <tr><td><code>verifyBundledAioncoreResources({ resourcesDir, electronPlatformName, targetArch })</code></td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/verify-bundled-aioncore-resources.js</span></td><td>返回 runtimeKey、checked、missing；afterPack 用它阻断缺资源包。</td></tr>
+      <tr><td><code>normalizeArch</code>、<code>rebuildSingleModule</code>、<code>verifyModuleBinary</code></td><td><span class="where">open-ai-desktop/AionU/scripts/rebuildNativeModules.js</span></td><td>原生模块跨架构重建和二进制存在性校验。</td></tr>
+      <tr><td><code>resolveAioncoreVersion(projectRoot)</code></td><td><span class="where">open-ai-desktop/AionU/scripts/resolveAioncoreVersion.js</span></td><td>按 env、package pin、latest 的顺序解析 aioncore 版本。</td></tr>
+      <tr><td><code>prepareHubResources()</code></td><td><span class="where">open-ai-desktop/AionU/scripts/prepareHubResources.js</span></td><td>下载 AionHub index 与扩展包，生成 <code>resources/hub/manifest.json</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="dependencies">5. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>来源</th><th>被谁使用</th><th>风险点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Node.js <code>&gt;=22 &lt;25</code></td><td><span class="where">open-ai-desktop/AionU/package.json</span></td><td>脚本、构建工具、Electron 生态。</td><td>构建机 Node 版本过旧会先在 install 或脚本阶段失败。</td></tr>
+      <tr><td>Bun</td><td>脚本命令和 Dockerfile</td><td><code>bunx electron-vite</code>、<code>bun build --compile</code>、依赖安装。</td><td>WebCLI tarball 依赖 Bun compile target。</td></tr>
+      <tr><td>electron-vite</td><td><span class="where">open-ai-desktop/AionU/packages/desktop/electron.vite.config.ts</span></td><td>编译 main/preload/renderer。</td><td>输出缺失会被 <code>build-with-builder.js</code> 阻断。</td></tr>
+      <tr><td>electron-builder</td><td><span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span></td><td>桌面分发包、asar、extraResources、afterPack、afterSign。</td><td>files 白名单和 asarUnpack 错误会导致运行时资源丢失。</td></tr>
+      <tr><td>aioncore</td><td><span class="where">open-ai-desktop/AionU/package.json</span> 的 <code>aioncoreVersion</code></td><td>桌面包和 WebCLI 包的 backend runtime。</td><td>版本、平台、架构和 managed resources 必须一致。</td></tr>
+      <tr><td>GitHub Releases / Actions artifact</td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span></td><td>aioncore 下载、release asset 下载。</td><td>缺 token、缺 artifact 或 tag 名不匹配会失败。</td></tr>
+      <tr><td>原生模块</td><td><span class="where">open-ai-desktop/AionU/scripts/rebuildNativeModules.js</span></td><td><code>better-sqlite3</code> 等需要匹配 Electron ABI。</td><td>跨架构构建时需要 prebuild-install 或源码重建。</td></tr>
+      <tr><td>Apple notarize / codesign</td><td><span class="where">open-ai-desktop/AionU/scripts/afterSign.js</span></td><td>macOS 签名后公证。</td><td>无 Apple 凭据时跳过 notarization；未签名时尝试 ad-hoc signature 后返回。</td></tr>
+      <tr><td>Homebrew Cask</td><td><span class="where">open-ai-desktop/AionU/homebrew/aionui.rb.example</span></td><td>macOS 包管理分发模板。</td><td>文件声明实际 cask 由 Homebrew 官方仓维护，源码中只是参考模板。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="examples">6. 调用示例</h2>
+  <h3>6.1 桌面包：macOS 多架构</h3>
+  <pre><code class="language-bash">bun run build-mac
+# 展开后：
+node scripts/build-with-builder.js auto --mac --arm64 --x64</code></pre>
+  <p>该命令会让构建主控识别多架构模式，先选择一个架构用于 Electron Vite 编译，再把 <code>--arm64 --x64</code> 传给 electron-builder。macOS 目标来自 <span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span>：<code>dmg</code> 与 <code>zip</code>。</p>
+
+  <h3>6.2 Windows 本地快速构建</h3>
+  <pre><code class="language-bash">bun run build-win:x64:fast
+# package.json 中包含：
+# ELECTRON_BUILDER_COMPRESSION_LEVEL=1
+# --config.win.signAndEditExecutable=false</code></pre>
+  <p>这个入口用于降低压缩成本并避开本地开发机上常见的可执行文件编辑或锁文件问题。单测会确认这三个关键片段仍在脚本中。</p>
+
+  <h3>6.3 WebCLI tarball</h3>
+  <pre><code class="language-bash">PACK_PLATFORM=linux PACK_ARCH=x64 node scripts/pack-web-cli.js
+# 产物：
+# dist-web-cli/aionui-web-版本-linux-x86_64.tar.gz
+# dist-web-cli/aionui-web-版本-linux-x86_64.tar.gz.sha256</code></pre>
+  <p>WebCLI 包不带 node_modules。脚本用 Bun compile 生成独立可执行文件，再复制 <code>out/renderer</code>、同平台 aioncore bundle 和 stamped package.json。</p>
+
+  <h3>6.4 发布资产整理</h3>
+  <pre><code class="language-bash">./scripts/prepare-release-assets.sh build-artifacts release-assets
+./scripts/verify-release-assets.sh release-assets</code></pre>
+  <p>第一条命令收集桌面安装包、WebCLI tarball、checksum、updater metadata 和 <code>install-web.sh</code>；第二条命令验证 metadata 指向的文件存在，并检查预期平台资产。</p>
+
+  <h2 id="tests">7. 测试证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试文件</th><th>覆盖行为</th><th>对读码的价值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/assets/prepareAioncoreActionsArtifact.test.ts</span></td><td>平台架构到 Actions artifact 名称映射；缺 artifact 错误信息。</td><td>证明 AionCore artifact 名称不是口头约定，而是被测试锁定。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/assets/verifyBundledAioncoreResources.test.ts</span></td><td>managed node、manifest 平台/架构、ACP manifest、ACP entrypoint 缺失。</td><td>解释 afterPack 为什么要在资源缺失时直接失败。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/build-scripts/windows-fast-build-script.test.ts</span></td><td>Windows x64 fast 构建脚本参数；debug auto-update version 覆盖后恢复。</td><td>保证快速构建和临时版本覆盖不会悄悄漂移。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/scripts/smoke-test-install-web.sh</span></td><td>从 mirror 下载 install-web、安装到临时目录、创建 symlink、运行 version。</td><td>提供 WebCLI 安装链路的冒烟验证模型。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="risks">8. 风险与新发现</h2>
+  <section class="warn">
+    <p><strong>Dockerfile 疑似漂移：</strong><span class="where">open-ai-desktop/AionU/Dockerfile</span> 调用 <code>bun run build:renderer:web</code> 和 <code>node scripts/build-server.mjs</code>，但当前读取到的 <span class="where">open-ai-desktop/AionU/package.json</span> 没有 <code>build:renderer:web</code> 脚本，优先文件清单中也未出现 <code>scripts/build-server.mjs</code>。因此本 L1 不把 Dockerfile 作为主发布路径，只标记为后续需要确认的容器化路径。</p>
+  </section>
+  <table>
+    <thead>
+      <tr><th>风险</th><th>定位文件</th><th>建议排查顺序</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>打包后 app 缺 aioncore 或 managed resources</td><td><code>prepare-aioncore.js</code>、<code>afterPack.js</code>、<code>verify-bundled-aioncore-resources.js</code></td><td>先看 prepare 输出目录，再看 afterPack missing 列表，最后对照单测 fixture。</td></tr>
+      <tr><td>macOS 有 `.app` 但没有 `.dmg`</td><td><code>build-with-builder.js</code></td><td>检查 DMG retry、hdiutil 清理和 <code>--prepackaged</code> 重试日志。</td></tr>
+      <tr><td>Windows 本地构建被锁文件阻断</td><td><code>build-with-builder.js</code>、NSIS 相关脚本</td><td>检查 AionUi/Electron 进程、stale win output 清理和 retry without executable edit。</td></tr>
+      <tr><td>release-assets 缺 updater metadata</td><td><code>prepare-release-assets.sh</code></td><td>确认各平台 job 输出目录命名和 <code>latest*.yml</code> 文件名。</td></tr>
+      <tr><td>WebCLI 安装失败或 checksum mismatch</td><td><code>pack-web-cli.js</code>、<code>install-web.sh</code></td><td>确认 tarball 命名、版本 tag、mirror 路径和 SHA256 文件内容。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

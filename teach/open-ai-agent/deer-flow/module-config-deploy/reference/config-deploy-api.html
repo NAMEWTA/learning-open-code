@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置与部署微观 API 参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; --warn:#b45309; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; font-size:.9em; }
+    pre.shell { padding:12px 14px; white-space:pre; overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#0f172a; color:#e2e8f0; font-family:"SF Mono",Consolas,monospace; font-size:.84rem; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .tag.hot { border-color:#86efac; background:#f0fdf4; }
+    .tag.cold { border-color:#fca5a5; background:#fef2f2; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .warn { background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:12px 14px; }
+    nav.toc { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 24px; }
+    nav.toc a { font-size:.88rem; padding:4px 10px; border:1px solid var(--line); border-radius:6px; }
+    .tests { font-size:.86rem; color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>配置与部署微观 API 参考</h1>
+  <p class="lead"><strong>L3 速查：</strong>按源码文件列出 <code>AppConfig</code> 加载与缓存、热加载边界、根 <code>Makefile</code> 目标、编排脚本 CLI 与边界条件。返回 <a href="config-deploy-overview.html">L1 外壳参考</a> · <a href="../lessons/0001-config-deploy-module-tour.html">短课</a> · <a href="../../00-overview/reference/00-overview.html">L0 总览</a>。</p>
+  <div>
+    <span class="tag hot">get_app_config 热加载</span>
+    <span class="tag cold">STARTUP_ONLY_FIELDS 需重启</span>
+    <span class="tag">Makefile → scripts/</span>
+  </div>
+
+  <nav class="toc" aria-label="分节导航">
+    <a href="#app-config">app_config.py</a>
+    <a href="#reload-boundary">reload_boundary.py</a>
+    <a href="#extensions">extensions_config.py</a>
+    <a href="#runtime-paths">runtime_paths.py</a>
+    <a href="#makefile">Makefile</a>
+    <a href="#configure">configure.py</a>
+    <a href="#serve">serve.sh</a>
+    <a href="#deploy">deploy.sh</a>
+    <a href="#check">check.py</a>
+    <a href="#examples">调用示例</a>
+    <a href="#tests">测试索引</a>
+  </nav>
+
+  <p class="warn"><strong>易错：</strong><code>make config</code> 在已有 <code>config.yaml</code> 时<strong>中止</strong>，不会覆盖；schema 升级用 <code>make config-upgrade</code>。修改 <code>database</code>、<code>sandbox</code> 等 <code>STARTUP_ONLY_FIELDS</code> 后必须重启 Gateway，仅改 <code>models</code> / <code>memory</code> 等可在下一条消息生效。</p>
+
+  <!-- ========== APP CONFIG ========== -->
+  <h2 id="app-config">配置加载：<code>deerflow/config/app_config.py</code></h2>
+  <h3>路径解析</h3>
+  <table>
+    <thead><tr><th>符号</th><th>签名</th><th>行为</th><th>异常 / 边界</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>AppConfig.resolve_config_path</code></td>
+        <td><code>(config_path: str | None = None) -&gt; Path</code></td>
+        <td>优先级：显式参数 → <code>DEER_FLOW_CONFIG_PATH</code> → <code>project_root()/config.yaml</code> → 遗留 <code>backend/config.yaml</code>、<code>repo_root/config.yaml</code></td>
+        <td>路径存在但文件缺失 → <code>FileNotFoundError</code></td>
+      </tr>
+      <tr>
+        <td><code>AppConfig.from_file</code></td>
+        <td><code>(config_path: str | None = None) -&gt; Self</code></td>
+        <td>YAML 解析 → 版本检查 → <code>resolve_env_variables</code> → <code>_apply_database_defaults</code> → 合并 <code>ExtensionsConfig.from_file()</code> → Pydantic 校验 → 同步子系统单例</td>
+        <td>缺失 <code>$VAR</code> 环境变量 → <code>ValueError</code>；<code>models</code> 为空仅 <code>warning</code>；注释掉的 YAML 段解析为 <code>null</code> 时由 <code>_drop_null_config_sections</code> 回退默认值</td>
+      </tr>
+      <tr>
+        <td><code>AppConfig.resolve_env_variables</code></td>
+        <td><code>(config: Any) -&gt; Any</code></td>
+        <td>递归替换以 <code>$</code> 开头的字符串为 <code>os.getenv</code> 结果</td>
+        <td>变量未设置 → <code>ValueError</code>（主配置 fail-closed）</td>
+      </tr>
+      <tr>
+        <td><code>AppConfig._check_config_version</code></td>
+        <td><code>(config_data, config_path) -&gt; None</code></td>
+        <td>对比用户 <code>config_version</code> 与向上搜索的 <code>config.example.yaml</code></td>
+        <td>用户版本偏低 → <code>logger.warning</code>，建议 <code>make config-upgrade</code>；缺失版本视为 0</td>
+      </tr>
+      <tr>
+        <td><code>get_app_config</code></td>
+        <td><code>() -&gt; AppConfig</code></td>
+        <td>单例缓存；比较路径 + 内容签名（mtime、size、sha256）自动重载；优先返回 <code>ContextVar</code> 运行时覆盖</td>
+        <td><code>set_app_config</code> 注入的自定义实例跳过重载</td>
+      </tr>
+      <tr>
+        <td><code>reload_app_config</code></td>
+        <td><code>(config_path: str | None = None) -&gt; AppConfig</code></td>
+        <td>强制从磁盘重载并刷新缓存元数据</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><code>reset_app_config</code></td>
+        <td><code>() -&gt; None</code></td>
+        <td>清空缓存，下次 <code>get_app_config()</code> 重新加载</td>
+        <td>测试与切换配置场景</td>
+      </tr>
+      <tr>
+        <td><code>set_app_config</code></td>
+        <td><code>(config: AppConfig) -&gt; None</code></td>
+        <td>注入 mock / 自定义实例，标记 <code>_app_config_is_custom</code></td>
+        <td>跳过后续文件变更检测</td>
+      </tr>
+      <tr>
+        <td><code>push_current_app_config</code> / <code>pop_current_app_config</code></td>
+        <td>—</td>
+        <td>请求级 <code>ContextVar</code> 覆盖栈，供单测或特殊执行上下文</td>
+        <td>栈空时 <code>pop</code> 置 <code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>get_model_config</code> / <code>get_tool_config</code> / <code>get_tool_group_config</code></td>
+        <td><code>(name: str) -&gt; *Config | None</code></td>
+        <td>O(1) 名称查找，由 <code>_build_name_indexes</code> 在验证后构建</td>
+        <td>重名保留首个（<code>setdefault</code> 语义）</td>
+      </tr>
+      <tr>
+        <td><code>apply_logging_level</code></td>
+        <td><code>(name: str | None) -&gt; None</code></td>
+        <td>仅调整 <code>deerflow</code> / <code>app</code> logger 级别</td>
+        <td>启动时调用；运行时改 <code>log_level</code> 不自动生效</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="callout"><strong>Gateway 消费方式：</strong>依赖注入 <code>get_config()</code> 每次请求调用 <code>get_app_config()</code>，故 <code>models</code>、<code>summarization</code>、<code>memory</code>、<code>tools</code> 等可热加载字段在下一条消息生效。<code>lifespan()</code> 保留 <code>startup_config</code> 本地变量做一次性引导（engine、checkpointer、IM channel）。</p>
+  <p class="tests">测试：<code>backend/tests/test_app_config_reload.py</code>、<code>test_gateway_config_freshness.py</code>、<code>test_config_version.py</code></p>
+
+  <!-- ========== RELOAD BOUNDARY ========== -->
+  <h2 id="reload-boundary">热加载边界：<code>deerflow/config/reload_boundary.py</code></h2>
+  <table>
+    <thead><tr><th>符号</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>STARTUP_ONLY_PREFIX</code></td><td>固定字符串 <code>"startup-only:"</code>，IDE hover 与漂移测试的机读标记</td></tr>
+      <tr><td><code>STARTUP_ONLY_FIELDS</code></td><td><code>dict[str, str]</code>：字段路径 → 需重启原因（解释哪段启动代码捕获了快照）</td></tr>
+      <tr><td><code>is_startup_only_field(path)</code></td><td>仅接受顶层段名（如 <code>"database"</code>），嵌套键不在此注册</td></tr>
+      <tr><td><code>format_field_description(path, field_doc=...)</code></td><td>为 <code>AppConfig</code> 的 <code>Field(description=...)</code> 生成标准描述；未知路径 → <code>KeyError</code></td></tr>
+      <tr><td><code>iter_startup_only_field_paths()</code></td><td>遍历注册表键</td></tr>
+    </tbody>
+  </table>
+  <h3>当前 <code>STARTUP_ONLY_FIELDS</code> 注册表</h3>
+  <table>
+    <thead><tr><th>字段</th><th>重启原因（摘要）</th><th>在 AppConfig schema</th></tr></thead>
+    <tbody>
+      <tr><td><code>database</code></td><td><code>init_engine_from_config()</code> 启动时建 engine，连接池不随 YAML 编辑重建</td><td>是</td></tr>
+      <tr><td><code>checkpointer</code></td><td><code>make_checkpointer()</code> 启动绑定，含 SQLite WAL 设置</td><td>是</td></tr>
+      <tr><td><code>run_events</code></td><td><code>make_run_event_store()</code> 启动选型并冻结到 <code>app.state</code></td><td>是</td></tr>
+      <tr><td><code>stream_bridge</code></td><td><code>make_stream_bridge()</code> 单例构造一次</td><td>是</td></tr>
+      <tr><td><code>sandbox</code></td><td><code>get_sandbox_provider()</code> 缓存 provider 类路径</td><td>是</td></tr>
+      <tr><td><code>log_level</code></td><td><code>apply_logging_level()</code> 仅 lifespan 调用</td><td>是</td></tr>
+      <tr><td><code>logging</code></td><td><code>configure_logging()</code> + <code>TraceMiddleware</code> 启动快照</td><td>是</td></tr>
+      <tr><td><code>channels</code></td><td><code>start_channel_service()</code> 一次启动 IM 客户端</td><td>否（仅 config.yaml 段）</td></tr>
+      <tr><td><code>channel_connections</code></td><td>连接仓库与 channel workers 启动时布线</td><td>是</td></tr>
+      <tr><td><code>scheduler</code></td><td><code>ScheduledTaskService</code> 构造与后台 poller 启动一次</td><td>是</td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>backend/tests/test_reload_boundary.py</code>（注册表 ↔ Pydantic schema 双向漂移检测）</p>
+
+  <!-- ========== EXTENSIONS ========== -->
+  <h2 id="extensions">扩展配置：<code>deerflow/config/extensions_config.py</code></h2>
+  <table>
+    <thead><tr><th>符号</th><th>签名 / 行为</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>ExtensionsConfig.resolve_config_path</code></td>
+        <td>参数 → <code>DEER_FLOW_EXTENSIONS_CONFIG_PATH</code> → <code>extensions_config.json</code> / 遗留 <code>mcp_config.json</code> → backend/repo 根</td>
+        <td>未找到 → 返回 <code>None</code>（扩展可选）</td>
+      </tr>
+      <tr>
+        <td><code>ExtensionsConfig.from_file</code></td>
+        <td>JSON 加载 + <code>resolve_env_variables</code> + 校验</td>
+        <td>文件缺失 → 空 <code>{mcpServers:{}, skills:{}}</code>；无效 JSON → <code>ValueError</code></td>
+      </tr>
+      <tr>
+        <td><code>resolve_env_variables</code>（扩展版）</td>
+        <td><code>$VAR</code> 未设置时返回 <code>""</code> 而非抛错</td>
+        <td>与主配置 fail-closed 行为不同，避免 MCP 启动硬失败</td>
+      </tr>
+      <tr>
+        <td><code>McpServerConfig._accept_transport_alias</code></td>
+        <td>接受 MCP 规范的 <code>transport</code> 作为 <code>type</code> 别名</td>
+        <td>两者同时存在时 <code>type</code> 优先</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="callout"><code>AppConfig.from_file</code> 始终把扩展配置合并进 <code>config.extensions</code> 字段；Gateway MCP/Skills API 另写 <code>extensions_config.json</code>，MCP 缓存通过 mtime 失效检测变更。</p>
+
+  <!-- ========== RUNTIME PATHS ========== -->
+  <h2 id="runtime-paths">路径解析：<code>deerflow/config/runtime_paths.py</code></h2>
+  <table>
+    <thead><tr><th>函数</th><th>返回值</th><th>环境变量 / 边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>project_root()</code></td><td><code>Path</code></td><td><code>DEER_FLOW_PROJECT_ROOT</code> 优先；不存在或非目录 → <code>ValueError</code>；否则 <code>cwd()</code></td></tr>
+      <tr><td><code>runtime_home()</code></td><td><code>Path</code></td><td><code>DEER_FLOW_HOME</code> 或 <code>project_root() / ".deer-flow"</code></td></tr>
+      <tr><td><code>resolve_path(value, base=None)</code></td><td>绝对路径原样；相对路径相对 <code>base</code> 或项目根</td><td>—</td></tr>
+      <tr><td><code>existing_project_file(names)</code></td><td>项目根下第一个存在的文件名，或 <code>None</code></td><td>供配置路径搜索使用</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ========== MAKEFILE ========== -->
+  <h2 id="makefile">根编排：<code>Makefile</code></h2>
+  <p>所有目标从仓库根执行；Windows 通过 <code>scripts/run-with-git-bash.cmd</code> 调用 shell 脚本。</p>
+  <table>
+    <thead><tr><th>目标</th><th>实现</th><th>前置 / 副作用</th><th>退出码</th></tr></thead>
+    <tbody>
+      <tr><td><code>help</code></td><td>echo 命令清单</td><td>—</td><td>0</td></tr>
+      <tr><td><code>setup</code></td><td><code>cd backend && uv run python ../scripts/setup_wizard.py</code></td><td>交互生成最小配置</td><td>向导决定</td></tr>
+      <tr><td><code>doctor</code></td><td><code>uv run python ../scripts/doctor.py</code></td><td>配置与健康检查</td><td>脚本决定</td></tr>
+      <tr><td><code>support-bundle</code></td><td><code>support_bundle.py --include-doctor</code></td><td>脱敏排障包</td><td>—</td></tr>
+      <tr><td><code>config</code></td><td><code>python ./scripts/configure.py</code></td><td>—</td><td>见 configure.py</td></tr>
+      <tr><td><code>config-upgrade</code></td><td><code>scripts/config-upgrade.sh</code></td><td>合并 example 新字段</td><td>shell</td></tr>
+      <tr><td><code>check</code></td><td><code>python ./scripts/check.py</code></td><td>工具链探测</td><td>0 / 1</td></tr>
+      <tr><td><code>install</code></td><td><code>uv sync</code> + <code>pnpm install</code> + pre-commit</td><td>—</td><td>子命令失败即停</td></tr>
+      <tr><td><code>dev</code> / <code>start</code></td><td><code>check.py</code> 后 <code>serve.sh --dev|--prod</code></td><td>本地整栈</td><td>见 serve.sh</td></tr>
+      <tr><td><code>dev-daemon</code> / <code>start-daemon</code></td><td><code>serve.sh</code> + <code>--daemon</code></td><td>后台 nohup</td><td>—</td></tr>
+      <tr><td><code>nginx</code></td><td><code>scripts/nginx.sh</code></td><td>仅本地 nginx 前台</td><td>—</td></tr>
+      <tr><td><code>stop</code></td><td><code>serve.sh --stop</code></td><td>杀 deer-flow 进程 + 释放 8001/3000/2026</td><td>0</td></tr>
+      <tr><td><code>clean</code></td><td><code>stop</code> + 删 <code>backend/.deer-flow</code>、<code>logs/*.log</code></td><td>—</td><td>—</td></tr>
+      <tr><td><code>docker-init</code> / <code>docker-start</code> / <code>docker-stop</code> / <code>docker-logs*</code></td><td><code>scripts/docker.sh</code></td><td>开发 compose</td><td>—</td></tr>
+      <tr><td><code>up</code></td><td><code>scripts/deploy.sh</code>（默认 build+start）</td><td>生产 Docker</td><td>见 deploy.sh</td></tr>
+      <tr><td><code>down</code></td><td><code>scripts/deploy.sh down</code></td><td><code>docker compose down</code></td><td>0</td></tr>
+      <tr><td><code>setup-sandbox</code></td><td><code>scripts/setup-sandbox.sh</code></td><td>预拉 sandbox 镜像</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ========== CONFIGURE ========== -->
+  <h2 id="configure">配置引导 CLI：<code>scripts/configure.py</code></h2>
+  <table>
+    <thead><tr><th>符号</th><th>行为</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>copy_if_missing(src, dst)</code></td>
+        <td><code>dst</code> 已存在则跳过；否则 <code>shutil.copyfile</code></td>
+        <td>模板缺失 → <code>FileNotFoundError</code></td>
+      </tr>
+      <tr>
+        <td><code>main()</code></td>
+        <td>检测 <code>config.yaml</code> / <code>config.yml</code> / <code>configure.yml</code> 任一存在则<strong>中止</strong>；否则复制 example → 三份文件</td>
+        <td>生成：<code>config.yaml</code>、<code>.env</code>、<code>frontend/.env</code>；权限错误打印 hint；返回 1</td>
+      </tr>
+    </tbody>
+  </table>
+  <pre class="shell">make config          # 等价 python scripts/configure.py
+# 已有 config.yaml → 退出码 1，不覆盖</pre>
+
+  <!-- ========== SERVE ========== -->
+  <h2 id="serve">本地编排 CLI：<code>scripts/serve.sh</code></h2>
+  <h3>参数</h3>
+  <table>
+    <thead><tr><th>标志</th><th>默认</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>--dev</code></td><td>是（默认 dev）</td><td>Gateway <code>--reload</code>，前端 <code>pnpm run dev</code></td></tr>
+      <tr><td><code>--prod</code></td><td>—</td><td>无热重载；前端 <code>pnpm run preview</code> + 生成 <code>BETTER_AUTH_SECRET</code></td></tr>
+      <tr><td><code>--daemon</code></td><td>否</td><td><code>nohup</code> 后台，设置 <code>DEERFLOW_DAEMON_ROOT</code></td></tr>
+      <tr><td><code>--skip-install</code></td><td>否</td><td>跳过 <code>uv sync</code> / <code>pnpm install</code></td></tr>
+      <tr><td><code>--stop</code></td><td>—</td><td>调用 <code>stop_all</code> 后退出</td></tr>
+      <tr><td><code>--restart</code></td><td>—</td><td>先 stop 再按模式启动</td></tr>
+    </tbody>
+  </table>
+  <h3>关键内部函数</h3>
+  <table>
+    <thead><tr><th>函数</th><th>职责</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>stop_all</code></td><td>按进程名 / 端口 / nginx pid 杀 deer-flow 工作树内服务；清理 sandbox 容器</td><td>可跨 git worktree 回收 8001/3000/2026</td></tr>
+      <tr><td><code>run_service name cmd port timeout</code></td><td>端口占用预检 → 启动 → <code>wait-for-port.sh</code></td><td>失败 tail 日志并 <code>cleanup 1</code></td></tr>
+      <tr><td>启动顺序</td><td>Gateway :8001 → Frontend :3000 → Nginx :2026</td><td>设置 <code>DEER_FLOW_PROJECT_ROOT</code>、<code>DEER_FLOW_HOME=backend/.deer-flow</code></td></tr>
+      <tr><td>dev reload 排除</td><td><code>--reload-exclude</code> sandbox、<code>DEER_FLOW_HOME</code></td><td>启动前 <code>mkdir -p backend/sandbox</code> 避免 uvicorn glob 崩溃 (#3459)</td></tr>
+      <tr><td>配置预检</td><td>无 config 则退出；自动跑 <code>config-upgrade.sh</code></td><td>支持 <code>DEER_FLOW_CONFIG_PATH</code></td></tr>
+      <tr><td><code>detect_uv_extras.py</code></td><td>从 config / <code>UV_EXTRAS</code> 解析 <code>uv sync --extra</code></td><td>检测失败仅 warning，不阻断启动</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ========== DEPLOY ========== -->
+  <h2 id="deploy">生产 Docker CLI：<code>scripts/deploy.sh</code></h2>
+  <table>
+    <thead><tr><th>子命令</th><th>行为</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td>（默认）</td><td><code>docker compose up --build -d</code></td><td>构建 + 启动 redis、frontend、gateway、nginx（+ 可选 provisioner）</td></tr>
+      <tr><td><code>build</code></td><td>仅 <code>compose build</code></td><td>与 sandbox 模式无关</td></tr>
+      <tr><td><code>start</code></td><td><code>up -d</code> 不重建</td><td>需已有镜像</td></tr>
+      <tr><td><code>down</code></td><td><code>compose down</code></td><td>填充占位 env 避免 compose 解析警告</td></tr>
+      <tr><td><code>detect_sandbox_mode</code></td><td>awk 解析 <code>sandbox.use</code> → <code>local</code> / <code>aio</code> / <code>provisioner</code></td><td>aio 无 Docker socket → 退出 1；aio 附加 <code>docker-compose.dood.yaml</code></td></tr>
+      <tr><td>配置种子</td><td>缺失 <code>config.yaml</code> 时从 example 复制（与 configure.py 不同，deploy 允许种子）</td><td>缺失 extensions 时写空 JSON</td></tr>
+      <tr><td>密钥持久化</td><td><code>BETTER_AUTH_SECRET</code>、<code>DEER_FLOW_INTERNAL_AUTH_TOKEN</code> 写入 <code>DEER_FLOW_HOME</code></td><td>无 python/openssl 则要求手动设置</td></tr>
+      <tr><td><code>UV_EXTRAS</code></td><td><code>detect_uv_extras.py</code> 自动检测构建 extra</td><td>可从 <code>.env</code> 预置</td></tr>
+    </tbody>
+  </table>
+  <p>Compose 项目名 <code>deer-flow</code>；对外端口 <code>${PORT:-2026}</code>。</p>
+
+  <!-- ========== CHECK ========== -->
+  <h2 id="check">工具链检查：<code>scripts/check.py</code></h2>
+  <table>
+    <thead><tr><th>检查项</th><th>要求</th><th>失败时</th></tr></thead>
+    <tbody>
+      <tr><td>Node.js</td><td>major ≥ 22</td><td>打印安装指引，<code>main</code> 返回 1</td></tr>
+      <tr><td>pnpm</td><td>经 PATH 或 corepack</td><td>—</td></tr>
+      <tr><td>uv</td><td>可执行</td><td>—</td></tr>
+      <tr><td>nginx</td><td>可执行（本地 <code>make dev</code> 反代入口）</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ========== EXAMPLES ========== -->
+  <h2 id="examples">调用示例</h2>
+  <h3>Python：加载与热加载探测</h3>
+  <pre class="shell">from deerflow.config.app_config import get_app_config, reload_app_config
+from deerflow.config.reload_boundary import is_startup_only_field
+
+cfg = get_app_config()
+print(cfg.sandbox.use)
+assert not is_startup_only_field("memory")  # 可热加载
+
+# 编辑 config.yaml 后
+cfg2 = reload_app_config()
+assert cfg2 is get_app_config()</pre>
+  <h3>Shell：本地 vs 生产 Docker</h3>
+  <pre class="shell">make check && make config    # 首次生成配置
+make dev                    # serve.sh --dev → localhost:2026
+make up                     # deploy.sh build+start
+make down                   # deploy.sh down</pre>
+
+  <!-- ========== TESTS ========== -->
+  <h2 id="tests">测试索引</h2>
+  <table>
+    <thead><tr><th>主题</th><th>测试文件</th></tr></thead>
+    <tbody>
+      <tr><td>热加载边界注册表</td><td><code>backend/tests/test_reload_boundary.py</code></td></tr>
+      <tr><td>AppConfig 重载 / 签名</td><td><code>backend/tests/test_app_config_reload.py</code></td></tr>
+      <tr><td>Gateway 请求级配置新鲜度</td><td><code>backend/tests/test_gateway_config_freshness.py</code></td></tr>
+      <tr><td>config_version 警告</td><td><code>backend/tests/test_config_version.py</code></td></tr>
+      <tr><td>扩展配置解析</td><td><code>backend/tests/test_extensions_config.py</code></td></tr>
+      <tr><td>Docker sandbox 模式检测</td><td><code>backend/tests/test_docker_sandbox_mode_detection.py</code></td></tr>
+      <tr><td>configure 中止逻辑</td><td><code>backend/tests/test_configure.py</code>（若存在）</td></tr>
+    </tbody>
+  </table>
+
+  <p class="callout">字段级语义与 operator 文档见 <code>backend/docs/CONFIGURATION.md</code>。若某 Makefile 目标或环境变量行为仍不清楚，向 agent 追问「沿 config-deploy 的 serve.sh 或 deploy.sh 继续展开」。</p>
+</main>
+</body>
+</html>

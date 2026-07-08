@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 主入口模块参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Electron 主入口与生命周期参考</h1>
+    <p class="subtitle">L1 模块速查：职责、边界、入口清单、内部层次、关键依赖、测试证据与后续拆课候选。</p>
+    <div class="meta">
+      <span class="pill">模块：module-main-entry</span>
+      <span class="pill">核心入口：packages/desktop/src/index.ts</span>
+      <span class="pill">版本：AionUi 2.1.30</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#role">1. 模块职责</a>
+    <a href="#position">2. 架构位置</a>
+    <a href="#interfaces">3. 对外接口与入口清单</a>
+    <a href="#layers">4. 内部分层结构</a>
+    <a href="#deps">5. 关键依赖</a>
+    <a href="#evidence">6. 调用与阅读示例</a>
+    <a href="#tests">7. 测试佐证</a>
+    <a href="#next">8. 后续 L2/L3/L4 候选</a>
+  </nav>
+
+  <h2 id="role">1. 模块职责</h2>
+  <table>
+    <thead>
+      <tr><th>职责</th><th>落点</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>启动前置</td><td><code>index.ts</code> 顶层 import 与顶层逻辑</td><td>Chromium 配置、Sentry、console、PATH 修复、单实例锁、Squirrel 安装器退出。</td></tr>
+      <tr><td>主生命周期编排</td><td><code>handleAppReady()</code></td><td>先短路处理版本输出，再初始化 main 基础设施、启动 backend、恢复缩放与窗口尺寸，并进入剩余模式分支。</td></tr>
+      <tr><td>运行形态分流</td><td><code>isVersionMode</code> / <code>isResetPasswordMode</code> / <code>isWebUIMode</code></td><td>同一入口支持桌面窗口、无头 WebUI、CLI 重置密码和版本输出。</td></tr>
+      <tr><td>退出收尾</td><td><code>installQuitCleanup()</code></td><td>统一处理托盘销毁、backend 停止、pet 窗口销毁和退出超时保护。</td></tr>
+      <tr><td>故障状态传播</td><td><code>markBackendStartupFailed()</code> + <code>classifyBackendStartupFailure()</code></td><td>把 backend 启动异常转成 renderer 可读取的结构化信息。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="position">2. 架构位置</h2>
+  <p>回看全局关系时，建议先打开 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览课</a> 或 <a href="../../00-overview/reference/00-overview.html">L0 架构参考页</a>。本页只聚焦 Electron main 入口，不重复解释 AionU 的整体模块地图。</p>
+  <div class="grid">
+    <section class="panel">
+      <h3>上游输入</h3>
+      <p>命令行参数、操作系统协议唤醒、Electron 生命周期事件、环境变量和上次保存的用户偏好。</p>
+    </section>
+    <section class="panel">
+      <h3>本模块输出</h3>
+      <p>BrowserWindow、WebHost、backend 端口、启动失败状态、托盘和退出清理回调。</p>
+    </section>
+    <section class="panel">
+      <h3>不负责的内容</h3>
+      <p>不直接承载 renderer 业务、不实现 backend 细节、不解释 deep link / tray / pet 的完整内部逻辑。</p>
+    </section>
+  </div>
+
+  <h2 id="interfaces">3. 对外接口与入口清单</h2>
+  <table>
+    <thead>
+      <tr><th>入口 / 接口</th><th>源码位置</th><th>外部可观察效果</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>app.whenReady().then(handleAppReady)</code></td><td><code>index.ts:943-950</code></td><td>把真正初始化延后到 Electron ready 之后。</td></tr>
+      <tr><td><code>startBackendOrExit()</code></td><td><code>index.ts:661-710</code> + <code>backendStartup.ts</code></td><td>统一 backend 启动成功、失败、取消的入口语义。</td></tr>
+      <tr><td><code>startWebHost()</code></td><td><code>index.ts:775-812</code></td><td><code>--webui</code> 时启动无头静态服务并复用已有 backend。</td></tr>
+      <tr><td><code>resetPasswordCLI()</code></td><td><code>index.ts:747-758</code></td><td><code>--resetpass</code> 时不创建窗口，直接走管理员密码重置。</td></tr>
+      <tr><td><code>createWindow()</code></td><td><code>index.ts:375-597</code>、<code>846-850</code></td><td>默认桌面模式创建主窗口、菜单、缩放、自动更新与 loadURL/loadFile。</td></tr>
+      <tr><td><code>app.on('open-url')</code></td><td><code>index.ts:929-937</code></td><td>处理 <code>aionui://</code> deep link，并在有窗口场景下聚焦主窗口。</td></tr>
+      <tr><td><code>installQuitCleanup()</code></td><td><code>index.ts:984-1006</code> + <code>quitCleanup.ts</code></td><td>在 <code>before-quit</code> 阶段防抖、收尾并托底强制退出。</td></tr>
+      <tr><td><code>ipcMain.on('get-backend-port')</code> 等同步查询</td><td><code>index.ts:214-228</code></td><td>让 preload / renderer 读取 backend 端口、语言和启动失败状态。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">4. 内部分层结构</h2>
+  <table>
+    <thead>
+      <tr><th>层次</th><th>代表代码</th><th>边界判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>启动前置层</td><td><code>configureChromium</code>、<code>fix-path</code>、单实例锁、Sentry</td><td>这些逻辑必须在任何窗口和存储初始化之前发生。</td></tr>
+      <tr><td>编排层</td><td><code>handleAppReady()</code></td><td>只负责顺序和条件，不实现 backend / tray / WebHost 内部细节。</td></tr>
+      <tr><td>模式分支层</td><td>版本、重置密码、WebUI、桌面模式</td><td>按运行形态选择“是否创建窗口、是否保持无头存活、是否调用 CLI helper”。</td></tr>
+      <tr><td>生命周期回调层</td><td><code>open-url</code>、<code>activate</code>、<code>window-all-closed</code>、<code>before-quit</code></td><td>响应系统事件，但收尾工作继续委托给 helper。</td></tr>
+      <tr><td>辅助器层</td><td><code>backendStartup.ts</code>、<code>quitCleanup.ts</code>、<code>backendStartupFailure.ts</code></td><td>把复杂语义做成小而可测单元，减轻入口文件的认知负担。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="deps">5. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>类型</th><th>为什么关键</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>electron</code></td><td>运行时框架</td><td>提供 <code>app</code>、<code>BrowserWindow</code>、<code>ipcMain</code>、<code>powerMonitor</code> 等主进程能力。</td></tr>
+      <tr><td><code>@aionui/web-host</code></td><td>模块内核心协作者</td><td>同时提供 <code>BackendLifecycleManager</code> 和 <code>startWebHost()</code>，把桌面 backend 与 WebUI 复用串起来。</td></tr>
+      <tr><td><code>ProcessConfig</code> / <code>initializeProcess()</code></td><td>本地基础设施</td><td>存储、语言、窗口尺寸、zoom factor 等都依赖它先完成初始化。</td></tr>
+      <tr><td><code>classifyBackendStartupFailure()</code></td><td>错误分类器</td><td>把 runtime、安装损坏、数据库损坏等失败整理成 renderer 可消费的结构。</td></tr>
+      <tr><td><code>fix-path</code> / <code>hydrateWindowsProcessPath()</code></td><td>平台兼容</td><td>保证 GUI 启动出的本地 CLI、nvm Node 和 PATH 行为一致。</td></tr>
+      <tr><td><code>restoreDesktopWebUIFromPreferences()</code></td><td>体验增强</td><td>桌面窗口创建后异步恢复 WebUI 偏好，说明 WebUI 不只是 CLI 入口，也是桌面能力延展。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">6. 调用与阅读示例</h2>
+  <div class="callout">
+    <p><strong>推荐阅读顺序：</strong></p>
+    <p>1. 先读 <code>index.ts:619-624</code>，确认为什么 <code>--version</code> 会在 <code>initializeProcess()</code> 之前直接退出。</p>
+    <p>2. 再读 <code>index.ts:643-724</code>，确认为什么 backend 启动一定发生在 <code>initializeProcess()</code> 之后。</p>
+    <p>3. 再读 <code>index.ts:747-902</code>，对照剩余三个运行分支，判断“哪个模式会创建窗口，哪个不会”。</p>
+    <p>4. 最后读 <code>quitCleanup.ts:49-89</code>，把 <code>before-quit</code> 事件和真正清理动作对上号。</p>
+  </div>
+  <pre><code class="language-text">app.whenReady()
+  -> handleAppReady()
+  -> if (--version) exit
+  -> initializeProcess()
+  -> startBackendOrExit()
+  -> { resetpass | webui | desktop-window }
+  -> installQuitCleanup() 托底退出</code></pre>
+
+  <h2 id="tests">7. 测试佐证</h2>
+  <table>
+    <thead>
+      <tr><th>测试</th><th>覆盖点</th><th>对本模块的意义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>tests/unit/bootstrap/backendStartup.test.ts</code></td><td>启动成功、默认失败退出、关闭退出、取消启动</td><td>证明入口依赖的 helper 语义是稳定且可回归的。</td></tr>
+      <tr><td><code>tests/unit/bootstrap/quitCleanup.test.ts</code></td><td>退出清理流程与超时控制</td><td>虽不在本轮必读清单中，但可作为退出语义的补证。</td></tr>
+      <tr><td><code>tests/e2e/specs/app-launch.e2e.ts</code></td><td>窗口标题、body 可见、启动无关键 console error</td><td>把主入口的外部结果压成最小烟雾测试。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="next">8. 后续 L2/L3/L4 候选</h2>
+  <table>
+    <thead>
+      <tr><th>层级</th><th>候选主题</th><th>建议关注点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>L2</td><td><code>desktop-startup-dispatch</code></td><td>默认桌面模式从 <code>createWindow()</code> 到 <code>did-finish-load</code> 的首屏启动链，作为后续候选主题。</td></tr>
+      <tr><td>L2</td><td><code>webui-headless-branch</code></td><td><code>--webui</code> 分支如何复用 backend、保持进程存活并恢复远程访问配置，作为后续候选主题。</td></tr>
+      <tr><td>L2</td><td><code>resetpass-cli-branch</code></td><td>管理员密码重置为何仍借 Electron 壳启动，以及与 WebUI 配置文件的一致性，作为后续候选主题。</td></tr>
+      <tr><td>L2</td><td><code>main-quit-cleanup</code></td><td><code>before-quit</code>、托盘、pet、backend 和超时保护的组合设计，作为后续候选主题。</td></tr>
+      <tr><td>L3</td><td><code>backend-startup-failure-taxonomy</code></td><td>安装损坏、架构不匹配、GLIBC、数据库损坏与本地数据修复失败的分类逻辑，作为后续候选主题。</td></tr>
+      <tr><td>L4</td><td><code>backend-lifecycle-vs-sqlite-race</code></td><td>为什么入口要先做数据迁移，再允许 backend 接触同一份数据库，作为后续候选主题。</td></tr>
+      <tr><td>L4</td><td><code>desktop-webui-runtime-unification</code></td><td>Electron 桌面壳与独立 WebHost 如何共享同一 backend 运行时模型，作为后续候选主题。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

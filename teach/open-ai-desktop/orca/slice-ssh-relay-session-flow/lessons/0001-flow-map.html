@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSH Relay 会话保活导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>SSH Relay Session Flow：远端终端为什么能活过断线</h1>
+        <p class="meta">目标：15 分钟内能从 SSH connect 追到 detached relay、grace socket 和 PTY reattach。</p>
+
+        <h2>先抓三段主路径</h2>
+        <p>
+          Orca 的 SSH 远端会话不是普通的 <code>ssh command</code> 长连接。主进程先建立 SSH transport，
+          再部署或连接远端 relay daemon，最后把 filesystem、Git、PTY provider 都挂到同一个 relay mux 上。
+          读源码时先抓这三个文件：<code>src/main/ipc/ssh.ts</code> 是用户入口和重连策略，
+          <code>src/main/ssh/ssh-relay-session.ts</code> 是每个 target 的 session 状态机，
+          <code>src/relay/relay.ts</code> 是远端 daemon 的 socket、grace 和 handler 装配。
+        </p>
+        <div class="filetree">renderer or user action
+  └─ src/main/ipc/ssh.ts              ← ssh:connect、state override、relay-lost backoff
+main session authority
+  └─ src/main/ssh/ssh-relay-session.ts ← deploy、provider、reattach、mux loss watcher
+remote daemon
+  └─ src/relay/relay.ts               ← detached socket、--connect bridge、grace shutdown</div>
+
+        <h2>连接：先 SSH，再 relay ready</h2>
+        <p>
+          <code>ssh:connect</code> 先通过 <code>SshConnectionManager</code> 得到可用 SSH transport。
+          但 renderer 不能只看 SSH 已 connected，因为这时远端 provider 可能还没注册。<code>ssh.ts</code>
+          会显式广播 <code>deploying-relay</code>，再调用 session 的 <code>establish()</code>。
+          session 内部部署 relay，创建 multiplexer，用 <code>session.resolveHome</code> 做健康检查，
+          然后注册 PTY、filesystem、Git provider，最后才进入 <code>ready</code> 并广播 connected。
+        </p>
+        <pre><code class="language-text">ssh:connect
+  -> connectionManager.connect(target)
+  -> status: deploying-relay
+  -> session.establish(conn, target.relayGracePeriodSeconds)
+  -> mux health check
+  -> register providers
+  -> reattach known PTYs
+  -> status: connected</code></pre>
+        <p>
+          已经 ready 的 session 再次被窗口激活时不会被拆掉。<code>ssh.ts</code> 会直接广播现有状态，
+          避免刷新 BrowserWindow 时把活跃 relay、端口转发和远端终端意外断开。
+        </p>
+
+        <h2>远端：detached daemon 和 --connect bridge</h2>
+        <p>
+          部署层会先 probe 目标 socket。如果 socket 仍 alive，就执行 <code>relay.js --connect --sock-path ...</code>，
+          把新的 SSH exec channel 桥到旧 relay 进程。如果 socket 不可用，才 fresh launch 一个 detached relay：
+          POSIX 用 <code>nohup ... --detached --grace-time ... &</code>，Windows 用 WMI 重新挂载进程树。
+          fresh launch 后仍然通过 <code>--connect</code> 连接 daemon socket，主进程始终只和 bridge 的 stdin/stdout 通信。
+        </p>
+        <p>
+          relay daemon 启动后注册 PTY、FS、Git、workspace、agent hook 等 handler，并监听 Unix socket 或 named pipe。
+          detached 模式一开始没有直接 stdout client，所以会进入 grace；第一个 socket client 接入后取消 grace。
+          <code>relay.configureGraceTime</code> 可以更新 PTY grace timer；<code>graceTimeSeconds = 0</code>
+          表示不自动过期，不是立即关闭。系统睡眠前主进程会把 grace 设成 0，防止睡眠时间吃掉普通窗口。
+        </p>
+
+        <h2>恢复：SSH 掉线和 relay 掉线走同一个重建口</h2>
+        <p>
+          SSH transport 掉线由 <code>SshConnection</code> 的 disconnect handler 发现，进入 bounded reconnect。
+          当它重新 connected 且 <code>reconnectAttempt = 0</code>，<code>ssh.ts</code> 会把 UI 覆盖为
+          <code>reconnecting</code>，调用 <code>session.reconnect()</code> 重建 relay provider。
+          如果 SSH 没掉但 relay bridge 关了，multiplexer 的 <code>onDispose("connection_lost")</code>
+          会触发同一个 relay-lost backoff，然后也回到 <code>session.reconnect()</code>。
+        </p>
+        <p>
+          恢复终端不是重新 spawn。session 会从 durable remote PTY lease 和当前 ownership 里收集已知 relay PTY id，
+          调 <code>pty.attach</code>，把 replay buffer 发回 renderer，并把 lease 标成 attached。
+          如果 relay 返回 PTY not found，说明 grace 已过期或进程已死：Orca 会标记 expired，发送 <code>pty:exit</code>，
+          renderer 再冷启动一个新 shell。启动恢复时，passphrase 目标会先变成 deferred，等用户聚焦终端或主动连接时再 attach。
+        </p>
+
+        <h3>检索练习</h3>
+        <p>
+          用户说“SSH 状态显示已连接，但远端终端没有恢复旧输出”，你会先查哪几层？
+        </p>
+        <div class="answer">
+          参考路径：先看 <code>ssh.ts</code> 是否已经从 <code>deploying-relay/reconnecting</code> 进入 ready connected；
+          再看 <code>ssh-relay-session.ts</code> 的 reattach 是否命中 lease、是否收到 replay 或 not found；
+          最后看 <code>relay.ts</code> 的 grace/socket 日志，确认是连上旧 daemon 还是 fresh launch 了新 daemon。
+          如果是 passphrase 目标，还要检查 renderer 是否走了 deferred SSH reattach。完整来源见
+          <a href="../reference/ssh-relay-session-flow-map.html">SSH Relay 会话保活参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/main/ipc/ssh.ts</code>、
+          <code>src/main/ssh/ssh-relay-session.ts</code>、
+          <code>src/relay/relay.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

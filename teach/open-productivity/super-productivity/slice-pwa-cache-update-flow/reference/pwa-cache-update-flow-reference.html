@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PWA 缓存与更新全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 参考文档 · PWA cache/update 入口清单、平台边界、缓存策略与排障表</p>
+    <h1>PWA 缓存与更新全链路参考</h1>
+    <p>短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。父级 L1：<a href="../../module-mobile-pwa-host/reference/mobile-pwa-host-overview.html">Capacitor 移动端与 PWA 宿主</a>。相邻切片：<a href="../../slice-mobile-background-flush-flow/reference/mobile-background-flush-flow-reference.html">移动端后台恢复</a>（PWA cache 不写业务数据）。</p>
+
+    <h2 id="module-skeleton">模块骨架</h2>
+    <div class="filetree">super-productivity/
+├── ngsw-config.json                          ← SW 缓存策略（asset + data groups）
+├── angular.json                              ← 各 build 是否启用 serviceWorker
+├── src/
+│   ├── main.ts                               ← register / unregister 分叉
+│   ├── manifest.json                         ← PWA manifest（非 SW 逻辑）
+│   └── app/
+│       ├── core/
+│       │   ├── initial-pwa-update-check.service.ts  ← PWA 更新检测
+│       │   ├── update-check/                 ← Electron GitHub releases（非 PWA）
+│       │   ├── notify/notify.service.ts      ← PWA 通知 vs native 通知
+│       │   └── http/translate-http-loader-with-fallback.class.ts
+│       ├── imex/sync/sync.effects.ts         ← 更新检测与 initial sync 串联
+│       └── util/is-native-platform.ts        ← native 平台判定</div>
+    <p class="callout"><strong>注意：</strong>仓库中<strong>不存在</strong> <code>src/app/core/pwa/</code> 目录；PWA 逻辑分散于上表文件。<code>src/app/features/mobile/</code> 负责 native 提醒调度，不含 SW 更新代码。</p>
+
+    <h2 id="entry-list">入口清单</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>入口</th><th>源码</th><th>职责</th><th>先看场景</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>缓存策略定义</td><td><code>ngsw-config.json</code></td><td><code>assetGroups</code>：壳层 prefetch、criticalAssets（含 <code>en.json</code>）、lazy assets。<code>dataGroups</code>：<code>api-freshness</code> 覆盖 GitHub/GitLab/Jira API。</td><td>离线白屏、静态资源旧版本、Issue API 读到缓存。</td></tr>
+          <tr><td>SW 注册（Angular DI）</td><td><code>src/main.ts:178-186</code></td><td><code>ServiceWorkerModule.register('ngsw-worker.js')</code>；<code>enabled</code> 需 prod/stage 且非 Electron/native；<code>registrationStrategy: registerWhenStable:30000</code>。</td><td>dev 环境无 SW、SW 注册时机。</td></tr>
+          <tr><td>SW 注册/注销（bootstrap 末尾）</td><td><code>src/main.ts:415-438</code></td><td>Web prod/stage 再次 <code>register</code>；Electron/native <code>getRegistrations().unregister()</code>。</td><td>Capacitor 里 SW 是否生效、旧 SW 残留。</td></tr>
+          <tr><td>PWA 更新检测</td><td><code>src/app/core/initial-pwa-update-check.service.ts</code></td><td><code>SwUpdate.checkForUpdate()</code>，8s 超时；有更新则 <code>confirmDialog</code> + <code>reload</code>；非 Electron 且 <code>isEnabled</code> 且 online。</td><td>部署新版本后用户仍看到旧 UI。</td></tr>
+          <tr><td>更新与 initial sync 顺序</td><td><code>src/app/imex/sync/sync.effects.ts:160-176</code></td><td><code>triggerSync$</code> 在 initial sync 前先订阅 <code>afterInitialUpdateCheck$</code>。</td><td>更新弹窗与首次 sync 时序、SuperSync delay。</td></tr>
+          <tr><td>桌面版本检查</td><td><code>src/app/core/update-check/update-check.service.ts</code></td><td>Electron 专用 GitHub releases API；banner 提示下载，无自动安装。</td><td>勿与 PWA SW 更新混淆。</td></tr>
+          <tr><td>平台 gate</td><td><code>src/app/core/update-check/is-update-check-possible.util.ts</code></td><td>非 Electron 返回 false；注释说明 Web 走 SW。</td><td>配置页「检查更新」在 Web 上无效的原因。</td></tr>
+          <tr><td>PWA 通知</td><td><code>src/app/core/notify/notify.service.ts:37-68</code></td><td>native 优先 Capacitor；Web 才 <code>getRegistration('ngsw-worker.js')</code> + <code>showNotification</code>。</td><td>iOS WKWebView 通知被 SW 分支吞掉的问题。</td></tr>
+          <tr><td>离线 i18n 兜底</td><td><code>src/app/core/http/translate-http-loader-with-fallback.class.ts</code></td><td>status-0 时回退构建时 bundled <code>en.json</code>；应对 SW bypass（Safari Reading List）。</td><td>离线 crash card、raw i18n keys。</td></tr>
+          <tr><td>构建开关</td><td><code>angular.json</code></td><td>production/stage 配置 <code>serviceWorker: "ngsw-config.json"</code>；development 为 false。</td><td>本地 <code>ng serve</code> 无法复现 SW 行为。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="responsibility">职责边界</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>层</th><th>能做什么</th><th>不能假设什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>ngsw assetGroups</td><td>缓存 index.html、JS/CSS bundle、icons、<code>en.json</code>、字体与 lazy assets。</td><td>不持久化用户任务、op-log 或 sync 状态。</td></tr>
+          <tr><td>ngsw api-freshness</td><td>对列出的 Issue REST API 做 network-first + 短期缓存。</td><td>不覆盖 SuperSync/WebDAV/自定义 sync provider。</td></tr>
+          <tr><td>InitialPwaUpdateCheckService</td><td>检测 ngsw 新版本并提示 reload。</td><td>不下载 Electron 安装包；不在 native 上运行（<code>SwUpdate.isEnabled</code> 为 false）。</td></tr>
+          <tr><td>UpdateCheckService</td><td>Electron 上对比 GitHub release tag。</td><td>Web/PWA 完全不参与。</td></tr>
+          <tr><td>main.ts unregister</td><td>清理 Electron/Capacitor 中误注册的 SW。</td><td>不提供 native 离线壳层；native 离线依赖打包进 WebView 的 <code>dist/browser</code>。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="cache-strategy">ngsw-config 速查</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Group</th><th>模式</th><th>内容</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>app</code></td><td>prefetch</td><td><code>index.html</code>、根级 JS/CSS、favicon、manifest</td></tr>
+          <tr><td><code>criticalAssets</code></td><td>prefetch + update prefetch</td><td>icons、<code>en.json</code>、material 字体</td></tr>
+          <tr><td><code>assets</code></td><td>lazy install, prefetch update</td><td><code>/assets/**</code>、<code>/media/**</code></td></tr>
+          <tr><td><code>externalAssets</code></td><td>lazy</td><td>外部图片 URL 模式</td></tr>
+          <tr><td><code>api-freshness</code></td><td>freshness, maxAge 1h, timeout 10s</td><td>GitHub / GitLab / Atlassian REST</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="troubleshooting">排障表</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>症状</th><th>第一判断</th><th>入口</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Web 部署后仍看到旧 UI</td><td>SW 是否检测到新版本；用户是否确认 reload</td><td><code>initial-pwa-update-check.service.ts</code></td></tr>
+          <tr><td>离线无法打开应用</td><td>是否 prod/stage build；SW 是否成功 register</td><td><code>main.ts</code>、<code>ngsw-config.json</code></td></tr>
+          <tr><td>离线 i18n crash card</td><td>HTML 来自 bypass SW 的缓存（Reading List 等）</td><td><code>translate-http-loader-with-fallback.class.ts</code></td></tr>
+          <tr><td>Issue API 数据偏旧</td><td>是否在 api-freshness 1h 窗口内且网络超时回退缓存</td><td><code>ngsw-config.json</code> dataGroups</td></tr>
+          <tr><td>Android 无 PWA 更新提示</td><td>native 启动时已 unregister SW</td><td><code>main.ts:426-437</code></td></tr>
+          <tr><td>Electron 有新版本 banner</td><td>这是 GitHub release 检查，不是 ngsw</td><td><code>update-check.service.ts</code></td></tr>
+          <tr><td>iOS 通知不弹出</td><td>是否误走 SW 分支而非 Capacitor</td><td><code>notify.service.ts</code> native 优先逻辑</td></tr>
+          <tr><td>本地任务离线丢失</td><td>不是 SW 问题；查 op-log/sync</td><td><a href="../../slice-op-log-sync-flow/reference/op-log-sync-flow-reference.html">op-log-sync-flow</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="source-anchors">源码锚点（更新检测）</h2>
+    <pre class="diagram">// initial-pwa-update-check.service.ts
+afterInitialUpdateCheck$ =
+  !IS_ELECTRON && this._swUpdate.isEnabled && isOnline()
+    ? defer(() => from(this._swUpdate.checkForUpdate())).pipe(
+        timeout(8000),
+        concatMap((isUpdateAvailable) => {
+          if (isUpdateAvailable && confirmDialog(...)) {
+            window.location.reload();
+            return EMPTY;
+          }
+          return of(undefined);
+        }),
+        shareReplay(1),
+      )
+    : of(undefined);
+
+// sync.effects.ts — initial sync 等待更新检测
+this._initialPwaUpdateCheckService.afterInitialUpdateCheck$.pipe(
+  concatMap(() => this._syncWrapperService.isEnabledAndReady$.pipe(filter(v => v), first())),
+  ...
+)</pre>
+
+    <h2 id="related">相关主题</h2>
+    <ul>
+      <li><a href="../../slice-app-startup-flow/lessons/0001-flow-map.html">应用启动与数据初始化</a> — bootstrap 与 DataInit 时序</li>
+      <li><a href="../../slice-mobile-background-flush-flow/lessons/0001-flow-map.html">移动端后台恢复</a> — PWA visibility sync 与 cache 边界</li>
+      <li><a href="../../module-engineering-release/reference/engineering-release-overview.html">工程化与发布</a> — prod/stage build 与 SW 产物</li>
+    </ul>
+  </article>
+</main>
+</body>
+</html>

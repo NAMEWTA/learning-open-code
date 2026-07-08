@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>模型配置与适配器 API 速查</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:32px;margin-bottom:6px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px;font-size:14px}
+    th,td{border:1px solid #e5e7eb;padding:7px 9px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px;font-size:.9em}
+    a{color:#2563eb;text-decoration:none}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .note{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px;margin:14px 0}
+    .where{font-family:"SF Mono",Consolas,monospace;font-size:.82em;color:#374151}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+    nav a{margin-right:12px}
+    .tree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+  <h1>模型配置与适配器 API 速查</h1>
+  <p class="summary"><strong>一句话：</strong>本页按 <strong>Server feature-model</strong> 与 <strong>snail-ai-models</strong> 两组，列出配置枚举、API Key 加解密、适配器 SPI、Maven 模块依赖，以及项目内 <code>OpenAiChatModel</code> 的扩展点。模块边界见 <a href="models-overview.html">models-overview.html</a>；运行时调用链路见 <a href="../../slice-model-runtime/reference/model-runtime-flow-map.html">model-runtime-flow-map.html</a>。</p>
+  <nav>
+    <a href="../lessons/0001-models-module-tour.html">返回 L1 短课</a>
+    <a href="#server">Server feature-model</a>
+    <a href="#enums">配置枚举</a>
+    <a href="#spi">适配器 SPI</a>
+    <a href="#maven">Maven 模块</a>
+    <a href="#openai-ext">OpenAiChatModel 扩展</a>
+  </nav>
+
+  <h2 id="server">Server feature-model 基础设施</h2>
+  <p class="note"><strong>边界：</strong><code>snail-ai-feature-model</code> 负责 Server 侧模型配置处理、API Key 加解密与使用统计接口定义；三类模型 runtime 通过 starter 依赖注入。</p>
+
+  <h3>Maven 依赖（<span class="where">snail-ai-feature-model/pom.xml</span>）</h3>
+  <table>
+    <thead><tr><th>依赖 artifact</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>snail-ai-commons-core</code></td><td><code>ConfigExtAttrsDTO</code>、<code>RerankApiClient</code> 等公共模型 DTO。</td></tr>
+      <tr><td><code>snail-ai-biz-template</code></td><td>模型配置 PO / Mapper 模板。</td></tr>
+      <tr><td><code>snail-ai-model-chat-starter</code></td><td>注入 <code>ChatModelRuntime</code> 与 OpenAI-compatible adapter。</td></tr>
+      <tr><td><code>snail-ai-model-embedding-starter</code></td><td>注入 <code>EmbeddingModelRuntime</code>。</td></tr>
+      <tr><td><code>snail-ai-model-rerank-starter</code></td><td>注入 <code>RerankModelRuntime</code>。</td></tr>
+      <tr><td><code>spring-ai-openai</code>、<code>spring-ai-client-chat</code>、<code>spring-ai-retry</code></td><td>Chat 调用与重试；项目内 <code>OpenAiChatModel</code> 位于 chat-core。</td></tr>
+      <tr><td><code>volcengine-java-sdk-ark-runtime</code></td><td>火山方舟运行时（feature-model 层预留，与 adapter 扩展相关）。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>CryptoHelper — API Key 加解密</h3>
+  <table>
+    <thead><tr><th>项</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>类</td><td><span class="where">.../feature-model/.../crypto/CryptoHelper.java</span></td></tr>
+      <tr><td>算法</td><td>SM4 / CBC / PKCS5Padding（Hutool <code>SM4</code>）</td></tr>
+      <tr><td>配置项</td><td><code>snail-ai.crypto.secret-key</code>、<code>snail-ai.crypto.iv</code>（十六进制）</td></tr>
+      <tr><td><code>encrypt(plaintext)</code></td><td>空串返回 <code>""</code>；否则 Base64 密文。</td></tr>
+      <tr><td><code>decrypt(ciphertext)</code></td><td>空串返回 <code>""</code>；否则明文。被 <code>ModelConfigHandler</code>、<code>DispatchModelConfigAssembler</code> 等在构建 spec 前调用。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>AiModelUsageService — 使用统计 SPI</h3>
+  <table>
+    <thead><tr><th>方法</th><th>参数</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>recordUsage</code></td><td><code>modelId</code>, <code>userId</code>, <code>promptTokens</code>, <code>completionTokens</code>, <code>responseTime</code>, <code>status</code>, <code>errorMessage</code>, <code>conversationId</code></td><td>基础设施层接口；由 admin 模块实现，feature-model 只定义契约，不持久化。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="enums">配置枚举</h2>
+  <table>
+    <thead><tr><th>枚举</th><th>值</th><th>解析</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="2"><code>ModelScopeEnum</code></td><td><code>GLOBAL</code>（全局，Admin 配置）</td><td rowspan="2"><code>fromValue(String)</code>，未匹配返回 <code>null</code></td><td rowspan="2">区分模型配置作用域：平台级 vs 用户个人级。</td></tr>
+      <tr><td><code>PERSONAL</code>（个人）</td></tr>
+      <tr><td rowspan="2"><code>ModelStatusEnum</code></td><td><code>ENABLED</code>（code=1）</td><td rowspan="2"><code>fromCode(int)</code>，未匹配返回 <code>null</code></td><td rowspan="2">模型启用/禁用；与数据库 <code>status</code> 字段对齐。</td></tr>
+      <tr><td><code>DISABLED</code>（code=0）</td></tr>
+    </tbody>
+  </table>
+  <p><span class="tag">adapterKey 默认值</span> 适配层另有一套字符串常量，见 <code>ModelAdapterDefaults</code>：<code>CHAT</code>/<code>EMBEDDING</code> → <code>openai-compatible</code>；<code>RERANKER</code> → <code>qwen-rerank</code>。<code>resolve(adapterKey, modelType)</code> 在 adapterKey 为空时按 modelType 回退。</p>
+
+  <h2 id="spi">snail-ai-models 适配器 SPI</h2>
+  <p>三类能力共享同一模式：<code>Spec</code> → <code>Runtime.build</code> → 按 <code>adapterKey</code> 选 <code>Adapter</code> → <code>create(spec)</code>。</p>
+
+  <h3>公共 Spec 字段（Chat / Embedding / Rerank 对齐）</h3>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>必填（runtime 校验）</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>adapterKey</code></td><td><code>String</code></td><td>是</td><td>选择 provider 的主键；与 <code>Adapter.adapterKey()</code> 忽略大小写匹配。</td></tr>
+      <tr><td><code>providerKey</code></td><td><code>String</code></td><td>否</td><td>保存在 spec 中；当前内置 provider 选择仍只看 <code>adapterKey</code>。</td></tr>
+      <tr><td><code>baseUrl</code></td><td><code>String</code></td><td>是</td><td>OpenAI-compatible 或 Qwen rerank 根地址。</td></tr>
+      <tr><td><code>apiKey</code></td><td><code>String</code></td><td>是</td><td>明文 Key（Server 侧通常已由 <code>CryptoHelper</code> 解密）。</td></tr>
+      <tr><td><code>modelKey</code></td><td><code>String</code></td><td>是</td><td>远端模型名。</td></tr>
+      <tr><td><code>configJson</code></td><td><code>ConfigExtAttrsDTO</code></td><td>否</td><td>温度、超时、维度、extraBody 等扩展参数。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Adapter SPI 接口</h3>
+  <table>
+    <thead><tr><th>能力</th><th>接口</th><th>方法</th><th>返回类型</th><th>内置实现</th><th>adapterKey</th></tr></thead>
+    <tbody>
+      <tr><td>Chat</td><td><code>ChatModelAdapter</code></td><td><code>adapterKey()</code><br><code>create(ChatModelSpec)</code></td><td><code>ChatModel</code></td><td><code>OpenAiCompatibleChatModelAdapter</code></td><td><code>openai-compatible</code></td></tr>
+      <tr><td>Embedding</td><td><code>EmbeddingModelAdapter</code></td><td><code>adapterKey()</code><br><code>create(EmbeddingModelSpec)</code></td><td><code>EmbeddingModel</code></td><td><code>OpenAiCompatibleEmbeddingModelAdapter</code></td><td><code>openai-compatible</code></td></tr>
+      <tr><td>Rerank</td><td><code>RerankModelAdapter</code></td><td><code>adapterKey()</code><br><code>create(RerankModelSpec)</code></td><td><code>RerankApiClient</code></td><td><code>QwenRerankModelAdapter</code></td><td><code>qwen-rerank</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Runtime 选择与错误码</h3>
+  <table>
+    <thead><tr><th>Runtime</th><th>入口</th><th>adapter 排序</th><th>异常</th></tr></thead>
+    <tbody>
+      <tr><td><code>ChatModelRuntime</code></td><td><code>build(ChatModelSpec)</code></td><td><code>Ordered.getOrder()</code>，默认 <code>LOWEST_PRECEDENCE</code></td><td><code>INVALID_MODEL_CONFIG</code>、<code>ADAPTER_NOT_FOUND</code>、<code>MODEL_BUILD_FAILED</code></td></tr>
+      <tr><td><code>EmbeddingModelRuntime</code></td><td><code>build(EmbeddingModelSpec)</code></td><td>同上</td><td>同上</td></tr>
+      <tr><td><code>RerankModelRuntime</code></td><td><code>build(RerankModelSpec)</code></td><td>同上</td><td>同上</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Starter 自动装配 Bean</h3>
+  <table>
+    <thead><tr><th>AutoConfiguration</th><th>Runtime Bean</th><th>Adapter Bean</th><th>Descriptor Bean</th></tr></thead>
+    <tbody>
+      <tr><td><code>SnailAiChatModelAutoConfiguration</code></td><td><code>ChatModelRuntime(List&lt;ChatModelAdapter&gt;)</code></td><td><code>OpenAiCompatibleChatModelAdapter</code></td><td><code>ModelCapability.CHAT</code></td></tr>
+      <tr><td><code>SnailAiEmbeddingModelAutoConfiguration</code></td><td><code>EmbeddingModelRuntime</code></td><td><code>OpenAiCompatibleEmbeddingModelAdapter</code></td><td><code>ModelCapability.EMBEDDING</code></td></tr>
+      <tr><td><code>SnailAiRerankModelAutoConfiguration</code></td><td><code>RerankModelRuntime</code></td><td><code>QwenRerankModelAdapter</code></td><td><code>ModelCapability.RERANKER</code></td></tr>
+    </tbody>
+  </table>
+  <p><span class="tag">扩展 provider</span> 实现对应 <code>*ModelAdapter</code> 并注册为 Spring Bean；可选实现 <code>Ordered</code> 控制同 key 冲突时的优先级；同步注册 <code>ModelAdapterDescriptor</code> 供 Admin <code>listModelAdapters</code> 展示。</p>
+
+  <h2 id="maven">Maven 模块依赖矩阵</h2>
+  <div class="tree">snail-ai-models/                          ← 聚合：common + chat + embedding + rerank
+├── snail-ai-model-common/                  ← descriptor、defaults、error（无外部 AI 依赖）
+├── snail-ai-model-chat/
+│   ├── snail-ai-model-chat-core/           ← Spec、Adapter SPI、Runtime、OpenAiChatModel
+│   ├── snail-ai-model-chat-provider-openai-compatible/  ← 依赖 core + spring-ai-openai
+│   └── snail-ai-model-chat-starter/        ← core + provider + autoconfigure
+├── snail-ai-model-embedding/
+│   ├── snail-ai-model-embedding-core/      ← Spec、SPI、Runtime
+│   ├── snail-ai-model-embedding-provider-openai-compatible/
+│   └── snail-ai-model-embedding-starter/
+└── snail-ai-model-rerank/
+    ├── snail-ai-model-rerank-core/         ← Spec、SPI、Runtime（仅 commons-core）
+    ├── snail-ai-model-rerank-provider-qwen/ ← core + spring-web（RestClient）
+    └── snail-ai-model-rerank-starter/</div>
+  <table>
+    <thead><tr><th>子模块</th><th>直接依赖</th><th>产出职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>chat-core</code></td><td><code>model-common</code>、<code>commons-core</code>、<code>spring-ai-client-chat</code>、<code>spring-ai-openai</code></td><td>SPI +  fork 版 <code>OpenAiChatModel</code></td></tr>
+      <tr><td><code>chat-provider-openai-compatible</code></td><td><code>chat-core</code>、<code>spring-ai-openai</code></td><td><code>ConfigExtAttrsDTO</code> → <code>OpenAiChatOptions</code></td></tr>
+      <tr><td><code>chat-starter</code></td><td><code>chat-core</code>、<code>chat-provider</code>、<code>spring-boot-autoconfigure</code></td><td>一键装配 Chat 适配层</td></tr>
+      <tr><td><code>embedding-core</code></td><td><code>model-common</code>、<code>commons-core</code>、<code>spring-ai-openai</code></td><td>Embedding SPI + Runtime</td></tr>
+      <tr><td><code>embedding-provider-openai-compatible</code></td><td><code>embedding-core</code>、<code>spring-ai-openai</code></td><td>维度、编码格式、重试映射</td></tr>
+      <tr><td><code>embedding-starter</code></td><td><code>embedding-core</code>、<code>embedding-provider</code>、autoconfigure</td><td>一键装配 Embedding</td></tr>
+      <tr><td><code>rerank-core</code></td><td><code>model-common</code>、<code>commons-core</code></td><td>Rerank SPI + Runtime（无 Spring AI）</td></tr>
+      <tr><td><code>rerank-provider-qwen</code></td><td><code>rerank-core</code>、<code>spring-web</code></td><td>HTTP <code>/rerank</code> 客户端</td></tr>
+      <tr><td><code>rerank-starter</code></td><td><code>rerank-core</code>、<code>rerank-provider-qwen</code>、autoconfigure</td><td>一键装配 Rerank</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="openai-ext">OpenAiChatModel 扩展点</h2>
+  <p>项目将 Spring AI 的 <code>OpenAiChatModel</code> 放在 <span class="where">chat-core/.../org/springframework/ai/openai/OpenAiChatModel.java</span>，供 <code>OpenAiCompatibleChatModelAdapter</code> 通过 <code>OpenAiChatModel.builder().options(...).build()</code> 创建。相对上游 Spring AI，Snail AI 重点扩展了兼容性与流式合并。</p>
+
+  <h3>构建入口</h3>
+  <table>
+    <thead><tr><th>API</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>OpenAiChatModel.builder()</code></td><td>Builder 模式；可注入 <code>OpenAiChatOptions</code>、<code>ToolCallingManager</code>、<code>ObservationRegistry</code>。</td></tr>
+      <tr><td><code>OpenAiCompatibleChatModelAdapter.buildOptions</code></td><td>把 <code>ChatModelSpec</code> + <code>ConfigExtAttrsDTO</code> 映射为 <code>OpenAiChatOptions</code>：baseUrl、apiKey、model、timeout、temperature、topP、topK、maxTokens、penalty、stop、seed、<strong>extraBody</strong>。</td></tr>
+      <tr><td>默认超时</td><td><code>configJson.timeoutMs</code> 缺失或 ≤0 时使用 <code>300_000</code> ms。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>请求体扩展：extraBody</h3>
+  <p>在 <code>createRequest</code> 路径中，若 <code>OpenAiChatOptions.extraBody</code> 非空，会转为 <code>additionalBodyProperties</code> 写入 OpenAI Java SDK 请求——用于 DeepSeek、Qwen 等 OpenAI-compatible 厂商的专有字段（如 <code>enable_thinking</code>）。配置来源：<code>ConfigExtAttrsDTO.extraBody</code> → adapter → options → 请求体。</p>
+
+  <h3>流式 ChunkMerger（内部类）</h3>
+  <table>
+    <thead><tr><th>方法</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>hasToolCall</code> / <code>toolCallsDone</code></td><td>检测流式 chunk 是否处于 tool call 片段。</td></tr>
+      <tr><td><code>mergeChunks</code></td><td>合并同一逻辑响应的多个 <code>ChatCompletionChunk</code>。</td></tr>
+      <tr><td><code>mergeToolCalls</code></td><td>按 <code>index</code> 合并 tool call 参数片段；兼容 DeepSeek 等 provider 在续传 delta 上发送空字符串 <code>id</code> 的行为。</td></tr>
+      <tr><td><code>chunkToChatCompletion</code></td><td>将最终 chunk 转为 <code>ChatCompletion</code>；<strong>保留 delta 的 <code>_additionalProperties</code></strong>（如 <code>reasoning_content</code>）。</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><strong>测试锚点：</strong><span class="where">OpenAiChatModelChunkMergerTest</span> 验证 <code>reasoning_content</code> 在 <code>chunkToChatCompletion</code> 后仍存在于 message additional properties——推理模型场景排查时可对照此测试。</p>
+
+  <h3>工具调用与观测</h3>
+  <table>
+    <thead><tr><th>扩展点</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>ToolCallingManager</code></td><td>解析 tool definitions、执行 tool call 循环；流式路径在 tool call 完成后聚合再转 completion。</td></tr>
+      <tr><td><code>parseToolChoice(JsonNode)</code></td><td>支持 <code>function</code> / <code>auto</code> / <code>required</code> / <code>none</code> 四种 tool_choice。</td></tr>
+      <tr><td><code>TOOL_CALL_ADDITIONAL_PROPERTIES_METADATA_KEY</code></td><td>assistant message metadata 中保存 tool call 附加 JSON 属性。</td></tr>
+      <tr><td>Micrometer Observation</td><td><code>ChatModelObservationContext</code> 包裹同步与流式调用。</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top:28px;font-size:14px;color:#6b7280">对本文档有疑问？向你的 AI 老师追问「某个 adapter 如何新增」「extraBody 字段如何传到请求体」或「ChunkMerger 与工具调用的关系」。</p>
+</body>
+</html>

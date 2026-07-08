@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 日历导入与 time block 写回路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article class="doc">
+    <p class="kicker">L2 垂直切片 · 15 分钟 · 一个判断目标</p>
+    <h1>日历事件导入与插件 time block 写回全链路</h1>
+    <p class="lead">
+      学完这一课，你要能回答：某段代码是在<strong>读远端日历</strong>、<strong>把事件投影到 Planner/Schedule</strong>、<strong>导入成本地任务</strong>，还是<strong>把本地 scheduled task 写回插件日历</strong>？
+      完整索引见 <a href="../reference/calendar-time-block-sync-flow-reference.html">参考文档</a>。
+      父模块：<a href="../../module-issue-integrations/lessons/0001-issue-integrations-module-tour.html">Issue Provider 与日历集成</a>。
+      相邻切片：<a href="../../slice-planner-schedule-flow/lessons/0001-flow-map.html">Planner→Schedule 投影</a>。
+    </p>
+
+    <h2>1. 时序总览</h2>
+    <pre class="mermaid">sequenceDiagram
+  participant Src as iCal / 插件 Agenda
+  participant CalSvc as CalendarIntegrationService
+  participant CalFx as CalendarIntegrationEffects
+  participant IssueSvc as IssueService
+  participant View as Planner / Schedule
+  participant Task as TaskSharedActions
+  participant TB as TimeBlockSyncEffects
+  participant Plugin as 插件 timeBlock API
+
+  Note over Src,View: 读方向：事件进入视图，可选导入任务
+  CalSvc->>Src: HTTP iCal 或 getNewIssuesForBacklog
+  Src-->>CalSvc: CalendarIntegrationEvent[]
+  CalSvc->>View: calendarEvents$ 过滤后投影
+  CalFx->>Src: requestEvents$ 轮询今日事件
+  CalFx->>IssueSvc: addTaskFromIssue（auto-import）
+  IssueSvc->>Task: 确定性 cal_ task id
+
+  Note over Task,Plugin: 写方向 A：scheduled task → time block
+  Task->>TB: schedule / update / unschedule
+  TB->>Plugin: upsertEvent / deleteEvent（合并队列）
+
+  Note over View,Plugin: 写方向 B：拖拽可写插件事件
+  View->>Plugin: CalendarEventActions pushChanges
+  Plugin-->>CalSvc: triggerRefresh 重拉事件</pre>
+    <p>首查读方向入口是 <span class="where"><code>src/app/features/calendar-integration/calendar-integration.service.ts</code></span> 的 <code>calendarEvents$</code>；写回本地任务到远端日历是 <span class="where"><code>src/app/features/calendar-integration/time-block/time-block-sync.effects.ts</code></span>。</p>
+
+    <h2>2. 三类对象别混</h2>
+    <table>
+      <thead>
+        <tr><th>对象</th><th>存在哪里</th><th>典型入口</th><th>常见误判</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>calendar event（读）</td>
+          <td>远端 + LS 缓存；视图为 <code>ScheduleFromCalendarEvent</code></td>
+          <td><code>CalendarIntegrationService</code></td>
+          <td>投影到 Schedule 不等于已导入任务；iCal 事件默认不可拖拽写回。</td>
+        </tr>
+        <tr>
+          <td>calendar task（导入）</td>
+          <td>本地 <code>Task</code>，<code>issueType=ICAL</code>，id 为 <code>cal_{providerId}_{eventId}</code></td>
+          <td><code>CalendarIntegrationEffects</code> 或 banner / 右键</td>
+          <td>与 time block 无关；走 issue 导入，不是 <code>timeBlock.upsertEvent</code>。</td>
+        </tr>
+        <tr>
+          <td>time block（写）</td>
+          <td>远端插件日历事件，由 <code>task.id</code> 关联</td>
+          <td><code>TimeBlockSyncEffects</code></td>
+          <td>需要 <code>isAutoTimeBlock</code> 且插件定义 <code>timeBlock</code>；监听的是 task action，不是 calendar 投影。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一（事件为何没出现在 Schedule）：</strong>先看 <code>calendarEvents$</code> 是否拉到数据，再看视图过滤——已链接任务 id、用户 skip、hidden、regex 过滤都会隐藏事件。缓存写在 <code>LS.CAL_EVENTS_CACHE</code>，拉取失败会回退缓存。</p>
+    <p><strong>判断二（今日事件为何没自动变任务）：</strong>首查 <span class="where"><code>src/app/features/calendar-integration/store/calendar-integration.effects.ts</code></span>。必须同时满足：provider 开启 <code>isAutoImportForCurrentDay</code>、事件是今天、未重复、初始同步完成且不在 sync window。手动添加走同一 <code>IssueService.addTaskFromIssue</code>，但无 sync window 门控。</p>
+    <p><strong>判断三（排程后为何没写回日历）：</strong>首查 <code>TimeBlockSyncEffects</code>。只有启用插件且 <code>pluginConfig.isAutoTimeBlock</code> 为真才会 upsert；单次编辑多个 action 会在 1s 内合并；取消排程、跨日 transfer、删除任务会走 delete。Schedule 拖插件事件则走 <code>CalendarEventActionsService.moveToStartTime</code>，那是<strong>改远端已有事件</strong>，不是 time block 链路。</p>
+
+    <h2>4. 60 秒判断题</h2>
+    <p>场景：用户把本地任务 A 拖到明天 10:00（此前无 <code>dueWithTime</code>），同时 Google Calendar 插件已开 auto time block。Schedule 上另有一个可拖拽的插件日历会议块被改到 11:00。哪条链路会写远端？</p>
+    <ol>
+      <li>两条都走 <code>TimeBlockSyncEffects</code>。</li>
+      <li>任务 A 走 time block upsert；会议块走 <code>CalendarEventActionsService</code> pushChanges。</li>
+      <li>两条都走 <code>IssueTwoWaySyncEffects</code> 双向同步。</li>
+    </ol>
+    <details class="answer">
+      <summary>参考答案与反馈</summary>
+      <p>选 2。本地排程触发 <code>scheduleTaskWithTime</code>，由 <code>TimeBlockSyncEffects</code> 合并后调用 <code>definition.timeBlock.upsertEvent</code>。拖拽 Schedule 上的插件日历事件是移动<strong>已存在的远端 agenda 事件</strong>，经 sync adapter <code>pushChanges</code> 后 <code>triggerRefresh</code> 重拉；iCal 只读事件则不能拖。它们都不经过 issue 双向同步的 baseline push。</p>
+    </details>
+    <p class="mini">主要来源：<a href="../reference/calendar-time-block-sync-flow-reference.html">日历 time block 全链路速查</a>。若某步不清楚，可向 agent 追问：“请从 <code>calendarEvents$</code> 追到 Schedule blocked block”或“请列出 time block 队列合并规则”。</p>
+  </article>
+</main>
+</body>
+</html>

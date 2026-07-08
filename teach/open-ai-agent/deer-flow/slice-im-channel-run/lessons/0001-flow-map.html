@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟串起 IM 入站如何触发 run</title>
+  <link rel="stylesheet" href="../../module-frontend-core/assets/core-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>15 分钟串起 IM 入站如何触发 run</h1>
+    <p class="lead">
+      学习目标：用户在飞书或 Slack 发一条消息后，你能从平台 adapter 一直指到 Gateway 上的一次 agent run，并说出 run 在哪一层被创建。
+      完整分层表、三种 run 模式与异常分支见
+      <a href="../reference/im-channel-run-flow-map.html">入站执行参考页</a>。
+    </p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">关联：<a href="../../module-channels/lessons/0001-channels-module-tour.html">channels</a> · <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">gateway</a> · <a href="../../slice-chat-streaming-run/lessons/0001-flow-map.html">chat-streaming-run</a></span>
+    </div>
+
+    <h2>1. 入口：平台 adapter 只入队，不跑 agent</h2>
+    <p>
+      各 IM 平台在 <span class="where">backend/app/channels/*.py</span> 里收事件或长轮询。
+      以飞书为例，adapter 把用户文本包装成 <code>InboundMessage</code>，调用
+      <span class="where">message_bus.py</span> 的 <code>publish_inbound</code> 入队。
+      此时还没有 thread、也没有 run——adapter 与 agent 完全解耦。
+    </p>
+    <pre>FeishuChannel（示意）
+  -> InboundMessage(channel_name, chat_id, user_id, text, …)
+  -> bus.publish_inbound(msg)   # asyncio.Queue.put</pre>
+    <p>
+      <span class="where">service.py</span> 在 Gateway 启动时创建 <code>MessageBus</code> 与 <code>ChannelManager</code>，
+      并启动各平台 worker。运维侧 <code>GET /api/channels/</code> 只查状态，不参与消息流（见
+      <span class="where">gateway/routers/channels.py</span>）。
+    </p>
+
+    <h2>2. 调度循环：出队、去重、并发处理</h2>
+    <p>
+      <span class="where">manager.py</span> 的 <code>_dispatch_loop</code> 阻塞读取总线：
+      <code>msg = await self.bus.get_inbound()</code>。
+      先用 <code>_is_duplicate_inbound</code> 吸收平台重投；再 <code>asyncio.create_task(self._handle_message(msg))</code>，
+      由信号量 <code>_max_concurrency</code> 限制并行度。
+      普通聊天在 <code>_handle_message</code> 里还会先做绑定身份校验（<code>require_bound_identity</code>）。
+    </p>
+    <pre>_dispatch_loop
+  -> get_inbound()
+  -> dedupe?
+  -> create_task(_handle_message)
+       -> bound identity OK?
+       -> _handle_chat 或 _handle_command</pre>
+
+    <h2>3. 触发 run：thread 映射 + SDK 调 Gateway</h2>
+    <p>
+      <code>_handle_chat</code> 是聊天入站的主路径：
+      ① <code>_get_or_create_thread</code> 经 <code>langgraph_sdk</code> 调 <code>client.threads.create</code>（或复用 store 里的映射）；
+      ② <code>_resolve_run_params</code> 合并 session、<code>owner_user_id</code>、channel 策略；
+      ③ 按平台能力选 run API——Feishu/Telegram 走 <code>runs.stream</code>，Slack/Discord 走 <code>runs.wait</code>，GitHub 走 fire-and-forget 的 <code>runs.create</code>。
+      与浏览器聊天相同，真正执行 lead agent 的是 Gateway 内嵌 runtime，不是 channel 进程里的 Python 图。
+    </p>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant IM as Feishu/Slack adapter
+    participant Bus as MessageBus
+    participant M as ChannelManager
+    participant SDK as langgraph_sdk
+    participant GW as Gateway /api
+
+    IM->>Bus: publish_inbound(InboundMessage)
+    Bus->>M: get_inbound()
+    M->>M: _handle_chat
+    M->>SDK: threads.create / get
+    SDK->>GW: POST /api/threads
+    M->>SDK: runs.wait 或 runs.stream
+    SDK->>GW: POST .../runs/wait 或 /stream
+    GW-->>M: 最终状态或 SSE 块
+    M->>Bus: publish_outbound(OutboundMessage)
+    Bus-->>IM: channel 回调发回平台</pre>
+    </div>
+
+    <h2>4. 异常路径：未绑定与线程忙</h2>
+    <p>
+      启用 <code>channel_connections.require_bound_identity</code> 时，缺少 <code>connection_id</code> + <code>owner_user_id</code>
+      的入站聊天在进信号量前就被 <code>_reject_unbound_channel_message</code> 拒绝，并直接 <code>publish_outbound</code> 提示用户去设置页绑定。
+      另一条常见边界：<code>multitask_strategy="reject"</code> 下同 thread 已有活跃 run 时，SDK 抛 <code>ConflictError</code>，
+      manager 回复 <code>THREAD_BUSY_MESSAGE</code> 而不重试。处理失败时还会 <code>_release_inbound_dedupe_key</code>，避免重投被 TTL 去重吞掉。
+      更多错误码与 provider 差异见
+      <a href="../reference/im-channel-run-flow-map.html#errors">参考页错误表</a>。
+    </p>
+
+    <h3>检索练习</h3>
+    <div class="callout">
+      <p>判断对错（不看上文）：</p>
+      <p>A. <code>feishu.py</code> 里直接 <code>import make_lead_agent</code> 并跑图。</p>
+      <p>B. <code>ChannelManager</code> 与浏览器前端共用 Gateway 的 thread/run HTTP API。</p>
+      <p>C. <code>POST /api/channels/feishu/restart</code> 是用户发消息时必经的 HTTP 入口。</p>
+    </div>
+    <div class="answer">
+      <p><strong>参考答案：</strong>A 错，adapter 只 <code>publish_inbound</code>，agent 由 manager 经 SDK 在 Gateway 触发。B 对，同一 <code>langgraph_url</code>（默认 <code>http://localhost:8001/api</code>）。C 错，那是管理员重启 worker 的运维接口，与入站消息流无关。</p>
+    </div>
+
+    <p class="note">
+      主要来源：<code>backend/AGENTS.md</code> IM Channels Message Flow、<code>manager.py</code> 中 <code>_handle_chat</code>。
+      想沿某一层下钻，向 agent 追问「从 <code>runs.stream</code> 出站节流继续」或「GitHub fire-and-forget 为何不 publish_outbound」。
+    </p>
+  </article>
+</main>
+</body>
+</html>

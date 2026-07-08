@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Client 与 OpenAPI SDK API</title>
+  <link rel="stylesheet" href="../assets/agent-client.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-agent-client-module-tour.html">返回短课</a>
+    <a href="agent-client-overview.html">执行层速查</a>
+    <a href="../../slice-client-advisor-stream/reference/client-advisor-stream-flow-map.html">Advisor 流式切片</a>
+    <a href="../../slice-openapi-client-example/reference/openapi-client-example-flow-map.html">OpenAPI 示例切片</a>
+  </nav>
+
+  <h1>Agent Client 与 OpenAPI SDK API</h1>
+  <p class="lead">L3 微观 API 参考：按子模块列出 <code>snail-ai-agent-chat</code>、<code>snail-ai-agent-executor</code>、<code>snail-ai-agent-openapi</code>、<code>snail-ai-agent-common</code> 与示例配置的公开类型、方法签名、参数、返回值与异常。架构地图见 <a href="agent-client-overview.html">执行层速查</a>。</p>
+
+  <h2>0. 启用注解与 Maven 模块</h2>
+  <table>
+    <thead>
+      <tr><th>注解</th><th>模块</th><th>导入配置</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>@EnableSnailAiAgent</code></td>
+        <td><code>snail-ai-agent-executor-starter</code></td>
+        <td><code>@Import(SnailAiAgentAutoConfiguration.class)</code></td>
+        <td>启用 Agent Client 执行层：gRPC server、心跳、ChatClient 工厂、Advisor、Tool resolver。</td>
+      </tr>
+      <tr>
+        <td><code>@EnableSnailAiOpenApi</code></td>
+        <td><code>snail-ai-openapi-starter</code></td>
+        <td><code>@Import(SnailAiOpenApiAutoConfiguration.class)</code></td>
+        <td>启用 OpenAPI HTTP 客户端动态代理（<code>OpenApi*Client</code> Bean）。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note">嵌入式 Chat UI 依赖 OpenAPI：<code>SnailAiChatAutoConfiguration</code> 在 <code>snail-ai.openapi.enabled=true</code> 时生效，并 <code>@AutoConfigureAfter(SnailAiOpenApiAutoConfiguration.class)</code>。</p>
+  <table>
+    <thead>
+      <tr><th>Maven 子模块</th><th>职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>snail-ai-agent-chat-api</code></td><td>嵌入式 Chat 会话模型、配置属性、认证注解。</td></tr>
+      <tr><td><code>snail-ai-agent-chat-starter</code></td><td>Chat BFF 网关、JWT 拦截器、静态页转发。</td></tr>
+      <tr><td><code>snail-ai-agent-executor-core</code></td><td>ChatClient 构建、Interceptor、内置 Tool、执行请求模型。</td></tr>
+      <tr><td><code>snail-ai-agent-executor-model</code></td><td><code>ModelConfig</code> → <code>ChatModel</code> 工厂。</td></tr>
+      <tr><td><code>snail-ai-agent-executor-starter</code></td><td><code>@EnableSnailAiAgent</code> 与自动配置。</td></tr>
+      <tr><td><code>snail-ai-openapi-core</code></td><td>OpenAPI 客户端接口与参数注解。</td></tr>
+      <tr><td><code>snail-ai-openapi-starter</code></td><td><code>@EnableSnailAiOpenApi</code> 与 HTTP 客户端 Bean。</td></tr>
+      <tr><td><code>snail-ai-agent-common</code></td><td>聊天上下文、滑动窗口、回调异常、RPC 注解。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>1. Chat Starter / API</h2>
+  <p>嵌入式 Chat 的 BFF 层，把浏览器请求代理到 <code>OpenApi*Client</code>。网关根路径：<code>SnailAiChatConstants.GATEWAY_PATH</code> = <code>/api/snail/chat</code>。</p>
+
+  <h3>1.1 配置与常量</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>成员</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>SnailAiChatProperties</code><br><span class="where">snail-ai-agent-chat-api</span></td>
+        <td><code>@ConfigurationProperties(prefix = "snail-ai.chat")</code><br>
+          <code>DEFAULT_PAGE_TITLE = "Snail AI Chat"</code><br>
+          <code>Ui ui</code>：<code>pageTitle</code>、<code>logo</code>、<code>resourceBaseUrl</code>、<code>embed</code><br>
+          <code>Session session</code>：<code>tokenTtlSeconds</code>（默认 3600）</td>
+        <td>Chat UI 与嵌入模式配置；<code>Embed</code> 含 <code>enabled</code>、<code>showHeader</code>、<code>showSidebarUser</code>、<code>showAgentMarket</code>、<code>compactInput</code>、<code>lockAgent</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatConstants</code></td>
+        <td><code>GATEWAY_PATH = "/api/snail/chat"</code></td>
+        <td>网关与前端共享路径常量。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatTokenService.AUTH_HEADER</code></td>
+        <td><code>"Snail-Ai-Auth"</code></td>
+        <td>JWT 请求头名称。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1.2 会话与认证</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>方法 / 字段</th><th>返回值 / 异常</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>@SnailAiChatAuthorize</code></td>
+        <td>标注在类或方法上</td>
+        <td>触发 <code>SnailAiChatAuthenticationInterceptor</code> 校验 JWT。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatSession</code></td>
+        <td><code>token</code>、<code>appId</code>、<code>openId</code>、<code>trustedCredential</code>、<code>expiresAt</code></td>
+        <td>已验证会话；Lombok <code>@Builder</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatSessionContext</code></td>
+        <td><code>set(SnailAiChatSession)</code><br><code>get() → Optional</code><br><code>current() → SnailAiChatSession</code><br><code>clear()</code></td>
+        <td><code>current()</code> 未初始化时抛 <code>IllegalStateException</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatTokenService</code></td>
+        <td><code>verify(String rawToken) → SnailAiChatSession</code></td>
+        <td>解析 <code>Snail-Ai-Auth</code> JWT；失败抛 <code>SnailAiAuthenticationException</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatCredentialValidator</code></td>
+        <td><code>void validate(SnailAiChatSession session)</code></td>
+        <td>接入方扩展：在发 token 前校验 <code>openId</code> / <code>trustedCredential</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SnailAiChatAuthenticationInterceptor</code></td>
+        <td><code>preHandle(...)</code><br><code>afterCompletion(...)</code></td>
+        <td>对 <code>@SnailAiChatAuthorize</code> 请求校验 token、运行 validators、设置/清理 <code>SnailAiChatSessionContext</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1.3 自动配置</h3>
+  <table>
+    <thead>
+      <tr><th>Bean</th><th>条件</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>SnailAiChatAutoConfiguration</code></td>
+        <td><code>snail-ai.openapi.enabled=true</code></td>
+        <td><code>@ComponentScan("com.aizuda.snail.ai.agent.chat")</code>；注册 <code>SnailAiChatTokenService</code>、<code>SnailAiChatAuthenticationInterceptor</code>、<code>WebMvcConfigurer</code>（拦截器 + 静态资源）。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1.4 网关控制器 <code>SnailAiChatGatewayController</code></h3>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-chat/snail-ai-agent-chat-starter/.../SnailAiChatGatewayController.java</span></p>
+  <table>
+    <thead>
+      <tr><th>HTTP</th><th>方法签名</th><th>认证</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>GET /config</code></td><td><code>Result&lt;Map&lt;String,Object&gt;&gt; config()</code></td><td>无</td><td>返回 UI 配置：gatewayPath、pageTitle、logo、resourceBaseUrl、embed 选项。</td></tr>
+      <tr><td><code>POST /session</code></td><td><code>Result&lt;OpenApiEmbedTokenResponse&gt; session(@Valid OpenApiEmbedTokenRequest)</code></td><td>无（可经 CredentialValidator）</td><td>调用 <code>OpenApiEmbedClient.embedToken</code>；自动填充 <code>ttlSeconds</code>。</td></tr>
+      <tr><td><code>GET /agents</code></td><td><code>PageResult&lt;List&lt;OpenApiAgentVO&gt;&gt; listAgents(@Valid OpenApiAgentQueryRequest)</code></td><td><code>@SnailAiChatAuthorize</code></td><td>代理 <code>OpenApiAgentClient.listAgents</code>，并标记订阅状态。</td></tr>
+      <tr><td><code>GET /agent</code></td><td><code>Result&lt;OpenApiAgentVO&gt; getAgent(@Valid OpenApiAgentIdentityRequest)</code></td><td>是</td><td>单个 Agent 详情。</td></tr>
+      <tr><td><code>GET /my-agents</code></td><td><code>Result&lt;List&lt;OpenApiAgentVO&gt;&gt; myAgents()</code></td><td>是</td><td>当前用户已订阅 Agent。</td></tr>
+      <tr><td><code>POST /agent/subscribe</code></td><td><code>Result&lt;Void&gt; subscribeAgent(@RequestParam Long agentId)</code></td><td>是</td><td>订阅 Agent。</td></tr>
+      <tr><td><code>DELETE /agent/subscribe</code></td><td><code>Result&lt;Void&gt; unsubscribeAgent(@RequestParam Long agentId)</code></td><td>是</td><td>取消订阅。</td></tr>
+      <tr><td><code>GET /conversations</code></td><td><code>PageResult&lt;List&lt;OpenApiConversationVO&gt;&gt; listConversations(agentId, page=1, size=50)</code></td><td>是</td><td>分页会话列表。</td></tr>
+      <tr><td><code>POST /conversations</code></td><td><code>Result&lt;OpenApiConversationVO&gt; createConversation(@RequestBody OpenApiCreateConversationRequest)</code></td><td>是</td><td>创建会话。</td></tr>
+      <tr><td><code>DELETE /conversations?conversationId=</code></td><td><code>Result&lt;Void&gt; deleteConversation(agentId, conversationId)</code></td><td>是</td><td>删除单个会话。</td></tr>
+      <tr><td><code>DELETE /conversations</code>（无 conversationId）</td><td><code>Result&lt;Void&gt; clearConversations(agentId)</code></td><td>是</td><td>清空 Agent 下全部会话。</td></tr>
+      <tr><td><code>GET /messages</code> 或 <code>/conversations/messages</code></td><td><code>Result&lt;List&lt;OpenApiMessageVO&gt;&gt; getMessages(agentId, conversationId)</code></td><td>是</td><td>历史消息。</td></tr>
+      <tr><td><code>POST /completions</code>（SSE）</td><td><code>Flux&lt;ServerSentEvent&lt;String&gt;&gt; completions(@RequestBody OpenApiChatRequest)</code></td><td>是</td><td>流式补全；代理 <code>OpenApiChatClient.chatStream</code>。</td></tr>
+    </tbody>
+  </table>
+  <p class="note">网关内部 OpenAPI 响应 <code>status != 1</code> 时抛 <code>SnailAiException</code>；<code>currentOpenId()</code> 为空时抛 <code>SnailAiException("Token 缺少 openId")</code>。</p>
+
+  <h3>1.5 静态页转发 <code>WebController</code></h3>
+  <table>
+    <thead>
+      <tr><th>映射</th><th>签名</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>GET /snail-chat</code></td><td><code>String redirectChatRoot(HttpServletRequest)</code></td><td>重定向到带尾斜杠路径。</td></tr>
+      <tr><td><code>GET /snail-chat/</code></td><td><code>String forwardChatIndex()</code></td><td>转发到嵌入式 <code>index.html</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. Executor Core</h2>
+  <p>Client 侧 LLM 调用构建与扩展 SPI。默认实现由 <code>SnailAiAgentAutoConfiguration</code> 注册；详见 <a href="agent-client-overview.html">执行层速查</a> 第 2–5 节。</p>
+
+  <h3>2.1 ChatClient 构建链</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>方法 / 字段</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ChatClientFactory</code></td>
+        <td><code>ChatClient build(ChatClientBuildRequest request)</code></td>
+        <td>构建 Spring AI <code>ChatClient</code>；默认实现 <code>DefaultChatClientFactory</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ChatClientBuildRequest</code></td>
+        <td><code>ChatDispatchRequest dispatchRequest</code><br><code>List&lt;ToolCallback&gt; tools</code><br><code>getModelConfig()</code></td>
+        <td>一次 Chat 调用的模型与工具输入。</td>
+      </tr>
+      <tr>
+        <td><code>ChatClientBuildContext</code></td>
+        <td><code>ChatClientBuildRequest request</code><br><code>ChatClient.Builder builder</code></td>
+        <td>传给 <code>ChatClientCustomizer</code> 的构建上下文。</td>
+      </tr>
+      <tr>
+        <td><code>ChatClientCustomizer</code></td>
+        <td><code>default String name()</code><br><code>default int order()</code> → <code>LOWEST_PRECEDENCE</code><br><code>void customize(ChatClientBuildContext context)</code></td>
+        <td>接入方在 <code>ChatClient.Builder</code> build 前横向定制；按 <code>order()</code> 排序执行。</td>
+      </tr>
+      <tr>
+        <td><code>PromptFactory</code></td>
+        <td><code>Prompt build(ChatDispatchRequest request)</code></td>
+        <td>把 system、history、user message 组装为 Spring AI <code>Prompt</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ChatModelFactory</code></td>
+        <td><code>ChatModel build(ChatDispatchRequest.ModelConfig modelConfig)</code></td>
+        <td>把 Server 下发的 <code>ModelConfig</code> 转为可调用 <code>ChatModel</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ClientChatModelInput</code>（record）</td>
+        <td><code>ChatDispatchRequest.ModelConfig modelConfig</code></td>
+        <td>模型工厂输入 record。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 执行请求与回调</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>字段 / 方法</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ClientChatExecutionRequest</code></td>
+        <td><code>ChatDispatchRequest dispatchRequest</code><br><code>List&lt;ToolCallback&gt; tools</code><br>
+          <code>Consumer&lt;String&gt; messageDeltaConsumer</code><br>
+          <code>Consumer&lt;String&gt; thinkingDeltaConsumer</code><br>
+          <code>Consumer&lt;ChatCompletionResult&gt; completionConsumer</code><br>
+          <code>Consumer&lt;Throwable&gt; errorConsumer</code><br>
+          <code>acceptCompletion(ChatCompletionResult)</code><br>
+          <code>acceptError(Throwable)</code></td>
+        <td><code>ClientChatExecutor</code> 的执行上下文；流式文本、thinking、完成与错误通过 Consumer 回传。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.3 ToolCalling 工厂</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>方法 / 字段</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ToolCallingManagerFactory</code></td>
+        <td><code>ToolCallingManager build(ToolCallingManagerBuildRequest request)</code></td>
+        <td>构建 Spring AI <code>ToolCallingManager</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ToolCallingManagerBuildRequest</code></td>
+        <td><code>Map&lt;String, Object&gt; extraBody</code></td>
+        <td>透传模型侧 extra body 参数。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.4 Interceptor SPI</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>方法</th><th>默认行为</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>SnailAiInterceptor</code><br><span class="where">extends Ordered</span></td>
+        <td><code>ChatClientRequest beforeRequest(ChatClientRequest)</code><br>
+          <code>ChatClientResponse afterResponse(ChatClientResponse)</code><br>
+          <code>int getOrder()</code></td>
+        <td>默认透传请求/响应；<code>getOrder()</code> 默认 0。由 <code>InterceptorChainAdvisor</code> 按 order 正序 before、逆序 after。</td>
+      </tr>
+      <tr>
+        <td><code>LoggingInterceptor</code></td>
+        <td>同上</td>
+        <td><code>getOrder() = 100</code>；记录 LLM 请求/响应日志（可选 Bean）。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.5 内置 Tool</h3>
+  <table>
+    <thead>
+      <tr><th>类</th><th>构造器</th><th>Tool 方法</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ShellTool</code></td>
+        <td><code>ShellTool(String workingDirectory, long commandTimeout, int maxOutputLines)</code></td>
+        <td><code>@Tool(name="shell") String execute(String command)</code></td>
+        <td>在隔离工作目录执行 shell；输出截断到 <code>maxOutputLines</code>。</td>
+      </tr>
+      <tr>
+        <td><code>HttpTool</code></td>
+        <td><code>HttpTool(long timeoutMs)</code></td>
+        <td><code>@Tool(name="http_request") String request(url, method?, body?, contentType?, headers?)</code></td>
+        <td>GET/POST HTTP；拒绝内网/本机地址；响应长度有上限。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. OpenAPI Client</h2>
+  <p>声明式 HTTP 客户端接口，由 <code>@EnableSnailAiOpenApi</code> 注册动态代理 Bean。路径常量来自 <code>OpenApiPathConstants</code>；请求/响应 DTO 在 <code>snail-ai-commons-core</code> 的 <code>openapi.dto</code> 包。</p>
+
+  <h3>3.1 参数注解</h3>
+  <table>
+    <thead>
+      <tr><th>注解</th><th>成员</th><th>目标</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>@PathParam</code></td><td><code>String value()</code></td><td>方法参数 → URL 路径段。</td></tr>
+      <tr><td><code>@QueryParam</code></td><td><code>String value()</code></td><td>方法参数 → 查询字符串。</td></tr>
+      <tr><td><code>@OpenApiMapping</code></td><td><code>path</code>、<code>method</code>（GET/POST/DELETE 等）</td><td>接口方法 → HTTP 端点。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 <code>OpenApiAgentClient</code></h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>HTTP</th><th>返回</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>listAgents(OpenApiAgentQueryRequest)</code></td><td>GET agents</td><td><code>PageResult&lt;List&lt;OpenApiAgentVO&gt;&gt;</code></td></tr>
+      <tr><td><code>getAgent(OpenApiAgentIdentityRequest)</code></td><td>GET agent</td><td><code>Result&lt;OpenApiAgentVO&gt;</code></td></tr>
+      <tr><td><code>listUserAgents(OpenApiUserQueryRequest)</code></td><td>GET user agents</td><td><code>Result&lt;List&lt;OpenApiAgentVO&gt;&gt;</code></td></tr>
+      <tr><td><code>subscribeAgent(OpenApiUserAgentRequest)</code></td><td>POST user agent</td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td><code>unsubscribeAgent(OpenApiUserAgentRequest)</code></td><td>DELETE user agent</td><td><code>Result&lt;Void&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.3 <code>OpenApiConversationClient</code></h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>HTTP</th><th>返回</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>listConversations(OpenApiConversationQueryRequest)</code></td><td>GET conversations</td><td><code>PageResult&lt;List&lt;OpenApiConversationVO&gt;&gt;</code></td></tr>
+      <tr><td><code>createConversation(OpenApiCreateConversationRequest)</code></td><td>POST conversations</td><td><code>Result&lt;OpenApiConversationVO&gt;</code></td></tr>
+      <tr><td><code>deleteConversation(OpenApiConversationIdentityRequest)</code></td><td>DELETE conversation</td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td><code>clearConversations(OpenApiConversationClearRequest)</code></td><td>DELETE conversations</td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td><code>getMessages(OpenApiConversationIdentityRequest)</code></td><td>GET messages</td><td><code>Result&lt;List&lt;OpenApiMessageVO&gt;&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.4 <code>OpenApiEmbedClient</code> 与 <code>OpenApiUserClient</code></h3>
+  <table>
+    <thead>
+      <tr><th>接口</th><th>方法</th><th>返回</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>OpenApiEmbedClient</code></td>
+        <td><code>embedToken(OpenApiEmbedTokenRequest)</code></td>
+        <td><code>Result&lt;OpenApiEmbedTokenResponse&gt;</code> — 嵌入式对话 JWT。</td>
+      </tr>
+      <tr>
+        <td><code>OpenApiUserClient</code></td>
+        <td><code>register(OpenApiUserRegisterRequest)</code><br><code>getUser(OpenApiUserQueryRequest)</code></td>
+        <td><code>Result&lt;OpenApiUserVO&gt;</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note">流式聊天接口 <code>OpenApiChatClient.chatStream</code> 由 Chat 网关使用，不在本 goal 的 56 个源文件内；见 <a href="../../slice-openapi-client-example/reference/openapi-client-example-flow-map.html">OpenAPI 示例切片</a>。</p>
+
+  <h2>4. Common 工具</h2>
+
+  <h3>4.1 聊天上下文</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>API</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AgentChatContextHolder</code></td>
+        <td><code>KEY = "AgentChatContext"</code><br>
+          <code>setContext(ChatContext)</code><br>
+          <code>getContext() → ChatContext</code><br>
+          <code>clear()</code></td>
+        <td>ThreadLocal 持有一次 Chat 的 agent/user/model/memory 等元数据；供 Advisor、Tool、Interceptor 读取。</td>
+      </tr>
+      <tr>
+        <td><code>ChatContext</code>（嵌套）</td>
+        <td>字段含 <code>agentId</code>、<code>userId</code>、<code>conversationId</code>、<code>modelId</code>、<code>modelKey</code>、<code>memoryEnabled</code>、<code>skillEnabled</code>、<code>mcpEnabled</code>、<code>memoryTopK</code>、<code>shortTermMemorySize</code>、<code>agentInstruction</code>、<code>currentThinkingContent</code> 等</td>
+        <td>完整字段见源码 <code>AgentChatContextHolder.ChatContext</code>。</td>
+      </tr>
+      <tr>
+        <td><code>AgentChatContextThreadLocalAccessor</code></td>
+        <td><code>key()</code>、<code>getValue()</code>、<code>setValue(ChatContext)</code>、<code>setValue()</code>（clear）</td>
+        <td>注册到 Reactor <code>context-propagation</code>，使异步流可访问同一 Chat 上下文。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>4.2 滑动窗口</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>API</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>Listener&lt;T&gt;</code></td>
+        <td><code>void handler(List&lt;T&gt; list)</code></td>
+        <td>窗口触发时的回调函数式接口。</td>
+      </tr>
+      <tr>
+        <td><code>SlidingRingWindow&lt;T&gt;</code></td>
+        <td><code>SlidingRingWindow(Duration duration, Integer totalThreshold, List&lt;Listener&lt;T&gt;&gt;)</code><br>
+          <code>SlidingRingWindow(int ringSize, Duration, Integer totalThreshold, List&lt;Listener&gt;, ScheduledExecutorService)</code><br>
+          <code>void add(T data)</code><br>
+          <code>void shutdown()</code></td>
+        <td>环形滑动窗口；按时间或数量阈值触发 listener；线程安全 CAS。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 回调异常层次</h3>
+  <table>
+    <thead>
+      <tr><th>异常</th><th>构造器</th><th>语义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CallbackException</code></td><td><code>(String message)</code>、<code>(String, Throwable)</code></td><td>Client 回调 Server 的基础异常，继承 <code>SnailAiException</code>。</td></tr>
+      <tr><td><code>CallbackChannelUnavailableException</code></td><td><code>(String message)</code></td><td>gRPC Channel 不可用；可重试。</td></tr>
+      <tr><td><code>CallbackTimeoutException</code></td><td><code>(String message, Throwable cause)</code></td><td>回调超时；可重试。</td></tr>
+      <tr><td><code>CallbackServerErrorException</code></td><td><code>(String message)</code></td><td>Server 业务错误；不可重试。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.4 RPC 回调注解</h3>
+  <p>用于 <code>RpcClient</code> 动态代理，Client 回调 Server 时映射 gRPC 路径与参数。</p>
+  <table>
+    <thead>
+      <tr><th>注解</th><th>成员</th><th>目标</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>@Mapping</code></td><td><code>String path()</code>、<code>long timeout() default 0</code></td><td>标注回调接口方法。</td></tr>
+      <tr><td><code>@Param</code></td><td><code>String value()</code></td><td>标注方法参数名，供代理构建参数 Map。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 示例配置</h2>
+  <table>
+    <thead>
+      <tr><th>类</th><th>实现</th><th>要点</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>MyChatClientCustomizer</code></td>
+        <td><code>implements ChatClientCustomizer</code>，<code>@Component</code></td>
+        <td>在 <code>customize</code> 中调用 <code>context.getBuilder().defaultToolContext(...)</code>，向所有 Tool 注入 <code>userId</code> 等上下文。</td>
+      </tr>
+      <tr>
+        <td><code>SwaggerConfig</code></td>
+        <td><code>@Configuration</code></td>
+        <td><code>@Bean OpenAPI customOpenAPI()</code> — 示例应用的 Swagger 元信息（title、version、contact）。</td>
+      </tr>
+      <tr>
+        <td><code>logback-boot.xml</code></td>
+        <td>—</td>
+        <td>示例应用日志配置；排查 Client 执行问题时对照 <code>LoggingInterceptor</code> 输出。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>最小 Client 接入：<code>@EnableSnailAiAgent</code> + <code>snail-ai.enabled=true</code> + <code>app-id</code> / <code>token</code> / 端口 / Server 地址。OpenAPI + Chat UI：<code>@EnableSnailAiOpenApi</code> + <code>snail-ai.openapi.enabled=true</code>。</p>
+
+  <h2>6. 扩展点速查</h2>
+  <table>
+    <thead>
+      <tr><th>你想扩展…</th><th>实现 / 配置</th><th>相关 API</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>ChatClient 构建</td><td>实现 <code>ChatClientCustomizer</code></td><td>§2.1</td></tr>
+      <tr><td>LLM 调用观测</td><td>实现 <code>SnailAiInterceptor</code></td><td>§2.4</td></tr>
+      <tr><td>嵌入式 Chat 用户校验</td><td>实现 <code>SnailAiChatCredentialValidator</code></td><td>§1.2</td></tr>
+      <tr><td>调用 Server OpenAPI</td><td>注入 <code>OpenApi*Client</code></td><td>§3</td></tr>
+      <tr><td>Tool 内读会话元数据</td><td><code>AgentChatContextHolder.getContext()</code></td><td>§4.1</td></tr>
+      <tr><td>回调 Server 失败分类</td><td>捕获 <code>Callback*Exception</code> 子类</td><td>§4.3</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 边界条件</h2>
+  <ul>
+    <li>Chat 网关依赖 OpenAPI 已启用；未配置 <code>snail-ai.openapi.enabled=true</code> 时 Chat starter 不会装配。</li>
+    <li><code>SnailAiChatSessionContext.current()</code> 与 <code>AgentChatContextHolder</code> 分别服务 HTTP 会话与 gRPC Chat 执行，不要混用。</li>
+    <li><code>HttpTool</code> 拒绝内网地址；<code>ShellTool</code> 受工作目录与超时约束。</li>
+    <li>回调异常中仅 <code>CallbackChannelUnavailableException</code> 与 <code>CallbackTimeoutException</code> 语义上可重试。</li>
+    <li>优先以源码与 <code>snail-ai-agent-example</code> 为准；官方文档与自动配置差异见 <a href="agent-client-overview.html">执行层速查</a> 第 4 节。</li>
+  </ul>
+</main>
+</body>
+</html>

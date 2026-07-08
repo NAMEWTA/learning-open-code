@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置热加载边界参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; --restart:#b45309; --hot:#1b7f4a; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .tag-restart { color:var(--restart); font-weight:600; }
+    .tag-hot { color:var(--hot); font-weight:600; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>配置热加载边界参考</h1>
+  <p class="lead">L2 垂直切片速查。短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。配置文件布局见 <a href="../../module-config-deploy/reference/config-deploy-overview.html">config-deploy-overview</a>。</p>
+
+  <h2>源码锚点</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>关键符号</th></tr>
+    <tr><td><code>config/reload_boundary.py</code></td><td>重启字段注册表</td><td><code>STARTUP_ONLY_FIELDS</code>、<code>format_field_description</code></td></tr>
+    <tr><td><code>config/app_config.py</code></td><td>加载与热缓存</td><td><code>get_app_config</code>、<code>_get_config_signature</code>、<code>AppConfig.from_file</code></td></tr>
+    <tr><td><code>app/gateway/app.py</code></td><td>启动快照消费</td><td><code>lifespan</code>、<code>startup_config</code>、<code>configure_logging</code></td></tr>
+    <tr><td><code>app/gateway/deps.py</code></td><td>请求时配置</td><td><code>get_config</code>、<code>langgraph_runtime</code></td></tr>
+    <tr><td><code>config.example.yaml</code></td><td>运维模板</td><td>顶层段与 <code>config_version</code></td></tr>
+    <tr><td><code>tests/test_reload_boundary.py</code></td><td>漂移防护</td><td>schema ↔ registry 双向断言</td></tr>
+  </table>
+
+  <h2 id="restart-only">需重启：<code>STARTUP_ONLY_FIELDS</code></h2>
+  <table>
+    <tr><th>顶层段</th><th>启动时捕获方</th><th>典型运维场景</th></tr>
+    <tr><td><code>database</code></td><td><code>init_engine_from_config()</code>，连接池</td><td>memory → sqlite/postgres 切换</td></tr>
+    <tr><td><code>checkpointer</code></td><td><code>make_checkpointer()</code></td><td>LangGraph 持久化后端变更</td></tr>
+    <tr><td><code>run_events</code></td><td><code>make_run_event_store()</code> + <code>app.state.run_events_config</code></td><td>事件存储 memory/db/jsonl 切换</td></tr>
+    <tr><td><code>stream_bridge</code></td><td><code>make_stream_bridge()</code> 单例</td><td>Redis SSE bridge 参数</td></tr>
+    <tr><td><code>sandbox</code></td><td><code>get_sandbox_provider()</code> 缓存</td><td>local ↔ aio ↔ boxlite 切换</td></tr>
+    <tr><td><code>log_level</code></td><td><code>apply_logging_level()</code> 仅启动</td><td>debug/info verbosity</td></tr>
+    <tr><td><code>logging</code></td><td><code>configure_logging()</code> + TraceMiddleware 构造</td><td><code>logging.enhance.enabled</code>、trace 格式</td></tr>
+    <tr><td><code>channels</code></td><td><code>start_channel_service()</code>（非 AppConfig 段）</td><td>Feishu/Slack bot 凭证</td></tr>
+    <tr><td><code>channel_connections</code></td><td>连接仓库 + router 缓存</td><td>用户绑定 IM 连接层</td></tr>
+    <tr><td><code>scheduler</code></td><td><code>ScheduledTaskService</code> 构造与轮询任务</td><td>定时任务开关与 lease 参数</td></tr>
+  </table>
+  <p class="note">粒度是<strong>顶层段</strong>，不是叶子键。改 <code>database.sqlite_dir</code> 仍属 <code>database</code> 段，需重启。</p>
+
+  <h2 id="hot-reload">可热加载（代表性字段）</h2>
+  <p>下列段<strong>不在</strong>注册表中；Gateway run 路径经 <code>get_config()</code> 读取，下一条消息生效：</p>
+  <table>
+    <tr><th>段</th><th>示例字段</th><th>消费时机</th></tr>
+    <tr><td><code>models[]</code></td><td><code>max_tokens</code>、<code>supports_thinking</code></td><td><code>create_chat_model</code> / agent 构图</td></tr>
+    <tr><td><code>memory</code></td><td><code>debounce_seconds</code>、<code>max_facts</code></td><td>middleware + updater</td></tr>
+    <tr><td><code>summarization</code></td><td><code>enabled</code>、trigger 条件</td><td>SummarizationMiddleware</td></tr>
+    <tr><td><code>title</code></td><td><code>max_words</code>、<code>model_name</code></td><td>TitleMiddleware</td></tr>
+    <tr><td><code>subagents</code></td><td><code>timeout_seconds</code>、<code>enabled</code></td><td>task tool / executor</td></tr>
+    <tr><td><code>tools[]</code> / <code>tool_groups[]</code></td><td>社区工具开关</td><td><code>get_available_tools</code></td></tr>
+    <tr><td><code>guardrails</code></td><td><code>enabled</code></td><td>GuardrailMiddleware（条件挂载）</td></tr>
+    <tr><td><code>skills</code></td><td><code>deferred_discovery</code></td><td>prompt / describe_skill 工具</td></tr>
+  </table>
+
+  <h2>决策流程</h2>
+  <div class="diagram">编辑 config.yaml
+  │
+  ├─ 顶层段 ∈ STARTUP_ONLY_FIELDS ?
+  │     ├─ 是 → <span class="tag-restart">重启 Gateway</span>（make dev 重启或 docker restart gateway）
+  │     └─ 否 → <span class="tag-hot">保存即生效</span>（下一请求 get_app_config 重载）
+  │
+  └─ 仍异常？
+        ├─ 代码是否误用 lifespan 的 startup_config 局部变量？
+        └─ extensions_config.json（MCP/skills）→ 另走 mtime 失效，本切片不展开</div>
+
+  <h2 id="errors">常见误报</h2>
+  <table>
+    <tr><th>现象</th><th>原因</th><th>处理</th></tr>
+    <tr><td>改了 sandbox 仍走 local</td><td>provider 单例已缓存</td><td>重启；确认 <code>sandbox.use</code> 类路径正确</td></tr>
+    <tr><td>改了 log_level 无新日志</td><td><code>apply_logging_level</code> 未重跑</td><td>重启 Gateway</td></tr>
+    <tr><td>改了 memory 但下条消息仍旧值</td><td>非边界问题：异步 updater 未完成</td><td>等 debounce + LLM；见 <a href="../../slice-memory-update-injection/lessons/0001-flow-map.html">memory 切片</a></td></tr>
+    <tr><td>HTTP 503 Configuration not available</td><td><code>get_config()</code> 加载失败</td><td>检查 YAML 语法与必填 <code>sandbox</code></td></tr>
+  </table>
+
+  <h2>相关测试</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖</th></tr>
+    <tr><td><code>test_reload_boundary.py</code></td><td>注册表 ↔ schema 双向一致</td></tr>
+    <tr><td><code>test_app_config_reload.py</code></td><td>签名变化触发 <code>get_app_config</code> 重载</td></tr>
+    <tr><td><code>test_gateway_config_freshness.py</code></td><td>Gateway 请求读到新配置</td></tr>
+  </table>
+</main>
+</body>
+</html>

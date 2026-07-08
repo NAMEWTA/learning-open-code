@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工具调用确认全链路短课</title>
+  <link rel="stylesheet" href="../assets/tool-permission.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>工具调用确认全链路</h1>
+    <p class="subtitle">15 分钟短课：学会从一条需要确认的 ACP / tool 消息，判断它经过哪些层、停在哪个安全边界、确认后如何继续传播。</p>
+    <div class="meta">
+      <span class="pill">入口：acp_permission / permission</span>
+      <span class="pill">主参考：<a href="../reference/tool-permission-flow-map.html">tool-permission-flow-map</a></span>
+      <span class="pill">回链：<a href="../../00-overview/reference/00-overview.html">L0 总览</a></span>
+    </div>
+  </section>
+
+  <h2>1. 先定位入口</h2>
+  <p>本切片从“会话里出现需要用户确认的消息”开始。ACP 平台在 <code>useAcpMessage.ts</code> 收到 <code>acp_permission</code> 后把消息合并进列表；aionrs 平台遇到 wire type <code>acp_permission</code> 但 payload 是 legacy confirmation 时，会改标成 <code>permission</code>。两者进入同一个 <code>MessageList</code>，但不是同一个 UI 组件。</p>
+  <p>先记住一个判断：<code>acp_permission</code> 是 ACP 专用确认卡；<code>permission</code> 是通用 / legacy 确认卡；<code>acp_tool_call</code> 只是工具执行状态和结果展示。</p>
+  <pre><code class="language-typescript">case 'acp_permission':
+  mergeLiveMessage(transformMessage(message));
+  break;
+
+case 'permission':
+case 'acp_permission':
+  mergeLiveMessage(transformMessage({
+    ...message,
+    type: message.type === 'acp_permission' ? 'permission' : message.type,
+  }));
+  break;</code></pre>
+
+  <h2>2. 五层调用时序</h2>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant Stream as ACP / aionrs stream
+  participant Recovery as pending recovery
+  participant Merge as Messages hooks
+  participant List as MessageList
+  participant Card as Permission UI
+  participant Adapter as common adapter
+  participant Backend as backend
+  Stream-&gt;&gt;Merge: acp_permission / permission
+  Recovery-&gt;&gt;Merge: 缺失 pending confirmation
+  Merge-&gt;&gt;List: 合并并按 call_id 去重
+  List-&gt;&gt;Card: 分派到 MessageAcpPermission / MessagePermission
+  Card-&gt;&gt;Adapter: confirmMessage / confirmation.confirm
+  Adapter-&gt;&gt;Backend: POST /confirmations/:call_id/confirm
+  Backend--&gt;&gt;Merge: confirmation.remove / tool update / turn.completed
+  Merge--&gt;&gt;List: 移除卡或展示后续状态</code></pre>
+  <div class="sequence">ACP stream / recovered pending
+  -> hooks.ts 合并消息：permission 按 call_id 去重
+  -> MessageList.tsx 分派：permission / acp_permission / acp_tool_call
+  -> 用户在确认卡选择 option
+  -> common adapter POST /api/conversations/:id/confirmations/:call_id/confirm
+  -> backend 发 remove / tool update / turn.completed，UI 移除或展示后续状态</div>
+  <p>安全边界在 adapter / preload 一侧更清楚：<code>preload/main.ts</code> 只暴露受控 <code>electronAPI.emit/on</code> 和少量原生 helper；确认业务不是让 renderer 直接拿 Node 权限，而是通过 common adapter 的 conversation contract 发给 backend。</p>
+
+  <h2>3. 不要把确认卡和工具结果混在一起</h2>
+  <div class="split">
+    <section class="panel">
+      <h3>确认 UI</h3>
+      <p><code>MessageAcpPermission</code> 读取 <code>tool_call</code> 和 <code>options</code>，选择后调用 <code>conversation.confirmMessage.invoke()</code>。如果没有 <code>tool_call</code>，它直接不渲染。</p>
+      <p><code>MessagePermission</code> 读取 <code>IConfirmation</code>，选择 <code>proceed_always</code> 时带上 <code>always_allow</code>。</p>
+    </section>
+    <section class="panel">
+      <h3>结果 UI</h3>
+      <p><code>MessageAcpToolCall</code> 展示 pending / in progress、diff、文本或图片结果。它说明工具正在做什么或做完了什么，不负责批准。</p>
+      <p><code>MessageToolGroup</code> 是普通工具组展示；它可内嵌 <code>confirmationDetails</code>，并提供 <code>Cancel</code> 等 outcome。</p>
+    </section>
+  </div>
+
+  <h2>4. 边界练习</h2>
+  <div class="quiz">
+    <p><strong>检索问题：</strong>如果页面刷新后权限卡消失，但 backend 仍有 pending confirmation，哪一层负责补回？它如何避免重复补卡？</p>
+    <p><strong>参考答案：</strong><code>AcpChat</code> 和 <code>AionrsChat</code> 挂载 <code>usePendingConfirmationsRecovery()</code>；这个 hook 调 <code>conversation.confirmation.list</code>，把缺失项构造成 <code>permission</code> 消息，并用 <code>call_id</code> 检查已有卡，收到 <code>confirmation.remove</code> 后再移除。</p>
+  </div>
+  <p class="muted">继续阅读：完整源码表、异常路径和 E2E 证据在 <a href="../reference/tool-permission-flow-map.html">参考图谱</a>；上游模块背景见 <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">conversation-runtime</a>、<a href="../../module-preload-ipc/reference/preload-ipc-overview.html">preload-ipc</a>、<a href="../../module-common-adapter/reference/common-adapter-overview.html">common-adapter</a>。</p>
+</main>
+</body>
+</html>

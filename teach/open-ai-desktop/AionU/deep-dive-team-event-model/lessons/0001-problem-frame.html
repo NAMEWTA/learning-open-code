@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 事件模型：问题框架</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode 事件模型：问题框架</h1>
+    <p class="subtitle">学习目标：能把 Team run UI 状态拆成 ack、WebSocket、reconcile 和 slot gate 四个来源。</p>
+    <div class="meta">
+      <span class="pill">L4：deep-dive-team-event-model</span>
+      <span class="pill">主来源：useTeamRunView.ts</span>
+      <span class="pill">15 分钟短课</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#inputs">1. 三条输入流</a>
+    <a href="#boundaries">2. 状态边界</a>
+    <a href="#judge">3. 判断法</a>
+    <a href="#practice">4. 检索练习</a>
+  </nav>
+
+  <p class="muted">回链：<a href="../../module-team-mode/reference/team-mode-overview.html">Team Mode L1 总览</a>、<a href="../../slice-team-run/reference/team-run-flow-map.html">Team run L2 图谱</a>。详细速查见 <a href="../reference/team-event-model-notes.html">事件模型参考笔记</a>。</p>
+
+  <h2 id="inputs">1. 三条输入流</h2>
+  <p>Team Mode 的难点不是“有没有事件”，而是同一段 UI 忙碌状态有三条输入：发送接口返回的 <code>ITeamRunAck</code>、WebSocket 推来的 <code>team.run*</code> 与 <code>team.childTurn*</code>、以及页面主动拉取的 <code>getRunState</code> 快照。它们都落到 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code>，再被 <code>TeamPage</code> 传给每个 slot。</p>
+  <p>ack 的价值是“快”：用户按下发送后，<code>TeamChatView</code> 立即拿到 REST 返回，调用 <code>onTeamRunAck?.(ack)</code>。如果只等 WebSocket，发送框可能短暂仍可点，成员 tab 也看不出 run 已被接受。WebSocket 的价值是“准”：它携带后端持续更新的 child 数量、pending wake 和 slot work。reconcile 的价值是“补”：重连、成员结构变化或 session 变化后，前端不假设本地 reducer 还完整，而是重新拉一次 run state。</p>
+
+  <h2 id="boundaries">2. 状态边界</h2>
+  <p>这里有三个层次。团队级 run 表示一次任务整体是否 accepted/running/failed；child turn 表示某个成员会话中正在处理的 turn；slot work 表示某个 slot 是否有 pending wake、starting child、active turn、paused 或 suppressed work。不要把 <code>activeRun</code> 当成“所有输入框都忙”。真正控制输入框的是 slot 级状态。</p>
+  <pre><code class="language-ts">export type ITeamRunAck = {
+  team_run_id: string;
+  team_id: string;
+  target_slot_id: string;
+  target_role: TeamRunTargetRole;
+  accepted_slot_id: string;
+  accepted_role: TeamRunTargetRole;
+  status: TeamRunStatus;
+  message_id?: string;
+};</code></pre>
+  <p>这段类型来自 <code>open-ai-desktop/AionU/packages/desktop/src/common/types/team/teamTypes.ts</code>。注意它没有 child turn 明细，只告诉你这次发送被哪个 slot 接受。因此 ack 只能生成一个保守的 slot work：先把 <code>accepted_slot_id</code> 标成有 pending wake；如果没有 accepted slot，才 fallback 到 <code>target_slot_id</code>。后续再由 WebSocket 或 reconcile 校准。</p>
+
+  <h2 id="judge">3. 判断法</h2>
+  <p>维护时先问三个问题：第一，现象是不是刚发送后立刻出现？如果是，先查 ack 是否进入 <code>applyAck()</code>。第二，现象是不是 run 中途或 child turn 结束后出现？先看 <code>runUpdated</code>、<code>childTurnCompleted</code> 是否更新了 slot work。第三，现象是不是刷新、重连、增删成员后出现？先看结构事件有没有触发 reconcile。</p>
+  <p>这个判断法能避免两个常见误判：把 Team run 当成单会话 turn，或者把某个成员忙误扩散成整个 Team 忙。下一课会进入 <code>ackToRunEvent()</code> 和 reducer，专门看 ack 与 WebSocket 怎么合并。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果 leader 发送后，leader 输入框立即变忙，但 WebSocket 还没到，这个忙态最可能来自哪条输入流？</p>
+    <p><strong>答案：</strong>来自 REST ack。<code>TeamChatView</code> 收到 <code>ITeamRunAck</code> 后调用 <code>onTeamRunAck</code>，<code>useTeamRunView</code> 再把 ack 转成带 pending wake 的 run event。WebSocket 后续负责校准，而不是第一时间唯一来源。</p>
+  </div>
+  <p class="muted">主要阅读：<code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code>。继续：<a href="0002-core-mechanism.html">0002-core-mechanism</a>。</p>
+</main>
+</body>
+</html>

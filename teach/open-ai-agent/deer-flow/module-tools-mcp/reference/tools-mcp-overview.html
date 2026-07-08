@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tools 与 MCP 模块参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 8px; letter-spacing:0; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .where { color:#6f42c1; font-weight:600; }
+    .route { font-family:"SF Mono",Consolas,monospace; color:#263746; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Tools 与 MCP 模块参考</h1>
+  <p class="lead">本页是 L1 模块参考：集中记录职责、架构位置、公共入口、内部分层、依赖、配置表、工具来源和测试锚点。短课入口：<a href="../lessons/0001-tools-mcp-module-tour.html">0001-tools-mcp-module-tour.html</a>；L3 公共 API 签名与边界见 <a href="tools-mcp-api.html">tools-mcp-api.html</a>；整体位置对照 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>中的工具扩展入口。</p>
+
+  <h2>模块职责与位置</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码证据</th></tr>
+    <tr><td>一句话职责</td><td>Tools/MCP 模块把配置工具、内置工具、MCP server 暴露的工具、ACP agent 工具和 agent 专属额外工具组织成可被 LangChain agent 绑定的 <code>BaseTool</code> 集合。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/tools.py</code></span></td></tr>
+    <tr><td>架构位置</td><td>位于配置系统、Gateway MCP 管理 API、MCP client/cache/session pool 与 lead agent 装配点之间；在 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>中对应工具扩展入口。lead agent 负责把工具集合再交给 skill policy、deferred tools 和 middleware。</td><td><span class="where"><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></span></td></tr>
+    <tr><td>对外入口</td><td>包级入口是 <code>deerflow.tools:get_available_tools</code> 与 <code>deerflow.mcp</code> 的 cache/client 导出；HTTP 管理入口是 Gateway 的 <span class="route">/api/mcp/*</span>。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/__init__.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/mcp/__init__.py</code></span>、<span class="where"><code>backend/app/gateway/routers/mcp.py</code></span></td></tr>
+  </table>
+
+  <h2>整体调用链</h2>
+  <div class="diagram">runtime tools config + builtins + subagent/view_image + ACP
+  │
+  ├── get_available_tools()
+  │   ├── resolve_variable(tools[*].use)
+  │   ├── get_cached_mcp_tools() → tag_mcp_tool(...)
+  │   └── deduplicate by tool.name
+  │
+  └── lead_agent._make_lead_agent()
+      ├── filter by custom agent tool_groups
+      ├── filter_tools_by_skill_allowed_tools(...)
+      ├── assemble_deferred_tools(...)
+      ├── build_middlewares(..., deferred_setup=setup)
+      └── create_agent(model, tools=final_tools, ...)</div>
+
+  <h2>内部分层结构</h2>
+  <div class="filetree">backend/packages/harness/deerflow/
+├── tools/                         ← 工具聚合、内置工具、MCP metadata
+│   ├── tools.py                   ← get_available_tools 聚合入口
+│   ├── mcp_metadata.py            ← MCP 来源标记
+│   ├── sync.py                    ← async-only tool 的 sync wrapper
+│   ├── types.py                   ← DeerFlow ToolRuntime 类型别名
+│   └── builtins/                  ← task、tool_search、view_image 等内置工具
+├── mcp/                           ← MCP client、cache、OAuth、session pool
+│   ├── client.py                  ← server config 转 adapter 参数
+│   ├── cache.py                   ← process cache 与 reset
+│   ├── tools.py                   ← MCP tool 加载、包装、路径重写
+│   ├── session_pool.py            ← stdio 持久 session 池
+│   └── oauth.py                   ← OAuth token 与 interceptor
+└── config/                        ← 工具相关配置 schema
+    ├── tool_config.py             ← tools[*] 与 tool_groups schema
+    └── tool_search_config.py      ← deferred tool_search 开关</div>
+
+  <h2>公共入口与函数清单</h2>
+  <table>
+    <tr><th>符号</th><th>位置</th><th>用途</th><th>调用方</th></tr>
+    <tr><td><code>get_available_tools(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/tools/tools.py</code></span></td><td>按 group、模型能力、subagent 参数和 MCP/ACP 配置返回去重后的工具集合。</td><td>lead agent、embedded client、测试。</td></tr>
+    <tr><td><code>ToolConfig</code>、<code>ToolGroupConfig</code></td><td><span class="where"><code>backend/packages/harness/deerflow/config/tool_config.py</code></span></td><td>描述 <code>tools[*].name/group/use</code> 与工具组。</td><td>AppConfig 加载。</td></tr>
+    <tr><td><code>ToolSearchConfig</code></td><td><span class="where"><code>backend/packages/harness/deerflow/config/tool_search_config.py</code></span></td><td>控制 MCP 工具是否经 <code>tool_search</code> 延迟暴露。</td><td>AppConfig、lead agent。</td></tr>
+    <tr><td><code>tag_mcp_tool(...)</code>、<code>is_mcp_tool(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/tools/mcp_metadata.py</code></span></td><td>给 MCP 来源工具写入统一 metadata，并供 deferred assembly 识别。</td><td><code>get_available_tools</code>、<code>tool_search</code>。</td></tr>
+    <tr><td><code>assemble_deferred_tools(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td><td>从 policy-filtered 工具集合构建 final tools 与 deferred setup。</td><td>lead agent、client、subagent 构建路径。</td></tr>
+    <tr><td><code>build_tool_search_tool(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td><td>创建可返回完整 schema 并写入 promoted state 的 <code>tool_search</code>。</td><td>deferred setup。</td></tr>
+    <tr><td><code>get_deferred_tools_prompt_section(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td><td>生成只含 MCP 工具名称的 prompt section。</td><td>lead prompt。</td></tr>
+    <tr><td><code>initialize_mcp_tools()</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/cache.py</code></span></td><td>异步初始化并缓存 MCP 工具。</td><td>FastAPI startup、lazy cache。</td></tr>
+    <tr><td><code>get_cached_mcp_tools()</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/cache.py</code></span></td><td>返回 MCP 工具缓存；未初始化或配置 mtime 变化时重新加载。</td><td><code>get_available_tools</code>。</td></tr>
+    <tr><td><code>reset_mcp_tools_cache()</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/cache.py</code></span></td><td>清空 MCP 工具缓存并关闭 session pool。</td><td>Gateway reset API、测试。</td></tr>
+    <tr><td><code>build_server_params(...)</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/client.py</code></span></td><td>把单个 MCP server config 转成 <code>MultiServerMCPClient</code> 参数。</td><td><code>build_servers_config</code>。</td></tr>
+    <tr><td><code>get_mcp_tools()</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span></td><td>从启用的 MCP servers 拉取工具，注入 OAuth/custom interceptors，包装 stdio session pool，并补 sync wrapper。</td><td>MCP cache。</td></tr>
+    <tr><td><code>MCPSessionPool</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/session_pool.py</code></span></td><td>按 <code>(server_name, user_id:thread_id)</code> 复用 stdio MCP session。</td><td><code>_make_session_pool_tool</code>。</td></tr>
+    <tr><td><code>OAuthTokenManager</code></td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/oauth.py</code></span></td><td>获取、缓存、刷新 HTTP/SSE MCP OAuth token。</td><td>OAuth interceptor 与初始 headers。</td></tr>
+  </table>
+
+  <h2>关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>本模块如何使用</th><th>谁依赖本模块</th></tr>
+    <tr><td><code>AppConfig.tools</code> / <code>ToolSearchConfig</code></td><td>解析 <code>tools[*].use</code> 与 deferred tool_search 开关。</td><td>—</td></tr>
+    <tr><td><code>extensions_config.json</code> MCP servers</td><td>经 <code>get_cached_mcp_tools()</code> 加载并打 <code>deerflow_mcp</code> 标记。</td><td>Gateway <span class="route">/api/mcp/*</span> 管理入口。</td></tr>
+    <tr><td><a href="../../module-lead-agent/reference/lead-agent-overview.html">lead agent</a></td><td><code>get_available_tools</code> → skill policy → <code>assemble_deferred_tools</code> → bind。</td><td>—</td></tr>
+    <tr><td><a href="../../module-subagents/reference/subagents-overview.html">subagents</a></td><td>subagent 路径调用 <code>get_available_tools(subagent_enabled=False)</code> 防递归。</td><td>—</td></tr>
+    <tr><td><a href="../../module-skills/reference/skills-overview.html">skills</a></td><td><code>filter_tools_by_skill_allowed_tools</code> 在 bind 前收窄工具集。</td><td>—</td></tr>
+  </table>
+
+  <h2>模块边界</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th></tr>
+    <tr><td>职责</td><td>聚合配置工具、内置工具、MCP/ACP 工具为 LangChain <code>BaseTool</code> 集合；不负责 tool 执行 sandbox 或 Gateway 路由。</td></tr>
+    <tr><td>非职责</td><td>不实现 lead agent 推理、不管理 thread checkpoint、不渲染前端 MCP 配置 UI（由 Gateway + frontend core 承担）。</td></tr>
+  </table>
+
+  <h2>工具来源表</h2>
+  <table>
+    <tr><th>来源</th><th>进入点</th><th>启用条件</th><th>排序/优先级</th><th>注意点</th></tr>
+    <tr><td>配置工具</td><td>运行时主配置中的 <code>tools[*].use</code></td><td>group 匹配，且 host bash 未被安全策略屏蔽。</td><td>最高，先进入去重集合。</td><td><code>cfg.name</code> 与 tool 对象 <code>.name</code> 不一致会记录 warning，实际绑定以 tool 对象名为准。</td></tr>
+    <tr><td>内置工具</td><td><code>BUILTIN_TOOLS</code></td><td>默认包含 <code>present_files</code> 与 <code>ask_clarification</code>。</td><td>排在配置工具之后。</td><td><code>skill_manage_tool</code> 仅在 skill evolution 启用时加入。</td></tr>
+    <tr><td>subagent 工具</td><td><code>SUBAGENT_TOOLS</code></td><td>运行参数 <code>subagent_enabled</code> 为真。</td><td>作为内置工具追加。</td><td>当前暴露 <code>task</code>，状态轮询由后端内部处理。</td></tr>
+    <tr><td>vision 工具</td><td><code>view_image_tool</code></td><td>解析后的模型配置 <code>supports_vision</code> 为真。</td><td>作为内置工具追加。</td><td>middleware 还要负责把 viewed images 重新注入模型上下文。</td></tr>
+    <tr><td>MCP 工具</td><td><code>get_cached_mcp_tools()</code></td><td>extensions 运行时配置有启用的 MCP server，且工具加载成功。</td><td>排在内置工具之后。</td><td>进入集合后会被 <code>tag_mcp_tool()</code> 标记，供 deferred setup 识别。</td></tr>
+    <tr><td>ACP 工具</td><td><code>build_invoke_acp_agent_tool()</code></td><td>配置中存在 ACP agents。</td><td>排在 MCP 后。</td><td>构造失败只记录 warning，不阻断普通工具加载。</td></tr>
+    <tr><td>agent 额外工具</td><td><code>setup_agent</code>、<code>update_agent</code></td><td>bootstrap agent 或 custom agent 装配阶段添加。</td><td>不属于 <code>get_available_tools()</code> 返回值，而是在 lead agent 内追加后再过滤。</td><td>GitHub webhook channel 会屏蔽 <code>update_agent</code>。</td></tr>
+  </table>
+
+  <h2>MCP 配置与安全边界</h2>
+  <table>
+    <tr><th>主题</th><th>行为</th><th>源码锚点</th></tr>
+    <tr><td>配置文件</td><td>MCP server 配置存放在 extensions 运行时配置或兼容的旧 MCP 配置中，也可由 <code>DEER_FLOW_EXTENSIONS_CONFIG_PATH</code> 指定；仓库中提供 <code>extensions_config.example.json</code> 作为字段示例。</td><td><span class="where"><code>backend/packages/harness/deerflow/config/extensions_config.py</code></span></td></tr>
+    <tr><td>server schema</td><td><code>McpServerConfig</code> 支持 <code>enabled</code>、<code>type/transport</code>、<code>command/args/env</code>、<code>url/headers</code>、<code>oauth</code>、<code>tool_call_timeout</code>。</td><td><span class="where"><code>backend/packages/harness/deerflow/config/extensions_config.py</code></span></td></tr>
+    <tr><td>stdio</td><td>需要 <code>command</code>；API 管理路径只允许单个可执行名，默认允许 <code>npx</code> 和 <code>uvx</code>，可用 <code>DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST</code> 扩展。</td><td><span class="where"><code>backend/app/gateway/routers/mcp.py</code></span></td></tr>
+    <tr><td>HTTP/SSE</td><td>需要 <code>url</code>；headers 可配置。OAuth server 会在工具发现和工具调用时注入 Authorization。</td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/client.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/mcp/oauth.py</code></span></td></tr>
+    <tr><td>密钥遮蔽</td><td>GET 配置时 env、headers 用 <code>***</code> 遮蔽，OAuth client_secret 和 refresh_token 不返回；PUT 时 masked 值只允许保留已有密钥。</td><td><span class="where"><code>backend/app/gateway/routers/mcp.py</code></span></td></tr>
+    <tr><td>缓存刷新</td><td>配置 mtime 变化会触发 lazy reload；Gateway 更新配置或显式 reset 会调用 <code>reset_mcp_tools_cache()</code>。</td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/cache.py</code></span>、<span class="where"><code>backend/app/gateway/routers/mcp.py</code></span></td></tr>
+    <tr><td>自定义 interceptor</td><td><code>mcpInterceptors</code> 可声明构造函数路径，加载后与 OAuth interceptor 一起应用到 MCP tool calls。</td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span></td></tr>
+    <tr><td>stdio session pool</td><td>只包装 stdio transport，按用户和线程隔离；HTTP/SSE 不做 pool，避免跨 task cleanup 问题。</td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/session_pool.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span></td></tr>
+    <tr><td>本地输出路径</td><td>stdio MCP 子进程 cwd 和 temp dir 钉在 thread user-data 树内，返回文本中的本地路径会尽量改写为 <code>/mnt/user-data/...</code> 虚拟路径。</td><td><span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span></td></tr>
+  </table>
+
+  <h2>Deferred tool_search 规则</h2>
+  <table>
+    <tr><th>规则</th><th>含义</th><th>源码锚点</th></tr>
+    <tr><td>只延迟 MCP 来源工具</td><td>是否 MCP 来源由 <code>deerflow_mcp</code> metadata 决定，不看工具名。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/mcp_metadata.py</code></span></td></tr>
+    <tr><td>必须在 policy 过滤后构建 catalog</td><td>skill/agent 未允许的 MCP 工具不会出现在 <code>tool_search</code> 搜索结果里。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td></tr>
+    <tr><td>开启但没有 MCP survivor 时为空 setup</td><td>不会追加 <code>tool_search</code>，也不会误报。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td></tr>
+    <tr><td>fail closed</td><td>如果开启 deferral 且 MCP 工具幸存，但 deferred set 没恢复出来，直接抛错，避免把 MCP schema 悄悄绑定给模型。</td><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td></tr>
+    <tr><td>promotion 带 catalog hash</td><td>持久 state 中的 promoted names 只有 hash 匹配当前 catalog 才生效，避免工具变更后旧状态泄漏 schema。</td><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py</code></span></td></tr>
+    <tr><td>ToolNode 保留工具，模型暂时看不到 schema</td><td>middleware 从 model binding 请求里移除未 promote 工具，并阻止模型直接调用未 promote 的 deferred tool。</td><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py</code></span></td></tr>
+  </table>
+
+  <h2>调用示例</h2>
+  <h3>配置工具</h3>
+  <pre><code class="language-yaml">tool_groups:
+  - name: web
+  - name: file:read
+
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool</code></pre>
+  <p><code>get_available_tools(groups=["web"])</code> 会保留 group 为 <code>web</code> 的配置工具，并通过 <code>resolve_variable("deerflow.community.ddg_search.tools:web_search_tool")</code> 得到真实 <code>BaseTool</code> 对象。</p>
+
+  <h3>MCP 工具</h3>
+  <pre><code class="language-json">{
+  "mcpServers": {
+    "github": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_TOKEN": "$GITHUB_TOKEN"}
+    }
+  }
+}</code></pre>
+  <p>启用后，<code>get_mcp_tools()</code> 会用 <code>MultiServerMCPClient</code> 发现工具。若 <code>tool_search.enabled: true</code>，lead agent 会先把这些 MCP 工具名写入 <code>&lt;available-deferred-tools&gt;</code>，再等待模型调用 <code>tool_search</code> 获取具体 schema。</p>
+
+  <h2>源码索引</h2>
+  <table>
+    <tr><th>路径</th><th>用途</th><th>关键度</th></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/tools/tools.py</code></span></td><td>工具聚合、过滤 group、host bash gate、MCP/ACP 加载、去重。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span></td><td>deferred catalog、tool_search、prompt section、fail-closed assembly。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/tools/mcp_metadata.py</code></span></td><td>MCP 工具 metadata 标记与判定。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span></td><td>MCP 工具发现、stdio 包装、OAuth/custom interceptor、路径改写。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/mcp/cache.py</code></span></td><td>MCP 工具缓存、mtime stale 检测、cache reset。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/mcp/session_pool.py</code></span></td><td>持久 MCP session 池、LRU、跨 loop 清理。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/mcp/oauth.py</code></span></td><td>OAuth token cache、refresh、Authorization header 注入。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/mcp/client.py</code></span></td><td>MCP server config 到 adapter 参数的转换。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/extensions_config.py</code></span></td><td>MCP server 与 skill state 的统一扩展配置。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/tool_config.py</code></span></td><td>普通配置工具 schema。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/tool_search_config.py</code></span></td><td>deferred tool_search 配置。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/app/gateway/routers/mcp.py</code></span></td><td>MCP 配置 GET/PUT/cache reset API、安全校验与密钥保留。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></span></td><td>工具集合进入 agent 的最终装配点。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/deferred_tool_filter_middleware.py</code></span></td><td>隐藏未 promote 的 deferred MCP schema，并阻止直接调用。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>config.example.yaml</code></span></td><td><code>tool_groups</code>、<code>tools</code>、<code>tool_search</code> 配置示例。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>extensions_config.example.json</code></span></td><td>MCP servers、mcpInterceptors、skills 状态示例。</td><td>辅助</td></tr>
+  </table>
+
+  <h2>测试锚点</h2>
+  <table>
+    <tr><th>测试文件</th><th>验证内容</th></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_client_config.py</code></span></td><td>stdio/http/sse 参数构建、transport alias、禁用 server、无效 server 跳过、tool_call_timeout 不进入 connection dict。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_oauth.py</code></span></td><td>OAuth token 获取、缓存、interceptor header 注入、初始 OAuth headers。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_config_secrets.py</code></span></td><td>Gateway MCP API 的密钥遮蔽、masked round-trip、admin 要求、stdio command allowlist。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_custom_interceptors.py</code></span></td><td>custom MCP interceptors 的加载、顺序、异常容错、与 OAuth 共存。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_session_pool.py</code></span></td><td>session 复用、scope 隔离、LRU、跨 loop/task cleanup、stdio cwd/temp pinning、HTTP/SSE 不 pool。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_mcp_sync_wrapper.py</code></span></td><td>MCP async tool 的 sync wrapper、运行中 event loop、contextvars 和 RunnableConfig 注入。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_tool_deduplication.py</code></span></td><td><code>get_available_tools()</code> 按工具名去重、first occurrence wins、async-only 工具补 sync wrapper。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_tool_search.py</code></span></td><td><code>tool_search.enabled</code> 默认关闭、配置加载、deferred prompt 名称排序。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_deferred_setup.py</code></span></td><td>MCP metadata 判定、deferred setup、catalog hash scoped promotion、无匹配时 promoted names 为空。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_deferred_filter_middleware.py</code></span></td><td>未 promote 工具 schema 隐藏、hash mismatch 忽略、直接调用未 promote deferred tool 返回错误。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_deferred_tool_crosscontext.py</code></span></td><td>跨 async context 构建/运行时仍隐藏 deferred tools；policy-denied MCP 不进 catalog；fail-closed；subagent reentry 不污染 lead state。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_view_image_tool.py</code></span></td><td>vision 工具的路径白名单、MIME 校验、大小限制和 state 更新。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_task_tool_core_logic.py</code></span></td><td>subagent task 工具核心行为，是 <code>subagent_enabled</code> 分支的重要补充锚点。</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_invoke_acp_agent_tool.py</code></span></td><td>ACP agent 工具构造和调用行为。</td></tr>
+  </table>
+
+  <p class="callout">阅读顺序建议：先读短课的单链路，再看本页“工具来源表”和“Deferred tool_search 规则”。排查真实问题时优先从测试锚点找行为边界，再回到源码定位具体函数。</p>
+</main>
+</body>
+</html>

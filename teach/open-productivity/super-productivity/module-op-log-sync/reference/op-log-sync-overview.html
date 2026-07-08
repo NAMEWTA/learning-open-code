@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operation Log 与同步模块参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · Operation Log、本地持久化与同步架构速查</p>
+    <h1>Operation Log 与同步模块参考</h1>
+
+    <h2>模块职责</h2>
+    <p>一句话：把本地用户意图从 NgRx action 捕获为不可变 operation，以 <code>SUP_OPS</code> 作为可回放持久化来源，并通过统一 provider 边界同步到文件型远端或 SuperSync 服务端。</p>
+    <p>它位于 <a href="../../00-overview/reference/00-overview.html">L0 总览</a> 中的“NgRx Store + op-log + packages”层：运行时状态仍在 NgRx，长期一致性来源转到 operation log。</p>
+
+    <h2>对外入口与接口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>职责</th><th>先读什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>OperationCaptureService</td><td><code>src/app/op-log/capture/operation-capture.service.ts</code></td><td>记录 pending action 数量；为少数特殊 action 生成 <code>entityChanges</code>。</td><td><code>incrementPending()</code>、<code>decrementPending()</code>、<code>extractEntityChanges()</code></td></tr>
+        <tr><td>operation capture meta-reducer</td><td><code>src/app/op-log/capture/operation-capture.meta-reducer.ts</code></td><td>拦截本地 persistent action；sync replay 窗口内延迟本地 action。</td><td><code>operationCaptureMetaReducer</code>、<code>isDeferredAction()</code></td></tr>
+        <tr><td>OperationLogEffects</td><td><code>src/app/op-log/capture/operation-log.effects.ts</code></td><td>把 action 转成 operation，校验 payload，写入本地日志，触发 immediate upload。</td><td><code>persistOperation$</code>、<code>writeOperation()</code></td></tr>
+        <tr><td>op-log persistence adapters</td><td><code>src/app/op-log/persistence/op-log-db-adapter.ts</code><br><code>src/app/op-log/persistence/op-log-db-adapter.token.ts</code></td><td>抽象 IndexedDB/SQLite 后端；保证多 store 原子事务。</td><td><code>OpLogDbAdapter</code>、<code>OP_LOG_DB_ADAPTER_FACTORY</code></td></tr>
+        <tr><td>OperationLogStoreService</td><td><code>src/app/op-log/persistence/operation-log-store.service.ts</code></td><td>管理 <code>SUP_OPS</code> 中的 ops、state_cache、vector_clock、client_id 等。</td><td><code>appendWithVectorClockUpdate()</code>、<code>getUnsynced()</code>、<code>markSynced()</code></td></tr>
+        <tr><td>SyncWrapperService</td><td><code>src/app/imex/sync/sync-wrapper.service.ts</code></td><td>一轮 sync 的用户触发/周期触发入口；获取 <code>OperationSyncCapable</code> provider，并负责先下载再上传的顺序。</td><td><code>sync()</code>、<code>_syncBody()</code></td></tr>
+        <tr><td>OperationLogSyncService</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td><td>op-log 层下载/上传方法；处理 fresh-client gate、piggyback、force upload/download、full-state import gate。</td><td><code>downloadRemoteOps()</code>、<code>uploadPendingOps()</code>、<code>forceDownloadRemoteState()</code></td></tr>
+        <tr><td>RemoteOpsProcessingService</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></td><td>处理远端 operation：schema migration、SYNC_IMPORT 过滤、冲突检测、应用与校验。</td><td><code>processRemoteOps()</code></td></tr>
+        <tr><td>OperationApplierService</td><td><code>src/app/op-log/apply/operation-applier.service.ts</code></td><td>把已确认可应用的 operation 批量 replay 到 NgRx store。</td><td><code>applyOperations()</code></td></tr>
+        <tr><td>operation converter</td><td><code>src/app/op-log/apply/operation-converter.util.ts</code></td><td>把 operation 转回 persistent action，并写入 <code>meta.isRemote</code> 防止二次捕获。</td><td><code>convertOpToAction()</code></td></tr>
+        <tr><td>sync providers factory</td><td><code>src/app/op-log/sync-providers/sync-providers.factory.ts</code></td><td>懒加载 Dropbox、WebDAV、SuperSync、Nextcloud、OneDrive、LocalFile provider。</td><td><code>loadSyncProviders()</code></td></tr>
+        <tr><td>provider wrapper</td><td><code>src/app/op-log/sync-providers/wrapped-provider.service.ts</code></td><td>SuperSync 原样返回；文件型 provider 包装为 <code>OperationSyncCapable</code>。</td><td><code>getOperationSyncCapable()</code></td></tr>
+        <tr><td>sync-core public exports</td><td><code>packages/sync-core/src/index.ts</code></td><td>框架无关 operation、vector clock、planning、replay、conflict 和 port 类型。</td><td><code>compareVectorClocks</code>、<code>planSnapshotHydration</code>、<code>applyRemoteOperations</code></td></tr>
+        <tr><td>sync-providers contracts</td><td><code>packages/sync-providers/src/provider-types.ts</code></td><td>定义 provider 基础接口、文件型 provider、<code>OperationSyncCapable</code>。</td><td><code>OperationSyncProviderMode</code>、<code>SyncOperation</code></td></tr>
+        <tr><td>SuperSync server API</td><td><code>packages/super-sync-server/src/sync/sync.routes.ts</code><br><code>packages/super-sync-server/src/sync/websocket.routes.ts</code></td><td>提供 operation upload/download、snapshot、restore、delete data 与 WebSocket 通知。</td><td><span class="endpoint">POST /api/sync/ops</span>、<span class="endpoint">GET /api/sync/ops</span>、<span class="endpoint">GET /api/sync/ws</span></td></tr>
+      </tbody>
+    </table>
+
+    <h2>内部分层结构</h2>
+    <pre class="diagram">NgRx action capture
+  ├─ PersistentActionMeta 标记用户意图
+  ├─ operationCaptureMetaReducer 登记本地 action
+  └─ OperationLogEffects 顺序写入
+
+operation conversion / apply
+  ├─ action → Operation：uuidv7、opType、entityType、payload、vectorClock
+  ├─ RemoteOpsProcessingService：迁移、SYNC_IMPORT 过滤、冲突检测、校验
+  ├─ OperationApplierService：批量 replay 到 NgRx store
+  └─ convertOpToAction()：Operation → action，带 meta.isRemote 防止二次记录
+
+IndexedDB / SQLite persistence
+  ├─ SUP_OPS.ops：append-only operation log
+  ├─ state_cache：快照与 compaction 基准
+  ├─ vector_clock：本地因果状态
+  └─ OpLogDbAdapter：后端无关事务口
+
+sync orchestration
+  ├─ SyncWrapperService：一轮 sync 入口；获取 provider，先 downloadRemoteOps() 再 uploadPendingOps()
+  ├─ OperationLogSyncService：op-log 层 download/upload、fresh-client gate、piggyback、force upload/download
+  ├─ OperationLogUploadService / DownloadService：provider I/O
+  └─ RemoteOpsProcessingService：应用远端 ops、冲突与校验
+
+provider / server boundary
+  ├─ fileSnapshotOps：例如 Dropbox / WebDAV / Nextcloud / OneDrive / LocalFile 的 sync-data.json
+  └─ superSyncOps：Fastify API + PostgreSQL operations 表</pre>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖</th><th>所在层</th><th>用途</th><th>证据入口</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>idb</code></td><td>本地持久化</td><td>打开和升级 <code>SUP_OPS</code> IndexedDB。</td><td><code>src/app/op-log/persistence/operation-log-store.service.ts</code></td></tr>
+        <tr><td>NgRx Store / Effects / meta-reducers</td><td>capture 与 apply</td><td>捕获 action、避免 remote side effect、注册 op-log effects。</td><td><code>src/app/root-store/meta/meta-reducer-registry.ts</code><br><code>src/app/root-store/feature-stores.module.ts</code></td></tr>
+        <tr><td><code>@sp/sync-core</code></td><td>框架无关算法</td><td>vector clock、upload/download planning、remote apply、conflict helper、port 类型。</td><td><code>packages/sync-core/src/index.ts</code></td></tr>
+        <tr><td><code>@sp/sync-providers</code></td><td>provider 实现</td><td>例如 Dropbox、WebDAV、Nextcloud、OneDrive、LocalFile、SuperSync provider 及 HTTP/credential/platform ports。</td><td><code>packages/sync-providers/package.json</code></td></tr>
+        <tr><td><code>@sp/shared-schema</code></td><td>客户端/服务端共享契约</td><td>SuperSync HTTP zod schema、schema version、entity types。</td><td><code>packages/shared-schema/src/supersync-http-contract.ts</code></td></tr>
+        <tr><td>Fastify / Prisma / PostgreSQL</td><td>SuperSync server</td><td>HTTP API、append-only operations 表、用户同步状态和 quota。</td><td><code>packages/super-sync-server/src/server.ts</code><br><code>packages/super-sync-server/prisma/schema.prisma</code></td></tr>
+        <tr><td>WebSocket</td><td>SuperSync real-time hint</td><td>通知客户端有远端变更，触发下载。</td><td><code>packages/super-sync-server/src/sync/websocket.routes.ts</code><br><code>src/app/op-log/sync/super-sync-websocket.service.ts</code></td></tr>
+        <tr><td>Docker / Helm</td><td>服务端部署</td><td>部署 app、PostgreSQL、迁移和监控。</td><td><code>packages/super-sync-server/docker-compose.yml</code><br><code>packages/super-sync-server/helm/supersync/</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>SuperSync API 线索</h2>
+    <table>
+      <thead>
+        <tr><th>端点</th><th>方法</th><th>用途</th><th>客户端对应</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="endpoint">/api/sync/ops</span></td><td>POST</td><td>上传一批 operation；服务端分配 <code>serverSeq</code>，可能 piggyback 返回别的客户端 ops。</td><td><code>OperationLogUploadService</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/ops</span></td><td>GET</td><td>按 <code>sinceSeq</code> 分页下载 operation。</td><td><code>OperationLogDownloadService</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/snapshot</span></td><td>POST</td><td>上传 full-state operation，例如 <code>SYNC_IMPORT</code>、<code>BACKUP_IMPORT</code>、<code>REPAIR</code>。</td><td><code>uploadSnapshot()</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/data</span></td><td>DELETE</td><td>删除用户同步数据，常见于加密清理或重建。</td><td><code>deleteAllData()</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/restore-points</span></td><td>GET</td><td>列出可恢复快照点。</td><td><code>SuperSyncRestoreService</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/restore/:serverSeq</span></td><td>GET</td><td>生成指定 server sequence 的状态快照。</td><td><code>getStateAtSeq()</code></td></tr>
+        <tr><td><span class="endpoint">/api/sync/ws</span></td><td>WebSocket</td><td>保存在线设备连接，作为实时下载提示。</td><td><code>SuperSyncWebSocketService</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>远端 apply 入口</h2>
+    <p>下载到远端 operation，或上传时 piggyback 收到别的客户端 operation 后，阅读入口从 provider I/O 转到 apply 管线：</p>
+    <ul>
+      <li><code>src/app/op-log/sync/remote-ops-processing.service.ts</code>：<code>RemoteOpsProcessingService.processRemoteOps()</code> 先做 schema migration、SYNC_IMPORT 过滤、冲突检测，再决定直接应用或进入冲突解决。</li>
+      <li><code>src/app/op-log/apply/operation-applier.service.ts</code>：<code>OperationApplierService.applyOperations()</code> 使用 <code>replayOperationBatch()</code> 和 <code>bulkApplyOperations()</code> 批量 dispatch 到 NgRx store。</li>
+      <li><code>src/app/op-log/apply/operation-converter.util.ts</code>：<code>convertOpToAction()</code> 把 operation 转回 action，并设置 <code>meta.isRemote: true</code>，避免 replay 又被 capture 成新 operation。</li>
+    </ul>
+
+    <h2>阅读路径：从 action 到同步队列</h2>
+    <ol>
+      <li>在 <code>src/app/root-store/meta/task-shared.actions.ts</code> 找一个 action，例如 <code>TaskSharedActions.updateTask</code>，确认它带 <code>isPersistent: true</code>、<code>entityType: 'TASK'</code>、<code>opType: OpType.Update</code>。</li>
+      <li>到 <code>src/app/op-log/capture/operation-capture.meta-reducer.ts</code> 看本地 action 如何调用 <code>OperationCaptureService.incrementPending()</code>；注意 remote action 和 replay 窗口会被过滤或延迟。</li>
+      <li>到 <code>src/app/op-log/capture/operation-log.effects.ts</code> 看 <code>writeOperation()</code> 如何组装 <code>Operation</code>，然后调用 <code>appendWithVectorClockUpdate(op, 'local')</code>。</li>
+      <li>到 <code>src/app/op-log/persistence/operation-log-store.service.ts</code> 看 <code>appendWithVectorClockUpdate()</code> 如何在同一事务中写 <code>ops</code> 和 <code>vector_clock</code>。</li>
+      <li>到 <code>src/app/imex/sync/sync-wrapper.service.ts</code> 看全局 sync 周期如何先下载再上传，并通过 <code>WrappedProviderService</code> 获取 <code>OperationSyncCapable</code> provider。</li>
+      <li>到 <code>src/app/op-log/sync/operation-log-sync.service.ts</code> 看上传前的 <code>flushPendingWrites()</code>，确认刚捕获的 operation 已经落盘。</li>
+      <li>如果要追远端 operation 如何落到本地状态，按 <code>src/app/op-log/sync/remote-ops-processing.service.ts</code>、<code>src/app/op-log/apply/operation-applier.service.ts</code>、<code>src/app/op-log/apply/operation-converter.util.ts</code> 的顺序读。</li>
+      <li>最后根据 provider 类型分叉：文件型 provider 读 <code>src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</code>；SuperSync 读 <code>src/app/op-log/sync-providers/super-sync/super-sync.ts</code> 和 <code>packages/super-sync-server/src/sync/sync.routes.ts</code>。</li>
+    </ol>
+
+    <h2>边界判断口诀</h2>
+    <table>
+      <thead>
+        <tr><th>问题</th><th>应去的位置</th><th>不要放到</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>这是 Angular DI、NgRx、UI 对话框或平台桥接吗？</td><td><code>src/app</code></td><td><code>@sp/sync-core</code></td></tr>
+        <tr><td>这是通用 vector clock、planning、replay 或 port 类型吗？</td><td><code>packages/sync-core</code></td><td><code>src/app</code> 专有模型</td></tr>
+        <tr><td>这是 Dropbox/WebDAV/SuperSync 协议代码或 credential/fetch port 吗？</td><td><code>packages/sync-providers</code></td><td>Angular service</td></tr>
+        <tr><td>这是客户端和服务端都要校验的 HTTP schema 吗？</td><td><code>packages/shared-schema</code></td><td><code>@sp/sync-core</code></td></tr>
+        <tr><td>这是 server sequence、PostgreSQL、quota、auth 或 WebSocket 连接吗？</td><td><code>packages/super-sync-server</code></td><td>Angular renderer</td></tr>
+      </tbody>
+    </table>
+  </article>
+</main>
+</body>
+</html>

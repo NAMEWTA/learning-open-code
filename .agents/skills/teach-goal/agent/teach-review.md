@@ -1,6 +1,6 @@
 # Teach 课程审查员（teach-review）
 
-独立的课程质量审查 subagent。在每个 teach subagent 完成 goal 产出后，由主 Agent 派发 teach-review 对产出文档进行质量审查，在问题扩散到后续 goal 之前发现并修复。
+独立的课程质量审查 subagent。在每个 teach subagent 完成 goal 产出后，由主 Agent 派发 teach-review 对整个 teach 主题目录进行质量审查，在问题扩散到后续 goal 之前发现并修复。
 
 **核心原则：** 每个 goal 完成后立即审查，不带着已知问题继续。
 
@@ -12,7 +12,7 @@
 
 ```
 Task tool（general-purpose）:
-  description: "审查 teach 课程产出"
+  description: "审查 teach 主题产出"
   prompt: |
     你是一名资深技术教学审查员，精通技术写作、课程设计、代码教学的最佳实践。
     你的工作是对照教学规范审查已完成的 teach 课程文档，在问题扩散之前发现它们。
@@ -21,7 +21,10 @@ Task tool（general-purpose）:
 
     goal_id: {GOAL_ID}
     层级: {LEVEL}
-    产出文件: {OUTPUT_PATH}
+    主题目录: {TOPIC_DIR}
+    主入口文件: {OUTPUT_PATH}
+    本次创建/更新文件: {CREATED_FILES}
+    lesson_manifest: {LESSON_MANIFEST}
 
     ## 教学规范（审查依据）
 
@@ -34,15 +37,29 @@ Task tool（general-purpose）:
     见 teach-goal 的 references/five-levels.md
 
     ### HTML 课程/参考文档格式
-    由 teach SKILL 定义，subagent 应已遵循其规范
+    见 `.agents/skills/teach/SKILL.md`——subagent 生成时应已 Read 并激活该文件
 
     ## 待审查内容
 
-    {OUTPUT_PATH} 的完整内容已在上下文中提供（或由你自行读取）。
+    {TOPIC_DIR} 的目录树、{OUTPUT_PATH} 的完整内容、created_files 和 lesson_manifest 已在上下文中提供（或由你自行读取）。审查对象是整个主题目录，而不只是一个 HTML 文件。
 
     ## 检查内容
 
-    ### 内容准确性（最高优先级）
+    ### 持久化路径合规（最高优先级，Critical）
+    - 主题目录、主入口文件和 created_files 是否全部以 `teach/` 开头？
+    - 路径是否落在 `TEACH_ROOT`（`teach/<path>/`）目录树下？
+    - 是否误写入 `.agents/` 或其子目录？
+    - 路径违规 → 必须标为 Critical，阻塞 goal 标记 done
+
+    ### 主题完整性（Critical）
+    - `MISSION.md` 是否已写实，且没有 `{主题}`、`{……}` 等 init_topic.sh 占位符？
+    - `RESOURCES.md` 是否有真实资源或明确空白说明，且没有占位注释？
+    - `SNAPSHOT.md` 是否已由 `generate_snapshot.py` 填充，包含快照时间、课程数、引用源文件统计？
+    - `lessons/` 下是否至少有 1 个 HTML 课程？
+    - 是否存在 reference-only 主题？存在则 Critical。
+    - 是否已通过 `audit_topic.py`？未通过或未运行则 Critical。
+
+    ### 内容准确性
     - 技术事实是否正确？与源码是否一致？
     - 代码片段是否真实（非虚构/简化到失真的伪代码）？
     - API 签名、参数类型、返回值是否与源码完全匹配？
@@ -56,6 +73,13 @@ Task tool（general-purpose）:
       - L3：签名/原型、参数约束、返回值、边界条件、异常类型、调用示例、测试引用
       - L4：问题背景、备选方案、算法拆解、性能特征、已知局限
     - 是否遗漏了关键信息？（如重要的配置项、关键的边界条件）
+
+    ### 短课合约
+    - 每节 lesson 是否只解决一个学习目标，预计 15 分钟内完成？
+    - 是否存在巨型单页课程（过多章节、过多源码文件、过长代码块、正文过长）？
+    - 复杂 L2/L4 是否拆成同一主题目录下的多节短课？
+    - 长表格、源码索引、接口清单是否放入 `reference/`，而不是塞进 lesson？
+    - 每节 lesson 是否包含检索练习、判断题、小型任务或反馈闭环？
 
     ### 教学有效性
     - 讲解是否由浅入深、逻辑通顺？
@@ -93,7 +117,7 @@ Task tool（general-purpose）:
     ### 问题
 
     #### Critical（必须修复 — 阻塞 goal 标记为 done）
-    [事实错误、关键章节缺失、格式损坏导致无法阅读]
+    [事实错误、关键章节缺失、主题元文件占位、无 lesson、reference-only、巨型 lesson、格式损坏导致无法阅读]
 
     #### Important（应该修复 — 不阻塞但强烈建议）
     [讲解不清、示例不足、遗漏次要信息、交叉引用错误]
@@ -146,7 +170,10 @@ Task tool（general-purpose）:
 |--------|------|------|
 | `{GOAL_ID}` | 当前 goal 的唯一标识 | `_progress.json` 中 goal.id |
 | `{LEVEL}` | L0 / L1 / L2 / L3 / L4 | `_progress.json` 中 goal.level |
-| `{OUTPUT_PATH}` | 产出文件的完整路径 | subagent 回报中的 output_path |
+| `{TOPIC_DIR}` | 主题目录 | subagent 回报中的 topic_dir |
+| `{OUTPUT_PATH}` | 主入口文件路径 | subagent 回报中的 output_path |
+| `{CREATED_FILES}` | 本次创建或更新的文件 | subagent 回报中的 created_files |
+| `{LESSON_MANIFEST}` | 课程清单与学习目标 | subagent 回报中的 lesson_manifest |
 | `{LEVEL_REQUIREMENTS}` | 该层级必须包含的内容清单 | 从 five-levels.md 中提取对应层级的「必须包含」列表 |
 
 ---
@@ -155,19 +182,21 @@ Task tool（general-purpose）:
 
 ### 1. 时机
 
-**每个 teach subagent 完成产出后，立即派发 teach-review。**
+**每个 teach subagent 完成产出并通过 `audit_topic.py` 后，立即派发 teach-review。**
 
 ```
 主 Agent 流程（每个 goal）:
   teach subagent 完成 → 收集回报
     ↓
-  派发 teach-review subagent（传入产出路径 + 层级要求）
+  运行 audit_topic.py（失败则 needs_fix，不派 review）
+    ↓
+  派发 teach-review subagent（传入主题目录 + 主入口路径 + 层级要求）
     ↓
   收集审查结果
     ↓
   ├─ ✅ 通过 → 标记 goal.status = "done"
   ├─ ⚠️ 有条件通过 → 标记 goal.status = "done"，记录 Important 问题到 _progress.json
-  └─ ❌ 不通过 → 标记 goal.status = "needs_fix"，将 Critical 问题反馈给 teach subagent 修复
+  └─ ❌ 不通过 → 标记 goal.status = "needs_fix"，将 Critical 问题反馈给 teach subagent 修复（修复时须重新 Read 并激活 `.agents/skills/teach/SKILL.md`）
 ```
 
 ### 2. teach-review 的 GCP
@@ -181,7 +210,7 @@ GCP 模板与 teach subagent 相同，见 [references/task-order.md](../referenc
 
 ### 3. 修复循环
 
-- Critical 问题 → teach subagent 修复后重新提交审查（最多 2 轮）
+- Critical 问题 → teach subagent **重新 Read 并激活 `.agents/skills/teach/SKILL.md`** 后修复并重新提交审查（最多 2 轮）
 - 2 轮修复后仍有 Critical → 标记 goal 为 `blocked`，由人工介入
 - Important 问题 → 记录到 `_progress.json` 的 `review_issues` 字段，后续 goal 可引用并改进
 - Minor 问题 → 记录但不阻塞
@@ -193,7 +222,7 @@ GCP 模板与 teach subagent 相同，见 [references/task-order.md](../referenc
 | **L0** 项目总览 | **必须审查** | 锚点文档，影响所有后续 goal |
 | **L1** 模块总览 | **必须审查** | 模块入口，后续 L2/L3 的参考基准 |
 | **L2** 垂直切片 | **必须审查** | 核心教学内容，需验证完整性和准确性 |
-| **L3** 微观 API | **采样审查**（每 5 个审 1 个） | 纯 API 参考文档，格式固定，人工审查价值有限 |
+| **L3** 微观 API | **采样审查**（每 5 个审 1 个） | API 参考格式固定，但仍必须通过主题审计，避免 reference-only |
 | **L4** 深度剖析 | **必须审查** | 高复杂度内容，需验证技术深度和准确性 |
 
 > 采样审查的具体规则：按 goal 完成顺序计数，每第 5 个 L3 goal 触发一次审查。采样到的 goal 与其他层级一样执行完整审查流程。未采样到的 goal 直接标记 `review_status = "skipped"`。
@@ -210,7 +239,12 @@ GCP 模板与 teach subagent 相同，见 [references/task-order.md](../referenc
 
 一个 goal 的产出被视为「审查通过」需满足：
 
-- [ ] 无 Critical 问题
+- [ ] 主题目录、主入口路径和所有 created_files 以 `teach/` 开头，不含 `.agents/`（路径违规为 Critical）
+- [ ] 主题已通过 `audit_topic.py`
+- [ ] `MISSION.md`、`RESOURCES.md`、`SNAPSHOT.md` 已填写，且无占位符残留
+- [ ] `lessons/` 下至少有 1 个 HTML 课程，且不存在 reference-only 主题
+- [ ] 每节 lesson 符合短课合约，不存在巨型单页课程
+- [ ] 无其他 Critical 问题
 - [ ] 内容准确性验证通过（至少抽查 3 处技术事实与源码一致）
 - [ ] 层级必备内容全部覆盖
 - [ ] HTML 可在浏览器中正常渲染

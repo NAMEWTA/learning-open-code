@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>goal 自动续跑流程参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>goal 自动续跑流程参考</h1>
+  <p class="lead">L2 垂直切片速查。短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。相关 L1 背景见 <a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">runtime-persistence-overview</a>。</p>
+
+  <h2>源码锚点</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>关键符号</th></tr>
+    <tr><td><code>agents/goal_state.py</code></td><td>类型契约</td><td><code>GoalState</code>、<code>GoalEvaluation</code>、<code>GoalBlocker</code></td></tr>
+    <tr><td><code>runtime/goal.py</code></td><td>evaluator 与续跑判定</td><td><code>evaluate_goal_completion</code>、<code>should_continue_goal</code>、<code>make_goal_continuation_message</code>、<code>read_thread_goal</code>、<code>write_thread_goal</code></td></tr>
+    <tr><td><code>runtime/runs/worker.py</code></td><td>run 内续跑编排</td><td><code>run_agent</code>、<code>_prepare_goal_continuation_input</code>、<code>_persist_goal_evaluation</code>、<code>_has_durable_goal_turn_receipt</code></td></tr>
+  </table>
+
+  <h2>端到端流程</h2>
+  <div class="diagram">用户 /goal 或 PUT /api/threads/{id}/goal
+  │
+  └── write_thread_goal() → checkpoint.channel_values.goal (status=active)
+
+Gateway POST /runs/stream → start_run() → asyncio.create_task(run_agent())
+
+run_agent()
+  ├── _stream_once(可见 graph_input)
+  └── loop:
+        _prepare_goal_continuation_input()
+          1. read_thread_goal → 无 active goal 则 return None
+          2. 读 checkpoint messages + pending_writes
+          3. _has_durable_goal_turn_receipt → 否则 blocker=run_failed, stand down
+          4. evaluate_goal_completion (非 thinking 模型, 仅可见对话证据)
+          5. compute_no_progress_count (assistant 证据签名)
+          6. 重读 goal + 对话签名 → 竞态则 stand down
+          7. satisfied → write_thread_goal(None) 清空
+          8. _stand_down_reason 或 !should_continue_goal → 只写 last_evaluation
+          9. continuation_count++ → 注入 hide_from_ui HumanMessage
+        _stream_once({messages: [continuation_message]})</div>
+
+  <h2>GoalBlocker 与续跑决策</h2>
+  <table>
+    <tr><th>blocker</th><th>含义</th><th>会触发隐藏续跑？</th></tr>
+    <tr><td><code>none</code></td><td>goal 已满足（<code>satisfied=true</code>）</td><td>否 — 清空 goal</td></tr>
+    <tr><td><code>goal_not_met_yet</code></td><td>证据显示未完成，但 agent 还可自主推进</td><td>是 — 唯一可续跑 blocker</td></tr>
+    <tr><td><code>needs_user_input</code></td><td>assistant 在等待用户</td><td>否</td></tr>
+    <tr><td><code>missing_evidence</code></td><td>可见证据不足以证明进度</td><td>否</td></tr>
+    <tr><td><code>run_failed</code></td><td>回合未 durable 落盘或执行失败</td><td>否</td></tr>
+    <tr><td><code>external_wait</code></td><td>等待外部系统</td><td>否</td></tr>
+  </table>
+
+  <h2>熔断与默认上限</h2>
+  <table>
+    <tr><th>字段</th><th>默认值</th><th>作用</th></tr>
+    <tr><td><code>max_continuations</code></td><td>8</td><td>单 goal 隐藏续跑次数硬顶</td></tr>
+    <tr><td><code>continuation_count</code></td><td>0 → 每次续跑 +1</td><td>与 <code>max_continuations</code> 比较</td></tr>
+    <tr><td><code>max_no_progress_continuations</code></td><td>2</td><td>连续无新可见 assistant 输出则停</td></tr>
+    <tr><td><code>no_progress_count</code></td><td>按 <code>progress_key</code> 累加</td><td>键 = blocker + 最新可见 AI 文本 SHA256，防 evaluator 措辞抖动</td></tr>
+  </table>
+
+  <h2>并发守卫（stand_down_reason 摘录）</h2>
+  <table>
+    <tr><th>原因</th><th>触发条件</th></tr>
+    <tr><td><code>no_durable_end_of_turn</code></td><td>checkpoint 无 id、有 <code>pending_writes</code>、或末条可见消息不是 AI</td></tr>
+    <tr><td><code>thread_changed_after_evaluation</code></td><td>evaluator 运行期间 checkpoint 或可见对话签名变化</td></tr>
+    <tr><td><code>thread_changed_before_continuation</code></td><td>已排队续跑前用户又发消息</td></tr>
+    <tr><td><code>blocked:{blocker}</code></td><td>blocker 非 <code>goal_not_met_yet</code></td></tr>
+    <tr><td><code>max_continuations_reached</code></td><td>续跑次数达上限</td></tr>
+    <tr><td><code>no_progress_detected</code></td><td>无进展熔断触发</td></tr>
+  </table>
+
+  <h2>GoalState 核心字段</h2>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>objective</code></td><td>用户设定的目标文本（最长 4000 字符）</td></tr>
+    <tr><td><code>status</code></td><td>活跃 goal 恒为 <code>active</code>；满足后整条 goal 从 checkpoint 移除</td></tr>
+    <tr><td><code>last_evaluation</code></td><td>含 <code>satisfied</code>、<code>blocker</code>、<code>reason</code>、<code>progress_key</code>、可选 <code>stand_down_reason</code></td></tr>
+  </table>
+
+  <h2>隐藏续跑消息形态</h2>
+  <p><code>make_goal_continuation_message</code> 生成带 <code>&lt;goal_continuation&gt;</code> 包裹的 HumanMessage，<code>additional_kwargs</code> 含 <code>hide_from_ui: true</code> 与 <code>deerflow_goal_continuation: true</code>。SSE 仍走同一 <code>run_id</code>，前端不展示该条用户消息。</p>
+
+  <div class="note">
+    <strong>测试锚点：</strong><code>backend/tests/test_goal_worker.py</code>（worker 续跑与竞态）、<code>test_goal_runtime.py</code>（goal.py 纯函数）。排障时先确认 checkpointer 已配置、可见回合已 durable 落盘，再看 <code>last_evaluation.stand_down_reason</code>。
+  </div>
+</main>
+</body>
+</html>

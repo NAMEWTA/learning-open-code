@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日历 time block 同步全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article class="doc">
+    <p class="kicker">Reference · Super Productivity · calendar time block vertical slice</p>
+    <h1>日历事件导入与插件 time block 写回参考</h1>
+    <p class="lead">
+      本参考用于快速定位：日历事件拉取、视图投影、自动/手动导入、scheduled task 写回 time block、插件事件拖拽写回。
+      短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>。
+      父模块 <a href="../../module-issue-integrations/lessons/0001-issue-integrations-module-tour.html">Issue Provider 与日历集成</a>；
+      投影细节见 <a href="../../slice-planner-schedule-flow/reference/planner-schedule-flow-reference.html">Planner/Schedule 参考</a>。
+    </p>
+
+    <h2>模块骨架</h2>
+    <pre>src/app/features/
+├── calendar-integration/              ← 读日历、缓存、过滤、用户动作
+│   ├── calendar-integration.service.ts
+│   ├── store/calendar-integration.effects.ts
+│   ├── calendar-event-actions.service.ts
+│   └── time-block/time-block-sync.effects.ts
+├── issue/providers/calendar/          ← iCal provider 配置与轮询间隔
+├── issue/issue.service.ts             ← 日历事件导入为任务
+├── schedule/                          ← 投影与拖拽写回入口
+│   ├── map-schedule-data/
+│   └── schedule-week/schedule-week-drag.service.ts
+└── planner/                           ← 全天/定时日历事件列展示</pre>
+
+    <h2>源码引用索引</h2>
+    <p>以下路径是本主题的源码依据，也用于生成主题快照：</p>
+    <p>
+      <code>src/app/features/calendar-integration/calendar-integration.service.ts</code>
+      <code>src/app/features/calendar-integration/calendar-integration.model.ts</code>
+      <code>src/app/features/calendar-integration/store/calendar-integration.effects.ts</code>
+      <code>src/app/features/calendar-integration/calendar-event-actions.service.ts</code>
+      <code>src/app/features/calendar-integration/time-block/time-block-sync.effects.ts</code>
+      <code>src/app/features/calendar-integration/time-block/time-block-delete-sidecar.service.ts</code>
+      <code>src/app/features/calendar-integration/generate-calendar-task-id.ts</code>
+      <code>src/app/features/calendar-integration/get-calendar-event-id-candidates.ts</code>
+      <code>src/app/features/calendar-integration/calendar-event-regex-filter.ts</code>
+      <code>src/app/features/calendar-integration/hidden-calendar-events.service.ts</code>
+      <code>src/app/features/calendar-integration/is-calender-event-due.ts</code>
+      <code>src/app/features/issue/providers/calendar/calendar.model.ts</code>
+      <code>src/app/features/issue/providers/calendar/calendar.const.ts</code>
+      <code>src/app/features/issue/providers/calendar/calendar-common-interfaces.service.ts</code>
+      <code>src/app/features/issue/providers/calendar/is-calendar-provider-disabled-on-current-platform.util.ts</code>
+      <code>src/app/features/issue/issue.service.ts</code>
+      <code>src/app/features/issue/store/issue-provider.selectors.ts</code>
+      <code>src/app/features/schedule/ical/get-relevant-events-from-ical.ts</code>
+      <code>src/app/features/schedule/schedule.model.ts</code>
+      <code>src/app/features/schedule/schedule.service.ts</code>
+      <code>src/app/features/schedule/map-schedule-data/map-to-schedule-days.ts</code>
+      <code>src/app/features/schedule/map-schedule-data/create-sorted-blocker-blocks.ts</code>
+      <code>src/app/features/schedule/schedule-week/schedule-week-drag.service.ts</code>
+      <code>src/app/features/planner/planner.service.ts</code>
+      <code>src/app/features/planner/store/planner.selectors.ts</code>
+      <code>src/app/features/planner/planner-calendar-event/planner-calendar-event.component.ts</code>
+      <code>src/app/features/tasks/task.service.ts</code>
+      <code>src/app/features/tasks/store/task.selectors.ts</code>
+      <code>src/app/root-store/meta/task-shared.actions.ts</code>
+      <code>packages/plugin-dev/google-calendar-provider/src/plugin.ts</code>
+      <code>packages/plugin-dev/caldav-calendar-provider/src/plugin.ts</code>
+    </p>
+
+    <h2>读方向：事件拉取与投影</h2>
+    <pre>selectCalendarProviders + 插件 useAgendaView providers
+  → CalendarIntegrationService.calendarEvents$
+      ├─ 先读 LS.CAL_EVENTS_CACHE（视图级过滤）
+      ├─ timer / triggerRefresh 触发 _fetchAllCombined
+      │     ├─ iCal: requestEventsForSchedule$ → parse iCal
+      │     └─ 插件: getNewIssuesForBacklog → 带 start 的 agenda 事件
+      ├─ 缓存未过滤原始结果到 LS.CAL_EVENTS_CACHE
+      └─ 视图过滤：regex / 已链接 task / skip / hidden
+  → PlannerService.days$ 与 ScheduleService 读取
+      ├─ timed event → Schedule blocked block / Planner scheduledIItems
+      └─ all-day → Planner allDayEvents</pre>
+    <table>
+      <thead>
+        <tr><th>步骤</th><th>文件</th><th>要点</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>iCal HTTP 拉取</td>
+          <td class="where"><code>calendar-integration.service.ts</code><br><code>get-relevant-events-from-ical.ts</code></td>
+          <td>范围默认「过去一周～未来一月」；Web 端可被 <code>isDisabledForWebApp</code> 禁用；错误时 snack 且不泄漏 iCal URL token。</td>
+        </tr>
+        <tr>
+          <td>插件 agenda 拉取</td>
+          <td class="where"><code>calendar-integration.service.ts</code> <code>_fetchPluginCalendarEvents</code></td>
+          <td>调用插件 <code>getNewIssuesForBacklog</code>；只保留有 <code>start</code> 的项；轮询间隔取插件 <code>pollIntervalMs</code> 或默认 5 分钟。</td>
+        </tr>
+        <tr>
+          <td>Schedule 投影</td>
+          <td class="where"><code>map-to-schedule-days.ts</code><br><code>create-sorted-blocker-blocks.ts</code></td>
+          <td>timed calendar event 形成 <code>BlockedBlockType.CalendarEvent</code>，参与 blocked block 合并与任务 split。</td>
+        </tr>
+        <tr>
+          <td>已链接事件隐藏</td>
+          <td class="where"><code>calendar-integration.service.ts</code> <code>_allLinkedCalendarEventIds$</code></td>
+          <td>合并 live task 与归档 task 的 calendar event id，避免「已完成并归档」事件次日重新出现。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>导入方向：事件变任务</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>触发条件</th><th>写任务？</th><th>关键门控</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>自动导入</td>
+          <td class="where"><code>calendar-integration.effects.ts</code> <code>pollChanges$</code></td>
+          <td>是 → <code>IssueService.addTaskFromIssue</code></td>
+          <td><code>isAutoImportForCurrentDay</code>；<code>isToday(start)</code>；无重复 issue id；<code>isInitialSyncDoneSync() && !isInSyncWindow()</code>。</td>
+        </tr>
+        <tr>
+          <td>Banner「添加为任务」</td>
+          <td class="where">同上 <code>_showOrHideBanner</code></td>
+          <td>是</td>
+          <td>用户手动；<code>isForceDefaultProject: true</code>；随后 skip 事件 id。</td>
+        </tr>
+        <tr>
+          <td>Schedule/Planner 右键</td>
+          <td class="where"><code>calendar-event-actions.service.ts</code> <code>createAsTask</code></td>
+          <td>是</td>
+          <td>无 sync window 门控；仍走确定性 <code>generateCalendarTaskId</code>。</td>
+        </tr>
+        <tr>
+          <td>确定性 task id</td>
+          <td class="where"><code>generate-calendar-task-id.ts</code><br><code>issue.service.ts</code></td>
+          <td>创建时指定 id</td>
+          <td><code>cal_{issueProviderId}_{calendarEventId}</code>，跨设备防重复（Discussion #7677）。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>写方向 A：task → time block</h2>
+    <pre>TaskSharedActions.scheduleTaskWithTime / reScheduleTaskWithTime
+TaskSharedActions.applyShortSyntax（带 dueWithTime）
+TaskSharedActions.updateTask（title / timeEstimate / isDone）
+  → TimeBlockSyncEffects.upsertOnTaskChange$
+      ├─ 检查 enabled plugin + isAutoTimeBlock + definition.timeBlock
+      ├─ per-task debounce COALESCE_MS + groupBy 合并突发 action
+      ├─ per-task 队列串行；跨任务 MAX_PARALLEL_TIME_BLOCK_HTTP = 3
+      └─ 执行前重读 task；无 dueWithTime 则跳过
+
+TaskSharedActions.unscheduleTask / PlannerActions.transferTask（清时间）
+TaskSharedActions.deleteTask / deleteTasks（bulk + sidecar）
+  → TimeBlockSyncEffects delete 效应 → timeBlock.deleteEvent
+
+IssueProviderActions.updateIssueProvider（开启 isAutoTimeBlock）
+  → backfillOnAutoTimeBlockEnabled$：syncRangeWeeks 内已有 dueWithTime 任务批量 upsert</pre>
+    <table>
+      <thead>
+        <tr><th>字段</th><th>映射到 time block</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>task.title</code></td>
+          <td>event title</td>
+          <td>updateTask 标题变化触发 upsertIfScheduled。</td>
+        </tr>
+        <tr>
+          <td><code>dueWithTime</code></td>
+          <td>开始时间</td>
+          <td>排程/改时间的主触发器。</td>
+        </tr>
+        <tr>
+          <td>duration</td>
+          <td><code>timeEstimate - timeSpent</code>（未完成）或 <code>timeSpent</code>（已完成）</td>
+          <td>镜像 Schedule 剩余工时；避免完成后块缩成 0（#7949）；兜底 30 分钟。</td>
+        </tr>
+        <tr>
+          <td><code>task.id</code></td>
+          <td>远端事件关联键</td>
+          <td>插件 <code>upsertEvent(taskId, …)</code> / <code>deleteEvent(taskId, …)</code>。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>写方向 B：拖拽插件日历事件</h2>
+    <table>
+      <thead>
+        <tr><th>动作</th><th>入口</th><th>写远端？</th><th>刷新</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Schedule 网格拖拽</td>
+          <td class="where"><code>schedule-week-drag.service.ts</code> → <code>moveToStartTime</code></td>
+          <td>仅插件事件且 <code>definition.updateIssue</code></td>
+          <td><code>adapter.pushChanges</code> 后 <code>triggerRefresh()</code></td>
+        </tr>
+        <tr>
+          <td>右键改期</td>
+          <td class="where"><code>calendar-event-actions.service.ts</code> <code>reschedule</code></td>
+          <td>同上</td>
+          <td>弹窗选日/时 → push <code>start_dateTime</code> 或 <code>start_date</code></td>
+        </tr>
+        <tr>
+          <td>删除远端事件</td>
+          <td class="where"><code>calendar-event-actions.service.ts</code> <code>deleteEvent</code></td>
+          <td><code>adapter.deleteIssue</code></td>
+          <td>确认后 refresh</td>
+        </tr>
+        <tr>
+          <td>iCal 事件</td>
+          <td class="where"><code>canMoveEvent</code></td>
+          <td>否（只读）</td>
+          <td>可 <code>openEventLink</code> 或 <code>createAsTask</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>常见判断清单</h2>
+    <table>
+      <thead>
+        <tr><th>现象</th><th>先看</th><th>判断规则</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Schedule 没有某会议块</td>
+          <td class="where"><code>calendarEvents$</code> 过滤链</td>
+          <td>可能 regex 过滤、已导入为任务、被 skip/hidden，或 provider 未启用。</td>
+        </tr>
+        <tr>
+          <td>第二台设备重复导入同一事件</td>
+          <td class="where"><code>generate-calendar-task-id.ts</code></td>
+          <td>检查是否在 sync window 内提前 auto-import；确定性 id 应收敛为同一 task。</td>
+        </tr>
+        <tr>
+          <td>排程后 Google 日历无块</td>
+          <td class="where"><code>time-block-sync.effects.ts</code></td>
+          <td>确认 <code>isAutoTimeBlock</code>、插件 <code>timeBlock</code> 定义、snack TIME_BLOCK_ERROR；看队列是否被 delete 覆盖。</td>
+        </tr>
+        <tr>
+          <td>改标题后日历标题旧</td>
+          <td class="where"><code>upsertOnTaskChange$</code></td>
+          <td><code>updateTask</code> 相关字段会 upsertIfScheduled；等待 1s 合并窗口结束。</td>
+        </tr>
+        <tr>
+          <td>拖会议块无效</td>
+          <td class="where"><code>canMoveEvent</code></td>
+          <td>iCal 与 reference calendar 不可移动；需插件 <code>updateIssue</code>。</td>
+        </tr>
+        <tr>
+          <td>开启 auto time block 后旧任务没块</td>
+          <td class="where"><code>backfillOnAutoTimeBlockEnabled$</code></td>
+          <td>仅 backfill <code>syncRangeWeeks</code> 内未来 scheduled task；每 provider 只执行一次。</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>与相邻链路的边界</h2>
+    <ul>
+      <li><strong>vs issue 双向同步：</strong>Jira/GitLab 等字段写回走 <code>IssueTwoWaySyncEffects</code>；calendar time block 是独立 HTTP 副作用，<code>dispatch: false</code>，不写 task op-log。</li>
+      <li><strong>vs Planner/Schedule 投影：</strong>calendar 事件进入视图后仍是外部数据；只有导入才产生 <code>Task</code>；time block 则从已有 <code>Task.dueWithTime</code> 写出。</li>
+      <li><strong>vs 插件 agenda 读：</strong>同一插件可能同时提供 agenda 读（<code>useAgendaView</code>）与 time block 写（<code>isAutoTimeBlock</code>）；二者 API 与缓存路径不同。</li>
+    </ul>
+
+    <h2>后续 L3/L4 候选</h2>
+    <ul>
+      <li><strong>L3：</strong><code>TimeBlockSyncEffects</code> 队列合并与 delete 优先规则源码走读。</li>
+      <li><strong>L3：</strong><code>_allLinkedCalendarEventIds$</code> 与归档任务联动（#7971）。</li>
+      <li><strong>L3：</strong>Google/CalDAV 插件 <code>timeBlock.upsertEvent</code> 实现与 calendar id 选择。</li>
+      <li><strong>L4：</strong>calendar auto-import 与 sync window / vector clock 冲突完整时序。</li>
+      <li><strong>L4：</strong>Schedule 拖拽插件事件与 blocked block 刷新竞态。</li>
+    </ul>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 助手或 Skill 导入全链路短课</title>
+  <link rel="stylesheet" href="../assets/skill-import.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>助手或 Skill 导入全链路</h1>
+    <p class="subtitle">目标：15 分钟内建立一张可用于读码和改代码的流程地图：用户从设置页导入 skill，或在 AssistantSettings 中把 skill 设为默认能力，最终通过 common adapter 写入后端并刷新状态。</p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">入口：Skills Hub / AssistantSettings</span>
+      <span class="pill">后端边界：/api/skills 与 /api/assistants</span>
+    </div>
+  </section>
+
+  <p class="muted">
+    交叉链接：
+    <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>、
+    <a href="../../module-assistants-skills/reference/assistants-skills-overview.html">Assistants / Skills L1</a>、
+    <a href="../../module-common-adapter/reference/common-adapter-overview.html">common adapter L1</a>、
+    <a href="../../module-test-quality/reference/test-quality-overview.html">测试质量 L1</a>、
+    <a href="../reference/skill-import-flow-map.html">本切片参考图谱</a>。
+  </p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#entry">1. 两个入口</a>
+    <a href="#layers">2. 沿途每一层</a>
+    <a href="#sequence">3. 调用时序</a>
+    <a href="#boundary">4. 边界与练习</a>
+  </nav>
+
+  <h2 id="entry">1. 两个入口</h2>
+  <p>当前源码里最直接的 skill 导入入口在 Skills Hub。用户打开“Add Skill”下拉菜单并选择手动导入后，页面先调用 Electron 原生文件选择，再把选中路径交给统一导入函数。下面是源码节选：注意 <code>catch</code> 分支只显示错误，不会刷新列表。</p>
+  <pre><code class="language-ts">const handleManualImport = async () =&gt; {
+  try {
+    const result = await ipcBridge.dialog.showOpen.invoke({
+      properties: ['openFile', 'openDirectory'],
+      filters: [{ name: 'Skill folders or zip archives', extensions: ['zip'] }],
+    });
+    if (result &amp;&amp; result.length &gt; 0) {
+      await handleImport(result[0]);
+    }
+  } catch (error) {
+    console.error('Failed to open directory dialog:', error);
+  }
+};</code></pre>
+  <pre><code class="language-ts">const handleImport = async (skillPath: string) =&gt; {
+  try {
+    const result = await ipcBridge.fs.importSkills.invoke({ skill_path: skillPath });
+    const notice = buildSkillImportNotice(result, t);
+    if (notice.type === 'error') {
+      Message.error(notice.message);
+    } else if (notice.type === 'warning') {
+      Message.warning(notice.message);
+    } else {
+      Message.success(notice.message);
+    }
+    if (notice.importedNames.length &gt; 0) {
+      setSearchQuery('');
+      void fetchData();
+    } else if (notice.type !== 'success') {
+      void fetchData();
+    }
+  } catch (error) {
+    console.error('Failed to import skill:', error);
+    Message.error(getSkillImportErrorMessage(error, t));
+  }
+};</code></pre>
+
+  <p>助手绑定 skill 的入口在 AssistantSettings 的默认配置区。它不是重新导入文件，而是从后端已知的 skill catalog 中选择默认 skill；“Manage in Skills Hub”按钮负责跳到导入页。</p>
+  <pre><code class="language-ts">&lt;Button
+  type='text'
+  size='mini'
+  onClick={() =&gt; navigate('/settings/skills')}
+  data-testid='btn-open-skills-settings'
+&gt;
+  {t('settings.skillsHub.manageInHub', { defaultValue: 'Manage in Skills Hub' })}
+&lt;/Button&gt;
+
+&lt;Select
+  mode='multiple'
+  value={defaultSkillsMode === 'fixed' ? selectedSkillValues : [AUTO_SELECT_VALUE]}
+  onChange={(value) =&gt; {
+    const nextValues = ((value as string[]) ?? []).filter(Boolean);
+    const filteredValues = nextValues.filter((item) =&gt; item !== AUTO_SELECT_VALUE);
+    if (filteredValues.length === 0) {
+      setDefaultSkillsMode('auto');
+      handleSkillSelectionChange([]);
+      return;
+    }
+    setDefaultSkillsMode('fixed');
+    handleSkillSelectionChange(filteredValues);
+  }}
+  data-testid='select-assistant-default-skills'
+/&gt;</code></pre>
+
+  <h2 id="layers">2. 沿途每一层</h2>
+  <table>
+    <thead><tr><th>层</th><th>导入 skill</th><th>绑定 assistant</th></tr></thead>
+    <tbody>
+      <tr><td>设置页 UI</td><td><code>TalkToButlerButton</code> 下拉到手动导入。</td><td><code>AssistantEditorPage</code> 保存按钮触发 <code>actions.save</code>。</td></tr>
+      <tr><td>页面状态</td><td><code>SkillsHubSettings.fetchData()</code> 读 skill、导入历史和限制。</td><td><code>useAssistantEditor</code> 读 assistant detail、skill catalog 和 MCP catalog。</td></tr>
+      <tr><td>文案与异常</td><td><code>buildSkillImportNotice()</code> 区分成功、部分成功、全失败。</td><td>保存 pending skill 失败时复用 <code>getSkillImportErrorMessage()</code> 并中止保存。</td></tr>
+      <tr><td>adapter</td><td><code>ipcBridge.fs.importSkills</code> 映射到 <code>POST /api/skills/import</code>。</td><td><code>ipcBridge.assistants.create/update</code> 映射到 <code>/api/assistants</code>。</td></tr>
+      <tr><td>刷新</td><td>导入结果分支会按 <code>importedNames</code> 或失败 notice 决定是否 <code>fetchData()</code>；HTTP throw 的 catch 只弹错误，不刷新。</td><td>保存后刷新 assistant catalog、detail cache，并发出 chat history refresh。</td></tr>
+      <tr><td>E2E 证据</td><td><code>manual-import.e2e.ts</code> 表达 mock dialog 导入意图；当前源码的手动菜单 test id 已是 <code>btn-add-skill-manual</code>，需运行前核对 selector。</td><td><code>assistant-settings-skills.e2e.ts</code> 断言默认 skill 选择保存后可重开读取。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="sequence">3. 调用时序</h2>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  actor U as 用户
+  participant SH as SkillsHubSettings
+  participant MSG as skillImportMessages
+  participant A as ipcBridge.fs
+  participant B as aioncore HTTP
+  participant AE as useAssistantEditor
+  U-&gt;&gt;SH: 选择手动导入 skill
+  SH-&gt;&gt;A: importSkills({ skill_path })
+  A-&gt;&gt;B: POST /api/skills/import
+  B--&gt;&gt;A: skill_names / failed 或 throw
+  A--&gt;&gt;SH: result 或 error
+  alt result 有导入或 result.failed
+    SH-&gt;&gt;MSG: buildSkillImportNotice()
+    SH-&gt;&gt;SH: fetchData()
+    SH-&gt;&gt;A: listAvailableSkills()
+    A-&gt;&gt;B: GET /api/skills
+  else HTTP catch
+    SH--&gt;&gt;U: Message.error，不调用 fetchData()
+  end
+  U-&gt;&gt;AE: 在 AssistantSettings 选择默认 skill 并保存
+  AE-&gt;&gt;B: POST /api/assistants 或 PUT /api/assistants/:id
+  AE-&gt;&gt;AE: refresh catalog/detail cache
+    </div>
+  </div>
+
+  <h2 id="boundary">4. 边界与练习</h2>
+  <p>最关键的失败路径在保存前导入 pending skill：一旦后端返回结构化错误，保存会显示 skill 导入错误并直接 <code>return</code>，不会继续创建或更新 assistant。</p>
+  <pre><code class="language-ts">for (const pendingSkill of skillsToImport) {
+  try {
+    await ipcBridge.fs.importSkills.invoke({ skill_path: pendingSkill.path });
+  } catch (error) {
+    console.error(`Failed to import skill "${pendingSkill.name}":`, error);
+    message.error(getSkillImportErrorMessage(error, t));
+    return;
+  }
+}
+
+if (skillsToImport.length &gt; 0) {
+  const skillsList = await ipcBridge.fs.listAvailableSkills.invoke();
+  setAvailableSkills(skillsList);
+}</code></pre>
+
+  <div class="callout">
+    <p><strong>检索练习：</strong>如果用户在 AssistantSettings 里选择了一个默认 skill 并保存，哪个字段把这个选择送给后端？如果导入 skill 时后端返回“文件过大”，为什么助手不会被创建？</p>
+    <div class="answer">
+      <p><strong>参考答案：</strong>默认 skill 最终进入 <code>enabled_skills</code> 和 <code>defaults.skills.value</code>。文件过大属于 <code>SKILL_IMPORT_FILE_TOO_LARGE</code>，<code>handleSave()</code> 捕获后调用 <code>getSkillImportErrorMessage()</code> 并 <code>return</code>，因此不会执行 <code>assistants.create/update</code>。</p>
+    </div>
+  </div>
+
+  <p class="muted">继续追问时，可以让 agent 带你顺着 <code>ipcBridge.ts</code> 进入某一个 endpoint 的 backend 实现，或把当前 E2E 与源码中的外部源导入 UI 差异单独做一次测试审计。</p>
+</main>
+<script>
+  mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });
+</script>
+</body>
+</html>

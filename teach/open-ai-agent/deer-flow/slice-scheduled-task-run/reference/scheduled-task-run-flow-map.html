@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scheduled task 创建→执行 全链路参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --accent:#2563eb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7f9fb; border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Scheduled task 创建→执行 全链路参考</h1>
+  <p class="lead">L2 垂直切片速查。短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。模块背景见 <a href="../../module-gateway/reference/gateway-overview.html">Gateway</a> 与 <a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">Runtime</a>。</p>
+
+  <h2>端到端流程图</h2>
+  <div class="diagram">/workspace/scheduled-tasks (page.tsx)
+  │ useCreateScheduledTask → api.ts POST /api/scheduled-tasks
+  ▼
+scheduled_tasks.py :: create_scheduled_task
+  │ validate context_mode / thread access
+  │ schedules.next_run_at(cron|once, timezone)
+  ▼
+ScheduledTaskRepository.create → scheduled_tasks 表
+  │ status=enabled, next_run_at=...
+  ▼
+[时间流逝] ScheduledTaskService._run_loop (poll_interval)
+  │ run_once → claim_due_tasks (lease + FOR UPDATE SKIP LOCKED)
+  ▼
+dispatch_task(trigger=scheduled|manual)
+  │ 1) 解析 execution_thread_id (fresh UUID 或 reuse thread_id)
+  │ 2) ScheduledTaskRunRepository.create (status=queued)
+  │ 3) launch_scheduled_thread_run → start_run (同聊天 run 路径)
+  │    context: { non_interactive: true, user_id }
+  │    metadata: scheduled_task_id, scheduled_task_run_id
+  ▼
+RunManager / worker.run_agent → lead agent 执行 prompt
+  ▼
+handle_run_completion → 更新 task_run + 父任务状态 (once 终态)</div>
+
+  <h2>分层与源码锚点</h2>
+  <div class="filetree">frontend/
+├── src/app/workspace/scheduled-tasks/page.tsx   ← UI：创建表单、列表、run 历史
+├── src/core/scheduled-tasks/api.ts              ← REST 客户端
+└── src/core/scheduled-tasks/hooks.ts            ← TanStack Query 封装
+
+backend/app/
+├── gateway/routers/scheduled_tasks.py           ← CRUD、pause/resume/trigger
+├── gateway/services.py :: launch_scheduled_thread_run
+├── gateway/app.py                               ← lifespan 内启动 ScheduledTaskService
+└── scheduler/service.py                         ← 轮询、认领、dispatch、completion 回写
+
+backend/packages/harness/deerflow/
+├── scheduler/schedules.py                       ← timezone、cron 规范化、next_run_at
+└── persistence/
+    ├── scheduled_tasks/                         ← 任务 ORM + Repository + claim
+    └── scheduled_task_runs/                     ← 每次执行记录</div>
+
+  <h2>创建阶段：HTTP 与持久化字段</h2>
+  <table>
+    <tr><th>步骤</th><th>入口</th><th>关键输出</th></tr>
+    <tr><td>前端 payload</td><td><code>ScheduledTaskPayload</code></td><td><code>title</code>, <code>prompt</code>, <code>schedule_type</code>, <code>schedule_spec</code>, <code>timezone</code>, <code>context_mode</code>, 可选 <code>thread_id</code></td></tr>
+    <tr><td>调度计算</td><td><code>compute_next_run_at</code></td><td>UTC <code>next_run_at</code>；once 若已过期返回 422</td></tr>
+    <tr><td>落库</td><td><code>repo.create</code></td><td><code>id=task-{uuid}</code>, <code>assistant_id=lead_agent</code>, <code>status=enabled</code></td></tr>
+    <tr><td>最小延迟</td><td><code>config.scheduler.min_once_delay_seconds</code></td><td>once 任务必须比当前时间至少晚 N 秒</td></tr>
+  </table>
+
+  <h2>执行阶段：认领 → dispatch → run</h2>
+  <table>
+    <tr><th>机制</th><th>行为</th><th>源码</th></tr>
+    <tr><td>轮询</td><td><code>_run_loop</code> 每 <code>poll_interval_seconds</code> 调 <code>run_once</code></td><td><code>app/scheduler/service.py</code></td></tr>
+    <tr><td>并发预算</td><td>全局活跃 run 数不超过 <code>max_concurrent_runs</code></td><td><code>count_active_runs</code> + claim limit</td></tr>
+    <tr><td>Lease 认领</td><td><code>enabled</code> 且到期；或 <code>running</code> 且 lease 已过期可重认领</td><td><code>claim_due_tasks</code></td></tr>
+    <tr><td>线程选择</td><td><code>fresh_thread_per_run</code> → 新 UUID；<code>reuse_thread</code> → 固定 <code>thread_id</code></td><td><code>dispatch_task</code></td></tr>
+    <tr><td>Overlap skip</td><td>默认 <code>overlap_policy=skip</code>：已有活跃 run 则记 <code>skipped</code> task_run</td><td><code>dispatch_task</code></td></tr>
+    <tr><td>Launch</td><td>内部用户 + <code>non_interactive</code>，复用 <code>start_run</code></td><td><code>launch_scheduled_thread_run</code></td></tr>
+    <tr><td>cron 下次</td><td>launch 成功即写新 <code>next_run_at</code>，父任务回到 <code>enabled</code></td><td><code>update_after_launch</code></td></tr>
+    <tr><td>once 中间态</td><td>launch 后父任务保持 <code>running</code> 直至 completion</td><td><code>dispatch_task</code> + <code>handle_run_completion</code></td></tr>
+  </table>
+
+  <h2>Gateway API 速查（本切片相关）</h2>
+  <table>
+    <tr><th>方法</th><th>路径</th><th>用途</th></tr>
+    <tr><td>POST</td><td><code>/api/scheduled-tasks</code></td><td>创建任务</td></tr>
+    <tr><td>GET</td><td><code>/api/scheduled-tasks</code></td><td>当前用户任务列表</td></tr>
+    <tr><td>POST</td><td><code>/api/scheduled-tasks/{id}/trigger</code></td><td>手动立即执行（并发中 409）</td></tr>
+    <tr><td>GET</td><td><code>/api/scheduled-tasks/{id}/runs</code></td><td>执行历史（前端 run 列表）</td></tr>
+    <tr><td>GET</td><td><code>/api/threads/{id}/scheduled-tasks</code></td><td>按线程过滤任务</td></tr>
+  </table>
+
+  <h2>状态与排障线索</h2>
+  <table>
+    <tr><th>现象</th><th>优先检查</th></tr>
+    <tr><td>任务从不执行</td><td><code>scheduler.enabled</code>；<code>next_run_at</code> 是否未来；状态是否为 <code>enabled</code> / 非 <code>paused</code></td></tr>
+    <tr><td>执行记录 skipped</td><td>上一轮 run 仍 active；overlap_policy</td></tr>
+    <tr><td>once 卡在 running</td><td>Gateway 重启后 <code>cancel_stuck_once_tasks</code>；run 是否无终态</td></tr>
+    <tr><td>手动触发 409</td><td>任务 status=<code>running</code> 或已有活跃 task_run</td></tr>
+    <tr><td>agent 不提问</td><td>预期行为：<code>non_interactive</code> 排除 <code>ask_clarification</code></td></tr>
+  </table>
+
+  <h2>测试锚点</h2>
+  <p>回归用例集中在 <code>backend/tests/test_scheduled_task_*.py</code>：<code>test_scheduled_task_lifecycle.py</code>（端到端生命周期）、<code>test_scheduled_task_claims.py</code>（认领与 lease）、<code>test_gateway_services.py::test_launch_scheduled_thread_run_marks_context_non_interactive</code>。前端 E2E：<code>frontend/tests/e2e/scheduled-tasks.spec.ts</code>。</p>
+
+  <p class="note">调度服务仅在 SQL 持久化后端可用时初始化（<code>scheduled_task_repo</code> 非空）。<code>database.backend: memory</code> 本地模式无定时任务表。</p>
+</main>
+</body>
+</html>

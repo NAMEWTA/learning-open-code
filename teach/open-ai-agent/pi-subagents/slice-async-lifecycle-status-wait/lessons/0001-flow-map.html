@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>0001 async lifecycle 全链路流程图</title>
+	<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-async-lifecycle 短课 0001</p>
+		<h1>async lifecycle 全链路流程图</h1>
+		<p>学习目标：15 分钟内能口述一次 <code>async: true</code> 调用从启动到完成通知的五段链路，并指出每段对应源码文件。</p>
+	</header>
+
+	<section>
+		<h2>1. 入口：前台只负责“点火”</h2>
+		<p>当 <code>subagent-executor</code> 判定 <code>effectiveAsync</code> 为真时，它不会调用前台 <code>runSync</code>，而是转给 <code>executeAsyncSingle</code> 或 <code>executeAsyncChain</code>。启动器做三件事：创建 <code>asyncDir</code>、把 runner 配置写到临时 JSON、用 <code>jiti</code> detached spawn <code>subagent-runner.ts</code>，然后立刻向父 Pi 发出 <code>SUBAGENT_ASYNC_STARTED_EVENT</code>。</p>
+		<pre>{
+  "agent": "reviewer",
+  "task": "Review src/runs/background/wait.ts",
+  "async": true
+}</pre>
+		<p>返回文本里会强调：<strong>不要用 sleep 或轮询空等</strong>；若本 turn 必须等到结果，应调用 <code>wait()</code>；若只是巡检，用 <code>subagent({ action: "status", id })</code>。这段提示来自 <code>formatAsyncStartedMessage</code>。</p>
+	</section>
+
+	<section>
+		<h2>2. 五段分工：谁写盘、谁记内存、谁阻塞</h2>
+		<pre class="tree">src/runs/background/
+├── async-execution.ts      ← 启动 detached runner，发 started event
+├── subagent-runner.ts      ← 运行中写 status.json / events.jsonl / result
+├── async-job-tracker.ts    ← 父进程 job map + 轮询刷新 + 控制事件转发
+├── run-status.ts           ← status action：一次性快照 / fleet / transcript
+├── wait.ts                 ← wait tool：阻塞当前 turn 直到终态或 needs_attention
+└── result-watcher.ts       ← 监听 RESULTS_DIR，发 complete event</pre>
+		<div class="grid">
+			<div class="panel"><strong>磁盘真相</strong><br><code>status.json</code> 记录运行态；<code>events.jsonl</code> 记录控制事件；<code>RESULTS_DIR/&lt;id&gt;.json</code> 是完成信号。</div>
+			<div class="panel"><strong>内存投影</strong><br><code>async-job-tracker</code> 把 started event 写入 <code>state.asyncJobs</code>，定时 reconcile 磁盘状态并刷新 TUI widget。</div>
+			<div class="panel"><strong>父 agent 观测</strong><br><code>status</code> = 看一眼；<code>wait</code> = 本 turn 卡住直到有结果；交互式会话还可依赖下一 turn 的 completion notification。</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>3. 调用时序（主路径）</h2>
+		<div class="mermaid-wrap">
+			<pre>Parent turn                async-execution        subagent-runner       job-tracker / watcher
+    |                            |                      |                        |
+    |-- subagent async:true ---->|                      |                        |
+    |                            |-- spawn detached --->|                        |
+    |                            |-- started event -------------------------------->| handleStarted
+    |&lt;- runId + asyncDir --------|                      |                        |
+    |                            |                      |-- write status.json -->|
+    |                            |                      |-- write events.jsonl ->|
+    |-- status (optional) ------ run-status.ts -------- read disk --------------->|
+    |-- wait (optional) -------- wait.ts -------------- poll + event wake ------>|
+    |                            |                      |-- write result.json -->| result-watcher
+    |&lt;- complete notification --- extension index &lt;------ complete event ----------|</pre>
+		</div>
+		<p>关键接线在 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code>：<code>createAsyncJobTracker</code> 订阅 started/complete；<code>createResultWatcher</code> 监视 result 目录；<code>wait</code> tool 注册为独立阻塞入口。</p>
+		<div class="note">
+			<p>更完整的状态表、产物清单与异常路径见 <a href="../reference/async-lifecycle-flow-map.html">async lifecycle 参考页</a>；runs 三层边界见 <a href="../../module-runs-execution/reference/runs-execution-overview.html">runs execution L1 参考</a>。</p>
+		</div>
+	</section>
+
+	<section class="quiz">
+		<h2>检索练习</h2>
+		<p>你在非交互式 <code>pi -p</code> 单 turn 里启动了 3 个 <code>async: true</code> 子任务，必须全部完成才能结束。下面哪种做法符合源码设计？</p>
+		<ol>
+			<li>每 5 秒调用一次 <code>subagent({ action: "status" })</code> 直到都 complete。</li>
+			<li>调用 <code>wait({ all: true })</code> 阻塞到每个 run 进入终态。</li>
+			<li>结束 turn，等待 Pi 在下一 turn 自动唤醒你。</li>
+		</ol>
+		<div class="answer">
+			<p><strong>参考答案：2。</strong><code>wait.ts</code> 顶部注释写明非交互式单 turn 没有“下一 turn”可接收 completion notification；<code>formatAsyncStartedMessage</code> 也禁止 sleep-poll。选项 1 是反模式；选项 3 在 <code>pi -p</code> 下会丢结果。</p>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>主要来源</h3>
+		<p>建议先读 <code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code> 的 <code>executeAsyncSingle</code> 与 <code>formatAsyncStartedMessage</code>，再对照 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code> 的事件订阅。</p>
+		<p>下一节：<a href="0002-status-wait-complete.html">status、wait 与完成通知</a>。不清楚某段链路时，可以让 agent 按 run id 带你逐文件追踪。</p>
+	</section>
+
+	<nav class="lesson-nav">
+		<p>课程导航 · <a href="0002-status-wait-complete.html">0002 status / wait / complete</a> · <a href="../reference/async-lifecycle-flow-map.html">参考：流程图谱</a></p>
+	</nav>
+</main>
+</body>
+</html>

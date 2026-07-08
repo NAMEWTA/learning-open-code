@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>skill slash 激活与递进加载流程参考</title>
+  <link rel="stylesheet" href="../assets/slice-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+  <style>
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.92rem; }
+    th, td { border:1px solid #e5e7eb; padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid #155eef; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .tag { display:inline-block; border:1px solid #d7dee8; border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; font-size:.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>skill slash 激活与递进加载流程参考</h1>
+    <p class="lead">
+      L2 垂直切片速查。短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。
+      L1 背景：<a href="../../module-skills/reference/skills-overview.html">skills-overview</a>、
+      <a href="../../module-lead-agent/reference/lead-agent-overview.html">lead-agent-overview</a>。
+    </p>
+
+    <h2>源码锚点</h2>
+    <table>
+      <tr><th>文件</th><th>职责</th><th>关键符号</th></tr>
+      <tr>
+        <td><code>agents/middlewares/skill_activation_middleware.py</code></td>
+        <td>slash 解析、全文注入、run 级 secret 绑定</td>
+        <td><code>SkillActivationMiddleware</code>、<code>_resolve_activation</code>、<code>_resolve_secret_bindings</code></td>
+      </tr>
+      <tr>
+        <td><code>agents/middlewares/skill_context.py</code></td>
+        <td>read_file 配对捕获与紧凑渲染</td>
+        <td><code>extract_skills</code>、<code>render_skill_context</code>、<code>SKILL_CONTEXT_ENTRY_KEY</code></td>
+      </tr>
+      <tr>
+        <td><code>agents/middlewares/durable_context_middleware.py</code></td>
+        <td>写入 <code>skill_context</code> 通道并每轮投影</td>
+        <td><code>DurableContextMiddleware</code>、<code>_render_durable_context_data</code></td>
+      </tr>
+      <tr>
+        <td><code>skills/slash.py</code></td>
+        <td>严格 <code>/name</code> 语法与保留命令过滤</td>
+        <td><code>parse_slash_skill_reference</code>、<code>RESERVED_SLASH_SKILL_NAMES</code></td>
+      </tr>
+      <tr>
+        <td><code>skills/storage/</code></td>
+        <td>扫描 <code>skills/{public,custom}</code>、enabled 状态</td>
+        <td><code>SkillStorage.load_skills</code>、<code>get_container_root</code></td>
+      </tr>
+    </table>
+
+    <h2>目录与虚拟路径</h2>
+    <div class="filetree">仓库根 deer-flow/
+├── skills/
+│   ├── public/          ← 提交到 git 的示例 skills
+│   │   └── chart-visualization/SKILL.md
+│   └── custom/          ← POST /api/skills/install，gitignore
+└── backend/packages/harness/deerflow/skills/
+    ├── parser.py        ← frontmatter、required-secrets
+    ├── slash.py
+    └── storage/         ← Local / UserScoped 存储
+
+Agent 沙箱虚拟路径：/mnt/skills/…（映射到配置的 skills 根）</div>
+
+    <h2>Slash 激活端到端</h2>
+    <div class="diagram">用户 HumanMessage: "/chart-visualization 画趋势"
+  │
+  ├── SkillActivationMiddleware.wrap_model_call
+  │     ├── _find_activation_target（跳过 summary / hide_from_ui）
+  │     ├── parse_slash_skill_reference (slash.py)
+  │     ├── storage.load_skills → match name
+  │     ├── gates: enabled ∧ allowlist(available_skills)
+  │     ├── _read_skill_content(skill_file) → sha256
+  │     ├── _make_activation_message → insert before user msg
+  │     └── _resolve_secret_bindings → context.__slash_skill_secret_source
+  │
+  └── handler → LLM 看到 &lt;slash_skill_activation&gt; + 完整 skill_content</div>
+
+    <h2>递进加载端到端</h2>
+    <div class="diagram">AIMessage tool_call: read_file(path=/mnt/skills/public/foo/SKILL.md)
+  │
+  ├── sandbox read → ToolMessage(content=全文)
+  ├── ToolErrorHandlingMiddleware → additional_kwargs.skill_context_entry
+  │
+  └── DurableContextMiddleware.before_model
+        ├── extract_skills(messages) → [{name, path, description, loaded_at}]
+        ├── merge_skill_context reducer → ThreadState.skill_context
+        └── wrap_model_call 注入 &lt;durable_context_data&gt; 中的 Active skills 列表
+              （无正文，提示 re-read）</div>
+
+    <h2>主时序（slash + 后续 tool loop）</h2>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant U as 用户消息
+    participant SAM as SkillActivationMiddleware
+    participant DC as DurableContextMiddleware
+    participant LLM as 模型
+    participant Tool as read_file/bash
+
+    U->>SAM: /skill-name 任务
+    alt 解析失败
+      SAM-->>U: AIMessage 错误（不调用 LLM）
+    else 激活成功
+      SAM->>SAM: 插入隐藏 slash_skill_activation
+      SAM->>LLM: override messages
+      loop 工具环（多轮 model call）
+        LLM->>Tool: 可选 read 辅助资源
+        Tool-->>LLM: ToolMessage
+        DC->>DC: 捕获 skill_context（若读了 SKILL.md）
+        SAM->>SAM: 重算 secret bindings（slash 路径持久）
+        SAM->>LLM: 后续 model call
+      end
+    end</pre>
+    </div>
+
+    <h2 id="errors">Slash 解析与激活异常</h2>
+    <table>
+      <tr><th>条件</th><th>行为</th><th>用户可见文案模式</th></tr>
+      <tr><td>非 <code>/name</code> 语法（前导空格、无分隔符）</td><td>不激活，走普通对话</td><td>（无 middleware 错误）</td></tr>
+      <tr><td>保留命令 <code>/new</code>、<code>/goal</code>、<code>/help</code> 等</td><td><code>parse_slash_skill_reference</code> 返回 None</td><td>由 channel / 前端处理</td></tr>
+      <tr><td>skill 未安装</td><td>返回 AIMessage</td><td><code>Skill `/name` is not installed.</code></td></tr>
+      <tr><td>已安装但 disabled</td><td>返回 AIMessage</td><td><code>…installed but disabled…</code></td></tr>
+      <tr><td>不在 agent allowlist</td><td>返回 AIMessage</td><td><code>…not available for this agent.</code></td></tr>
+      <tr><td>路径/读文件不安全</td><td>返回 AIMessage</td><td><code>…could not be loaded safely…</code></td></tr>
+      <tr><td>同一用户消息已激活过</td><td>跳过二次注入</td><td>（静默）</td></tr>
+    </table>
+
+    <h2>递进加载与 durable 边界</h2>
+    <table>
+      <tr><th>场景</th><th>checkpoint 存什么</th><th>下轮 model 请求</th></tr>
+      <tr><td>仅 slash 激活</td><td>通常无 <code>skill_context</code> 条目（除非又 read_file）</td><td>激活当轮：隐藏块含全文；之后依赖模型记忆或再读</td></tr>
+      <tr><td>read_file SKILL.md</td><td><code>skill_context[]</code> 仅元数据</td><td><code>render_skill_context</code> 紧凑列表</td></tr>
+      <tr><td>summarization 压缩旧 tool 消息</td><td><code>skill_context</code> 仍保留（durable 通道）</td><td>提醒仍在 <code>durable_context_data</code></td></tr>
+      <tr><td>skill 被 operator 禁用</td><td>条目可能仍在 state</td><td><code>_resolve_registry_skill</code> 失败 → secret 不绑定；需重读时工具报错</td></tr>
+      <tr><td>read 非 SKILL.md 或路径越界</td><td>不写入 <code>skill_context</code></td><td>无 skill 提醒</td></tr>
+    </table>
+
+    <h2>Request-scoped secrets（slash vs in-context）</h2>
+    <table>
+      <tr><th>来源</th><th>触发</th><th>重验证</th><th>secrets-autonomous opt-out</th></tr>
+      <tr><td>Slash 激活</td><td>用户 <code>/skill</code></td><td>激活时 enabled+allowlist；路径存 run context</td><td>豁免（显式仪式）</td></tr>
+      <tr><td>In-context</td><td><code>skill_context</code> 条目</td><td>每轮对 live registry 按 path 解析</td><td>遵守 <code>secrets-autonomous: false</code></td></tr>
+    </table>
+    <p>
+      注入值仅来自 <code>context.secrets</code>；registry 加载失败时当次 bind nothing（fail closed）。
+      审计日志只记 skill/secret 名称，不记值。
+    </p>
+
+    <h2>与 deferred_discovery 的关系</h2>
+    <p>
+      <code>skills.deferred_discovery: true</code> 时，系统提示词只给 <code>&lt;skill_index&gt;</code> 名称列表；
+      agent 需先 <code>describe_skill</code> 再 <code>read_file</code>——走的是<strong>递进加载</strong>路径，不是 slash。
+      Slash 与 deferred 正交：用户随时可用 <code>/name</code> 跳过索引，直接注入该 skill 全文。
+    </p>
+
+    <div class="note">
+      <strong>测试锚点：</strong>
+      <code>backend/tests/test_skill_request_scoped_secrets.py</code>（slash 与 in-context 密钥）、
+      harness 内 slash 相关单测。
+      排障顺序：extensions_config 里 skill 是否 enabled → custom agent allowlist → 用户消息是否匹配
+      <code>^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)</code> → 隐藏激活消息是否已插入。
+    </div>
+  </article>
+</main>
+</body>
+</html>

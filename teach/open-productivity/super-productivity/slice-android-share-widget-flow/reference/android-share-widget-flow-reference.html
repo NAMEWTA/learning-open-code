@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Android 分享与 Widget 全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · android share &amp; widget vertical slice</p>
+    <h1>Android 分享 intent、Home Widget 与队列 drain 参考</h1>
+    <p class="lead">本参考用于快速定位分享入队、Widget 快照推送、勾选 drain 与桥接时机。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>；宿主边界见 <a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端宿主导览</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <div class="filetree">android/app/src/main/java/com/superproductivity/superproductivity/
+├── CapacitorMainActivity.kt            ← handleIntent、flushPendingShareIntent、drain 广播
+├── webview/
+│   └── JavaScriptInterface.kt          ← getPendingShareData、getWidgetDoneQueue、updateWidget
+└── widget/
+    ├── ShareIntentQueue.kt             ← 分享 JSON SharedPreferences 队列
+    ├── WidgetDoneQueue.kt              ← Widget 勾选 last-wins map
+    ├── TaskListWidgetProvider.kt       ← 点击入队 + ACTION_WIDGET_DONE_DRAIN
+    ├── TaskListWidgetService.kt        ← 读取 widget_data + peek pending overlay
+    └── WidgetData.kt                   ← 快照 JSON 解析
+
+src/app/features/android/
+├── android-interface.ts                ← SUPAndroid 类型、冷启动 pull、Subject 初始化
+├── widget-data.service.ts              ← pushCurrent → KeyValStore + updateWidget
+├── android-widget.model.ts             ← ANDROID_WIDGET_DATA_KEY 与快照形状
+├── store/
+│   ├── android.effects.ts              ← handleShare$、checkPendingShareOnResume$
+│   ├── android-widget.effects.ts       ← 快照推送 + drainWidgetDoneQueue$
+│   └── android-widget.selectors.ts     ← selectAndroidWidgetData
+└── store/android.effects.spec.ts       ← buildTaskTitle 回归测试</div>
+    <p>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/ShareIntentQueue.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/WidgetDoneQueue.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/TaskListWidgetProvider.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/TaskListWidgetService.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/WidgetData.kt</code>
+      <code>src/app/features/android/android-interface.ts</code>
+      <code>src/app/features/android/widget-data.service.ts</code>
+      <code>src/app/features/android/android-widget.model.ts</code>
+      <code>src/app/features/android/store/android.effects.ts</code>
+      <code>src/app/features/android/store/android-widget.effects.ts</code>
+      <code>src/app/features/android/store/android-widget.selectors.ts</code>
+      <code>src/app/features/android/store/android.effects.spec.ts</code>
+    </p>
+
+    <h2>阶段速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>入口</th><th>输出</th><th>失败时表现</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>分享接收</td>
+            <td>外部应用 <code>ACTION_SEND</code> → <code>handleIntent</code></td>
+            <td>JSON <code>{title, subject, type, path}</code> + <code>ShareIntentQueue.setPending</code></td>
+            <td>空白文本被忽略；无任务、无 Toast</td>
+          </tr>
+          <tr>
+            <td>分享交付（温）</td>
+            <td><code>isFrontendReady</code> 时 <code>callJSInterfaceFunctionIfExists(onShareWithAttachment$)</code></td>
+            <td><code>onShareWithAttachment$.next</code> + 队列清除</td>
+            <td>WebView 未初始化则跳过 JS 调用</td>
+          </tr>
+          <tr>
+            <td>分享交付（冷）</td>
+            <td><code>android-interface.ts</code> init：<code>getPendingShareData</code> + <code>triggerGetShareData</code></td>
+            <td><code>flushPendingShareIntent</code> 置 ready 并补推</td>
+            <td>进程死后靠 SharedPreferences；内存 <code>pendingShareIntent</code> 丢失</td>
+          </tr>
+          <tr>
+            <td>分享消费</td>
+            <td><code>AndroidEffects.handleShare$</code></td>
+            <td><code>TaskService.add</code> + <code>addAttachment</code></td>
+            <td>空 <code>path</code> guard；标题由 <code>buildTaskTitle</code> 推导</td>
+          </tr>
+          <tr>
+            <td>Widget 快照推送</td>
+            <td><code>pushOnStateChange$</code> / <code>pushOnPause$</code> / <code>pushOnSyncWindowEnd$</code></td>
+            <td>KeyValStore <code>widget_data</code> + <code>updateWidget</code></td>
+            <td>hydration 期间暂停；sync 后靠 window 结束补推</td>
+          </tr>
+          <tr>
+            <td>Widget 勾选入队</td>
+            <td><code>TaskListWidgetProvider.onReceive(ACTION_CLICK)</code></td>
+            <td><code>WidgetDoneQueue.setTarget</code> + 重渲染 + <code>ACTION_WIDGET_DONE_DRAIN</code></td>
+            <td>Widget 显示 pending 勾选但 NgRx 未变（正常，待 drain）</td>
+          </tr>
+          <tr>
+            <td>Widget drain</td>
+            <td><code>merge(onResume$, onWidgetDoneDrainRequest$)</code> → <code>drainWidgetDoneQueue$</code></td>
+            <td><code>getWidgetDoneQueue</code> get-and-clear → <code>setDone</code>/<code>setUnDone</code></td>
+            <td>数据未加载完则 concatMap 阻塞；已 done 任务被过滤</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>分享 JSON 与标题推导</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>字段</th><th>来源</th><th>规则</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>path</code></td><td><code>Intent.EXTRA_TEXT</code></td><td>必填；空白则整条分享丢弃</td></tr>
+          <tr><td><code>type</code></td><td>native 推断</td><td><code>http</code> 前缀 → <code>LINK</code>，否则 <code>NOTE</code></td></tr>
+          <tr><td><code>title</code> / <code>subject</code></td><td><code>EXTRA_TITLE</code> / <code>EXTRA_SUBJECT</code></td><td>可为空；Angular <code>buildTaskTitle</code> 按 subject → title → URL/首行 推导</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><code>buildTaskTitle</code> 与 <code>readableUrl</code> 导出在 <code>android.effects.ts</code>，单测见 <code>android.effects.spec.ts</code>。native 侧故意不把缺失标题填成字面量 "Shared Content"，以免掩盖推导逻辑。</p>
+
+    <h2>队列与桥接常量</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>常量 / 键</th><th>定义位置</th><th>用途</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>SuperProductivityShare</code> / <code>PENDING_SHARE_DATA</code></td><td><code>ShareIntentQueue</code></td><td>分享 JSON 持久化；<code>commit()</code> 同步写</td></tr>
+          <tr><td><code>SuperProductivityWidgetDone</code> / <code>WIDGET_DONE_TASK_IDS</code></td><td><code>WidgetDoneQueue</code></td><td><code>{taskId: targetIsDone}</code> last-wins map</td></tr>
+          <tr><td><code>ANDROID_WIDGET_DATA_KEY</code></td><td><code>android-widget.model.ts</code></td><td>今日任务快照 blob 的 KeyValStore 键</td></tr>
+          <tr><td><code>ACTION_WIDGET_DONE_DRAIN</code></td><td><code>TaskListWidgetProvider</code></td><td>无内容本地广播；仅唤醒 Angular pull</td></tr>
+          <tr><td><code>WINDOW_INTERFACE_PROPERTY</code> = <code>SUPAndroid</code></td><td><code>CapacitorMainActivity</code></td><td>WebView <code>addJavascriptInterface</code> 挂载点</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>交付路径对比</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>场景</th><th>分享链路</th><th>Widget 勾选链路</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>应用前台存活</td><td>push <code>onShareWithAttachment$</code></td><td>push <code>onWidgetDoneDrainRequest$</code> + pull <code>getWidgetDoneQueue</code></td></tr>
+          <tr><td>冷启动 / 进程被杀</td><td>pull <code>getPendingShareData</code>；<code>onResume</code> 再 pull 一次</td><td>仅 <code>onResume$</code> 触发 drain（无 JS push）</td></tr>
+          <tr><td>Activity 配置重建</td><td><code>savedInstanceState != null</code> 时不重跑 <code>handleIntent</code>，防重复建任务</td><td>队列仍在 SharedPreferences，resume 时 drain</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Widget 快照推送触发器</h2>
+    <ol>
+      <li><code>pushOnStateChange$</code>：<code>selectAndroidWidgetData</code> 变更后 debounce 500ms；跳过 remote op hydration 窗口。</li>
+      <li><code>pushOnSyncWindowEnd$</code>：sync window 从 true→false 时补推，避免远程变更被守卫吞掉。</li>
+      <li><code>pushOnPause$</code>：进入后台前立即推送最新快照，无 debounce。</li>
+      <li><code>WidgetDataService.pushCurrent</code>：JSON 与上次成功推送相同时跳过；失败不更新 <code>_lastPushedJson</code> 以便重试。</li>
+    </ol>
+
+    <h2>drain 过滤逻辑</h2>
+    <p><code>getTaskDoneChangesToApply(queueJson, taskEntities)</code> 解析 JSON object 后仅保留：</p>
+    <ul>
+      <li><code>isDone</code> 为 boolean；</li>
+      <li>任务实体仍存在；</li>
+      <li>当前 <code>task.isDone !== targetIsDone</code>（已是目标状态则跳过，避免冗余 op）。</li>
+    </ul>
+    <p>drain 前等待 <code>isAllDataLoadedInitially$</code>，防止 store 未 hydrated 时误判任务缺失。</p>
+
+    <h2>排障口令</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>现象</th><th>首查文件</th><th>关键日志 TAG</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>分享无任务</td><td><code>CapacitorMainActivity.handleIntent</code> → <code>android.effects.ts</code></td><td>SP_SHARE / DroidLog</td></tr>
+          <tr><td>分享重复建任务</td><td>是否配置重建重跑 <code>handleIntent</code>；队列是否 get-and-clear</td><td>SP_SHARE</td></tr>
+          <tr><td>Widget 列表不更新</td><td><code>WidgetDataService</code>、hydration 守卫、sync window 补推</td><td>DroidLog</td></tr>
+          <tr><td>Widget 勾选无效果</td><td><code>drainWidgetDoneQueue$</code>、<code>getTaskDoneChangesToApply</code></td><td>TaskListWidget / DroidLog</td></tr>
+          <tr><td>勾选已显示但应用内未变</td><td>区分 pending overlay（<code>peek</code>）与 drain 是否执行</td><td>TaskListWidget</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>与提醒队列对比</h2>
+    <p>提醒 Done/Snooze 队列（<code>slice-android-native-reminder-flow</code>）与 Widget/分享队列共享同一心智模型：native <code>commit()</code> 持久化、Angular 冷启动 pull、温启动 <code>onResume$</code> 补捞。差异在于分享额外有 warm-start push（<code>onShareWithAttachment$</code>），Widget 勾选额外有 contentless drain 广播（<code>onWidgetDoneDrainRequest$</code>），而提醒 action 多在 <code>ReminderActionReceiver</code> 后台完成调度。</p>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AionU 发送会话消息全链路参考</title>
+  <link rel="stylesheet" href="../assets/slice.css" />
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>AionU 发送会话消息全链路参考</h1>
+    <p class="subtitle">从用户在 SendBox 输入/提交开始，追到 conversation runtime、adapter bridge、HTTP/WS 请求、消息状态更新、流式/错误反馈与 E2E 证据。</p>
+    <div class="meta">
+      <span class="pill">入口点</span>
+      <span class="pill">沿途每一层</span>
+      <span class="pill">调用时序</span>
+      <span class="pill">异常/边界路径</span>
+      <span class="pill">交叉链接</span>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <a href="../lessons/0001-flow-map.html">短课入口：0001-flow-map</a>
+    <a href="../../00-overview/reference/00-overview.html">L0：AionU 项目总览</a>
+    <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">L1：Conversation Runtime 与 Agent UI</a>
+    <a href="../../module-common-adapter/reference/common-adapter-overview.html">L1：Common Adapter 与 API 映射</a>
+    <a href="../../module-renderer-core/reference/renderer-core-overview.html">L1：Renderer 核心与 UI Shell</a>
+  </nav>
+
+  <h2>一眼图</h2>
+  <div class="diagram">
+    <pre><code class="language-text">用户输入
+  -> SendBox：拼接引用/DOM/附件上下文，清空草稿，调用 onSend
+  -> ChatConversation：按 conversation.type 分到 AionRS 或 ACP
+  -> 平台 SendBox：收集文件，检查模型、runtime gate、命令队列
+  -> useConversationRuntimeView：本地 pending、accepted、failed、completed gate
+  -> ipcBridge.conversation.sendMessage：POST /api/conversations/:id/messages
+  -> httpBridge：fetch 请求；失败时抛 BackendHttpError
+  -> WebSocket emitter：message.stream / turn.completed
+  -> useAionrsMessage 或 useAcpMessage：合并流式消息、结束 loading、处理 error
+  -> MessageList：渲染用户消息、AI 文本、tips、工具、权限与错误</code></pre>
+  </div>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant User as 用户
+  participant SendBox as SendBox
+  participant AionRS as AionrsSendBox
+  participant Queue as CommandQueue
+  participant Runtime as runtimeView
+  participant Adapter as ipcBridge/httpBridge
+  participant Backend as backend
+  participant Stream as WS stream
+  participant Messages as Message state
+  User-&gt;&gt;SendBox: 输入并提交
+  SendBox-&gt;&gt;AionRS: onSend(finalMessage)
+  AionRS-&gt;&gt;Queue: shouldEnqueueConversationCommand?
+  alt 忙时
+    Queue--&gt;&gt;AionRS: enqueue
+  else 可发送
+    AionRS-&gt;&gt;Runtime: markSendStarted()
+    AionRS-&gt;&gt;Adapter: sendMessage.invoke()
+    Adapter-&gt;&gt;Backend: POST /api/conversations/:id/messages
+    Backend--&gt;&gt;Adapter: turn_id / msg_id
+    AionRS-&gt;&gt;Runtime: markSendAccepted()
+    Backend--&gt;&gt;Stream: message.stream
+    Stream-&gt;&gt;Messages: mergeLiveMessage()
+    Backend--&gt;&gt;Stream: turn.completed
+    Stream-&gt;&gt;Runtime: turnCompleted()
+  end</code></pre>
+
+  <h2>入口与分支</h2>
+  <table>
+    <thead>
+      <tr><th>层</th><th>AionRS 主路径</th><th>ACP 路径</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>路由入口</td><td colspan="2"><code>pages/conversation/index.tsx</code> 加载会话后交给 <code>ChatConversation</code>。</td><td>这里不发送，只拿到会话对象。</td></tr>
+      <tr><td>平台选择</td><td><code>ChatConversation</code> 对 <code>type === 'aionrs'</code> 返回 <code>AionrsConversationPanel/AionrsChat</code>。</td><td><code>type === 'acp'</code> 返回 <code>AcpChat</code>。</td><td>分支发生在页面总装层。</td></tr>
+      <tr><td>公共输入</td><td colspan="2"><code>renderer/components/chat/SendBox/index.tsx</code> 统一处理 Enter、发送按钮、空输入、引用、DOM 片段、停止按钮。</td><td>它通过 props 接收 <code>onSend</code>，不直接调用 adapter。</td></tr>
+      <tr><td>平台发送</td><td><code>AionrsSendBox.onSendHandler</code> 收集文件、检查模型、队列或执行。</td><td><code>AcpSendBox.onSendHandler</code> 收集文件、队列或执行，另有 <code>useAcpInitialMessage</code> 处理 guid 初始消息。</td><td>两者都传 <code>allowSendWhileLoading</code>，忙时由平台层处理。</td></tr>
+      <tr><td>adapter</td><td><code>ipcBridge.conversation.sendMessage</code></td><td><code>ipcBridge.acpConversation.sendMessage</code> 直接复用 <code>conversation.sendMessage</code></td><td>最终都是 <code>POST /api/conversations/:id/messages</code>。</td></tr>
+      <tr><td>同形旁路</td><td colspan="2"><code>openclawConversation.sendMessage</code> 在 adapter 层也复用 <code>conversation.sendMessage</code>。</td><td>本切片没有读取对应 renderer SendBox 入口，只记录 adapter-level 同形路径。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>AionRS 主路径时序</h2>
+  <table>
+    <thead>
+      <tr><th>顺序</th><th>文件</th><th>动作</th><th>状态变化</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><code>SendBox/index.tsx</code></td><td><code>sendMessageHandler</code> 拒绝上传中/空输入，拼接引用和 DOM 片段，清空草稿，调用 <code>onSend(finalMessage)</code>。</td><td>本地输入清空，避免异步发送覆盖新草稿。</td></tr>
+      <tr><td>2</td><td><code>AionrsSendBox.tsx</code></td><td><code>onSendHandler</code> 读取上传文件和 <code>@</code> 文件，清理选择状态。</td><td>附件从 UI 选择态变成发送参数。</td></tr>
+      <tr><td>3</td><td><code>useConversationCommandQueue.ts</code></td><td><code>shouldEnqueueConversationCommand</code> 在 <code>isBusy</code> 或已有队列时排队；队列限制包括 20 条、单条 20000 字符、50 个文件、总状态 256KB。</td><td>忙时不会丢消息，而是等待 runtime gate 可执行。</td></tr>
+      <tr><td>4</td><td><code>AionrsSendBox.tsx</code></td><td><code>executeCommand</code> 检查模型，调用 <code>runtimeView.markSendStarted()</code> 和 <code>setWaitingResponse(true)</code>。</td><td>UI gate 进入本地 pending/processing。</td></tr>
+      <tr><td>5</td><td><code>ipcBridge.ts</code> + <code>httpBridge.ts</code></td><td><code>sendMessage.invoke</code> 发 <code>POST /api/conversations/:id/messages</code>，body 映射为 <code>content/files/loading_id/inject_skills</code>。</td><td>HTTP 2xx 返回 <code>turn_id/runtime/msg_id</code>；非 2xx 抛 <code>BackendHttpError</code>。</td></tr>
+      <tr><td>6</td><td><code>conversationRuntimeViewStore.ts</code></td><td><code>localSendAccepted</code> 清掉 pending，记录 active turn；<code>localSendFailed</code> 清掉 pending 并重置 gate。</td><td>发送被接受或失败都不会让按钮无限 loading。</td></tr>
+      <tr><td>7</td><td><code>useAionrsMessage.ts</code></td><td>订阅 <code>conversation.responseStream</code>，按 <code>thought/content/tool/permission/error</code> 更新 thought、streamRunning、waitingResponse，并调用 <code>mergeLiveMessage</code>。</td><td>流式 chunk 进入消息列表；error 会停止 loading。</td></tr>
+      <tr><td>8</td><td><code>useConversationRuntimeView.ts</code></td><td>订阅 <code>turnCompleted</code>，匹配当前 <code>conversation_id</code> 后调用 <code>turnCompleted</code>。</td><td>runtime gate 释放，下一条排队命令可 drain。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>ACP 差异路径</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>ACP 做法</th><th>与 AionRS 的差异</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>消息流 hook</td><td><code>AcpChat</code> 创建 <code>useAcpMessage</code> 并把 <code>messageState</code> 传给 <code>AcpSendBox</code>。</td><td>AionRS 的 <code>useAionrsMessage</code> 在 <code>AionrsSendBox</code> 内部使用。</td></tr>
+      <tr><td>初始消息</td><td><code>useAcpInitialMessage</code> 从 <code>sessionStorage</code> 读取 <code>acp_initial_message_${conversation_id}</code> 并发送。</td><td>这是 guid 创建后自动发送的一条特殊入口。</td></tr>
+      <tr><td>发送 adapter</td><td><code>ipcBridge.acpConversation.sendMessage</code> 复用 <code>conversation.sendMessage</code>。</td><td>HTTP endpoint 与 AionRS 一致，差异在前后处理和消息类型。</td></tr>
+      <tr><td>错误呈现</td><td><code>AcpSendBox</code> 捕获错误后调用 <code>markSendFailed</code>，认证错误会 emit error stream，其余错误添加 center tips，并通过 <code>buildSendFailureError</code> 分类。</td><td>AionRS 路径主要用 <code>Message.error</code> 和 stream error 处理；ACP 对用户可见错误结构化更明显。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>异常与边界矩阵</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>触发点</th><th>处理</th><th>证据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>空输入</td><td><code>SendBox.sendMessageHandler</code></td><td>无文本且无 DOM 片段时直接返回。</td><td><code>SendBox/index.tsx</code></td></tr>
+      <tr><td>AionRS 无模型</td><td><code>AionrsSendBox.executeCommand</code></td><td>提示 <code>conversation.chat.noModelSelected</code> 并抛错；UI 上 sendbox 也会禁用。</td><td><code>AionrsSendBox.tsx</code></td></tr>
+      <tr><td>忙时继续输入</td><td>平台 sendbox 的 <code>isBusy</code> 或 <code>hasPendingCommands</code></td><td>进入命令队列；runtime 完成且 gate 可执行后自动 drain。</td><td><code>useConversationCommandQueue.ts</code>、<code>conversationRuntimeViewStore.ts</code></td></tr>
+      <tr><td>HTTP 非 2xx</td><td><code>httpBridge.httpRequest</code></td><td>读取响应体，抛 <code>BackendHttpError</code>；ACP 转成可见 error tips。</td><td><code>httpBridge.ts</code>、<code>AcpSendBox.tsx</code></td></tr>
+      <tr><td>ACP 发送失败</td><td><code>POST /messages</code> 被 mock 为 502</td><td>最新 center tips 包含后端原始错误文本。</td><td><code>tests/e2e/features/conversations/acp/send-error-surfacing.e2e.ts</code></td></tr>
+      <tr><td>AionRS 成功路径</td><td>最小会话发送</td><td>数据库至少包含一条右侧用户消息和一条左侧 AI 文本消息。</td><td><code>tests/e2e/features/conversations/aionrs/basic-flow.e2e.ts</code></td></tr>
+      <tr><td>AionRS workspace 边界</td><td>超大文件或已删除文件夹</td><td>E2E 记录“可能早期失败，也可能延迟到访问时失败”的边界行为。</td><td><code>tests/e2e/features/conversations/aionrs/edge-cases.e2e.ts</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>调试索引</h2>
+  <table>
+    <thead>
+      <tr><th>现象</th><th>先看</th><th>再看</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>按 Enter 没反应</td><td><code>SendBox/index.tsx</code> 的空输入、上传、loading 判断。</td><td>平台 sendbox 是否禁用、模型是否存在。</td></tr>
+      <tr><td>消息发出但按钮一直忙</td><td><code>conversationRuntimeViewStore.ts</code> 的 pending/accepted/failed/completed。</td><td><code>turnCompleted</code> WS 是否到达。</td></tr>
+      <tr><td>HTTP 请求失败但 UI 没提示</td><td><code>httpBridge.ts</code> 是否抛出 <code>BackendHttpError</code>。</td><td><code>AcpSendBox.tsx</code> 或 <code>AionrsSendBox.tsx</code> 的 catch 分支。</td></tr>
+      <tr><td>流式内容不出现</td><td><code>useAionrsMessage.ts</code> 或 <code>useAcpMessage.ts</code> 的 <code>responseStream.on</code>。</td><td><code>MessageList</code> 与 <code>Messages/hooks.ts</code> 的合并逻辑。</td></tr>
+      <tr><td>忙时消息顺序异常</td><td><code>useConversationCommandQueue.ts</code> 的 enqueue/dequeue/restore。</td><td>runtime gate 的 hydrated/canSendMessage/isProcessing 三元组。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

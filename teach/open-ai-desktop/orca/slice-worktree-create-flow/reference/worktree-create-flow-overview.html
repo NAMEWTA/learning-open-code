@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Worktree 创建链路总览参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Worktree 创建链路总览参考</h1>
+        <p class="meta">定位：L2 跨模块切片。配合 <a href="../lessons/0001-worktree-create-flow.html">导览短课</a> 使用。</p>
+
+        <h2>端到端调用链</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>核心文件</th>
+              <th>行为</th>
+              <th>不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>modal 入口</td>
+              <td><code>src/renderer/src/components/NewWorkspaceComposerModal.tsx</code></td>
+              <td>根据 store 的 active modal 展示新建界面，选择 quick agent，提交到 composer hook。</td>
+              <td>modal 是薄壳，不直接触碰 main IPC。</td>
+            </tr>
+            <tr>
+              <td>请求组装</td>
+              <td><code>src/renderer/src/hooks/useComposerState.ts</code></td>
+              <td>解析 workspace name、base、linked review、setup trust、sparse checkout、Agent startup 和 telemetry。</td>
+              <td>所有需要用户参与的决策必须在关闭 modal 前完成。</td>
+            </tr>
+            <tr>
+              <td>pending 请求模型</td>
+              <td><code>src/renderer/src/lib/pending-worktree-creation.ts</code></td>
+              <td>定义可重试的 <code>WorktreeCreationRequest</code> 和 session-only pending entry。</td>
+              <td>请求保持 plain-serializable，Retry 复用同一份事实来源。</td>
+            </tr>
+            <tr>
+              <td>后台创建</td>
+              <td><code>src/renderer/src/lib/worktree-creation-flow.ts</code></td>
+              <td>生成 <code>creationId</code>，显示 pending surface，调用 store create，成功后激活或后台 seed terminal。</td>
+              <td>用户离开 pending surface 后，创建完成不能抢回焦点。</td>
+            </tr>
+            <tr>
+              <td>终端交接</td>
+              <td><code>src/renderer/src/lib/worktree-activation.ts</code>、<code>src/renderer/src/lib/new-workspace.ts</code></td>
+              <td>激活新 worktree、创建/复用初始 terminal，并在 backend 未 spawn 时投递 Agent startup plan。</td>
+              <td><code>startupTerminal.spawned</code> 为真时，renderer 不再重复启动 Agent。</td>
+            </tr>
+            <tr>
+              <td>VM 前置准备</td>
+              <td><code>src/renderer/src/lib/ephemeral-vm-worktree-creation.ts</code></td>
+              <td>处理 VM recipe provisioning、runtime repo 替换、workspace attach 和失败 cleanup。</td>
+              <td>这是创建前旁支；最终仍回到同一个 store create 调用。</td>
+            </tr>
+            <tr>
+              <td>renderer store 分流</td>
+              <td><code>src/renderer/src/store/slices/worktrees.ts</code></td>
+              <td>构造 <code>CreateWorktreeArgs</code>，按 active runtime target 走本地 preload IPC 或 runtime RPC。</td>
+              <td>最多重试 25 个候选名；watcher 先发现 worktree 时必须去重合并。</td>
+            </tr>
+            <tr>
+              <td>preload 桥</td>
+              <td><code>src/preload/index.ts</code></td>
+              <td>暴露 <code>worktrees.create()</code>、<code>prefetchCreateBase()</code> 和 <code>onCreateProgress()</code>。</td>
+              <td>renderer 只能通过受控 API 跨进程，不直接访问 Electron main。</td>
+            </tr>
+            <tr>
+              <td>进度事件消费</td>
+              <td><code>src/renderer/src/hooks/useIpcEvents.ts</code></td>
+              <td>监听 <code>createWorktree:progress</code>，按 <code>creationId</code> 更新对应 pending entry。</td>
+              <td>没有 correlation id 的旧事件不能覆盖并发创建的状态。</td>
+            </tr>
+            <tr>
+              <td>main IPC 入口</td>
+              <td><code>src/main/ipc/worktrees.ts</code></td>
+              <td>校验 repo，解析 telemetry/provenance，分流到 folder/local/SSH helper。</td>
+              <td>失败要释放 automation provenance，并发出 create failed telemetry。</td>
+            </tr>
+            <tr>
+              <td>Git 创建 helper</td>
+              <td><code>src/main/ipc/worktree-remote.ts</code></td>
+              <td>本地或 SSH 创建 worktree，写 metadata/lineage，准备 setup/default tabs；本地 helper 还可 backend-spawn startup terminal。</td>
+              <td>desktop SSH helper 不消费 <code>startup</code>；Git 成功后的 setup/startup 问题不能伪装成 Git 创建失败。</td>
+            </tr>
+            <tr>
+              <td>runtime RPC 入口</td>
+              <td><code>src/main/runtime/rpc/methods/worktree.ts</code></td>
+              <td><code>worktree.create</code> 把 mobile/CLI/remote runtime 请求映射到 runtime service。</td>
+              <td>RPC 参数要保留 linked review、setup、startup、lineage 和 automation provenance。</td>
+            </tr>
+            <tr>
+              <td>runtime managed create</td>
+              <td><code>src/main/runtime/orca-runtime.ts</code></td>
+              <td>为 CLI、mobile 和 runtime host 提供同语义创建路径，并在 managed local/SSH 路径处理 activation/setup/startup。</td>
+              <td>runtime 已 spawn 的 terminal 不应被 renderer 或 RPC client 再 spawn 一次。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>共享契约</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>契约</th>
+              <th>读法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/shared/types.ts</code></td>
+              <td><code>CreateWorktreeArgs</code>、<code>CreateWorktreeResult</code>、<code>WorktreeStartupLaunch</code></td>
+              <td>先看参数和返回值，而不是先看 UI；这能确定哪些字段真的跨进程传输。</td>
+            </tr>
+            <tr>
+              <td><code>src/shared/worktree-id.ts</code></td>
+              <td><code>repoId::worktreePath</code> 解析、filesystem path 归一化、folder workspace suffix 去除。</td>
+              <td>任何拿到 worktree id 后要访问磁盘的代码，都要分清 UI id 和 filesystem path。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>请求字段怎么流动</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>字段族</th>
+              <th>产生位置</th>
+              <th>消费位置</th>
+              <th>作用</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>身份与路径</td>
+              <td><code>repoId</code>、<code>name</code>、<code>displayName</code></td>
+              <td>store、main helper、metadata</td>
+              <td>决定 worktree 路径 seed、可读 display name 和最终 worktree id。</td>
+            </tr>
+            <tr>
+              <td>Git 起点</td>
+              <td><code>baseBranch</code>、<code>compareBaseRef</code>、<code>branchNameOverride</code></td>
+              <td><code>resolveWorktreeCreateBase()</code>、branch/path resolver、metadata</td>
+              <td>分开“从哪里 checkout”和“Source Control 对比哪里”。</td>
+            </tr>
+            <tr>
+              <td>review/linkage</td>
+              <td><code>linkedIssue</code>、<code>linkedPR</code>、GitLab/Bitbucket/Azure/Gitea 字段</td>
+              <td>metadata、push target、review conflict 检测</td>
+              <td>让创建出的 workspace 继承 issue/PR/MR 语境。</td>
+            </tr>
+            <tr>
+              <td>setup 与 sparse</td>
+              <td><code>setupDecision</code>、<code>sparseCheckout</code></td>
+              <td>hook policy、Git helper、setup runner</td>
+              <td>决定是否运行 setup，以及是否创建 sparse worktree。</td>
+            </tr>
+            <tr>
+              <td>Agent 启动</td>
+              <td><code>startup</code>、<code>startupPlan</code>、<code>quickPrompt</code></td>
+              <td>backend startup、renderer terminal handoff</td>
+              <td>自包含命令可由 backend 先 spawn；需要 prompt 投递的命令由 renderer 接手。</td>
+            </tr>
+            <tr>
+              <td>进度关联</td>
+              <td><code>creationId</code></td>
+              <td>main progress event、renderer pending entry</td>
+              <td>并发创建时把 <code>fetching</code>/<code>creating</code> 更新回正确 panel。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>base ref 与 Git 创建</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>问题</th>
+              <th>源码</th>
+              <th>规则</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>用户显式选 base</td>
+              <td><code>src/main/worktree-create-base.ts</code></td>
+              <td>直接返回，不探测默认值和持久化值。</td>
+            </tr>
+            <tr>
+              <td>repo 有持久化 base</td>
+              <td><code>src/main/worktree-create-base.ts</code></td>
+              <td>如果可用则保留；陈旧不可用时回退检测到的默认 base。</td>
+            </tr>
+            <tr>
+              <td>base 缺失</td>
+              <td><code>src/main/ipc/worktree-remote.ts</code></td>
+              <td>不伪造 <code>origin/main</code>，而是抛出清晰错误，要求用户显式选择 base。</td>
+            </tr>
+            <tr>
+              <td>本地 add</td>
+              <td><code>src/main/git/worktree.ts</code></td>
+              <td>新分支走 <code>git worktree add --no-track -b branch path base</code>，并写 branch base 与 push ergonomics。</td>
+            </tr>
+            <tr>
+              <td>SSH add</td>
+              <td><code>src/main/ipc/worktree-remote.ts</code></td>
+              <td>通过 relay provider 在远端执行 add，并在 sparse 失败时回滚刚创建的 worktree/branch。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>进度和失败语义</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>事件/状态</th>
+              <th>来源</th>
+              <th>renderer 行为</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>preparing</code></td>
+              <td>renderer staged preflight</td>
+              <td>先显示 pending row，异步 preflight 完成后替换 request。</td>
+            </tr>
+            <tr>
+              <td><code>provisioning-vm</code></td>
+              <td>ephemeral VM recipe</td>
+              <td>显示 provider provisioning，失败时可清理 VM runtime。</td>
+            </tr>
+            <tr>
+              <td><code>fetching</code></td>
+              <td>local main helper 或 retry 初始 phase</td>
+              <td>表示本地创建正在刷新 base ref 或准备进入 Git 创建；SSH/runtime 可能没有该细分事件。</td>
+            </tr>
+            <tr>
+              <td><code>creating</code></td>
+              <td>local main helper</td>
+              <td>表示本地创建即将或正在执行 <code>git worktree add</code>；SSH/runtime 可使用 indeterminate 进度。</td>
+            </tr>
+            <tr>
+              <td><code>status: error</code></td>
+              <td>background flow catch</td>
+              <td>错误留在同一个 pending surface；用户离开时额外 toast，用户正在看 panel 时不重复提醒。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>测试佐证</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行为</th>
+              <th>测试文件</th>
+              <th>不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>后台创建和 VM provisioning</td>
+              <td><code>src/renderer/src/lib/worktree-creation-flow.test.ts</code></td>
+              <td>request 会带着 VM/runtime repo、base、compare base 和 issue command 进入 store create 与 terminal handoff。</td>
+            </tr>
+            <tr>
+              <td>pending state 更新</td>
+              <td><code>src/renderer/src/store/slices/worktrees.test.ts</code></td>
+              <td>无变化 phase 不触发写入；真实 phase change、VM cleanup 和 active surface clearing 都可预测。</td>
+            </tr>
+            <tr>
+              <td>base 选择策略</td>
+              <td><code>src/main/worktree-create-base.test.ts</code></td>
+              <td>显式 base 优先；可用持久化 base 保留；陈旧持久化 base 回退默认 base。</td>
+            </tr>
+            <tr>
+              <td>startup/setup terminal</td>
+              <td><code>src/main/ipc/worktrees.test.ts</code></td>
+              <td>local create 后 backend 可先 spawn startup terminal，再 spawn setup terminal，并在结果里标记 startup 已生成。</td>
+            </tr>
+            <tr>
+              <td>runtime RPC 参数</td>
+              <td><code>src/main/runtime/rpc/methods/worktree.test.ts</code></td>
+              <td><code>worktree.create</code> 必须把 base、branch override、linked review、sparse、push target、setup 和 lineage 传入 runtime。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>读源码时的常见误判</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>误判</th>
+              <th>更准确的说法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>modal 关闭表示 workspace 已经创建完成。</td>
+              <td>modal 关闭只表示请求已经交给后台 pending flow；Git 可能还在 fetch 或 add。</td>
+            </tr>
+            <tr>
+              <td>所有创建都走 main IPC。</td>
+              <td>local target 走 preload/main IPC；runtime target 走 RPC <code>worktree.create</code>。</td>
+            </tr>
+            <tr>
+              <td>desktop SSH helper 也会直接启动 Agent terminal。</td>
+              <td>desktop SSH helper 只创建远端 worktree 并返回 setup/default tabs；managed SSH runtime 在 runtime 包装层启动 terminal。</td>
+            </tr>
+            <tr>
+              <td>setup hook 失败就表示 worktree 创建失败。</td>
+              <td>Git 创建成功后，setup runner 或 terminal 生成失败通常以 warning/setup payload 形式返回，不能抹掉真实 worktree。</td>
+            </tr>
+            <tr>
+              <td>renderer 总是负责启动 Agent。</td>
+              <td>自包含 startup 可由 backend 先 spawn；需要 draft/follow-up 的启动才留给 renderer handoff。</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </main>
+  </body>
+</html>

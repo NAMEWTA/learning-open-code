@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>一条 RAG 请求如何选中存储后端</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:980px;margin:32px auto;padding:0 22px;color:#1f2937;background:#fff}
+    h1{font-size:30px;margin:0 0 8px}
+    h2{font-size:21px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    p{margin:10px 0}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    pre{background:#0f172a;color:#e5e7eb;border-radius:8px;padding:14px 16px;overflow-x:auto;line-height:1.55;font-size:13px}
+    pre code{background:transparent;color:inherit;padding:0;border-radius:0}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .warn{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px}
+    .answer{border:1px solid #d1d5db;border-radius:8px;padding:10px 14px;background:#fafafa}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;color:#111827;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+  <nav><a href="../reference/store-instance-routing-flow-map.html">打开完整参考图谱</a></nav>
+  <h1>一条 RAG 请求如何选中存储后端</h1>
+  <p class="summary">本课只练一个判断：看到一个知识库 ID，如何从 Admin 配置追到真实的 PgVector、Milvus、Elasticsearch 向量索引，或 Elasticsearch 全文索引。</p>
+
+  <h2>1. 路由地图</h2>
+  <p><code>StoreInstance</code> 本身不存向量，也不存全文索引。它只是把后端连接参数放进 <code>sai_store_instance.config</code>。知识库创建时，<code>KnowledgeService</code> 把选中的 <code>vectorStoreInstanceId</code>、可选的 <code>searchEngineInstanceId</code> 和 <code>dimensionOfVectorModel</code> 写进 <code>RagPO</code>。摄入或检索发生时，工厂再按 ID 回查配置并创建后端。</p>
+  <pre class="diagram"><code>sequenceDiagram
+  actor Admin as Admin UI
+  participant SIS as StoreInstanceService
+  participant KS as KnowledgeService
+  participant VDC as VectorDimensionConstraintService
+  participant DP as DocumentPipeline / VectorSearchHandler
+  participant VSF as VectorStoreFactory
+  participant SEF as SearchEngineFactory
+  participant ES as ElasticsearchSearchEngine
+
+  Admin->>SIS: 保存 StoreInstance(category/type/config)
+  SIS->>SIS: 校验分类与类型
+  Admin->>KS: 创建知识库(vectorStoreInstanceId/searchEngine*)
+  KS->>VDC: 校验 embedding 维度与向量后端上限
+  DP->>VSF: create(RagPO) 路由到 PgVector/Milvus/ES Vector
+  DP->>SEF: searchEngineEnable=true 时路由搜索实例
+  SEF->>ES: insert/search indexName = "rag_" + ragId</code></pre>
+  <p class="warn"><strong>容易误判：</strong><code>isDefault</code> 只用于同分类默认标记和列表排序；当前 <code>KnowledgeService</code> 要求显式传入 <code>vectorStoreInstanceId</code>，运行时没有“未选则用默认实例”的 fallback。</p>
+
+  <h2>2. 三段源码证据</h2>
+  <p>第一段是 Admin 配置入库。<code>StoreInstanceService.create</code> 校验分类和类型，把表单里的 <code>config</code> 序列化为 JSON；如果设为默认，则先清掉同分类其他默认实例。</p>
+  <pre><code>validateCategoryType(vo.getCategory(), vo.getType());
+po.setCategory(vo.getCategory());
+po.setType(vo.getType());
+po.setConfig(JsonUtil.toJsonString(vo.getConfig() != null ? vo.getConfig() : Map.of()));
+po.setIsDefault(Boolean.TRUE.equals(vo.getIsDefault()));
+if (Boolean.TRUE.equals(po.getIsDefault())) {
+    clearDefaultInCategory(po.getCategory(), null);
+}</code></pre>
+  <p>第二段是向量工厂。<code>VectorStoreFactory.create</code> 从 <code>RagPO</code> 取实例 ID、embedding 模型 ID 和维度，再查 <code>StoreInstancePO</code>，把业务枚举转成 <code>VectorStoreType</code>，最后从 <code>REGISTER</code> 里拿构造器。</p>
+  <pre><code>StoreInstancePO inst = getStoreInstanceOrThrow(vectorStoreInstanceId);
+StoreInstanceTypeEnum typeEnum = getStoreInstanceTypeOrThrow(inst);
+ModelConfigInfoDTO modelConfig = getEmbeddingModelConfigOrThrow(embeddingModelId);
+VectorStoreType vectorStoreType = VectorStoreType.valueOf(typeEnum.name());
+Function&lt;VectorStoreConfigDTO, SnailAiVectorStore&gt; factory = REGISTER.get(vectorStoreType);
+EmbeddingModel model = modelRuntimeHandler.buildEmbeddingModel(modelConfig);</code></pre>
+  <p>第三段是 RAG 调用点。<code>DocumentPipeline</code> 和两个检索 handler 都用 <code>IndexNameBuilder.KNOWLEDGE</code> 生成同一个 <code>indexName</code>：前缀 <code>rag_</code> 加知识库 ID。PgVector 把它当表名，Milvus 把它当 collection，Elasticsearch 把它当 index。</p>
+  <pre><code>String indexName = IndexNameBuilder.KNOWLEDGE.build(Map.of("ragId", knowledge.getId()));
+snailAiVectorStore.add(VectorAddRequest.builder()
+        .indexName(indexName)
+        .documents(toEmbed)
+        .build());</code></pre>
+
+  <h2>3. 维度和错误路径</h2>
+  <p><code>VectorDimensionConstraintService</code> 会取 embedding 模型最大维度，再按后端类型限制：<code>PG_VECTOR</code> 为 <code>2000</code>，<code>MILVUS</code> 与 <code>ELASTICSEARCH</code> 为 <code>4096</code>，有效上限取两者较小值。知识库保存前，<code>validateRequestedDimension</code> 会拒绝空维度、小于 <code>64</code> 或超过任一上限的值。</p>
+  <p>向量写入失败会让 <code>DocumentPipeline.processDocument</code> 进入失败状态；搜索引擎写入失败只记录 warning，不中断文档成功。检索阶段如果 <code>searchEngineEnable</code> 不是 <code>true</code>，<code>Bm25SearchHandler</code> 直接跳过。</p>
+  <p>还有两个边界要分清：第一，<code>KnowledgeService.validateKnowledgeStorage</code> 只在 <code>searchEngineInstanceId != null</code> 时校验搜索实例，所以“启用搜索但没传 ID”可能保存成功；摄入时搜索双写异常会被当成 non-fatal warning，检索时 <code>Bm25SearchHandler</code> 会让 <code>SearchEngineFactory</code> 抛出“搜索引擎实例 ID 不能为空”。第二，向量侧 PgVector、Milvus、Elasticsearch Vector 的 client factory 会拦截 <code>enabled=false</code>，但 Elasticsearch Search 的 <code>createClient</code> 当前不会检查这个字段。</p>
+
+  <h2>4. 检索练习</h2>
+  <p>暂停回忆：一个知识库保存了 <code>vectorStoreInstanceId=7</code>、<code>searchEngineEnable=true</code>、<code>searchEngineInstanceId=9</code>。用户执行 <code>POST /rag/search</code>，你会查哪几处来确认后端？</p>
+  <div class="answer"><strong>参考答案：</strong>先查 <code>sai_rag</code> 的三个字段；再查 <code>sai_store_instance.id=7</code> 的 <code>type</code> 和 <code>config</code>，确认向量后端；如果启用 BM25，再查 <code>id=9</code> 的搜索实例；最后确认 <code>IndexNameBuilder.KNOWLEDGE</code> 生成的 <code>rag_</code> 加知识库 ID 是否存在于对应后端。</div>
+  <p>下一步阅读：<a href="../reference/store-instance-routing-flow-map.html">存储实例路由图谱</a>。如果某个异常路径不清楚，可以继续追问，让 agent 带你定位具体源码。</p>
+</body>
+</html>

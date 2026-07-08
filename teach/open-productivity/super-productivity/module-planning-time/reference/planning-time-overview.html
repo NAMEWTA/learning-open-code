@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>计划排程、时间追踪与专注反馈模块参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · Planner / Schedule / Boards / time-tracking / focus / idle / reminder / metric / history 边界速查</p>
+    <h1>计划排程、时间追踪与专注反馈模块参考</h1>
+
+    <h2>模块职责</h2>
+    <p>一句话：这个模块群把 task/work-context 的领域事实转换成计划视图、日程视图、真实工时、专注反馈、空闲修正和历史指标。它位于 <a href="../../00-overview/reference/00-overview.html">L0 总览</a> 的 Angular feature/store 层，并依赖 <a href="../../module-op-log-sync/reference/op-log-sync-overview.html">op-log 同步边界</a>持久化部分 action。</p>
+    <table>
+      <thead>
+        <tr><th>子模块</th><th>职责</th><th>边界</th><th>第一入口</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Planner</td><td>维护 day -> taskIds 的计划天列表，合并 overdue、deadline、repeat projection、calendar event 和容量估算。</td><td>不拥有 task 内容；只保存计划归属和顺序。</td><td><span class="where">src/app/features/planner/store/planner.reducer.ts</span><br><span class="where">src/app/features/planner/store/planner.selectors.ts</span></td></tr>
+        <tr><td>Schedule</td><td>把任务、planner day map、重复任务、calendar events、timeline config 映射为周/月/日程事件。</td><td>没有独立 store；是视图投影和拖拽交互层。</td><td><span class="where">src/app/features/schedule/schedule.service.ts</span><br><span class="where">src/app/features/schedule/map-schedule-data/map-to-schedule-days.ts</span></td></tr>
+        <tr><td>Boards</td><td>维护 board/panel 配置、过滤条件、手动 taskIds 顺序，并在拖拽时触发任务标签、项目、排程或 backlog 变化。</td><td>看板配置属于 Boards；任务事实仍走 task/project actions。</td><td><span class="where">src/app/features/boards/store/boards.reducer.ts</span><br><span class="where">src/app/features/boards/board-panel/board-panel.component.ts</span></td></tr>
+        <tr><td>time-tracking</td><td>按 project/tag/date 记录工作开始、结束、休息次数和休息时长；合并当前与归档状态。</td><td>不渲染回顾页；只提供工时状态来源。</td><td><span class="where">src/app/features/time-tracking/store/time-tracking.reducer.ts</span><br><span class="where">src/app/features/time-tracking/time-tracking.service.ts</span></td></tr>
+        <tr><td>focus-mode</td><td>维护本地 timer、session、break、overlay 状态；与当前任务追踪互相同步，完成后写 focus session metric。</td><td>timer 多为本地体验状态；完成记录落到 Metric。</td><td><span class="where">src/app/features/focus-mode/store/focus-mode.reducer.ts</span><br><span class="where">src/app/features/focus-mode/store/focus-mode.effects.ts</span></td></tr>
+        <tr><td>idle</td><td>消费 Electron 或扩展 idle 时间，打开空闲对话框，回滚已记时间并让用户分配到任务、休息或计数器。</td><td>平台检测在 Electron；前端负责业务修正。</td><td><span class="where">src/app/features/idle/store/idle.effects.ts</span><br><span class="where">electron/start-app.ts</span></td></tr>
+        <tr><td>reminder</td><td>将 task 的 schedule/deadline reminder 写入 worker，触发提醒弹窗或倒计时 banner。</td><td>旧 reminders store 仍加载；新提醒事实主要在 task 字段。</td><td><span class="where">src/app/features/reminder/reminder.service.ts</span><br><span class="where">src/app/features/reminder/store/reminder-countdown.effects.ts</span></td></tr>
+        <tr><td>metric</td><td>保存每日评价、focusSessions、反思，结合 Worklog 计算 productivity/sustainability。</td><td>不是原始工时来源；工时优先来自 Worklog。</td><td><span class="where">src/app/features/metric/store/metric.reducer.ts</span><br><span class="where">src/app/features/metric/metric.service.ts</span></td></tr>
+        <tr><td>history/worklog</td><td>按 active work context 读取 task archive、当前 task state 与 timeTracking，生成历史页、导出和每日工时。</td><td>Worklog 是聚合视图，不是新的同步事实源。</td><td><span class="where">src/app/features/worklog/worklog.service.ts</span><br><span class="where">src/app/features/history/history.component.ts</span></td></tr>
+      </tbody>
+    </table>
+
+    <h2>整体架构位置</h2>
+    <pre class="diagram">Task / WorkContext domain
+  ↓ consumed by
+Planning surfaces
+  ├─ Planner: planned day and order
+  ├─ Schedule: derived timeline events
+  └─ Boards: configurable task panels
+  ↓ current task / schedule / user intent
+Tracking and correction
+  ├─ timeTracking: project/tag daily sessions
+  ├─ focus-mode: local session and break timer
+  ├─ idle: platform idle correction
+  └─ reminder: task reminder worker and countdown
+  ↓ aggregation
+Review
+  ├─ worklog/history: archive + task + timeTracking
+  └─ metric: daily rating, focus sessions, reflections</pre>
+
+    <h2>入口与接口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>读它能回答什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>页面路由</td><td><span class="where">src/app/app.routes.ts</span><br><span class="where">src/app/routes/context.routes.ts</span></td><td><code>/planner</code>、<code>/schedule</code>、<code>/boards</code>、project/tag 下 <code>history</code>、<code>metrics</code> 如何进入。</td></tr>
+        <tr><td>Store 注册</td><td><span class="where">src/app/root-store/feature-stores.module.ts</span></td><td>哪些 feature 拥有 NgRx state/effects；Schedule、History、Worklog 这类未注册项主要是聚合投影或服务层。</td></tr>
+        <tr><td>Planner action</td><td><span class="where">src/app/features/planner/store/planner.actions.ts</span></td><td><code>entityType: 'PLANNER'</code> 的持久 action 如何进入 op-log。</td></tr>
+        <tr><td>Planner selectors</td><td><span class="where">src/app/features/planner/store/planner.selectors.ts</span></td><td>如何把 day taskIds、任务、重复任务、calendar events、容量配置合成 PlannerDay。</td></tr>
+        <tr><td>ScheduleService</td><td><span class="where">src/app/features/schedule/schedule.service.ts</span></td><td>Schedule 如何从多个 store/service 读取输入并生成 <code>ScheduleDay[]</code>。</td></tr>
+        <tr><td>Schedule mapper</td><td><span class="where">src/app/features/schedule/map-schedule-data/map-to-schedule-days.ts</span></td><td>日程事件如何处理 planned、unplanned、repeat、calendar、current task。</td></tr>
+        <tr><td>BoardPanelComponent</td><td><span class="where">src/app/features/boards/board-panel/board-panel.component.ts</span></td><td>跨 panel drop 如何改 tags、done state、project、schedule、backlog 和 panel order。</td></tr>
+        <tr><td>timeTracking actions</td><td><span class="where">src/app/features/time-tracking/store/time-tracking.actions.ts</span></td><td><code>TIME_TRACKING</code> 会话数据与 <code>TASK</code> time spent 同步 action 的区别。</td></tr>
+        <tr><td>TimeTrackingService</td><td><span class="where">src/app/features/time-tracking/time-tracking.service.ts</span></td><td>当前、young archive、old archive 的 timeTracking 如何合并。</td></tr>
+        <tr><td>FocusMode effects</td><td><span class="where">src/app/features/focus-mode/store/focus-mode.effects.ts</span></td><td>当前任务追踪与 focus session/break 如何互相同步，完成后如何调用 MetricService。</td></tr>
+        <tr><td>Idle effects</td><td><span class="where">src/app/features/idle/store/idle.effects.ts</span></td><td>空闲触发后如何移除当前任务已记时间、暂停 focus、打开 idle dialog 并写回结果。</td></tr>
+        <tr><td>Electron idle</td><td><span class="where">electron/idle-time-handler.ts</span><br><span class="where">src/app/core/ipc-events.ts</span></td><td>系统 idle 如何通过 <code>IPC.IDLE_TIME</code> 进入前端。</td></tr>
+        <tr><td>Reminder worker</td><td><span class="where">src/app/features/reminder/reminder.service.ts</span><br><span class="where">src/app/features/reminder/reminder.worker.ts</span></td><td>task reminder 如何被送入 worker，触发后怎样通知前端。</td></tr>
+        <tr><td>MetricService</td><td><span class="where">src/app/features/metric/metric.service.ts</span></td><td>每日 metric 如何被创建、更新、记录 focus session，并结合 Worklog 计算分数。</td></tr>
+        <tr><td>WorklogService</td><td><span class="where">src/app/features/worklog/worklog.service.ts</span></td><td>history/worklog 如何从 task archive、当前 task state 和 timeTracking 得到回顾数据。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>内部分层</h2>
+    <table>
+      <thead>
+        <tr><th>层</th><th>包含模块</th><th>状态来源</th><th>典型输出</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>计划层</td><td>Planner、Boards</td><td><code>planner.days</code>、<code>boards.boardCfgs</code>、task state</td><td>计划天、看板列、手动顺序、计划提示。</td></tr>
+        <tr><td>排程投影层</td><td>Schedule</td><td>task timeline selectors、planner day map、repeat cfg、calendar events、timeline config</td><td><code>ScheduleDay[]</code>、<code>ScheduleEvent</code>、周/月视图。</td></tr>
+        <tr><td>追踪事实层</td><td>time-tracking、task current tracking</td><td><code>timeTracking.project/tag</code>、task <code>timeSpentOnDay</code>、active work context</td><td>每日 start/end/break、任务累计耗时。</td></tr>
+        <tr><td>专注反馈层</td><td>focus-mode、idle、reminder</td><td>本地 timer、platform idle IPC、task reminder fields、global config</td><td>session/break 状态、空闲修正、倒计时 banner、通知。</td></tr>
+        <tr><td>回顾层</td><td>history、worklog、metric</td><td>task archive、当前 task state、timeTracking、metric entities、simple counters</td><td>历史工时、导出行、focus 图表、每日评分与反思。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖</th><th>用途</th><th>证据入口</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>NgRx Store / Effects</td><td>注册 planner、boards、timeTracking、focusMode、idle、metric、reminders；通过 persistent action 进入 op-log。</td><td><span class="where">src/app/root-store/feature-stores.module.ts</span></td></tr>
+        <tr><td>Angular signals / rxjs-interop</td><td>ScheduleService、Planner/Boards/History/Metric 组件使用 <code>toSignal</code>、<code>computed</code> 汇聚响应式数据。</td><td><span class="where">src/app/features/schedule/schedule.service.ts</span><br><span class="where">src/app/features/boards/board-panel/board-panel.component.ts</span></td></tr>
+        <tr><td>Task / WorkContext domain</td><td>所有时间视图依赖任务、当前任务、project/tag context、timeline config；不重复定义领域模型。</td><td><span class="where">src/app/features/tasks/store/task.selectors.ts</span><br><span class="where">src/app/features/work-context/store/work-context.selectors.ts</span></td></tr>
+        <tr><td>Calendar integration</td><td>Planner 与 Schedule 会把外部 calendar events 合入日程和容量估算。</td><td><span class="where">src/app/features/calendar-integration/calendar-integration.service.ts</span></td></tr>
+        <tr><td>Electron IPC / powerMonitor</td><td>主进程检测系统 idle、suspend、resume，并用 <code>IPC.IDLE_TIME</code> 通知前端。</td><td><span class="where">electron/start-app.ts</span><br><span class="where">electron/idle-time-handler.ts</span></td></tr>
+        <tr><td>Web Worker</td><td>ReminderService 把 task reminder 列表送入 worker，避免提醒计时完全依赖页面组件。</td><td><span class="where">src/app/features/reminder/reminder.service.ts</span><br><span class="where">src/app/features/reminder/reminder.worker.ts</span></td></tr>
+        <tr><td>ArchiveDbAdapter / TaskArchiveService</td><td>Worklog 和 TimeTrackingService 合并当前数据与归档数据，支撑历史回顾。</td><td><span class="where">src/app/features/time-tracking/time-tracking.service.ts</span><br><span class="where">src/app/features/worklog/worklog.service.ts</span></td></tr>
+      </tbody>
+    </table>
+
+    <h2>阅读示例：计划到日程再到回顾</h2>
+    <ol>
+      <li>从 <span class="where">src/app/app.routes.ts</span> 找到 <code>/planner</code>、<code>/schedule</code>、<code>/boards</code> 的页面入口；从 <span class="where">src/app/routes/context.routes.ts</span> 找到 project/tag 下的 <code>history</code> 与 <code>metrics</code>。</li>
+      <li>到 <span class="where">src/app/root-store/feature-stores.module.ts</span> 核对哪些 feature 有 store：Planner、Boards、timeTracking、focusMode、idle、metric、reminders 都注册；Schedule、History、Worklog 不是独立 feature state。</li>
+      <li>读 <span class="where">src/app/features/planner/store/planner.actions.ts</span> 与 <span class="where">src/app/features/planner/store/planner.reducer.ts</span>，确认 Planner 保存 day taskIds，并通过 <code>entityType: 'PLANNER'</code> 持久化。</li>
+      <li>读 <span class="where">src/app/features/schedule/schedule.service.ts</span>，观察 <code>buildScheduleDays()</code> 需要 task timeline、repeat cfg、calendar、planner day map 和 timeline config；这说明 Schedule 是聚合投影。</li>
+      <li>读 <span class="where">src/app/features/time-tracking/store/time-tracking.actions.ts</span>，区分 <code>syncTimeTracking</code> 的 work context 会话数据与 <code>syncTimeSpent</code> 的 task 累计耗时。</li>
+      <li>读 <span class="where">src/app/features/focus-mode/store/focus-mode.effects.ts</span> 的 <code>logFocusSession$</code>：focus 完成后调用 <code>MetricService.logFocusSession()</code>，由 Metric store 记录到当天。</li>
+      <li>读 <span class="where">src/app/features/idle/store/idle.effects.ts</span>：idle 触发时先撤销当前任务已记 idle time，再让用户把空闲时间重新分配。</li>
+      <li>读 <span class="where">src/app/features/worklog/worklog.service.ts</span> 与 <span class="where">src/app/features/metric/metric.service.ts</span>：回顾页从 archive、当前 task、timeTracking、metric 组合出历史和评分。</li>
+    </ol>
+
+    <h2>边界判断口诀</h2>
+    <table>
+      <thead>
+        <tr><th>问题</th><th>应该去哪里</th><th>不要放到</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>某天计划了哪些任务，或者计划顺序变了？</td><td>Planner</td><td>Schedule mapper</td></tr>
+        <tr><td>某个任务被安排具体开始时间、提醒时间或截止提醒？</td><td>TaskSharedActions / task reducer</td><td>Boards state</td></tr>
+        <tr><td>只是把任务、重复任务、calendar events 渲染成时间轴？</td><td>Schedule</td><td>timeTracking</td></tr>
+        <tr><td>看板列过滤、排序、手动 panel taskIds？</td><td>Boards</td><td>Planner days</td></tr>
+        <tr><td>project/tag 每日工作开始、结束、休息时长？</td><td>timeTracking</td><td>Metric</td></tr>
+        <tr><td>专注 session/break 的本地 timer 和 overlay？</td><td>focus-mode</td><td>timeTracking</td></tr>
+        <tr><td>系统空闲导致已记时间需要修正？</td><td>Electron idle + IdleEffects</td><td>Metric reducer</td></tr>
+        <tr><td>每日主观评价、focusSessions、反思？</td><td>Metric</td><td>WorklogService</td></tr>
+        <tr><td>历史页和导出需要聚合工时？</td><td>Worklog / History</td><td>Planner</td></tr>
+      </tbody>
+    </table>
+  </article>
+</main>
+</body>
+</html>

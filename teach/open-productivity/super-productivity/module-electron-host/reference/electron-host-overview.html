@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Electron 桌面宿主参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · Electron 主进程、窗口、IPC bridge 与桌面系统能力速查</p>
+    <h1>Electron 桌面宿主参考</h1>
+
+    <h2>模块职责</h2>
+    <p>职责一句话：把 Angular renderer 装入桌面窗口，并在主进程中集中管理单实例、窗口安全、IPC、托盘、idle/powerMonitor、协议 URL、本地文件、插件 Node/OAuth、本地 REST API 和退出清理。</p>
+    <p>它位于 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>中 Angular renderer 之外的桌面宿主层；<a href="../../module-angular-app-shell/reference/angular-app-shell-overview.html">Angular L1</a> 负责 renderer 装配，<a href="../../module-op-log-sync/reference/op-log-sync-overview.html">op-log L1</a> 负责同步/持久化边界，本参考只处理 Electron 主进程和桌面专用能力。</p>
+
+    <h2>模块骨架</h2>
+    <div class="filetree">super-productivity/electron/
+├── main.ts                         ← 单实例入口与 startApp 调用
+├── start-app.ts                    ← 主进程总装配：ready、IPC、窗口、托盘、idle、退出
+├── main-window.ts                  ← BrowserWindow、preload、导航安全、关闭前协议
+├── navigation-guard.ts             ← 应用 origin 判断，阻止非应用页面进入特权窗口
+├── open-url.ts                     ← file: URL 与本地路径打开 guard
+├── shared-with-frontend/
+│   └── is-external-url-allowed.ts  ← 外链 scheme、本地 file URL、UNC 与可执行扩展 guard
+├── preload.ts                      ← contextBridge 暴露 window.ea
+├── electronAPI.d.ts                ← renderer 可见的 typed bridge 契约
+├── ipc-handler.ts                  ← IPC handler 聚合入口
+├── ipc-handlers/                   ← app-control、app-data、system、shortcuts、jira
+├── indicator.ts                    ← tray、当前任务、进度和 task widget 联动
+├── local-file-sync.ts              ← LocalFile provider 的主进程文件桥
+├── local-rest-api.ts               ← 本地 HTTP API 与 renderer 转发
+├── plugin-node-executor.ts         ← 插件 Node 执行授权与脚本执行
+├── plugin-oauth.ts                 ← 插件 OAuth loopback 与系统浏览器
+└── protocol-handler.ts             ← superproductivity:// 协议 URL 处理</div>
+
+    <h2>对外入口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>职责</th><th>先读什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>进程入口</td><td><code>electron/main.ts</code></td><td>非 macOS 单实例锁；未拿到锁立即退出；protocol URL 只抑制普通重复实例日志，不让第二进程进入 <code>startApp()</code>。</td><td><code>app.requestSingleInstanceLock()</code>、<code>process.exit(0)</code></td></tr>
+        <tr><td>主进程总装配</td><td><code>electron/start-app.ts</code></td><td>注册协议、IPC、日志、命令行开关、app ready 回调、窗口、backup、local file、fullscreen、tray、idle/powerMonitor、退出清理。</td><td><code>startApp()</code>、<code>createMainWin()</code>、<code>createIndicator()</code></td></tr>
+        <tr><td>窗口创建</td><td><code>electron/main-window.ts</code></td><td>创建 <code>BrowserWindow</code>，设置 <code>webSecurity</code>、preload、context isolation、请求/响应头钩子、权限、导航拦截、菜单、fullscreen、titlebar、关闭前协议。</td><td><code>createWindow()</code>、<code>initWinEventListeners()</code>、<code>appCloseHandler()</code></td></tr>
+        <tr><td>preload bridge</td><td><code>electron/preload.ts</code><br><code>electron/electronAPI.d.ts</code></td><td>把主进程 IPC 能力包装为 <code>window.ea</code>；提供 renderer 可见类型。</td><td><code>contextBridge.exposeInMainWorld('ea', ea)</code>、<code>ElectronAPI</code></td></tr>
+        <tr><td>IPC 聚合</td><td><code>electron/ipc-handler.ts</code><br><code>electron/ipc-handlers/index.ts</code></td><td>初始化插件 Node 执行器、app-control、app-data、system、jira、global shortcuts、clipboard image、本地 REST API。</td><td><code>initIpcInterfaces()</code></td></tr>
+        <tr><td>renderer 类型入口</td><td><code>src/app/core/window-ea.d.ts</code></td><td>让 Angular renderer 认识 <code>window.ea</code> 类型。</td><td><code>declare global</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>内部分层结构</h2>
+    <table>
+      <thead>
+        <tr><th>层级</th><th>关键源码</th><th>边界判断</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>main process bootstrap</td><td><code>electron/main.ts</code>、<code>electron/start-app.ts</code></td><td>只处理 Electron app 生命周期、进程级参数、系统事件和主进程模块初始化。</td></tr>
+        <tr><td>window host</td><td><code>electron/main-window.ts</code>、<code>electron/navigation-guard.ts</code></td><td>窗口配置、preload 注入、网络 header 钩子、权限、导航和外链策略在这里；Angular route 不在这里定义。</td></tr>
+        <tr><td>bridge contract</td><td><code>electron/preload.ts</code>、<code>electron/electronAPI.d.ts</code>、<code>src/app/core/window-ea.d.ts</code></td><td>renderer 只看到 <code>window.ea</code>；bridge 包装 <code>ipcRenderer.send</code>、<code>ipcRenderer.invoke</code> 和事件监听。</td></tr>
+        <tr><td>IPC handlers</td><td><code>electron/ipc-handlers/app-control.ts</code>、<code>electron/ipc-handlers/app-data.ts</code>、<code>electron/ipc-handlers/system.ts</code>、<code>electron/ipc-handlers/global-shortcuts.ts</code>、<code>electron/ipc-handlers/jira.ts</code></td><td>主进程实际执行 app 控制、路径、外链、保存对话框、系统快捷键和 Jira 请求。</td></tr>
+        <tr><td>desktop capability modules</td><td><code>electron/indicator.ts</code>、<code>electron/idle-time-handler.ts</code>、<code>electron/protocol-handler.ts</code>、<code>electron/local-file-sync.ts</code>、<code>electron/local-rest-api.ts</code>、<code>electron/plugin-node-executor.ts</code>、<code>electron/plugin-oauth.ts</code></td><td>需要 OS、Node、HTTP server、child process、Tray 或 shell 的能力都在主进程模块。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>单实例与协议 URL 分派</h2>
+    <table>
+      <thead>
+        <tr><th>场景</th><th>源码</th><th>实际行为</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>非 macOS 未拿到 single-instance lock</td><td><code>electron/main.ts</code></td><td>无论 <code>argv</code> 是否带 <code>superproductivity://</code>，都会执行 <code>process.exit(0)</code>。差异只是普通重复实例打印 <code>Another instance is already running. Exiting.</code>，protocol URL 重复实例不打印这条普通日志。</td></tr>
+        <tr><td>Windows/Linux 已运行主实例</td><td><code>electron/protocol-handler.ts</code></td><td><code>initializeProtocolHandling()</code> 注册 <code>second-instance</code>，从 <code>commandLine</code> 找 <code>superproductivity://</code> 并调用 <code>processProtocolUrl()</code>；<code>toggle-visibility</code> 不做预先 focus。</td></tr>
+        <tr><td>macOS protocol URL</td><td><code>electron/protocol-handler.ts</code></td><td><code>open-url</code> 事件拦截 <code>superproductivity://</code>，阻止默认处理后转给 <code>processProtocolUrl()</code>。</td></tr>
+        <tr><td>命令行 cold-start / 测试入口</td><td><code>electron/protocol-handler.ts</code></td><td>启动中的主实例扫描 <code>process.argv</code>；普通 action 等 <code>whenReady()</code> 后处理，<code>toggle-visibility</code> 只设置 <code>coldStartShowPending</code>，避免新窗口刚显示又被 toggle 隐藏。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>系统能力边界</h2>
+    <table>
+      <thead>
+        <tr><th>能力</th><th>主进程入口</th><th>renderer 如何进入</th><th>边界要点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>托盘、当前任务、进度</td><td><code>electron/indicator.ts</code></td><td><code>window.ea.updateCurrentTask()</code>、<code>window.ea.setProgressBar()</code>、<code>window.ea.updateTodayTasks()</code></td><td>renderer 发送任务状态；主进程更新 Tray、菜单、title、task widget。</td></tr>
+        <tr><td>idle 与电源事件</td><td><code>electron/start-app.ts</code><br><code>electron/idle-time-handler.ts</code></td><td>renderer 监听 <code>IPC.IDLE_TIME</code>、<code>IPC.SUSPEND</code>、<code>IPC.RESUME</code></td><td>主进程轮询 idle，并用 <code>powerMonitor</code> 处理 suspend/resume/lock/unlock。</td></tr>
+        <tr><td>协议 URL</td><td><code>electron/protocol-handler.ts</code></td><td>主进程向 renderer 发送 <code>OAUTH_CALLBACK</code>、<code>ADD_TASK_FROM_APP_URI</code> 等事件</td><td><code>superproductivity://</code> 由主进程解析；日志避免写入用户内容和凭证。</td></tr>
+        <tr><td>本地文件同步</td><td><code>electron/local-file-sync.ts</code><br><code>electron/sync-path-resolver.ts</code><br><code>electron/file-path-guard.ts</code></td><td><code>window.ea.fileSyncSave()</code>、<code>fileSyncLoad()</code>、<code>pickDirectory()</code></td><td>renderer 传相对路径；主进程持有 sync folder，并阻止访问 app private dir。</td></tr>
+        <tr><td>插件 Node 执行</td><td><code>electron/plugin-node-executor.ts</code><br><code>electron/plugin-node-consent-store.ts</code></td><td><code>window.ea.consumePluginNodeExecutionApi()</code></td><td>主进程校验 plugin id、弹 native consent、发 grant token，再执行受控脚本。</td></tr>
+        <tr><td>插件 OAuth</td><td><code>electron/plugin-oauth.ts</code></td><td><code>pluginOAuthPrepare()</code>、<code>pluginOAuthStart()</code>、<code>onPluginOAuthCb()</code></td><td>主进程开 127.0.0.1 loopback server，系统浏览器打开 https auth URL。</td></tr>
+        <tr><td>本地 REST API</td><td><code>electron/local-rest-api.ts</code><br><code>src/app/core/electron/local-rest-api-handler.service.ts</code></td><td>主进程收到 HTTP 请求后发 <code>LOCAL_REST_API_REQUEST</code>，renderer 处理后回 <code>LOCAL_REST_API_RESPONSE</code></td><td>主进程负责 host/origin/body/concurrency/readiness gate；业务处理留在 renderer。</td></tr>
+        <tr><td>关闭前协议</td><td><code>electron/main-window.ts</code><br><code>src/app/core/electron/exec-before-close.service.ts</code></td><td><code>scheduleRegisterBeforeClose()</code>、<code>setDoneRegisterBeforeClose()</code></td><td>renderer 注册需要完成的关闭前任务；主进程等待完成后再真正退出。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>窗口网络、权限与外链边界</h2>
+    <table>
+      <thead>
+        <tr><th>边界</th><th>源码</th><th>要点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>主窗口 WebPreferences</td><td><code>electron/main-window.ts</code></td><td><code>webSecurity: true</code>、<code>nodeIntegration: false</code>、<code>contextIsolation: true</code>，并只通过 <code>preload.js</code> 暴露 <code>window.ea</code>。</td></tr>
+        <tr><td>请求头改写</td><td><code>onBeforeSendHeaders</code></td><td>剥离 <code>Origin</code>、<code>Referer</code>、<code>Cookie</code>、<code>sec-ch-*</code>、<code>sec-fetch-*</code>、<code>accept*</code> 等浏览器请求头；特定 GitHub / Office 主机还移除 <code>User-Agent</code>。</td></tr>
+        <tr><td>CORS 响应改写</td><td><code>onHeadersReceived</code></td><td>注入 <code>Access-Control-Allow-Origin</code>、<code>Access-Control-Allow-Headers</code>、<code>Access-Control-Allow-Methods</code> 为 <code>*</code>，并把所有 <code>OPTIONS</code> 响应强制为 <code>HTTP/1.1 200 OK</code>。</td></tr>
+        <tr><td>权限请求</td><td><code>setPermissionRequestHandler</code><br><code>setPermissionCheckHandler</code></td><td>只允许 <code>notifications</code>，拒绝 webcam、microphone、geolocation 等不需要的页面权限。</td></tr>
+        <tr><td>导航与新窗口</td><td><code>initWinEventListeners()</code><br><code>electron/navigation-guard.ts</code></td><td><code>will-navigate</code> 和 <code>will-redirect</code> 只允许应用自身 origin；<code>setWindowOpenHandler</code> 先调用受控外链打开，再返回 <code>{ action: 'deny' }</code>，意外子窗口会被销毁。</td></tr>
+        <tr><td>外链与本地文件</td><td><code>electron/shared-with-frontend/is-external-url-allowed.ts</code><br><code>electron/open-url.ts</code><br><code>electron/ipc-handlers/system.ts</code></td><td>外链先过 scheme allowlist；<code>file:</code> 和本地路径走 <code>openLocalPath()</code>，拒绝 UNC / remote file URL，并阻止可执行或脚本扩展交给 OS 打开。</td></tr>
+        <tr><td>自签证书</td><td><code>electron/start-app.ts</code></td><td>全局 <code>certificate-error</code> 回调 <code>true</code> 是为了兼容自托管 Jira、GitLab、Redmine 等自签证书服务；注释明确这是降低 TLS 安全性换兼容性，不是安全加强。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖/机制</th><th>所在层</th><th>在本模块中的作用</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Electron 41.4.0</td><td>主进程、preload、renderer bridge</td><td>提供 <code>app</code>、<code>BrowserWindow</code>、<code>ipcMain</code>、<code>ipcRenderer</code>、<code>contextBridge</code>、<code>Tray</code>、<code>powerMonitor</code>、<code>globalShortcut</code>、<code>shell</code>、<code>dialog</code>。</td></tr>
+        <tr><td><code>electron-log</code></td><td>主进程日志</td><td>记录启动、协议、idle、托盘、本地 REST API、插件授权等诊断信息。</td></tr>
+        <tr><td><code>electron-dl</code></td><td>下载集成</td><td>非 macOS 下处理下载完成并通知 renderer。</td></tr>
+        <tr><td><code>electron-window-state</code></td><td>窗口状态</td><td>保存和恢复主窗口位置、尺寸和最大化状态。</td></tr>
+        <tr><td>Node.js 标准库</td><td>主进程系统能力</td><td><code>fs</code>、<code>path</code>、<code>http</code>、<code>crypto</code>、<code>child_process</code>、<code>vm</code> 支撑文件、REST、插件脚本和平台检测。</td></tr>
+        <tr><td>Angular renderer</td><td><code>src/app</code></td><td>通过 <code>window.ea</code> 调用桌面能力，并处理主进程转发的本地 REST、协议、idle 和关闭前事件。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>阅读示例：从 renderer API 名反查主进程</h2>
+    <ol>
+      <li>看到 renderer 代码调用 <code>window.ea.fileSyncSave(args)</code>，先到 <code>electron/electronAPI.d.ts</code> 确认参数和返回类型。</li>
+      <li>到 <code>electron/preload.ts</code> 找同名方法，看到它调用 <code>_invoke('FILE_SYNC_SAVE', args)</code>。</li>
+      <li>用 <code>FILE_SYNC_SAVE</code> 到 <code>electron/shared-with-frontend/ipc-events.const.ts</code> 确认 IPC 常量。</li>
+      <li>回主进程搜索 <code>IPC.FILE_SYNC_SAVE</code>，落到 <code>electron/local-file-sync.ts</code> 的 <code>ipcMain.handle()</code>。</li>
+      <li>继续读 <code>resolveSyncPath()</code>、<code>assertPathOutside()</code> 和 atomic write，判断这是主进程负责的文件系统边界，不是 Angular service 的职责。</li>
+    </ol>
+
+    <h2>边界判断口诀</h2>
+    <table>
+      <thead>
+        <tr><th>问题</th><th>应去的位置</th><th>不要放到</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>要碰 Electron app 生命周期、Tray、globalShortcut、powerMonitor、shell、dialog 吗？</td><td>Electron 主进程模块</td><td>Angular component/effect</td></tr>
+        <tr><td>只是把受控 IPC API 暴露给页面吗？</td><td><code>electron/preload.ts</code> 与 <code>electron/electronAPI.d.ts</code></td><td>任意 renderer 全局变量</td></tr>
+        <tr><td>是 UI 状态、NgRx action、业务 service 或路由页面吗？</td><td><code>src/app</code></td><td>Electron 主进程</td></tr>
+        <tr><td>需要绝对路径、文件系统、HTTP server、child process 或 OAuth loopback 吗？</td><td>主进程系统能力模块</td><td>preload bridge 或 renderer</td></tr>
+        <tr><td>要找 IPC channel 吗？</td><td><code>electron/shared-with-frontend/ipc-events.const.ts</code></td><td>凭字符串猜 handler</td></tr>
+      </tbody>
+    </table>
+
+    <p>配套短课：<a href="../lessons/0001-electron-host-module-tour.html">0001 Electron 桌面宿主边界导览</a>。</p>
+  </article>
+</main>
+</body>
+</html>

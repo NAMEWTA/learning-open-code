@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自定义 agent 管理链路参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    .endpoint { display:inline-block; font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.08rem .3rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.91rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .filetree, .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); white-space:pre-wrap; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; font-size:.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>自定义 agent 管理链路参考</h1>
+  <p class="lead">
+    L2 垂直切片速查：从 workspace UI 到 Gateway REST、harness 工具与磁盘布局。短课入口：
+    <a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。相关 L1：
+    <a href="../../module-frontend-workspace/reference/frontend-workspace-overview.html">frontend workspace</a>、
+    <a href="../../module-gateway/reference/gateway-overview.html">Gateway</a>、
+    <a href="../../module-lead-agent/reference/lead-agent-overview.html">lead agent</a>。
+  </p>
+
+  <h2 id="layers">分层地图</h2>
+  <div class="filetree">frontend/src/app/workspace/agents/     ← 路由壳、layout 功能开关、new 向导
+frontend/src/components/workspace/agents/  ← AgentGallery、AgentCard、禁用页
+frontend/src/core/agents/                ← api.ts、hooks.ts、types.ts、feature-cache.ts
+backend/app/gateway/routers/agents.py    ← HTTP CRUD + user-profile
+backend/packages/harness/deerflow/
+├── config/agents_config.py              ← 扫描、加载、resolve 目录
+├── config/agents_api_config.py          ← agents_api.enabled
+├── tools/builtins/setup_agent_tool.py   ← bootstrap 创建（仅 is_bootstrap）
+└── tools/builtins/update_agent_tool.py  ← 聊天内自更新（agent_name 已设）</div>
+  <p>磁盘落点（per-user，默认在 <code>backend/.deer-flow/users/{user_id}/agents/{name}/</code>）：<code>config.yaml</code> + <code>SOUL.md</code>（+ 可选 memory 子目录）。legacy 共享路径 <code>{base}/agents/{name}/</code> 只读兼容，写操作需迁移。</p>
+
+  <h2 id="feature-gate">功能开关</h2>
+  <table>
+    <tr><th>检查点</th><th>行为</th><th>源码</th></tr>
+    <tr><td><code>config.yaml → agents_api.enabled</code></td><td>为 false 时 Gateway 所有 <code>/api/agents*</code> 与 <code>/api/user-profile</code> 返回 403</td><td><code>agents.py::_require_agents_api_enabled</code></td></tr>
+    <tr><td><code>GET /api/features</code></td><td>前端 <code>useAgentsApiEnabled</code> 读取；localStorage 缓存防 403 风暴</td><td><code>core/agents/hooks.ts</code></td></tr>
+    <tr><td>layout 禁用页</td><td><code>enabled=false</code> 时 agents 子路由不渲染</td><td><code>agents/layout.tsx</code></td></tr>
+  </table>
+
+  <h2 id="create">创建路径对比</h2>
+  <h3>A. UI 向导（当前默认）</h3>
+  <div class="diagram">sequenceDiagram
+    participant U as 用户
+    participant UI as new/page.tsx
+    participant API as Gateway agents
+    participant LG as LangGraph run
+    participant T as setup_agent
+    participant FS as 用户 agent 目录
+
+    U->>UI: 输入名称并确认
+    UI->>API: GET /api/agents/check?name=
+    API-->>UI: available + normalized name
+    UI->>LG: sendMessage(is_bootstrap, agent_name)
+    LG->>T: 模型调用 setup_agent(soul, description, …)
+    T->>FS: 写入 config.yaml + SOUL.md
+    UI->>API: GET /api/agents/{name}（重试）
+    API-->>UI: AgentResponse</div>
+  <table>
+    <tr><th>步骤</th><th>关键点</th></tr>
+    <tr><td>名称校验</td><td>前端 <code>^[A-Za-z0-9-]+$</code>；后端规范化小写；冲突含 legacy 目录</td></tr>
+    <tr><td>bootstrap 上下文</td><td><code>is_bootstrap: true</code> 使 lead agent 绑定 <code>setup_agent</code>，且 <code>agent_name</code> 注入 runtime context</td></tr>
+    <tr><td>保存触发</td><td>菜单「保存」发送隐藏用户消息；<code>onToolEnd(setup_agent)</code> 后拉取 agent</td></tr>
+    <tr><td>空 soul 拒绝</td><td><code>setup_agent</code> 对空 soul 返回 ToolMessage 错误，避免写入不可用 agent（#3549）</td></tr>
+  </table>
+
+  <h3>B. REST 直创（并行入口）</h3>
+  <table>
+    <tr><th>接口</th><th>说明</th></tr>
+    <tr><td><span class="endpoint">POST /api/agents</span></td><td>请求体含 name、description、model、tool_groups、skills、soul；<code>asyncio.to_thread</code> 写盘；409 已存在；失败时清理半成品目录</td></tr>
+    <tr><td>前端封装</td><td><code>createAgent()</code> in <code>api.ts</code>；<code>useCreateAgent</code> mutation（当前向导 UI 未调用）</td></tr>
+  </table>
+
+  <h2 id="read-list">读取与列表</h2>
+  <table>
+    <tr><th>接口</th><th>前端</th><th>后端</th></tr>
+    <tr><td><span class="endpoint">GET /api/agents</span></td><td><code>listAgents</code> / <code>useAgents</code></td><td><code>list_custom_agents</code>，含 soul</td></tr>
+    <tr><td><span class="endpoint">GET /api/agents/{name}</span></td><td><code>getAgent</code> / <code>useAgent</code></td><td><code>load_agent_config</code> + <code>load_agent_soul</code></td></tr>
+    <tr><td><span class="endpoint">GET /api/agents/check</span></td><td><code>checkAgentName</code></td><td>校验模式 + per-user/legacy 目录存在性</td></tr>
+    <tr><td><span class="endpoint">GET /api/user-profile</span></td><td>（全局 USER.md，注入所有 custom agents）</td><td>读 <code>paths.user_md_file</code></td></tr>
+  </table>
+
+  <h2 id="update">更新路径</h2>
+  <table>
+    <tr><th>路径</th><th>触发方</th><th>落盘</th></tr>
+    <tr><td><span class="endpoint">PUT /api/agents/{name}</span></td><td>REST 客户端 / <code>updateAgent</code></td><td>用 <code>model_fields_set</code> 区分省略与显式 null；<code>preserve_non_managed_fields</code> 保留 <code>github:</code> 等</td></tr>
+    <tr><td><code>update_agent</code> 工具</td><td>agent 专属聊天中模型自更新</td><td>与 Gateway 更新共享校验；原子写 YAML/SOUL</td></tr>
+    <tr><td><span class="endpoint">PUT /api/user-profile</span></td><td>全局用户画像</td><td>写 USER.md</td></tr>
+  </table>
+  <p><code>skills</code> 语义：<code>null</code> = 继承全部启用 skill；<code>[]</code> = 无 skill；非空列表 = 白名单。</p>
+
+  <h2 id="delete">删除</h2>
+  <p><span class="endpoint">DELETE /api/agents/{name}</span> → <code>shutil.rmtree</code> per-user 目录（config、SOUL、memory）。<code>AgentCard</code> 经 <code>useDeleteAgent</code> 调用；成功后 invalidate <code>["agents"]</code> 查询。</p>
+
+  <h2 id="errors">常见错误与传播</h2>
+  <table>
+    <tr><th>HTTP</th><th>场景</th><th>用户可见表现</th></tr>
+    <tr><td>403</td><td><code>agents_api.enabled=false</code></td><td>layout 禁用页；API 抛 <code>AgentsApiDisabledError</code></td></tr>
+    <tr><td>422</td><td>非法 agent 名称</td><td>向导名称步错误提示</td></tr>
+    <tr><td>409</td><td>名称已占用 / 仅 legacy 副本</td><td>「已存在」或提示跑 <code>migrate_user_isolation.py</code></td></tr>
+    <tr><td>404</td><td>agent 不存在</td><td>get/delete 失败</td></tr>
+    <tr><td>500</td><td>读盘或 YAML 解析失败</td><td>toast / 列表加载错误</td></tr>
+    <tr><td>工具错误</td><td>空 soul、未知 model</td><td>聊天内 ToolMessage；向导 save 后 agent 仍为 null</td></tr>
+  </table>
+
+  <h2 id="tests">测试锚点</h2>
+  <table>
+    <tr><th>文件</th><th>覆盖</th></tr>
+    <tr><td><code>frontend/tests/unit/core/agents/api.test.ts</code></td><td>agents API 禁用、名称检查网络错误分类</td></tr>
+    <tr><td><code>frontend/tests/unit/core/agents/features.test.ts</code></td><td>feature flag 解析与缓存</td></tr>
+    <tr><td><code>backend/tests/test_update_agent_tool.py</code></td><td>部分更新、null 省略、模型校验</td></tr>
+  </table>
+
+  <h2 id="config">启用自定义 agent 管理</h2>
+  <div class="callout">
+    <p>在仓库根 <code>config.yaml</code> 设置：</p>
+    <p><code>agents_api:</code><br><code>&nbsp;&nbsp;enabled: true</code></p>
+    <p>修改后 Gateway 热读取配置；前端再次进入 <code>/workspace/agents</code> 会通过 <code>/api/features</code> 自动启用（<code>staleTime: 0</code>）。</p>
+  </div>
+
+  <p>交叉链接：<a href="../../module-frontend-core/lessons/0001-frontend-core-module-tour.html">frontend core 导览</a>（fetcher/CSRF）、<a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>。</p>
+</main>
+</body>
+</html>

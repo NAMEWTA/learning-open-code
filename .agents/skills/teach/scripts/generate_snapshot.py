@@ -13,7 +13,7 @@ teach skill — 生成/更新教学主题的 SNAPSHOT.md
   python scripts/generate_snapshot.py teach/open-java/RuoYiVuePlus/permission-model --dry-run
 
 功能:
-  1. 扫描主题下的所有课程 HTML，提取源文件引用
+  1. 扫描主题下的课程 HTML 与参考 HTML，提取源文件引用
   2. 获取关联 git 子模块的当前 commit 和分支
   3. 统计课程数、学习记录数、参考资料数
   4. 写入格式化的 SNAPSHOT.md
@@ -187,6 +187,16 @@ def deduplicate_refs(refs):
     return set(result)
 
 
+def read_html_title(html_file):
+    try:
+        with open(html_file, "r", encoding="utf-8") as f:
+            content = f.read(5000)
+        title_match = re.search(r'<title>(.*?)</title>', content)
+        return title_match.group(1).strip() if title_match else html_file.name
+    except Exception:
+        return html_file.name
+
+
 def generate_snapshot(topic_path, workspace_root, submodules_info, dry_run=False):
     """为一个教学主题生成 SNAPSHOT.md"""
     topic_path = Path(topic_path)
@@ -211,20 +221,21 @@ def generate_snapshot(topic_path, workspace_root, submodules_info, dry_run=False
         for _, _, files in os.walk(assets_dir):
             asset_count += len(files)
 
-    # 提取源文件引用
+    # 提取课程与参考文档中的源文件引用
     all_refs = set()
     lesson_descriptions = []
     for lf in lesson_files:
         refs = extract_source_refs(lessons_dir / lf)
         all_refs.update(refs)
-        try:
-            with open(lessons_dir / lf, "r", encoding="utf-8") as f:
-                content = f.read(5000)
-            title_match = re.search(r'<title>(.*?)</title>', content)
-            title = title_match.group(1) if title_match else lf
-        except Exception:
-            title = lf
+        title = read_html_title(lessons_dir / lf)
         lesson_descriptions.append((lf, title))
+
+    reference_descriptions = []
+    for rf in reference_files:
+        refs = extract_source_refs(reference_dir / rf)
+        all_refs.update(refs)
+        title = read_html_title(reference_dir / rf)
+        reference_descriptions.append((rf, title))
 
     # 规范化 + 去重
     normalized = set()
@@ -287,15 +298,15 @@ def generate_snapshot(topic_path, workspace_root, submodules_info, dry_run=False
             num = lf.replace('.html', '')
             lines.append(f"| {num} | `lessons/{lf}` | {title} |")
     else:
-        lines.append("（暂无课程）")
+        lines.append("（未发现 lesson；主题完成前必须补齐课程并通过 audit_topic.py）")
     lines.append("")
 
     # 参考资料
-    if reference_files:
+    if reference_descriptions:
         lines.append("## 参考资料")
         lines.append("")
-        for rf in reference_files:
-            lines.append(f"- `reference/{rf}`")
+        for rf, title in reference_descriptions:
+            lines.append(f"- `reference/{rf}` — {title}")
         lines.append("")
 
     # 摘要
@@ -319,7 +330,7 @@ def generate_snapshot(topic_path, workspace_root, submodules_info, dry_run=False
     with open(snapshot_file, "w", encoding="utf-8") as f:
         f.write(content)
 
-    print(f"  ✅ {topic_name}: {len(lesson_files)} 课, {len(final_refs)} 引用, {len(record_files)} 记录")
+    print(f"  ✅ {topic_name}: {len(lesson_files)} 课, {len(reference_files)} 参考, {len(final_refs)} 引用, {len(record_files)} 记录")
 
 
 def main():

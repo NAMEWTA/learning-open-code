@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>REST/WS adapter：问题框架</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>为什么还叫 ipcBridge，却不再主要走 IPC</h1>
+    <p class="subtitle">学习目标：15 分钟内建立判断框架，区分“稳定调用面”和“真实传输层”。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：ipcBridge.ts / httpBridge.ts / preload/main.ts</span>
+    </div>
+  </section>
+
+  <p class="muted">前置回看：<a href="../../module-common-adapter/lessons/0001-common-adapter-module-tour.html">Common adapter 模块导览</a>。下一课：<a href="./0002-provider-like-invoke.html">provider-like invoke 机制</a>。速查：<a href="../reference/adapter-rest-ws-notes.html">adapter REST/WS 参考笔记</a>。</p>
+
+  <h2>1. 名字是兼容层，不是传输承诺</h2>
+  <p>AionU 的 renderer 仍大量调用 <code>ipcBridge.xxx.invoke()</code> 或 <code>ipcBridge.xxx.on()</code>，但这不等于每条能力都进入 Electron IPC。<code>ipcBridge.ts</code> 文件头已经把设计意图说清：旧 IPC bridge 调用被替换为发往 aioncore 的 HTTP REST 与 WebSocket；只有窗口控制、原生对话框、自动更新、devtools、缩放、CDP、deep link 这类 Electron-native 能力继续留在 IPC。这个命名保留的收益，是 renderer 页面、hook、store 不必随着 backend 迁移而批量改 API 形状。</p>
+  <p>因此维护时要把 <code>ipcBridge</code> 读成“能力目录”。目录里的每个条目仍给调用方一个熟悉的 <code>invoke/on</code> 入口，但条目内部可以是 HTTP provider、WS emitter、传统 IPC provider，甚至是暂未实现的 stub。这个分层让迁移可以按能力域渐进发生：先把业务状态迁到 backend，再在 adapter 层补路径、body 和 mapper，而不是要求所有 renderer 调用点一次性改写。</p>
+
+  <pre><code class="language-typescript">/**
+ * IPC Bridge → HTTP/WS adapter.
+ *
+ * This file replaces the original IPC bridge calls with HTTP REST and WebSocket
+ * calls routed to aioncore. Electron-native operations (window controls,
+ * native dialogs, auto-update, devtools, zoom, CDP, deep links) remain as IPC.
+ */</code></pre>
+
+  <h2>2. 判断标准：真实状态和副作用归谁所有</h2>
+  <p>新增 adapter 能力时，第一问不是“它在 <code>ipcBridge</code> 下吗”，而是“真实状态在哪里”。conversation、assistant、team、cron、skills、provider 等业务状态由 aioncore 管，适合 REST 负责命令和查询，WS 负责异步事件。窗口最小化、托盘、系统通知、原生文件选择器、自动更新仍依赖 Electron main 里的对象，继续用 <code>bridge.buildProvider/buildEmitter</code>。同一个域也可能混合：WebUI 生命周期要启动本地 host，常保留 IPC；密码、二维码 token、设置查询已经可以走 backend HTTP。</p>
+
+  <pre><code class="language-typescript">  sendMessage: httpPost&lt;ISendMessageResult, ISendMessageParams&gt;(
+    (p) =&gt; `/api/conversations/${p.conversation_id}/messages`,
+    (p) =&gt; ({
+      content: p.input,
+      files: p.files,
+      loading_id: p.loading_id,
+      inject_skills: p.inject_skills,
+    })
+  ),</code></pre>
+
+  <h2>3. WebUI 让 REST/WS 成为必要条件</h2>
+  <p>如果 AionU 只运行在 Electron renderer，继续追加 IPC 勉强可行；但 WebUI browser 没有 preload，也没有 <code>window.electronAPI</code>。<code>preload/main.ts</code> 在桌面场景同步暴露 <code>window.__backendPort</code>，<code>httpBridge.ts</code> 在检测不到该端口时改用 same-origin：<code>/api/*</code> 和 <code>/ws</code> 交给 web-host 反代到 backend。也就是说 REST/WS 不是简单“把 IPC 换个名字”，而是同一 renderer contract 同时服务桌面窗口和浏览器 WebUI 的基础。</p>
+  <p>这个约束也解释了为什么 adapter 要处理 base URL，而不是让每个页面自己判断运行环境。Electron 窗口拿到的是本机端口，WebUI 拿到的是站点同源路径；调用方仍只关心 <code>ipcBridge.conversation.sendMessage.invoke()</code>。一旦页面层开始散落这些判断，WebUI、桌面和 E2E 会形成三套不同网络路径，contract 很快失控。</p>
+
+  <div class="diagram"><pre><code class="language-text">renderer 稳定调用面
+  -> ipcBridge.conversation.sendMessage.invoke()
+  -> Electron：window.__backendPort -> http://127.0.0.1:{port}/api/*
+  -> WebUI：无 preload -> same-origin /api/* 与 /ws
+  -> aioncore 拥有业务状态
+
+Electron-native 能力
+  -> ipcBridge.application.getZoomFactor.invoke()
+  -> preload electronAPI -> adapter/main.ts -> Electron main provider</code></pre></div>
+
+  <h2>4. 维护者的最小检查表</h2>
+  <p>改 adapter 前先做四个判断：能力是否拥有 backend 路由；返回字段是否需要 mapper 保持旧前端语义；异步结果是 HTTP response 结束，还是需要 WS event 回流；E2E 是直接 HTTP 验证 backend 状态，还是必须走 legacy IPC fallback。这样能避免两类常见错误：把本该由 backend 管的业务状态继续塞进 main IPC，或把只能由 Electron main 完成的系统副作用硬迁到 REST。</p>
+
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果你要新增“导出会话为本地文件”的能力，第一判断问题是什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先问真实副作用在哪里。如果只是生成导出内容并写入 backend 管理的 workspace，优先 REST；如果必须弹出原生保存对话框或操作 Electron app 级对象，就需要 IPC 或混合路径。第二步再决定是否用 WS 回报进度。</p>
+    </details>
+  </div>
+
+  <p class="muted">推荐主来源：<code>packages/desktop/src/common/adapter/ipcBridge.ts</code> 文件头和 conversation/application 两组导出。继续追问 agent：请带我按“真实状态归属”给一个具体新增能力选传输层。</p>
+</main>
+</body>
+</html>

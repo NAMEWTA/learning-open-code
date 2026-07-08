@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>deferred tool search 速查</title>
+  <link rel="stylesheet" href="../assets/deep-dive-lesson.css">
+  <style>
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin: 0.75rem 0; }
+    th, td { border: 1px solid #e5e7eb; padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #f3f4f6; }
+    .ref-lede { color: #4b5563; margin-bottom: 1rem; }
+    h3 { margin-top: 1.25rem; font-size: 1.05rem; }
+  </style>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>deferred tool search 速查</h1>
+    <p class="ref-lede">
+      L4 参考页：设计 invariant、三文件职责、promotion reducer 与测试锚点。
+      入门帧见 <a href="../lessons/0001-problem-frame.html">0001-problem-frame</a>。
+    </p>
+
+    <h2>三文件职责</h2>
+    <table>
+      <thead>
+        <tr><th>文件</th><th>职责</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>config/tool_search_config.py</code></td>
+          <td><code>ToolSearchConfig.enabled</code>（默认 false）；由 AppConfig 加载</td>
+        </tr>
+        <tr>
+          <td><code>tools/builtins/tool_search.py</code></td>
+          <td>Catalog 搜索、<code>build_deferred_tool_setup</code>、<code>assemble_deferred_tools</code>（fail-closed）、prompt 段 <code>&lt;available-deferred-tools&gt;</code></td>
+        </tr>
+        <tr>
+          <td><code>agents/middlewares/deferred_tool_filter_middleware.py</code></td>
+          <td>bind 前过滤 schema；未 promote 的 tool call 返回 error ToolMessage</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>设计权衡对照</h2>
+    <table>
+      <thead>
+        <tr><th>维度</th><th>tool_search 关闭</th><th>tool_search 开启</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Prompt / bind 体积</td><td>全部 MCP schema 每轮重复</td><td>仅工具名列表 + 按需拉 schema</td></tr>
+        <tr><td>可发现性</td><td>模型直接见参数</td><td>需先读名字再 search；支持 keyword / select</td></tr>
+        <tr><td>执行路径</td><td>ToolNode 与 bind 一致</td><td>ToolNode 全量；LLM 侧两阶段</td></tr>
+        <tr><td>状态</td><td>无 promotion</td><td><code>ThreadState.promoted</code> + catalog hash</td></tr>
+        <tr><td>跨 task 隔离</td><td>—</td><td>build-time closure + state，无 ContextVar（#3272）</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="fail-closed">fail-closed 触发条件</h2>
+    <table>
+      <thead>
+        <tr><th>场景</th><th>行为</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>enabled=false</code></td>
+          <td>不 defer；MCP 全量 bind</td>
+        </tr>
+        <tr>
+          <td>enabled 但 policy 后无 MCP</td>
+          <td>空 setup；不追加 tool_search；<strong>不</strong> fail-closed</td>
+        </tr>
+        <tr>
+          <td>enabled 且有 MCP，setup 却为空（ wiring 回归）</td>
+          <td><code>RuntimeError</code> fail-closed</td>
+        </tr>
+        <tr>
+          <td>模型直接调用未 promote 的 deferred 工具</td>
+          <td>error ToolMessage，不进入 ToolNode 成功路径</td>
+        </tr>
+        <tr>
+          <td>policy 剔除的 MCP</td>
+          <td>不进 catalog；<code>tool_search</code> 不可搜到（Finding 1）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="hash">catalog hash 与 merge_promoted</h2>
+    <pre><code># DeferredToolCatalog.hash — 排序 name + OpenAI schema JSON
+canon = [{"name": t.name, "schema": convert_to_openai_function(t)} ...]
+hash = sha256(json.dumps(canon, sort_keys=True))[:16]
+
+# merge_promoted（thread_state.py）
+# new 为空 → 保留 existing
+# catalog_hash 变化 → 整包替换 names（丢弃 stale）
+# 相同 hash → names 并集去重，保序</code></pre>
+    <p>
+      Middleware <code>_promoted(state)</code> 仅在 <code>state["promoted"]["catalog_hash"] == self._catalog_hash</code> 时返回 names；
+      <code>_hidden = deferred_names - promoted</code> 决定 bind 过滤集合。
+    </p>
+
+    <h2>tool_search 查询形式</h2>
+    <table>
+      <thead>
+        <tr><th>Query</th><th>语义</th><th>上限</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>select:Read,Edit</code></td><td>按名精确取工具</td><td>MAX_RESULTS=5</td></tr>
+        <tr><td><code>notebook jupyter</code></td><td>regex 搜 name+description；name 命中加权</td><td>5</td></tr>
+        <tr><td><code>+slack send</code></td><td>name 须含 slack，再按 send 排序</td><td>5</td></tr>
+      </tbody>
+    </table>
+    <p>无效 regex 降级为字面量子串匹配（模型输入不可信）。</p>
+
+    <h2 id="tests">测试锚点</h2>
+    <table>
+      <thead>
+        <tr><th>测试文件</th><th>锁定行为</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>test_deferred_promotion_integration.py</code></td>
+          <td>turn1 隐藏 → tool_search → turn2 仅 promote 命中工具</td>
+        </tr>
+        <tr>
+          <td><code>test_deferred_tool_crosscontext.py</code></td>
+          <td>build/run 不同 asyncio context 仍隐藏；fail-closed；subagent 不污染 lead</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>装配顺序（不变量）</h2>
+    <pre><code>raw_tools = get_available_tools(...)
+filtered = filter_tools_by_skill_allowed_tools(...)
+final_tools, setup = assemble_deferred_tools(filtered, enabled=tool_search.enabled)
+# setup.deferred_names → system prompt 段 + DeferredToolFilterMiddleware</code></pre>
+    <p class="note">
+      <code>tool_search</code> 在 policy 过滤<strong>之后</strong>追加；allowlist 可不列 tool_search 名，但 catalog 仅含已允许 MCP（PR #3342 契约）。
+    </p>
+  </article>
+</main>
+</body>
+</html>

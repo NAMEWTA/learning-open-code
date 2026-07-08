@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 扩展入口与 Pi runtime 注册模块</title>
+  <link rel="stylesheet" href="../assets/module-extension-runtime.css">
+</head>
+<body>
+<main>
+  <h1>扩展入口与 Pi runtime 注册模块</h1>
+  <p class="meta">学习目标：15 分钟内能判断 <span class="mono">src/extension</span> 哪些代码负责注册到 Pi，哪些只是给注册层提供契约、描述或桥接。</p>
+
+  <h2>1. 一句话职责</h2>
+  <p><span class="mono">open-ai-agent/pi-subagents/src/extension</span> 是 Pi runtime 适配层：它把已有的 subagent 执行能力注册成 Pi 可见的工具、消息渲染器、slash/RPC 桥、后台追踪器和 session 生命周期处理器，但不把 single、parallel、chain 的执行算法写在自己这里。L0 已经说明父会话如何组织子会话；本课只看入口层边界。</p>
+  <div class="flow" aria-label="extension registration flow">
+    <div><strong>Pi 加载 extension</strong>：<code>package.json</code> 的 <code>pi.extensions</code> 配置值是 <span class="mono">./src/extension/index.ts</span>；在本工作区中对应源码是 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code>。</div>
+    <div><strong>入口建立 runtime 状态</strong>：加载 config，创建 watcher、async tracker、scheduled manager、supervisor channel。</div>
+    <div><strong>注册对外能力</strong>：<code>subagent</code>、<code>wait</code>、message renderer、slash bridge、prompt template bridge、RPC bridge。</div>
+    <div><strong>执行下沉</strong>：真正运行任务时交给 <code>createSubagentExecutor</code>。</div>
+  </div>
+
+  <h2>2. 读 <code>index.ts</code> 的主线</h2>
+  <p>先抓住早退和注册两件事。普通 child 进程检测到 <code>PI_SUBAGENT_CHILD</code> 后直接返回，避免子会话再注册父级工具；fanout child 另由 <code>fanout-child.ts</code> 暴露受限工具。父入口随后清理旧 runtime、确保结果目录可访问、恢复 active jobs，并把同一个 executor 接给 tool、slash、prompt template 和 RPC。</p>
+  <pre><code>export default function registerSubagentExtension(pi: ExtensionAPI): void {
+  if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
+
+  const config = loadConfig();
+  const state: SubagentState = { asyncJobs: new Map(), foregroundRuns: new Map(), ... };
+  const supervisorChannel = createNativeSupervisorChannel(pi, state);
+  const watcher = createResultWatcher(pi, state, RESULTS_DIR, 10 * 60 * 1000);
+  watcher.startResultWatcher();
+  watcher.primeExistingResults();
+
+  const executor = createSubagentExecutor({ pi, state, config, discoverAgents, ... });
+  pi.registerTool(tool);      // subagent
+  pi.registerTool(waitTool);  // wait
+}</code></pre>
+  <p>这个摘录省略了细节，但保留了阅读顺序：先确认运行环境，再建共享状态，再注册入口。看到 <code>executeSubagentCollapsed</code> 时要注意，它只是先折叠 UI，再调用 executor；它不是新的执行模式。</p>
+
+  <h2>3. 契约和桥接</h2>
+  <p><code>schemas.ts</code> 给 Pi provider 暴露参数形状。它的关键不是字段多，而是 <code>keepTopLevelParameterDescriptions</code>：保留顶层参数说明，删除嵌套 description，避免 provider payload 膨胀或出现不被接受的 schema 形状。</p>
+  <pre><code>export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);
+export const WaitParams = keepTopLevelParameterDescriptions(WaitParamsSchema);</code></pre>
+  <p><code>rpc.ts</code> 是 in-process event bus 桥。外部扩展发 <code>subagents:rpc:v1:request</code>，它回到 <code>subagents:rpc:v1:reply:&lt;requestId&gt;</code>。最重要的约束是：RPC <code>spawn</code> 只能 detached async，不能打开 clarify UI，也不能混入管理动作。</p>
+  <pre><code>events.emit(SUBAGENT_RPC_REQUEST_EVENT, {
+  version: 1,
+  requestId: "spawn-1",
+  method: "spawn",
+  params: { agent: "worker", task: "Do work" }
+});
+// rpc.ts 会补 async: true, clarify: false，再交给 executor。</code></pre>
+
+  <h2>4. 行为佐证与回忆练习</h2>
+  <p>这一层有直接测试保护：<code>open-ai-agent/pi-subagents/test/unit/index-child-registration.test.ts</code> 验证 child 模式早退、fanout child 不双注册、wait tool 可被配置禁用；<code>open-ai-agent/pi-subagents/test/unit/rpc.test.ts</code> 验证 RPC ping、status、spawn、interrupt、stop；<code>open-ai-agent/pi-subagents/test/unit/schemas.test.ts</code> 验证 schema 描述裁剪；<code>open-ai-agent/pi-subagents/test/unit/doctor.test.ts</code> 验证诊断报告在失败环境下也继续输出。</p>
+  <div class="callout check">
+    <p><strong>检索练习：</strong>如果你想确认 slash、RPC、tool call 是否最终复用同一个执行器，应先看哪个文件？答案：先看 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code>，找到 <code>createSubagentExecutor</code> 和各桥接函数传入的 <code>execute</code> 回调；再去 executor 追执行分流。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/src/extension/index.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/schemas.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/rpc.ts</code>。接口清单见 <a href="../reference/extension-runtime-overview.html">extension runtime 参考页</a>；需要全局地图时回看 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目导览课</a>。</p>
+</main>
+</body>
+</html>

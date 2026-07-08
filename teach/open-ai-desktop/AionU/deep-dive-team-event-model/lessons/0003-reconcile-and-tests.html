@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 事件模型：reconcile、slot gate 与测试缺口</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode 事件模型：reconcile、slot gate 与测试缺口</h1>
+    <p class="subtitle">学习目标：能判断结构事件为何要触发 reconcile，并识别 slot gate 的防串扰边界。</p>
+    <div class="meta">
+      <span class="pill">核心：reconcile + teamSendRuntime</span>
+      <span class="pill">测试证据与缺口</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#reconcile">1. 结构事件触发 reconcile</a>
+    <a href="#gate">2. slot gate 防串扰</a>
+    <a href="#tests">3. 测试证据与缺口</a>
+    <a href="#practice">4. 小任务</a>
+  </nav>
+
+  <p class="muted">本课延续 <a href="0002-core-mechanism.html">核心合成机制</a>，重点看状态丢失、结构变化和测试边界。</p>
+
+  <h2 id="reconcile">1. 结构事件触发 reconcile</h2>
+  <p>WebSocket 事件不是可靠日志，renderer 也不是 Team 状态的最终事实源。<code>useTeamRunView</code> 因此在页面加载、实时连接恢复、Team 结构变化和 session 变化时调用 <code>getRunState</code>。结构事件包括 <code>listChanged</code>、<code>sessionChanged</code>、<code>agentSpawned</code>、<code>agentRemoved</code>、<code>agentRenamed</code>。它们本身不一定携带 run 明细，但会改变 slot 集合或名称，使旧的 slot work 索引有 stale 风险。</p>
+  <pre><code class="language-ts">ipcBridge.realtime.reconnected.on(() =&gt; {
+  void reconcile('realtime.reconnected');
+}),
+ipcBridge.team.listChanged.on((event) =&gt; {
+  if (event.team_id === team_id) void reconcile('team.listChanged');
+}),
+ipcBridge.team.agentSpawned.on((event) =&gt; {
+  if (event.team_id === team_id) void reconcile('team.agentSpawned');
+}),
+ipcBridge.team.agentRemoved.on((event) =&gt; {
+  if (event.team_id === team_id) void reconcile('team.agentRemoved');
+}),</code></pre>
+  <p>同类订阅还包括 <code>sessionChanged</code> 和 <code>agentRenamed</code>。注意每个结构事件都按 <code>team_id</code> 过滤；这是跨 Team 防串扰的第一道门。</p>
+
+  <h2 id="gate">2. slot gate 防串扰</h2>
+  <p>第二道门在 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/teamSendRuntime.ts</code>。它不问“是否存在 active run”，而是问“当前 slot 有没有 work 或 child turn”。因此 teammate 正在跑时，leader 输入框不一定被锁；leader 有 pending wake 时，leader 输入框才被锁。</p>
+  <pre><code class="language-ts">const hasSlotWork =
+  Boolean(work?.active_turn_id) ||
+  (work?.pending_wake_count ?? 0) &gt; 0 ||
+  (work?.starting_child_count ?? 0) &gt; 0;
+if (hasSlotWork) return true;
+
+const childStatus = runView.childTurnsBySlot[slot_id]?.status;
+return childStatus === 'accepted' || childStatus === 'running' || childStatus === 'cancelling';</code></pre>
+  <p>paused slot 是特例：源码优先返回 false，让用户可以继续 priority send。stop handler 也只会暂停当前 slot 的 work；如果后端说没有 active run 可暂停，才触发 stale reconcile。</p>
+
+  <h2 id="tests">3. 测试证据与缺口</h2>
+  <p>单元测试对事件模型覆盖较好：<code>open-ai-desktop/AionU/tests/unit/renderer/useTeamRunView.dom.test.tsx</code> 验证 reconcile 清 stale、失败时保留本地状态、重连触发拉取，并直接覆盖 <code>listChanged</code> 的 team id 过滤；<code>sessionChanged</code>、<code>agentSpawned</code>、<code>agentRemoved</code>、<code>agentRenamed</code> 有源码订阅但缺少逐项测试。<code>open-ai-desktop/AionU/tests/unit/renderer/teamSendRuntime.test.ts</code> 验证 teammate-only work 不锁 leader，当前 slot child turn 才锁当前输入框。</p>
+  <p>E2E 证据要更谨慎。<code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-member-messaging.e2e.ts</code> 会通过 UI 给成员发送消息，并断言消息可见、成员 active badge 可见或输入清空；<code>team-communication.e2e.ts</code> 验证 leader UI 发送后 Team record 仍有效。但这些测试没有直接监听或断言 <code>ITeamRunAck</code>、<code>team.runUpdated</code>、<code>childTurnStarted</code> 的合并顺序。</p>
+  <table>
+    <thead><tr><th>特征 / 局限</th><th>维护含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>indexSlotWork()</code> 每次按 slot 重建索引</td><td>成本随 slot 数量增长，换来不累加旧 work 的可靠性。</td></tr>
+      <tr><td><code>reconcileSeq</code> 防旧请求覆盖新状态</td><td>重连和结构事件并发时，后返回的旧快照不会倒灌。</td></tr>
+      <tr><td>reconcile 会清空 <code>childTurnsBySlot</code></td><td>牺牲局部事件日志，换取 backend 快照校准后的简洁状态。</td></tr>
+      <tr><td>E2E 可观测性缺口</td><td>UI 发送可证明用户路径，但仍需 bridge probe 或 unit 测试覆盖 reducer 顺序。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="practice">4. 小任务</h2>
+  <div class="quiz">
+    <p><strong>任务：</strong>如果一个 bug 报告说“成员 A 正在处理时，成员 B 的输入框也被锁住”，你先看哪个文件、哪个判断？</p>
+    <p><strong>参考答案：</strong>先看 <code>teamSendRuntime.ts</code> 的 slot gate，确认传入的 <code>slot_id</code> 是否是成员 B，以及 <code>slotWorkBySlot</code> / <code>childTurnsBySlot</code> 是否错误地写到了成员 B。再回到 <code>useTeamRunView.ts</code> 查事件是否按正确 slot 合并。</p>
+  </div>
+  <p class="muted">主要阅读：<code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/teamSendRuntime.ts</code>。速查：<a href="../reference/team-event-model-notes.html">team-event-model-notes</a>。</p>
+</main>
+</body>
+</html>

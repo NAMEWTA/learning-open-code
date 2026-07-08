@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Frontend workspace 微观 API 参考</title>
+    <link rel="stylesheet" href="../assets/workspace-lesson.css" />
+    <style>
+      nav.toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 24px; }
+      nav.toc a {
+        font-size: 0.88rem;
+        padding: 4px 10px;
+        border: 1px solid #d7dee8;
+        border-radius: 6px;
+      }
+      .warn {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 1rem 0;
+      }
+      .tests { font-size: 0.86rem; color: #5f6e7a; }
+      .sig { font-family: "SF Mono", Consolas, monospace; font-size: 0.84rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Frontend workspace 微观 API 参考</h1>
+        <p class="lead">
+          <strong>L3 速查：</strong>按源码文件列出 DeerFlow 工作台（<code>app/workspace</code> +
+          <code>components/workspace</code>）的页面路由、React 组件 props、hooks 导出与边界行为。
+          返回 <a href="frontend-workspace-overview.html">L1 模块速查</a> ·
+          <a href="../lessons/0001-frontend-workspace-module-tour.html">短课</a> ·
+          <a href="../../00-overview/reference/00-overview.html">L0 总览</a>。
+        </p>
+
+        <div class="meta">
+          <span class="pill">层级：L3</span>
+          <span class="pill">路由：13 个 page/layout</span>
+          <span class="pill">组件导出：80+</span>
+          <span class="pill">hooks：6 个 barrel</span>
+        </div>
+
+        <nav class="toc" aria-label="分节导航">
+          <a href="#routes">页面路由</a>
+          <a href="#shell">App 壳层</a>
+          <a href="#hooks">Hooks</a>
+          <a href="#chat">聊天核心</a>
+          <a href="#sidecar">Sidecar</a>
+          <a href="#artifacts">Artifacts</a>
+          <a href="#layout">布局与导航</a>
+          <a href="#settings">设置</a>
+          <a href="#agents">Agents</a>
+          <a href="#scheduled">定时任务 UI</a>
+          <a href="#barrel">Barrel 导出</a>
+          <a href="#query">URL 参数</a>
+          <a href="#examples">调用示例</a>
+          <a href="#tests">测试索引</a>
+        </nav>
+
+        <div class="warn">
+          <strong>线程创建易错：</strong><code>isNewThread</code> 表示后端是否已有线程，控制 SDK 是否拉
+          <code>/history</code>；<code>isWelcomeMode</code> 仅为欢迎布局视觉态。新线程创建成功后必须用
+          <code>history.replaceState</code> 更新 URL，<strong>不要用</strong> Next.js <code>router.push</code>，否则会 remount 丢状态（issue #2746）。
+        </div>
+
+        <!-- ========== ROUTES ========== -->
+        <h2 id="routes">页面路由（<code>app/workspace/</code>）</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>URL</th>
+              <th>文件</th>
+              <th>导出 / 行为</th>
+              <th>边界</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>/workspace</code></td>
+              <td><span class="where">page.tsx</span></td>
+              <td>默认 <code>redirect</code></td>
+              <td>
+                <code>NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true</code> → 首个 demo thread；
+                否则 → <code>/workspace/chats/new</code>
+              </td>
+            </tr>
+            <tr>
+              <td><code>/workspace/*</code></td>
+              <td><span class="where">layout.tsx</span></td>
+              <td>
+                <code>WorkspaceLayout({ children })</code>；<code>dynamic = "force-dynamic"</code>
+              </td>
+              <td>
+                未登录 → <code>/login</code>；需 setup → <code>/setup</code>；
+                gateway 不可用 → <code>GatewayOfflineFallback</code> + <code>WorkspaceContent gatewayUnavailable</code>；
+                <code>config_error</code> → throw
+              </td>
+            </tr>
+            <tr>
+              <td>全局壳</td>
+              <td><span class="where">workspace-content.tsx</span></td>
+              <td>
+                <code>WorkspaceContent({ children, gatewayUnavailable? })</code>（async Server Component）
+              </td>
+              <td>读 <code>sidebar_state</code> cookie 初始化侧栏；挂载 QueryClient、Sidebar、离线横幅、CommandPalette、Toaster</td>
+            </tr>
+            <tr>
+              <td><code>/workspace/chats</code></td>
+              <td><span class="where">chats/page.tsx</span></td>
+              <td><code>ChatsPage()</code>（client）</td>
+              <td>无限滚动列表；搜索时禁用自动分页，改用手动「加载更多」</td>
+            </tr>
+            <tr>
+              <td><code>/workspace/chats/[thread_id]</code></td>
+              <td><span class="where">chats/[thread_id]/page.tsx</span></td>
+              <td><code>ChatPage()</code>（client）</td>
+              <td>
+                组合 MessageList、InputBox、Sidecar、Artifacts、Goal、分支/重试；
+                空线程 metadata → <code>router.replace("/workspace/chats/new")</code>
+              </td>
+            </tr>
+            <tr>
+              <td>聊天 layout</td>
+              <td><span class="where">chats/[thread_id]/layout.tsx</span></td>
+              <td>
+                <code>ChatLayout({ children })</code>；
+                <code>generateStaticParams()</code>（仅静态站模式）
+              </td>
+              <td>静态站为 <code>DEMO_THREAD_IDS</code> 预生成路径</td>
+            </tr>
+            <tr>
+              <td>聊天 providers</td>
+              <td><span class="where">chats/[thread_id]/providers.tsx</span></td>
+              <td><code>ChatProviders({ children })</code></td>
+              <td>嵌套 <code>SubtasksProvider → ArtifactsProvider → PromptInputProvider</code></td>
+            </tr>
+            <tr>
+              <td><code>/workspace/agents</code></td>
+              <td><span class="where">agents/page.tsx</span></td>
+              <td>渲染 <code>&lt;AgentGallery /&gt;</code></td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td>agents layout</td>
+              <td><span class="where">agents/layout.tsx</span></td>
+              <td><code>AgentsLayout({ children })</code></td>
+              <td><code>useAgentsApiEnabled()</code> 未开启 → <code>AgentsFeatureDisabled</code></td>
+            </tr>
+            <tr>
+              <td><code>/workspace/agents/new</code></td>
+              <td><span class="where">agents/new/page.tsx</span></td>
+              <td><code>NewAgentPage()</code></td>
+              <td>两步向导：名称校验 → bootstrap chat + <code>setup_agent</code> 工具</td>
+            </tr>
+            <tr>
+              <td><code>/workspace/agents/[agent_name]/chats/[thread_id]</code></td>
+              <td><span class="where">agents/.../page.tsx</span></td>
+              <td><code>AgentChatPage()</code></td>
+              <td>复用聊天流；<code>agent_name</code> 来自 <code>useParams</code>，提交时传 <code>{ agent_name }</code></td>
+            </tr>
+            <tr>
+              <td>agent chat layout</td>
+              <td><span class="where">agents/.../layout.tsx</span></td>
+              <td>与 chats layout 类似，提供 <code>ChatProviders</code></td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td><code>/workspace/scheduled-tasks</code></td>
+              <td><span class="where">scheduled-tasks/page.tsx</span></td>
+              <td><code>ScheduledTasksPage()</code></td>
+              <td>支持 <code>?thread_id=</code> 过滤；CRUD + pause/resume/trigger</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== SHELL ========== -->
+        <h2 id="shell">App 壳层组件</h2>
+        <table>
+          <thead>
+            <tr><th>符号</th><th>Props / 签名</th><th>返回值 / 职责</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>WorkspaceContent</code></td>
+              <td class="sig">
+                <code>{ children: ReactNode; gatewayUnavailable?: boolean }</code>
+              </td>
+              <td>工作台共享外壳：QueryClient、侧栏、离线横幅、命令面板</td>
+              <td>Server Component；读 cookie 决定侧栏默认开合</td>
+            </tr>
+            <tr>
+              <td><code>ChatProviders</code></td>
+              <td class="sig"><code>{ children: ReactNode }</code></td>
+              <td>聊天页 context 栈</td>
+              <td>必须在聊天 layout 内使用</td>
+            </tr>
+            <tr>
+              <td><code>GatewayOfflineBanner</code></td>
+              <td class="sig"><code>{ gatewayUnavailable: boolean }</code></td>
+              <td>Gateway 恢复探测 + 用户会话刷新</td>
+              <td><code>gatewayUnavailable=false</code> 时不渲染；连续 401 区分会话过期</td>
+            </tr>
+            <tr>
+              <td><code>GatewayOfflineFallback</code></td>
+              <td class="sig"><code>{ children: ReactNode }</code></td>
+              <td>离线时提供 <code>AuthProvider</code></td>
+              <td>与 layout 内 banner 避免双挂载</td>
+            </tr>
+            <tr>
+              <td><code>CommandPalette</code></td>
+              <td>—</td>
+              <td>全局快捷键命令入口</td>
+              <td>无 props；挂于 <code>WorkspaceContent</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== HOOKS ========== -->
+        <h2 id="hooks">Hooks 导出</h2>
+
+        <h3><code>chats/use-thread-chat.ts</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>签名</th><th>返回字段</th><th>边界</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>useThreadChat</code></td>
+              <td class="sig"><code>() =&gt; UseThreadChatResult</code></td>
+              <td>
+                <code>threadId</code>, <code>setThreadId</code>,
+                <code>isNewThread</code>, <code>setIsNewThread</code>,
+                <code>isMock</code>
+              </td>
+              <td>
+                路径 <code>/new</code> 时预生成 UUID；监听
+                <code>THREAD_CHAT_RESET_EVENT</code> 在删线程后重置本地态
+              </td>
+            </tr>
+            <tr>
+              <td><code>resetThreadChatAfterDelete</code></td>
+              <td class="sig">
+                <code>(detail: { deletedThreadId, nextPath, force? }) =&gt; void</code>
+              </td>
+              <td>派发重置事件</td>
+              <td>URL 替换由调用方 router 负责</td>
+            </tr>
+            <tr>
+              <td><code>THREAD_CHAT_RESET_EVENT</code></td>
+              <td>常量 <code>"deer-flow:thread-chat-reset"</code></td>
+              <td>—</td>
+              <td>—</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3><code>chats/use-chat-mode.ts</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>签名</th><th>行为</th><th>触发条件</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>useSpecificChatMode</code></td>
+              <td class="sig"><code>() =&gt; void</code></td>
+              <td>向 PromptInput 注入技能创建初始文案并 focus</td>
+              <td><code>/workspace/chats/new?mode=skill</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3><code>use-active-goal.ts</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>签名</th><th>返回</th><th>边界</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>useActiveGoal</code></td>
+              <td class="sig">
+                <code>(threadId: string, serverGoal?: GoalState | null) =&gt; UseActiveGoalResult</code>
+              </td>
+              <td><code>activeGoal</code>, <code>hasGoal</code>, <code>setLocalGoal</code></td>
+              <td>乐观 <code>/goal</code> 结果与 stream values 对账；换线程或 server 显式回报时清 override</td>
+            </tr>
+            <tr>
+              <td><code>resolveActiveGoal</code></td>
+              <td class="sig">纯函数</td>
+              <td>local 优先，否则 server</td>
+              <td>可单测</td>
+            </tr>
+            <tr>
+              <td><code>shouldResetLocalGoalOverride</code></td>
+              <td class="sig">纯函数</td>
+              <td>是否丢弃乐观态</td>
+              <td>stream 省略 <code>goal</code> 字段不算清除</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="tests">测试：<code>frontend/tests/unit/components/workspace/use-active-goal.test.ts</code></p>
+
+        <h3><code>messages/context.ts</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>类型 / 签名</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>ThreadContext</code></td>
+              <td><code>createContext&lt;ThreadContextType&gt;</code></td>
+              <td>Provider 供子树读取当前 thread stream</td>
+            </tr>
+            <tr>
+              <td><code>ThreadContextType</code></td>
+              <td class="sig"><code>{ thread: BaseStream&lt;AgentThreadState&gt;; isMock?: boolean }</code></td>
+              <td>—</td>
+            </tr>
+            <tr>
+              <td><code>useThread</code></td>
+              <td class="sig"><code>() =&gt; ThreadContextType</code></td>
+              <td>未在 Provider 内 → throw</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3><code>sidecar/context.tsx</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>签名</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>SidecarProvider</code></td>
+              <td class="sig">
+                <code>{ children, parentThreadId, context, isMock? }</code>
+              </td>
+              <td>管理 sidecar 开关、引用列表、子线程 ID</td>
+            </tr>
+            <tr>
+              <td><code>useSidecar</code></td>
+              <td class="sig"><code>() =&gt; SidecarContextValue</code></td>
+              <td>必须在 Provider 内；否则 throw</td>
+            </tr>
+            <tr>
+              <td><code>useMaybeSidecar</code></td>
+              <td class="sig"><code>() =&gt; SidecarContextValue | null</code></td>
+              <td>可选上下文；ChatBox 用其判断右侧面板</td>
+            </tr>
+          </tbody>
+        </table>
+        <p><strong>SidecarContextValue 主要方法：</strong><code>openSidecar</code>、<code>close</code>、
+        <code>openContext</code>、<code>openSelectedText</code>、<code>addContextToConversation</code>、
+        <code>clearConversationQuotes</code>、<code>restoreSidecarThread</code>、
+        <code>setSidecarThreadId</code>。</p>
+
+        <h3><code>artifacts/context.tsx</code></h3>
+        <table>
+          <thead><tr><th>符号</th><th>签名</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>ArtifactsProvider</code></td>
+              <td class="sig"><code>{ children: ReactNode }</code></td>
+              <td>artifact 列表与选中态</td>
+            </tr>
+            <tr>
+              <td><code>useArtifacts</code></td>
+              <td class="sig"><code>() =&gt; ArtifactsContextType</code></td>
+              <td>
+                <code>artifacts</code>, <code>select</code>, <code>deselect</code>,
+                <code>open</code>, <code>setOpen</code>, <code>selectedArtifact</code>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== CHAT CORE ========== -->
+        <h2 id="chat">聊天核心组件</h2>
+
+        <h3><code>chats/chat-box.tsx</code> — <code>ChatBox</code></h3>
+        <table>
+          <thead><tr><th>Prop</th><th>类型</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><code>threadId</code></td><td><code>string</code></td><td>当前线程 ID（含预生成 new 线程）</td></tr>
+            <tr><td><code>children</code></td><td><code>ReactNode</code></td><td>聊天主区域（header + MessageList + InputBox）</td></tr>
+          </tbody>
+        </table>
+        <p>职责：协调 artifact 面板与 sidecar 面板互斥；移动端用 Sheet；静态站自动选中首个 artifact。</p>
+
+        <h3><code>input-box.tsx</code> — <code>InputBox</code></h3>
+        <table>
+          <thead><tr><th>Prop</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><code>threadId</code></td><td><code>string</code></td><td>—</td><td>必填；goal 请求与 thread 绑定</td></tr>
+            <tr><td><code>status</code></td><td><code>"ready" | "streaming" | "error"</code></td><td><code>"ready"</code></td><td>控制提交/停止按钮</td></tr>
+            <tr><td><code>context</code></td><td><code>AgentThreadContext（mode 等）</code></td><td>—</td><td>模式、reasoning_effort 等</td></tr>
+            <tr><td><code>isWelcomeMode</code></td><td><code>boolean?</code></td><td>—</td><td>欢迎布局（与 isNewThread 解耦）</td></tr>
+            <tr><td><code>disabled</code></td><td><code>boolean?</code></td><td>—</td><td>demo/mock/上传中禁用</td></tr>
+            <tr><td><code>onSubmit</code></td><td><code>(message, options?) =&gt; void | Promise</code></td><td>—</td><td>拦截 <code>/goal</code> 命令后走 Gateway goal API</td></tr>
+            <tr><td><code>onStop</code></td><td><code>() =&gt; void</code></td><td>—</td><td>停止当前 stream</td></tr>
+            <tr><td><code>onContextChange</code></td><td><code>(context) =&gt; void</code></td><td>—</td><td>模式切换写回 thread settings</td></tr>
+            <tr><td><code>onGoalChange</code></td><td><code>(goal | null) =&gt; void</code></td><td>—</td><td>乐观更新 GoalStatus</td></tr>
+            <tr><td><code>extraHeader</code></td><td><code>ReactNode?</code></td><td>—</td><td>欢迎页 Hero（<code>Welcome</code>）</td></tr>
+          </tbody>
+        </table>
+        <p><strong>导出类型：</strong><code>InputBoxSubmitOptions</code>（<code>additionalKwargs</code>、
+        <code>additionalInputMessages</code>、<code>onSent</code>）。</p>
+        <p><strong>helpers（<code>input-box-helpers.ts</code>）：</strong><code>parseGoalCommand</code>、
+        <code>getInputSubmitAction</code>、<code>getMatchingSkillSuggestions</code> 等纯函数。</p>
+
+        <h3><code>messages/message-list.tsx</code> — <code>MessageList</code></h3>
+        <table>
+          <thead><tr><th>Prop</th><th>类型</th><th>默认</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><code>threadId</code></td><td><code>string</code></td><td>—</td><td>—</td></tr>
+            <tr><td><code>thread</code></td><td><code>BaseStream&lt;AgentThreadState&gt;</code></td><td>—</td><td>LangGraph stream 对象</td></tr>
+            <tr><td><code>paddingBottom</code></td><td><code>number</code></td><td><code>24</code></td><td>底部留白（常量 <code>MESSAGE_LIST_DEFAULT_PADDING_BOTTOM</code>）</td></tr>
+            <tr><td><code>hasMoreHistory</code></td><td><code>boolean?</code></td><td>—</td><td>是否还有历史页</td></tr>
+            <tr><td><code>loadMoreHistory</code></td><td><code>() =&gt; void</code></td><td>—</td><td>向上翻页</td></tr>
+            <tr><td><code>isHistoryLoading</code></td><td><code>boolean?</code></td><td>—</td><td>历史加载中</td></tr>
+            <tr><td><code>canRegenerate</code></td><td><code>boolean</code></td><td><code>false</code></td><td>显示重试按钮</td></tr>
+            <tr><td><code>onRegenerateMessage</code></td><td><code>(id, supersededIds) =&gt; void</code></td><td>—</td><td>—</td></tr>
+            <tr><td><code>canBranch</code></td><td><code>boolean</code></td><td><code>false</code></td><td>显示分支按钮</td></tr>
+            <tr><td><code>onBranchTurn</code></td><td><code>(messageId, messageIds) =&gt; void</code></td><td>—</td><td>由 page 拥有，sidecar 实例不传</td></tr>
+            <tr><td><code>enableSidecarActions</code></td><td><code>boolean</code></td><td><code>true</code></td><td>选中文本引用到 sidecar</td></tr>
+            <tr><td><code>tokenUsageInlineMode</code></td><td><code>TokenUsageInlineMode</code></td><td><code>"off"</code></td><td>消息内联 token 展示</td></tr>
+          </tbody>
+        </table>
+
+        <h3>其他聊天相关组件（精选）</h3>
+        <table>
+          <thead><tr><th>组件</th><th>关键 Props</th><th>文件</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>GoalStatus</code></td>
+              <td><code>{ goal: GoalState }</code></td>
+              <td><span class="where">goal-status.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>TodoList</code></td>
+              <td><code>{ todos, hidden?, className? }</code></td>
+              <td><span class="where">todo-list.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>ThreadTitle</code></td>
+              <td><code>{ threadId, thread }</code></td>
+              <td><span class="where">thread-title.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>TokenUsageIndicator</code></td>
+              <td><code>threadId?, backendUsage, messages, preferences, onPreferencesChange</code></td>
+              <td><span class="where">token-usage-indicator.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>ExportTrigger</code></td>
+              <td><code>{ threadId: string }</code></td>
+              <td><span class="where">export-trigger.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>Welcome</code></td>
+              <td><code>{ mode }</code></td>
+              <td><span class="where">welcome.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceChangeBadge</code></td>
+              <td><code>{ threadId, runId, ... }</code></td>
+              <td><span class="where">changes/workspace-change-badge.tsx</span></td>
+            </tr>
+            <tr>
+              <td><code>SubtaskCard</code></td>
+              <td><code>{ subtask, threadId, ... }</code></td>
+              <td><span class="where">messages/subtask-card.tsx</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== SIDECAR ========== -->
+        <h2 id="sidecar">Sidecar 组件</h2>
+        <table>
+          <thead><tr><th>组件</th><th>Props</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>SidecarTrigger</code></td>
+              <td>—</td>
+              <td>头部按钮；调用 <code>useSidecar().openSidecar</code></td>
+            </tr>
+            <tr>
+              <td><code>SidecarPanel</code></td>
+              <td><code>{ className?: string }</code></td>
+              <td>sidecar 聊天面板 + MessageList 实例</td>
+            </tr>
+            <tr>
+              <td><code>ReferenceAttachmentSummary</code></td>
+              <td>引用摘要条</td>
+              <td>展示已加入对话的 quote</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== ARTIFACTS ========== -->
+        <h2 id="artifacts">Artifacts 组件</h2>
+        <table>
+          <thead><tr><th>组件</th><th>Props</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>ArtifactTrigger</code></td>
+              <td>—</td>
+              <td>切换 artifact 面板；无 props</td>
+            </tr>
+            <tr>
+              <td><code>ArtifactFileList</code></td>
+              <td><code>{ artifacts, selected, onSelect }</code></td>
+              <td>文件列表</td>
+            </tr>
+            <tr>
+              <td><code>ArtifactFileDetail</code></td>
+              <td><code>{ artifactPath, threadId }</code></td>
+              <td>预览/编辑单文件</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== LAYOUT ========== -->
+        <h2 id="layout">布局与导航</h2>
+        <table>
+          <thead><tr><th>组件</th><th>Props</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>WorkspaceContainer</code></td>
+              <td><code>React.ComponentProps&lt;"div"&gt;</code></td>
+              <td>全屏列布局容器</td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceHeader</code></td>
+              <td><code>React.ComponentProps&lt;"header"&gt;</code></td>
+              <td>面包屑 + GitHub 链接；子节点追加 breadcrumb</td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceBody</code></td>
+              <td><code>React.ComponentProps&lt;"main"&gt;</code></td>
+              <td>主内容区居中</td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceSidebar</code></td>
+              <td><code>React.ComponentProps&lt;typeof Sidebar&gt;</code></td>
+              <td>侧栏：导航、频道、最近聊天、设置菜单</td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceNavChatList</code></td>
+              <td>—</td>
+              <td>新建聊天、聊天列表入口</td>
+            </tr>
+            <tr>
+              <td><code>RecentChatList</code></td>
+              <td>—</td>
+              <td>侧栏展开时显示最近线程</td>
+            </tr>
+            <tr>
+              <td><code>WorkspaceNavMenu</code></td>
+              <td>—</td>
+              <td>Agents、定时任务、设置等底部导航</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== SETTINGS ========== -->
+        <h2 id="settings">设置对话框</h2>
+        <table>
+          <thead><tr><th>符号</th><th>Props</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>SettingsDialog</code></td>
+              <td>
+                <code>Dialog props</code> +
+                <code>defaultSection?: "account"|"appearance"|"channels"|"memory"|"tools"|"skills"|"notification"|"about"</code>
+              </td>
+              <td>多页设置壳；打开时同步 <code>defaultSection</code></td>
+            </tr>
+            <tr>
+              <td>设置子页</td>
+              <td>多数无必填 props；<code>SkillSettingsPage({ onClose? })</code></td>
+              <td>各页面对应 Gateway 配置 API</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== AGENTS ========== -->
+        <h2 id="agents">Agents UI</h2>
+        <table>
+          <thead><tr><th>组件</th><th>Props</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>AgentGallery</code></td>
+              <td>—</td>
+              <td>列表 + 进入聊天/编辑</td>
+            </tr>
+            <tr>
+              <td><code>AgentCard</code></td>
+              <td><code>{ agent, onDelete?, ... }</code></td>
+              <td>单卡片操作</td>
+            </tr>
+            <tr>
+              <td><code>AgentsFeatureDisabled</code></td>
+              <td>—</td>
+              <td>feature flag 关闭时的占位页</td>
+            </tr>
+            <tr>
+              <td><code>AgentWelcome</code></td>
+              <td><code>{ agentName, description? }</code></td>
+              <td>Agent 专属聊天欢迎区</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== SCHEDULED ========== -->
+        <h2 id="scheduled">定时任务 UI</h2>
+        <table>
+          <thead><tr><th>组件</th><th>Props / 类型</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>ScheduledTaskScheduleInput</code></td>
+              <td>
+                <code>{ initial: ScheduleValue; onChange; scheduleTypeLocked? }</code>
+              </td>
+              <td>cron / once 调度编辑</td>
+            </tr>
+            <tr>
+              <td><code>ScheduleValue</code></td>
+              <td class="sig">
+                <code>{ schedule_type; schedule_spec: { cron?, run_at? }; timezone }</code>
+              </td>
+              <td>与 Gateway scheduled-tasks API 对齐</td>
+            </tr>
+            <tr>
+              <td><code>ThreadScheduledTasksLink</code></td>
+              <td><code>{ threadId: string }</code></td>
+              <td>跳转 <code>/workspace/scheduled-tasks?thread_id=</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>页面层 hooks 来自 <code>core/scheduled-tasks/hooks</code>（非 workspace 组件，但为本页主要 API）。</p>
+
+        <!-- ========== BARREL ========== -->
+        <h2 id="barrel">Barrel 导出（<code>index.ts</code>）</h2>
+        <table>
+          <thead><tr><th>路径</th><th>再导出</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="where">chats/index.ts</span></td>
+              <td><code>ChatBox</code>, <code>useThreadChat</code>, <code>useSpecificChatMode</code>, <code>resetThreadChatAfterDelete</code></td>
+            </tr>
+            <tr>
+              <td><span class="where">messages/index.ts</span></td>
+              <td><code>MessageList</code>, <code>MESSAGE_LIST_DEFAULT_PADDING_BOTTOM</code></td>
+            </tr>
+            <tr>
+              <td><span class="where">artifacts/index.ts</span></td>
+              <td><code>ArtifactsProvider</code>, <code>useArtifacts</code>, <code>ArtifactTrigger</code>, 文件列表/详情</td>
+            </tr>
+            <tr>
+              <td><span class="where">sidecar/index.ts</span></td>
+              <td><code>SidecarProvider</code>, <code>useSidecar</code>, <code>useMaybeSidecar</code>, Panel/Trigger</td>
+            </tr>
+            <tr>
+              <td><span class="where">settings/index.ts</span></td>
+              <td><code>SettingsDialog</code></td>
+            </tr>
+            <tr>
+              <td><span class="where">changes/index.ts</span></td>
+              <td><code>WorkspaceChangeBadge</code> 等</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== QUERY ========== -->
+        <h2 id="query">URL 查询参数</h2>
+        <table>
+          <thead><tr><th>参数</th><th>适用路由</th><th>含义</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>?mock=true</code></td>
+              <td>聊天线程页</td>
+              <td><code>useThreadChat().isMock</code>；禁用真实 API 提交</td>
+            </tr>
+            <tr>
+              <td><code>?mode=skill</code></td>
+              <td><code>/workspace/chats/new</code></td>
+              <td>触发 <code>useSpecificChatMode</code> 预填技能创建提示</td>
+            </tr>
+            <tr>
+              <td><code>?thread_id=</code></td>
+              <td><code>/workspace/scheduled-tasks</code></td>
+              <td>过滤某线程的定时任务；默认 context_mode 为 reuse_thread</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== EXAMPLES ========== -->
+        <h2 id="examples">调用示例</h2>
+
+        <h3>新聊天页组合（简化）</h3>
+        <pre><code>// chats/[thread_id]/page.tsx 核心结构
+const { threadId, isNewThread, setThreadId, setIsNewThread, isMock } = useThreadChat();
+const { thread, sendMessage, ... } = useThreadStream({
+  threadId: isNewThread ? undefined : threadId,
+  displayThreadId: threadId,
+  onStart: (id) =&gt; {
+    history.replaceState(null, "", `/workspace/chats/${id}`);
+    setThreadId(id);
+    setIsNewThread(false);
+  },
+});
+
+return (
+  &lt;ThreadContext.Provider value={{ thread, isMock }}&gt;
+    &lt;SidecarProvider parentThreadId={threadId} context={settings.context}&gt;
+      &lt;ChatBox threadId={threadId}&gt;
+        &lt;MessageList threadId={threadId} thread={thread} ... /&gt;
+        &lt;InputBox threadId={threadId} onSubmit={handleSubmit} ... /&gt;
+      &lt;/ChatBox&gt;
+    &lt;/SidecarProvider&gt;
+  &lt;/ThreadContext.Provider&gt;
+);</code></pre>
+
+        <h3>删线程后重置本地聊天态</h3>
+        <pre><code>import { resetThreadChatAfterDelete } from "@/components/workspace/chats";
+
+resetThreadChatAfterDelete({
+  deletedThreadId: thread.thread_id,
+  nextPath: "/workspace/chats/new",
+});
+router.replace("/workspace/chats/new");</code></pre>
+
+        <h3>读取 sidecar 上下文（在 MessageList 内）</h3>
+        <pre><code>const sidecar = useMaybeSidecar();
+if (sidecar &amp;&amp; selectedText) {
+  sidecar.openSelectedText(message, selectedText, displayIndex);
+}</code></pre>
+
+        <!-- ========== TESTS ========== -->
+        <h2 id="tests">测试索引（行为佐证）</h2>
+        <table>
+          <thead><tr><th>领域</th><th>测试文件</th><th>覆盖点</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Goal 乐观态</td>
+              <td><span class="where">tests/unit/components/workspace/use-active-goal.test.ts</span></td>
+              <td><code>resolveActiveGoal</code>、线程切换清 override</td>
+            </tr>
+            <tr>
+              <td>Goal 展示</td>
+              <td><span class="where">tests/unit/components/workspace/goal-status-helpers.test.ts</span></td>
+              <td>continuation 文案</td>
+            </tr>
+            <tr>
+              <td>离线横幅</td>
+              <td><span class="where">tests/unit/components/workspace/gateway-offline-banner-helpers.test.ts</span></td>
+              <td>探测间隔与展示逻辑</td>
+            </tr>
+            <tr>
+              <td>聊天 E2E</td>
+              <td><span class="where">tests/e2e/chat.spec.ts</span>、<code>chat-thread-init-ordering.spec.ts</code></td>
+              <td>新线程创建顺序、history 不提前拉取</td>
+            </tr>
+            <tr>
+              <td>分支</td>
+              <td><span class="where">tests/e2e/branch-thread.spec.ts</span></td>
+              <td><code>onBranchTurn</code> + 导航到新线程</td>
+            </tr>
+            <tr>
+              <td>Sidecar</td>
+              <td><span class="where">tests/e2e/sidecar-chat.spec.ts</span></td>
+              <td>旁路对话与引用</td>
+            </tr>
+            <tr>
+              <td>Artifact</td>
+              <td><span class="where">tests/e2e/artifact-preview.spec.ts</span></td>
+              <td>面板开关与预览</td>
+            </tr>
+            <tr>
+              <td>定时任务</td>
+              <td><span class="where">tests/e2e/scheduled-tasks.spec.ts</span></td>
+              <td>创建表单、过滤、CRUD</td>
+            </tr>
+            <tr>
+              <td>Agent 聊天</td>
+              <td><span class="where">tests/e2e/agent-chat.spec.ts</span></td>
+              <td>agent 专属路由</td>
+            </tr>
+            <tr>
+              <td>Workspace changes</td>
+              <td><span class="where">tests/e2e/workspace-changes.spec.ts</span></td>
+              <td>变更 badge 与 diff 面板</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>与 core 层的边界：</strong>线程流、Gateway REST、LangGraph SDK 的 hooks 定义在
+          <code>frontend/src/core/</code>（<code>threads/hooks</code>、<code>scheduled-tasks/hooks</code> 等）。
+          本 reference 只覆盖 workspace 组件层公共 API；数据层微观 API 见各 <code>module-*</code> 主题或
+          <a href="frontend-workspace-overview.html#core">L1 速查中的 core 表</a>。
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>移动端应用工程模块导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>mobile/ 怎样把 AionU 后端能力带到手机上</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU 的移动端工程怎样完成连接、路由落点和会话通信，把手机变成远程 Cowork 入口。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：app / context / services</span>
+    </div>
+  </section>
+
+  <h2 id="position">1. 先定模块位置：它不是独立后端，而是移动壳</h2>
+  <p><code>open-ai-desktop/AionU/mobile/package.json</code> 把这个模块定义成一个基于 Expo 的独立移动端工程，入口是 <code>expo-router/entry</code>。它在 AionU 总体架构里的位置，和 L0 里桌面 renderer 的角色很像：自己不实现 Cowork 核心能力，而是把远端 AionU backend 暴露出的鉴权、会话、消息流和文件能力，重组为适合手机的交互入口。</p>
+  <p>因此读 <code>mobile/</code> 最重要的判断不是“页面有哪些”，而是“手机怎样拿到后端状态”。对应答案集中在四层：<code>app/</code> 决定页面入口，<code>context/</code> 保存连接与业务状态，<code>services/</code> 负责 REST 和 WebSocket 协议，<code>utils/</code> 处理消息、工作区和时间线等适配细节。完整模块清单请看 <a href="../reference/mobile-app-overview.html">reference</a>；如果要先回到全仓库地图，打开 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图短课</a>。</p>
+
+  <h2 id="flow">2. 第一条主链：从扫码连接到聊天页</h2>
+  <p><code>open-ai-desktop/AionU/mobile/app/connect.tsx</code> 是移动端最关键的外部入口。它支持扫码或粘贴 <code>/qr-login</code> 链接，先调用后端的 <code>/api/auth/qr-login</code> 换到 JWT，再把 <code>host / port / token</code> 交给 <code>ConnectionContext</code>。只有等 WebSocket 真正进入 <code>connected</code>，页面才会跳到 <code>/(tabs)/chat</code>。这说明移动端把“拿到 token”和“连上消息流”分成了两个闸门。</p>
+  <pre><code class="language-ts">const response = await axios.post(`http://${host}:${port}/api/auth/qr-login`, {
+  qrToken,
+});
+const jwt: string = response.data.token;
+
+await connect(host, port, jwt);
+
+await new Promise&lt;void&gt;((resolve, reject) =&gt; {
+  const unsub = wsService.onStateChange((state) =&gt; {
+    if (state === 'connected') resolve();
+    if (state === 'auth_failed') reject(new Error('auth_failed'));
+  });
+});
+
+router.replace('/(tabs)/chat');</code></pre>
+  <div class="diagram">
+    <div class="mermaid">
+graph LR
+  U[手机用户] --> C[connect.tsx 扫码或粘贴]
+  C --> A[/api/auth/qr-login/]
+  A --> K[JWT]
+  K --> CC[ConnectionContext.connect]
+  CC --> WS[wsService.connect]
+  WS --> B[bridge request/on]
+  B --> TAB[/(tabs)/chat]
+    </div>
+  </div>
+  <p>与桌面端不同，这里没有 preload 或 Electron IPC。移动端直接面对远端后端，所以连接页本身就是“移动 Cowork 入口”的门厅。</p>
+
+  <h2 id="providers">3. 第二条主链：provider 栈怎样把远端能力变成页面状态</h2>
+  <p><code>open-ai-desktop/AionU/mobile/app/_layout.tsx</code> 先初始化 i18n，再按 <code>ConnectionProvider → WebSocketProvider → ConversationProvider → WorkspaceProvider → FilesTabProvider</code> 的顺序包住整个路由树。意思很直接：先保证知道连哪台服务器，再保证消息通道可用，然后才谈会话列表、当前工作区和文件标签页。</p>
+  <pre><code class="language-tsx">&lt;ConnectionProvider&gt;
+  &lt;WebSocketProvider&gt;
+    &lt;ConversationProvider&gt;
+      &lt;WorkspaceProvider&gt;
+        &lt;FilesTabProvider&gt;
+          &lt;Stack screenOptions={{ headerShown: false }}&gt;
+            &lt;Stack.Screen name='index' /&gt;
+            &lt;Stack.Screen name='connect' /&gt;
+            &lt;Stack.Screen name='(tabs)' /&gt;
+          &lt;/Stack&gt;
+        &lt;/FilesTabProvider&gt;
+      &lt;/WorkspaceProvider&gt;
+    &lt;/ConversationProvider&gt;
+  &lt;/WebSocketProvider&gt;
+&lt;/ConnectionProvider&gt;</code></pre>
+  <p>真正把“后端消息”翻译成“聊天页可渲染状态”的，是 <code>ChatContext.tsx</code>。它通过 <code>bridge.on('chat.response.stream')</code> 订阅流式事件，再借助 <code>transformMessage()</code> 和 <code>composeMessage()</code> 把原始协议消息拼成移动端消息列表。所以移动端的 UI 不直接理解底层协议，它依赖 context 把协议层折叠成可消费的 React 状态。</p>
+
+  <h2 id="protocol">4. 第三条主链：bridge 把后端协议收口，测试要分层看待</h2>
+  <p><code>open-ai-desktop/AionU/mobile/src/services/websocket.ts</code> 管连接寿命：携带 token 建立连接、处理 ping/pong、指数退避重连、鉴权过期恢复；<code>open-ai-desktop/AionU/mobile/src/services/bridge.ts</code> 再在它之上提供 <code>request / emit / on</code> 三种更稳定的调用形式。页面和 context 因而不必自己拼 WebSocket 报文，只需要按业务名调用诸如 <code>database.get-user-conversations</code>、<code>chat.send.message</code>、<code>confirmation.confirm</code> 这样的桥接接口。</p>
+  <pre><code class="language-ts">request&lt;T = unknown&gt;(name: string, data?: unknown, timeoutMs = 30000): Promise&lt;T&gt; {
+  const id = generateRequestId();
+  const callbackName = `subscribe.callback-${name}${id}`;
+
+  return new Promise&lt;T&gt;((resolve, reject) =&gt; {
+    const unsub = this.on(callbackName, (responseData) =&gt; {
+      unsub();
+      resolve(responseData as T);
+    });
+
+    wsService.send(`subscribe-${name}`, { id, data });
+  });
+}</code></pre>
+  <p>这条链路有专门的回归证据，但要分层看：<code>open-ai-desktop/AionU/mobile/__tests__/services/websocket.test.ts</code> 检查连接、心跳、鉴权失败与重连；<code>open-ai-desktop/AionU/mobile/__tests__/utils/messageAdapter.test.ts</code> 检查流式消息怎样合并成 UI 消息；<code>open-ai-desktop/AionU/mobile/__tests__/services/bridge.test.ts</code> 表达了订阅、一次性订阅、请求超时和回调清理这些抽象语义。当前 <code>bridge.ts</code> 已通过 <code>subscribe-${name}</code> 发送请求，而该测试里的直发事件名断言需要后续校准，所以不要把它当成 subscribe 发送协议已经完全锁死的证据。</p>
+
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果用户扫码成功后拿到了 JWT，但聊天页仍然没有打开，你会优先检查 <code>connect.tsx</code> 的哪个等待点？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先看它是否等到了 <code>wsService.onStateChange</code> 的 <code>connected</code>。因为页面跳转不是在 REST 换 token 后立刻发生，而是在 WebSocket 会话真正连通后触发。若你只盯着 <code>axios.post('/api/auth/qr-login')</code>，说明你抓到了鉴权，却还没抓到移动端真正依赖的是“长连接就绪”。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先读 <code>app/connect.tsx</code>，再顺着 <code>ConnectionContext.tsx → websocket.ts → bridge.ts → ChatContext.tsx</code> 走一遍。接着用 <a href="../reference/mobile-app-overview.html#routes">reference 路由表</a> 和 <a href="../reference/mobile-app-overview.html#tests">测试清单</a> 做交叉验证。</p>
+</main>
+<script>
+  mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });
+</script>
+</body>
+</html>

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox 与文件系统参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; --ok:#0f766e; --warn:#9a3412; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; letter-spacing:0; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    .mono { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    pre { margin:12px 0; padding:14px 16px; overflow:auto; background:#0f172a; color:#e5eefb; border-radius:8px; font-size:.84rem; line-height:1.6; }
+    pre code { background:transparent; color:inherit; padding:0; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Sandbox 与文件系统参考</h1>
+  <p class="lead">本页是 L1 速查材料：模块边界、对外接口、内部分层、provider 差异、配置项和测试锚点。微观 API 签名与边界见 <a href="sandbox-api.html">L3 sandbox-api.html</a>；短课入口：<a href="../lessons/0001-sandbox-module-tour.html">0001-sandbox-module-tour.html</a>；整体架构锚点见 <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>。</p>
+
+  <h2 id="boundary">模块职责与架构位置</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码依据</th></tr>
+    <tr><td>一句话职责</td><td>Sandbox 模块给 agent 提供受控执行环境和线程级文件系统视图：选择 provider、分配 sandbox、映射虚拟路径、执行 bash/file tools，并把 outputs 目录接入 artifact 读取链路。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/sandbox.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+    <tr><td>整体位置</td><td>位于 lead agent middleware 链和 Gateway 文件路由之间。Lead agent 通过 tools 使用它；Gateway uploads/artifacts 通过同一套线程目录读写它。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/middleware.py</code></span>、<span class="where"><code>backend/app/gateway/routers/artifacts.py</code></span></td></tr>
+    <tr><td>核心边界</td><td>agent 看到 `/mnt/user-data/...`、`/mnt/skills/...`、`/mnt/acp-workspace/...` 或配置 mount；host 绝对路径只应在 provider、Gateway 和 path resolver 内部出现。</td><td><span class="where"><code>backend/packages/harness/deerflow/config/paths.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/sandbox/local/local_sandbox.py</code></span></td></tr>
+    <tr><td>非职责</td><td>不决定模型策略，不实现前端 artifact UI，不替代 Gateway 认证授权，不保证 LocalSandboxProvider 的 host bash 是强隔离边界。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/security.py</code></span>、<span class="where"><code>backend/docs/CONFIGURATION.md</code></span></td></tr>
+  </table>
+
+  <h2 id="dependencies">关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>本模块如何使用</th><th>谁依赖本模块</th></tr>
+    <tr><td><a href="../../module-lead-agent/reference/lead-agent-overview.html">lead agent</a> / <code>SandboxMiddleware</code></td><td>lazy init sandbox，注入 <code>ThreadState.sandbox</code>，装配 file/bash tools。</td><td>—</td></tr>
+    <tr><td><code>config/paths.py</code></td><td>虚拟路径 <code>/mnt/user-data/{workspace,uploads,outputs}</code> 映射。</td><td>—</td></tr>
+    <tr><td><a href="../../module-gateway/reference/gateway-overview.html">Gateway</a> uploads/artifacts</td><td>读写 host <code>user-data/</code> 并与 sandbox 同步（非 bind-mount 时）。</td><td>—</td></tr>
+    <tr><td><a href="../../module-subagents/reference/subagents-overview.html">subagents</a></td><td>subagent 继承主线程 sandbox 与 tool groups。</td><td>—</td></tr>
+    <tr><td>—</td><td>—</td><td><a href="../../slice-upload-sandbox-artifact/lessons/0001-flow-map.html">L2 上传→artifact</a>、IM channel 文件管道</td></tr>
+  </table>
+
+  <h2 id="map">内部分层结构</h2>
+  <div class="filetree">backend/packages/harness/deerflow/
+├── config/
+│   ├── paths.py                       ← VIRTUAL_PATH_PREFIX、线程目录、artifact path resolver
+│   └── sandbox_config.py              ← SandboxConfig、VolumeMountConfig
+├── agents/
+│   └── middlewares/
+│       ├── thread_data_middleware.py  ← 写入 ThreadState.thread_data
+│       └── sandbox_audit_middleware.py ← bash 风险审计
+├── sandbox/
+│   ├── sandbox.py                     ← Sandbox 抽象接口
+│   ├── sandbox_provider.py            ← provider 单例与生命周期
+│   ├── middleware.py                  ← lazy init、ThreadState.sandbox 写回
+│   ├── tools.py                       ← bash/file/search tools 与路径校验
+│   ├── security.py                    ← Local host bash capability gate
+│   └── local/                         ← LocalSandboxProvider 与路径映射
+└── community/
+    ├── aio_sandbox/                   ← AIO Docker/remote provider
+    └── e2b_sandbox/                   ← E2B cloud provider</div>
+
+  <h3>运行时分层</h3>
+  <div class="diagram">Gateway / thread run
+  │
+  ├── ThreadDataMiddleware
+  │   └── thread_data: workspace_path / uploads_path / outputs_path
+  │
+  ├── SandboxMiddleware
+  │   └── lazy acquire + Command(update={"sandbox": ...})
+  │
+  ├── sandbox tools
+  │   ├── bash / ls / glob / grep
+  │   └── read_file / write_file / str_replace
+  │
+  ├── SandboxProvider
+  │   ├── LocalSandboxProvider
+  │   ├── AioSandboxProvider
+  │   └── E2BSandboxProvider
+  │
+  └── Gateway file routes
+      ├── uploads → /mnt/user-data/uploads
+      └── artifacts → /mnt/user-data/outputs</div>
+
+  <h2 id="interfaces">对外接口与主要类清单</h2>
+  <table>
+    <tr><th>接口/类</th><th>位置</th><th>职责</th><th>调用者</th></tr>
+    <tr><td><code>Sandbox</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/sandbox.py</code></span></td><td>统一命令执行、文本读写、二进制下载、目录列举、glob、grep、binary update。</td><td>tools、uploads sync、artifact/download 相关逻辑</td></tr>
+    <tr><td><code>SandboxProvider</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/sandbox_provider.py</code></span></td><td>定义 `acquire`、`acquire_async`、`get`、`release`、`reset` 生命周期。</td><td><code>SandboxMiddleware</code>、<code>ensure_sandbox_initialized</code>、uploads router</td></tr>
+    <tr><td><code>get_sandbox_provider()</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/sandbox_provider.py</code></span></td><td>按 `config.sandbox.use` 动态解析 provider，并用锁保护单例替换。</td><td>所有 sandbox 入口</td></tr>
+    <tr><td><code>ThreadDataMiddleware</code></td><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py</code></span></td><td>从 runtime context/config 取 `thread_id`，生成线程 workspace/uploads/outputs host 路径。</td><td>lead agent middleware 链</td></tr>
+    <tr><td><code>SandboxMiddleware</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/middleware.py</code></span></td><td>延迟或提前获取 sandbox，确保 lazy init 后的 sandbox id 进入 LangGraph state。</td><td>lead agent middleware 链</td></tr>
+    <tr><td><code>SandboxAuditMiddleware</code></td><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/sandbox_audit_middleware.py</code></span></td><td>只拦截 `bash` tool call，按风险级别 block/warn/pass，并写结构化审计日志。</td><td>lead agent middleware 链</td></tr>
+    <tr><td><code>LocalSandboxProvider</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py</code></span></td><td>构造线程级 <code>LocalSandbox</code>，把 `/mnt/user-data`、skills、ACP workspace 和自定义 mount 映射到本地目录。</td><td>默认 sandbox provider</td></tr>
+    <tr><td><code>LocalSandbox</code>、<code>PathMapping</code></td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/local/local_sandbox.py</code></span></td><td>在 host 进程内执行文件 API；可选 host bash；负责 path resolve/reverse resolve、只读 mount 和 symlink escape 防护。</td><td>Local provider 返回的 sandbox 实例</td></tr>
+    <tr><td><code>AioSandboxProvider</code>、<code>AioSandbox</code></td><td><span class="where"><code>backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py</code></span></td><td>管理 AIO sandbox 容器或 remote backend，处理线程锁、跨进程发现、warm pool、idle cleanup 和 mounts。</td><td>Docker/provisioner sandbox 模式</td></tr>
+    <tr><td><code>E2BSandboxProvider</code>、<code>E2BSandbox</code></td><td><span class="where"><code>backend/packages/harness/deerflow/community/e2b_sandbox/e2b_sandbox_provider.py</code></span></td><td>连接 E2B cloud sandbox，按 `(user_id, thread_id)` metadata 复用 remote VM，并把 `/mnt/user-data` 映射到 remote home。</td><td>E2B cloud sandbox 模式</td></tr>
+    <tr><td><code>bash_tool</code>、<code>read_file_tool</code>、<code>write_file_tool</code> 等</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td><td>agent 可见工具层，负责初始化 sandbox、路径校验、输出截断、secret masking 和文件操作锁。</td><td>模型 tool call</td></tr>
+    <tr><td><code>SandboxConfig</code></td><td><span class="where"><code>backend/packages/harness/deerflow/config/sandbox_config.py</code></span></td><td>配置 provider class、host bash 开关、镜像、mounts、环境变量、输出截断和 host bash timeout。</td><td>AppConfig、provider、tools</td></tr>
+  </table>
+
+  <h2 id="paths">虚拟路径契约</h2>
+  <table>
+    <tr><th>虚拟路径</th><th>host 语义</th><th>读写规则</th><th>关联入口</th></tr>
+    <tr><td><code>/mnt/user-data/workspace</code></td><td>线程工作区，agent 放置临时脚本、项目文件、运行日志。</td><td>读写允许；Local bash 会把相对路径锚定到 workspace。</td><td><code>Paths.sandbox_work_dir()</code>、<code>ThreadDataMiddleware</code></td></tr>
+    <tr><td><code>/mnt/user-data/uploads</code></td><td>用户通过 Gateway 上传的文件。</td><td>读允许；写也允许，但语义上不应把最终产物写在这里。</td><td><code>uploads.py</code>、<code>upload_virtual_path()</code></td></tr>
+    <tr><td><code>/mnt/user-data/outputs</code></td><td>agent 生成的 artifact 文件。</td><td>读写允许；Gateway artifacts router 从这里读回文件。</td><td><code>Paths.sandbox_outputs_dir()</code>、<code>artifacts.py</code></td></tr>
+    <tr><td><code>/mnt/skills/public</code></td><td>全局 public skills 目录。</td><td>只读；disabled skill 会被工具层拒绝访问。</td><td><code>LocalSandboxProvider._setup_path_mappings()</code>、<code>tools.py</code></td></tr>
+    <tr><td><code>/mnt/skills/custom</code></td><td>当前用户的 custom skills 目录。</td><td>只读；按 user_id 隔离。</td><td><code>LocalSandboxProvider._build_thread_path_mappings()</code></td></tr>
+    <tr><td><code>/mnt/acp-workspace</code></td><td>线程级 ACP agent workspace。</td><td>在工具校验中作为只读路径族；provider 可用 mount 或映射暴露。</td><td><code>Paths.acp_workspace_dir()</code>、AIO thread mounts</td></tr>
+    <tr><td>自定义 mount</td><td><code>sandbox.mounts[].host_path</code> 到 <code>container_path</code> 的映射。</td><td>按 <code>read_only</code> 约束；不能覆盖保留前缀。</td><td><code>SandboxConfig.mounts</code>、Local/AIO provider</td></tr>
+  </table>
+
+  <h2 id="providers">Provider 差异速查</h2>
+  <table>
+    <tr><th>Provider</th><th>隔离与执行</th><th>文件同步模型</th><th>生命周期与容量</th><th>主要风险/注意点</th></tr>
+    <tr><td><code>LocalSandboxProvider</code></td><td>在 Gateway 进程可见的本地文件系统上工作；host bash 默认禁用。</td><td>直接用 <code>PathMapping</code> 把虚拟路径解析到线程目录；<code>uses_thread_data_mounts=True</code>。</td><td>同一 `(user_id, thread_id)` 复用一个 <code>LocalSandbox</code>；LRU 默认最多缓存 256 个线程。</td><td>不是强 shell isolation；只适合可信本地工作流。Docker Compose 下 mount 的 host_path 是 Gateway 容器视角。</td></tr>
+    <tr><td><code>AioSandboxProvider</code> 本地容器</td><td>通过 Docker 或 Apple Container 启动 AIO sandbox 容器。</td><td>把 workspace/uploads/outputs bind mount 到容器内 `/mnt/user-data/...`；本地 backend 上 <code>uses_thread_data_mounts=True</code>。</td><td>线程锁 + 跨进程文件锁；确定性 sandbox id；warm pool；idle timeout；replicas 软上限。</td><td>Docker-outside-of-Docker 模式要理解 Docker socket 风险；per-command secret env 需要支持 <code>/v1/bash/exec</code> 的镜像。</td></tr>
+    <tr><td><code>AioSandboxProvider</code> remote/provisioner</td><td>通过 provisioner 或 remote backend 连接独立 sandbox。</td><td>remote backend 可能没有共享 host mount，上传文件需要显式 sync。</td><td>provider 仍负责发现、创建、ready polling、release/warm pool。</td><td>调试重点从本地目录变成 provisioner、Pod/Service 和 remote backend health。</td></tr>
+    <tr><td><code>E2BSandboxProvider</code></td><td>使用 E2B cloud micro-VM 和 <code>e2b_code_interpreter</code> SDK。</td><td>无 host bind mount；启动时 one-shot 上传 configured mounts；`/mnt/user-data` 被映射到 remote home。</td><td>通过 E2B metadata 发现同一 `(user_id, thread_id)` 的 VM；warm pool；server-side idle timeout。</td><td>outputs 需要通过 remote file API 下载或同步；VM 可能被控制面回收，provider 会在 ping/reuse 时重建。</td></tr>
+  </table>
+
+  <h2 id="tools">Tool 层安全规则</h2>
+  <table>
+    <tr><th>工具/函数</th><th>安全动作</th><th>依据</th></tr>
+    <tr><td><code>validate_local_tool_path()</code></td><td>只允许 `/mnt/user-data/*`、只读 skills、只读 ACP workspace 或配置 mount；拒绝 `..` traversal。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+    <tr><td><code>validate_local_bash_command_paths()</code></td><td>本地 bash 模式下扫描 host 绝对路径、`file://`、危险 `cd`、`..` 等，要求使用虚拟路径。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+    <tr><td><code>SandboxAuditMiddleware</code></td><td>高风险命令 block，如 `rm -rf /`、pipe to shell、`/etc/shadow`、动态链接器劫持；中风险 warn，如 `pip install`、`chmod 777`。</td><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/sandbox_audit_middleware.py</code></span></td></tr>
+    <tr><td><code>is_host_bash_allowed()</code></td><td>LocalSandboxProvider 下只有显式 <code>allow_host_bash: true</code> 才允许 bash。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/security.py</code></span></td></tr>
+    <tr><td><code>build_sandbox_env()</code></td><td>继承 host env 前剔除 key/secret/token/password/DSN 等疑似凭据，再叠加 request-scoped secrets。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/env_policy.py</code></span></td></tr>
+    <tr><td><code>mask_local_paths_in_output()</code></td><td>把工具输出中的 host 路径遮回 `/mnt/user-data`、`/mnt/skills`、`/mnt/acp-workspace`。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+    <tr><td><code>download_file()</code></td><td>只允许 `/mnt/user-data` 前缀，拒绝 traversal，并限制最大 100 MB。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/local/local_sandbox.py</code></span>、AIO/E2B adapters</td></tr>
+    <tr><td><code>write_file_tool()</code></td><td>单次非 append 写入默认 80 KB 上限；写入时使用 per-sandbox file operation lock。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+  </table>
+
+  <h2 id="artifact">Uploads 与 Artifact 链路</h2>
+  <table>
+    <tr><th>阶段</th><th>关键行为</th><th>源码</th></tr>
+    <tr><td>上传</td><td>Gateway 校验文件名、数量、大小和总大小，写入当前用户/线程的 uploads 目录，返回 virtual_path 和 artifact_url。</td><td><span class="where"><code>backend/app/gateway/routers/uploads.py</code></span>、<span class="where"><code>backend/packages/harness/deerflow/uploads/manager.py</code></span></td></tr>
+    <tr><td>同步到 sandbox</td><td>如果 provider 没有 thread data mounts，则 uploads router 通过 <code>sandbox.update_file(virtual_path, bytes)</code> 显式同步。</td><td><span class="where"><code>backend/app/gateway/routers/uploads.py</code></span></td></tr>
+    <tr><td>agent 读取上传</td><td>agent 使用 `/mnt/user-data/uploads/{filename}`；Local 由 PathMapping 或工具路径解析到 host；远端 provider 由自己的文件 API 读取。</td><td><span class="where"><code>backend/packages/harness/deerflow/sandbox/tools.py</code></span></td></tr>
+    <tr><td>agent 写出产物</td><td>建议写入 `/mnt/user-data/outputs/...`，这样 Gateway artifact router 能用同一虚拟路径找到 host/remote 同步后的文件。</td><td><span class="where"><code>backend/packages/harness/deerflow/config/paths.py</code></span></td></tr>
+    <tr><td>artifact 读取</td><td><span class="mono">GET /api/threads/{thread_id}/artifacts/{path:path}</span> 把 <span class="mono">mnt/user-data/...</span> 解析回线程目录；文本可 inline，主动内容强制 attachment。</td><td><span class="where"><code>backend/app/gateway/routers/artifacts.py</code></span>、<span class="where"><code>backend/app/gateway/path_utils.py</code></span></td></tr>
+  </table>
+
+  <h2 id="config">配置速查</h2>
+  <table>
+    <tr><th>配置项</th><th>默认/示例</th><th>作用</th></tr>
+    <tr><td><code>sandbox.use</code></td><td><code>deerflow.sandbox.local:LocalSandboxProvider</code></td><td>provider class path，由 <code>resolve_class()</code> 动态加载。</td></tr>
+    <tr><td><code>sandbox.allow_host_bash</code></td><td><code>false</code></td><td>LocalSandboxProvider 下是否允许 host bash。生产或不可信输入应保持关闭。</td></tr>
+    <tr><td><code>sandbox.mounts[]</code></td><td><code>host_path</code>、<code>container_path</code>、<code>read_only</code></td><td>额外挂载目录。Local provider 会拒绝相对 host path、非绝对 container path 和保留前缀冲突。</td></tr>
+    <tr><td><code>sandbox.image</code></td><td>AIO image 或 E2B template</td><td>AIO provider 用作容器镜像；E2B provider 可把它作为 template fallback。</td></tr>
+    <tr><td><code>sandbox.replicas</code></td><td><code>3</code></td><td>限制 active + warm sandboxes。active 通常不被强行停止，warm entries 可被 LRU 淘汰。</td></tr>
+    <tr><td><code>sandbox.idle_timeout</code></td><td><code>600</code> 或 provider 默认</td><td>释放后的 warm sandbox/VM 保留多久。</td></tr>
+    <tr><td><code>sandbox.environment</code></td><td><code>KEY: $HOST_ENV</code></td><td>注入 sandbox 容器或 remote VM 的环境变量；命令级 secrets 另走 per-call env。</td></tr>
+    <tr><td><code>bash_output_max_chars</code></td><td><code>20000</code></td><td>bash 输出中间截断，保留头尾。</td></tr>
+    <tr><td><code>read_file_output_max_chars</code></td><td><code>50000</code></td><td>read_file 输出头部截断。</td></tr>
+    <tr><td><code>ls_output_max_chars</code></td><td><code>20000</code></td><td>ls 输出头部截断。</td></tr>
+    <tr><td><code>bash_command_timeout</code></td><td><code>600</code></td><td>Local host bash 单命令 wall-clock 超时，超时会终止进程组。</td></tr>
+  </table>
+
+  <h2 id="call-example">调用示例</h2>
+  <p>下面是一次“写 artifact”的压缩调用形状，展示 L1 需要掌握的边界，不是完整可运行测试。</p>
+  <pre><code class="language-python"># 1. ThreadDataMiddleware 已经把三个 host path 写入 runtime.state["thread_data"]。
+runtime.state["thread_data"] = {
+    "workspace_path": ".../threads/t1/user-data/workspace",
+    "uploads_path": ".../threads/t1/user-data/uploads",
+    "outputs_path": ".../threads/t1/user-data/outputs",
+}
+
+# 2. 首次文件工具调用触发 sandbox lazy init。
+sandbox = ensure_sandbox_initialized(runtime)
+
+# 3. agent 写到虚拟 outputs 路径。
+write_file_tool.invoke({
+    "runtime": runtime,
+    "description": "write report",
+    "path": "/mnt/user-data/outputs/report.md",
+    "content": "# Report\n..."
+})
+
+# 4. Gateway 读取 artifact。
+# GET /api/threads/t1/artifacts/mnt/user-data/outputs/report.md</code></pre>
+
+  <h2 id="tests">测试锚点</h2>
+  <table>
+    <tr><th>测试文件</th><th>验证内容</th><th>关键度</th></tr>
+    <tr><td><span class="where"><code>backend/tests/test_local_sandbox_virtual_path_contract.py</code></span></td><td>LocalSandbox 通过公共 API 直接接受 `/mnt/user-data/...`；线程和用户隔离；LRU cache；release no-op。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_sandbox_middleware.py</code></span></td><td>lazy init、async acquire、`Command(update=...)` 写回 sandbox state、release off-thread。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_thread_data_middleware.py</code></span></td><td>thread id 来源、三类线程目录路径、缺少 thread id 的错误。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_sandbox_tools_security.py</code></span></td><td>虚拟路径替换、host path masking、traversal 拒绝、本地 bash 路径限制。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_sandbox_audit_middleware.py</code></span></td><td>bash 风险分类、compound command 解析、block/warn/pass 行为。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_local_sandbox_provider_mounts.py</code></span></td><td>PathMapping、只读 mount、symlink escape、反向路径解析、自定义 mounts。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_aio_sandbox.py</code></span></td><td>AIO 命令串行、ErrorObservation recovery、bash.exec 404 fail-fast、download 上限、client close。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_aio_sandbox_provider.py</code></span></td><td>AIO thread mounts、async readiness、锁取消安全、warm pool、replica/idle cleanup。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_e2b_sandbox_provider.py</code></span></td><td>E2B metadata reuse、dead sandbox detection、env forwarding、outputs sync、streaming download 上限。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_artifacts_router.py</code></span>、<span class="where"><code>backend/tests/test_uploads_router.py</code></span></td><td>Gateway 读写线程文件边界、artifact MIME 处理和上传安全。</td><td>辅助</td></tr>
+  </table>
+
+  <h2 id="reading-order">推荐阅读顺序</h2>
+  <ol>
+    <li>先读 <code>backend/packages/harness/deerflow/config/paths.py</code>，建立 `/mnt/user-data` 到 host 目录的映射。</li>
+    <li>再读 <code>thread_data_middleware.py</code> 与 <code>sandbox/middleware.py</code>，看路径和 sandbox id 如何进入 state。</li>
+    <li>接着读 <code>sandbox/tools.py</code> 的 <code>ensure_sandbox_initialized</code>、<code>validate_local_tool_path</code>、<code>bash_tool</code>、<code>write_file_tool</code>。</li>
+    <li>随后读 <code>local_sandbox_provider.py</code> 与 <code>local_sandbox.py</code>，确认公共 API 的虚拟路径契约。</li>
+    <li>最后按部署模式选择读 <code>aio_sandbox_provider.py</code> 或 <code>e2b_sandbox_provider.py</code>。</li>
+  </ol>
+
+  <p class="callout">调试经验：如果问题是“agent 看不到上传文件”，先查 uploads router 和 provider 的 <code>uses_thread_data_mounts</code>；如果问题是“写出的文件前端打不开”，先查是否写在 `/mnt/user-data/outputs` 以及 artifact URL 是否传了 `mnt/user-data/...`；如果问题是“bash 被拒绝”，先区分 Local host bash 开关、tool path validation 和 SandboxAuditMiddleware 三层。</p>
+</main>
+</body>
+</html>

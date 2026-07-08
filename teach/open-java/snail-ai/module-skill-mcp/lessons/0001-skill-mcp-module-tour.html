@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skill 与 MCP 能力模块导览</title>
+  <link rel="stylesheet" href="../assets/skill-mcp.css">
+  <style>
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 责任链</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Agent Client</a>
+    <a href="../reference/skill-mcp-overview.html">模块地图</a>
+    <a href="../reference/skill-mcp-api.html">模块构建 API</a>
+  </nav>
+
+  <h1>Skill 与 MCP 能力模块导览</h1>
+  <p class="lead">本课只完成一个目标：把 Skill 和 MCP Server 从 Admin 配置、Agent 绑定、Server 责任链描述符，到 Agent Client 工具 resolver 的执行边界串成一条线。</p>
+  <div class="meta">
+    <span class="pill">层级：L1 模块总览</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">前置：Agent 责任链与 Client 执行层</span>
+  </div>
+
+  <h2>1. 先分清两类能力</h2>
+  <p>Skill 是可复用的指令包，Admin 端通过在线创建或 ZIP 上传写入 <code>sai_skill</code> 和 <code>sai_skill_file</code>；Agent 只保存与 Skill 的关联。MCP Server 是外部工具服务配置，Admin 端写入 <code>sai_mcp_server</code>，再用 <code>sai_agent_mcp_server</code> 绑定到 Agent。二者都不是直接在 Admin 执行，而是在一次对话中被 Server 责任链转成 <code>ChatDispatchRequest</code> 描述符，交给 Agent Client 的工具解析器。</p>
+  <div class="filetree">skill-mcp 主线源码
+├── admin/                         ← Skill、MCP、Agent 配置入口
+├── feature-agent/chain/           ← McpHandler、SkillAgentChatHandler、LlmCallHandler
+├── feature-skill/handle/          ← Skill 查询与 read_skill 回调
+├── commons/dto/agent/             ← ChatDispatchRequest 与 Skill 内容 DTO
+└── agent/core/resolver/           ← Client 侧 ToolCallback 边界</div>
+
+  <h2>2. Admin 只负责配置和绑定</h2>
+  <p><code>SkillController</code> 管理上传、在线创建、文件树、内容保存和下载；<code>McpServerController</code> 管理 MCP Server CRUD 与连接测试。Agent 的创建和更新请求带有 <code>skillIds</code>、<code>mcpServerIds</code>、<code>skillEnabled</code>、<code>mcpEnabled</code>，<code>AgentService</code> 会分别调用两个服务维护关联表。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentService.java</span></p>
+  <pre><code class="language-java">if (request.getMcpServerIds() != null) {
+    mcpServerService.updateAgentMcpServers(id, request.getMcpServerIds());
+}
+
+if (request.getSkillIds() != null) {
+    skillService.updateAgentSkills(id, request.getSkillIds());
+}</code></pre>
+  <p>对话时还有一个轻量开关：<code>AgentChatRequestVO</code> 可带 <code>disabledMcpServerIds</code> 和 <code>disabledSkillIds</code>。这不会改数据库绑定，只影响当前请求中哪些描述符被过滤。</p>
+
+  <h2>3. Server 把配置变成分发合同</h2>
+  <p>责任链当前源码顺序里，<code>McpHandler</code> 是 <code>@Order(40)</code>，<code>SkillAgentChatHandler</code> 是 <code>@Order(70)</code>，<code>LlmCallHandler</code> 是 <code>@Order(80)</code>。MCP Handler 查询 Agent 绑定的 MCP Server，过滤本次禁用 ID，然后把连接参数转成 <code>McpServerDescriptor</code>。Skill Handler 查询 Agent 绑定的 Skill，过滤禁用 ID，然后生成 <code>SkillDescriptor</code>。最后 <code>LlmCallHandler</code> 把两组描述符放进同一个 <code>ChatDispatchRequest</code>。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/dto/agent/ChatDispatchRequest.java</span></p>
+  <pre><code class="language-java">private List&lt;McpServerDescriptor&gt; mcpServers;
+private List&lt;SkillDescriptor&gt; skills;
+
+public static class McpServerDescriptor { /* id, transport, endpoint, command... */ }
+public static class SkillDescriptor { /* id, name, description, version, skillPrompt */ }</code></pre>
+  <p class="note">源码优先：<code>SkillAgentChatHandler</code> 构造 <code>SkillDescriptor</code> 时仍调用 <code>skillPrompt(s.getSkillContent())</code>，DTO 会携带正文；但当前 <code>ClientSkillToolResolver</code> 不直接把这个字段拼成 prompt 正文，只把 Skill 名称、描述和临时目录列表追加到 system prompt，并注册 <code>read_skill</code>。模型需要完整指令时，<code>ReadSkillTool</code> 再通过 RPC 回调 Server 重新拉取内容。</p>
+
+  <h2>4. Client resolver 才进入工具执行边界</h2>
+  <p>Agent Client 接到 <code>/chat/dispatch</code> 后，<code>ChatSessionRuntime</code> 先调用 <code>ToolRuntime.resolve</code>。这里会解析 MCP 工具、基础工具、RAG 工具、Skill 工具和本地 <code>@Tool</code> Bean，随后 <code>DefaultChatClientFactory</code> 通过 <code>defaultTools</code> 交给 Spring AI 的 <code>ToolCallingAdvisor</code>。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/runtime/tool/ToolRuntime.java</span></p>
+  <pre><code class="language-java">tools.addAll(resolveMcpTools(dispatchRequest.getMcpServers(), mcpResolver));
+addResolvedTools(tools, "base", () -> baseToolResolver.resolve(dispatchRequest));
+addResolvedTools(tools, "RAG", () -> ragToolResolver.resolve(dispatchRequest));
+addResolvedTools(tools, "Skill", () -> skillToolResolver.resolve(dispatchRequest));
+tools.addAll(Arrays.asList(customToolCallbackProvider.getToolCallbacks()));</code></pre>
+  <p>MCP resolver 负责按 Streamable HTTP 或 Stdio 建立 <code>McpSyncClient</code>，发现远端工具并转为 <code>ToolCallback</code>；SSE 在当前代码中被跳过。Skill resolver 只注册 <code>read_skill</code>，不消费描述符里的 <code>skillPrompt</code> 作为正文提示词；完整内容由 <code>ReadSkillTool</code> 通过 <code>RpcClient.fetchSkillContent</code> 回调 Server 的 <code>SkillContentCallbackHandler</code> 重新获取，再缓存并异步物化支撑文件。一次会话 completion 或 error 后，<code>ToolResolution.close()</code> 会关闭 MCP 连接。</p>
+
+  <div class="exercise">
+    <p>暂停回忆：用户说“这个 Agent 绑定的 Skill 没有被模型使用”，你会先查 Admin 的 <code>SkillController</code>，Server 的 <code>SkillAgentChatHandler</code>，还是 Client 的 <code>ClientSkillToolResolver</code>？请按顺序说出三个检查点。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先查 Agent 是否 <code>skillEnabled=true</code> 且 <code>skillIds</code> 已写入关联表；再查 <code>SkillAgentChatHandler</code> 是否加载到 Skill、是否被 <code>disabledSkillIds</code> 过滤；最后查 <code>ClientSkillToolResolver</code> 是否追加 Skill 列表并注册 <code>read_skill</code>。如果模型看到了列表但没读内容，问题多半在模型选择工具或 <code>ReadSkillTool</code> 回调 Server 的链路。</p>
+    </details>
+  </div>
+  <p>主要阅读来源：<code>ToolRuntime</code>、<code>ClientSkillToolResolver</code>、<code>ClientMcpToolResolver</code>。读完后打开 <a href="../reference/skill-mcp-overview.html">模块地图</a>，用表格核对 Admin、DTO、Handler、resolver 和易错点。遇到禁用 ID、MCP 认证或 Skill 支撑文件物化不清楚的地方，可以继续向 agent 追问具体调用栈。</p>
+</main>
+</body>
+</html>

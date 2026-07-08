@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Intercom 总览参考页</title>
+	<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L1-intercom Reference</p>
+		<h1>父子进程 intercom 与 supervisor 协调模块总览</h1>
+		<p>这页承载短课之外的长内容：消息类型、通道生命周期、调用方矩阵、边界判断和测试证据。</p>
+	</header>
+
+	<section>
+		<h2>源码地图</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>文件</th>
+					<th>核心职责</th>
+					<th>关键函数</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code></span></td>
+					<td>把配置、父会话 target、默认/自定义协调提示转成可注入到子 agent 的 bridge state。</td>
+					<td><code>resolveIntercomSessionTarget</code>、<code>resolveSubagentIntercomTarget</code>、<code>diagnoseIntercomBridge</code>、<code>resolveIntercomBridge</code>、<code>applyIntercomBridgeToAgent</code></td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></span></td>
+					<td>提供 native 文件通道：子端写 request，父端轮询、展示、回复、清理。</td>
+					<td><code>resolveSupervisorChannelDir</code>、<code>registerNativeSupervisorClient</code>、<code>createNativeSupervisorChannel</code></td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code></span></td>
+					<td>把 foreground/async 子 agent 完成结果聚合成 intercom payload，并生成 compact receipt。</td>
+					<td><code>buildSubagentResultIntercomPayload</code>、<code>deliverSubagentResultIntercomEvent</code>、<code>formatSubagentResultReceipt</code>、<code>stripDetailsOutputsForIntercomReceipt</code></td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+
+	<section>
+		<h2>消息类型速查</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>消息/工具</th>
+					<th>发起方</th>
+					<th>承载位置</th>
+					<th>是否等待回复</th>
+					<th>用途</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><code>contact_supervisor({ reason: "need_decision" })</code></td>
+					<td>子 agent</td>
+					<td>native supervisor channel 的 request/reply 文件</td>
+					<td>是</td>
+					<td>请求父会话做阻塞决策、审批或范围判断。</td>
+				</tr>
+				<tr>
+					<td><code>contact_supervisor({ reason: "interview_request" })</code></td>
+					<td>子 agent</td>
+					<td>native supervisor channel 的 request/reply 文件</td>
+					<td>是</td>
+					<td>要求父会话返回结构化 JSON；reply 会尝试解析为 structured reply。</td>
+				</tr>
+				<tr>
+					<td><code>contact_supervisor({ reason: "progress_update" })</code></td>
+					<td>子 agent</td>
+					<td>native supervisor channel 的 request 文件</td>
+					<td>否</td>
+					<td>报告有意义进展，父端展示后移除请求文件。</td>
+				</tr>
+				<tr>
+					<td><code>intercom({ action: "ask" })</code> / <code>intercom({ action: "send" })</code></td>
+					<td>子 agent</td>
+					<td>native fallback 工具</td>
+					<td><code>ask</code> 等待，<code>send</code> 不等待</td>
+					<td>低层 fallback；默认提示要求优先使用 <code>contact_supervisor</code>。</td>
+				</tr>
+				<tr>
+					<td><code>subagent_supervisor({ action: "reply" })</code></td>
+					<td>父会话</td>
+					<td>native supervisor channel 的 reply 文件</td>
+					<td>不适用</td>
+					<td>回复 pending request。若外部已有 <code>intercom</code> 工具，父端仍会注册此 native reply path。</td>
+				</tr>
+				<tr>
+					<td><code>subagent:result-intercom</code></td>
+					<td>foreground 执行器或 async watcher</td>
+					<td>事件总线</td>
+					<td>等待 delivery acknowledgement，默认 500ms</td>
+					<td>传递 grouped child results、artifact、session、intercom target 和 async revive 指引。</td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+
+	<section>
+		<h2>通道生命周期</h2>
+		<h3>1. Bridge 激活</h3>
+		<p><span class="where"><code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code></span> 将 unknown mode 归一到 <code>always</code>，只接受 <code>off</code>、<code>always</code>、<code>fork-only</code>。bridge inactive 的原因只有三类：mode 为 off、fork-only 但当前不是 fork、没有 orchestrator target。active 后，agent 工具列表会被追加 <code>intercom</code> 和 <code>contact_supervisor</code>，系统提示会加上 <code>Intercom orchestration channel:</code> marker，重复调用保持幂等。</p>
+
+		<h3>2. 子进程 metadata 注入</h3>
+		<p><span class="where"><code>open-ai-agent/pi-subagents/src/runs/shared/pi-args.ts</code></span> 在存在 orchestrator target、父 session id、run id 和 child agent name 时创建 channel 目录，并写入 <code>SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV</code> 等环境变量。<span class="where"><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></span> 的子端 client 只在这些 metadata 完整时注册。</p>
+
+		<h3>3. 子端发请求</h3>
+		<p>子端 <code>registerNativeSupervisorClient</code> 注册 <code>contact_supervisor</code>，可选注册 fallback <code>intercom</code>。请求被写成 <code>subagent.supervisor.request</code> JSON，包含 request id、reason、message、run id、agent、child index、父 session id。阻塞类请求会等待 <code>subagent.supervisor.reply</code>，超时或取消时清理 request 文件；progress update 只返回 queued。</p>
+
+		<h3>4. 父端轮询与回复</h3>
+		<p><span class="where"><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></span> 在 <code>session_start</code> 时启动 supervisor channel。父端轮询 request 文件，先按当前 session id 过滤，再排除 resolved、expired、inactive、missing 请求。pending request 会通过 <code>pi.sendMessage</code> 展示，父端工具支持 <code>status</code>、<code>pending</code>/<code>list</code>、<code>reply</code>。如果已有外部 <code>intercom</code>，native 模块保留 <code>subagent_supervisor</code> 作为不冲突的回复工具。</p>
+
+		<h3>5. 完成结果回传</h3>
+		<p><span class="where"><code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code></span> 负责把 child results 归类为 <code>completed</code>、<code>failed</code>、<code>paused</code>、<code>detached</code>，生成 grouped message，并等待 <code>subagent:result-intercom-delivery</code> 确认。foreground 调用方在送达后返回 compact receipt，并移除 heavy output fields；async watcher 则从结果文件里读 <code>intercomTarget</code>，发送 async payload 和 revive 指引。</p>
+	</section>
+
+	<section>
+		<h2>调用方矩阵</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>调用方</th>
+					<th>调用 intercom 模块的位置</th>
+					<th>为什么重要</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code></span></td>
+					<td>解析 bridge、注入 agent；foreground 结果成功 delivery 后返回 compact receipt。</td>
+					<td>排查“前台子 agent 的工具为何出现/消失”“为什么普通结果里没有完整输出”。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></span></td>
+					<td>async 结果落盘后读取 result children，构造 async grouped payload 并发送。</td>
+					<td>排查异步完成后父会话是否收到结果、是否有 revive 指引。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/runs/shared/pi-args.ts</code></span></td>
+					<td>为子进程写入 supervisor channel 目录和父会话 metadata。</td>
+					<td>排查子端报 native supervisor channel 不可用。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/extension/fanout-child.ts</code></span></td>
+					<td>嵌套控制 inbox 收到 follow-up 时，通过 child intercom target 发送消息。</td>
+					<td>排查嵌套子 agent resume/follow-up 找不到 live target 的问题。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></span></td>
+					<td>创建 native supervisor channel，并在 session 生命周期中 start/dispose。</td>
+					<td>排查父端 pending 请求为什么没有轮询或 shutdown 后仍残留状态。</td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+
+	<section>
+		<h2>边界与失败模式</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>现象</th>
+					<th>先看哪里</th>
+					<th>判断点</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td>子 agent 没有 <code>contact_supervisor</code></td>
+					<td><code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code></td>
+					<td>bridge mode 是否 off；fork-only 是否运行在 fresh context；orchestrator target 是否为空；agent 工具是否显式限制但仍应追加 native 工具。</td>
+				</tr>
+				<tr>
+					<td>子端调用 <code>contact_supervisor</code> 直接失败</td>
+					<td><code>open-ai-agent/pi-subagents/src/runs/shared/pi-args.ts</code> 与 <code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></td>
+					<td>环境变量是否包含 channelDir、runId、agent、childIndex、orchestratorSessionId。</td>
+				</tr>
+				<tr>
+					<td>父端没有看到 pending request</td>
+					<td><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></td>
+					<td>request 的 orchestratorSessionId 是否匹配当前 session；请求是否已 resolved、expired、inactive；channel 是否 stale empty 被清理。</td>
+				</tr>
+				<tr>
+					<td>结果没有 grouped receipt</td>
+					<td><code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code> 与 foreground/async 调用方</td>
+					<td>bridge 是否 active；delivery acknowledgement 是否收到；child 是否 detached；async result 是否有 intercomTarget。</td>
+				</tr>
+				<tr>
+					<td>receipt 有但普通 details 缺少完整输出</td>
+					<td><code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code></td>
+					<td>这是预期：完整输出在 grouped payload；receipt details 会移除 heavy output fields。</td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+
+	<section>
+		<h2>测试证据</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>测试文件</th>
+					<th>覆盖行为</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/test/unit/intercom-bridge.test.ts</code></span></td>
+					<td>验证 unknown mode 默认 always、fork-only 的 context 条件、默认提示包含 reference-only/contact_supervisor、工具注入幂等、显式 extension allowlist 不阻塞 native supervisor 工具。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/test/unit/native-supervisor-channel.test.ts</code></span></td>
+					<td>验证 request 只投递到当前 session、父端同时支持已有 intercom 与 native reply path、resolved/expired/inactive request 会被隐藏并清理、取消 child ask 时 request 文件移除。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/test/unit/result-intercom.test.ts</code></span></td>
+					<td>验证 grouped payload 状态计数、async revive 指引、缺失 session 时不可 revive、嵌套结果脱敏、compact receipt 列出 artifacts/session/intercom target、details 移除 heavy output。</td>
+				</tr>
+				<tr>
+					<td><span class="where"><code>open-ai-agent/pi-subagents/test/integration/intercom-result-delivery.test.ts</code></span></td>
+					<td>验证 foreground single/parallel/chain 只发一个 grouped event；bridge inactive 或 delivery 未确认时回退 legacy foreground output。</td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+
+	<section>
+		<h2>后续 L2 候选</h2>
+		<table>
+			<thead>
+				<tr>
+					<th>候选主题</th>
+					<th>垂直切片问题</th>
+					<th>建议入口</th>
+				</tr>
+			</thead>
+			<tbody>
+				<tr>
+					<td><code>slice-supervisor-decision-request</code></td>
+					<td>一次 <code>need_decision</code> 如何从子端 tool call 变成父端 pending request，再回到子端 reply。</td>
+					<td><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></td>
+				</tr>
+				<tr>
+					<td><code>slice-async-result-intercom-delivery</code></td>
+					<td>异步结果落盘后，如何由 watcher 送达父会话并提供 revive 指引。</td>
+					<td><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></td>
+				</tr>
+				<tr>
+					<td><code>slice-live-resume-follow-up</code></td>
+					<td>live async child 如何被 interrupt 后通过 intercom target 接收 follow-up。</td>
+					<td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code></td>
+				</tr>
+				<tr>
+					<td><code>slice-nested-child-control-intercom</code></td>
+					<td>嵌套 fanout child 如何把控制请求转成 live nested intercom 消息。</td>
+					<td><code>open-ai-agent/pi-subagents/src/extension/fanout-child.ts</code></td>
+				</tr>
+			</tbody>
+		</table>
+	</section>
+</main>
+</body>
+</html>

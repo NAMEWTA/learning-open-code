@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team 创建并运行全链路参考图谱</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <link rel="stylesheet" href="../assets/team-run.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true });</script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team 创建并运行全链路参考图谱</h1>
+    <p class="subtitle">L2 速查：从创建 Team / 添加成员开始，追到 Team 页面状态、成员 slot、common adapter/HTTP、发送动作、事件回流与 E2E 证据。</p>
+    <div class="meta">
+      <span class="pill">主题：slice-team-run</span>
+      <span class="pill">入口：lessons/0001-flow-map.html</span>
+      <span class="pill">源仓：open-ai-desktop/AionU</span>
+    </div>
+  </section>
+
+  <p class="muted">课程入口：<a href="../lessons/0001-flow-map.html">0001-flow-map</a>。回链：<a href="../../00-overview/reference/00-overview.html">L0 总览</a>。交叉链接：<a href="../../module-team-mode/reference/team-mode-overview.html">Team Mode L1</a>、<a href="../../module-common-adapter/reference/common-adapter-overview.html">common adapter L1</a>、<a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">conversation runtime L1</a>。</p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#sequence">1. 调用时序</a>
+    <a href="#layers">2. 沿途层次</a>
+    <a href="#sources">3. 源码锚点</a>
+    <a href="#runtime">4. 运行与回流</a>
+    <a href="#boundaries">5. 异常与边界</a>
+    <a href="#e2e">6. E2E 证据</a>
+  </nav>
+
+  <h2 id="sequence">1. 调用时序</h2>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 用户
+  participant M as TeamCreateModal
+  participant A as ipcBridge.team
+  participant B as common adapter / HTTP
+  participant I as TeamIndex
+  participant P as TeamPage
+  participant T as TeamTabsProvider
+  participant C as TeamChatView
+  participant R as useTeamRunView
+  participant W as WebSocket emitter
+  U->>M: 输入 team name、选择 leader、可选 workspace
+  M->>M: resolveDefaultTeamAgentModel()
+  M->>A: team.create.invoke({ assistants:[leader] })
+  A->>B: POST /api/teams
+  B-->>A: TTeam 或 bridge error
+  A-->>M: 创建结果
+  M->>I: onCreated 后导航到 /team/:id
+  I->>A: team.get.invoke({ id })
+  A->>B: GET /api/teams/:id
+  I->>P: <TeamPage team={team}>
+  P->>T: assistants -> active slot、排序、状态 map
+  P->>C: 每个 slot 渲染 TeamChatView
+  U->>C: leader 或 member tab 发送
+  C->>A: sendMessage / sendMessageToAgent
+  A->>B: POST messages endpoint
+  A-->>C: ITeamRunAck
+  C->>R: applyAck()
+  W-->>R: run* / childTurn* / agent* 事件
+  R-->>T: slotWorkBySlot、childTurnsBySlot、gate、loading
+    </div>
+  </div>
+
+  <h2 id="layers">2. 沿途层次</h2>
+  <table>
+    <thead>
+      <tr><th>层</th><th>主职责</th><th>关键判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>创建 UI</td><td><code>TeamCreateModal</code> 收集名称、leader assistant、workspace，形成 assistant-first payload。</td><td>没有名称或 leader 不发请求；provider sentinel error 会转成用户可见错误。</td></tr>
+      <tr><td>common adapter / HTTP</td><td><code>ipcBridge.team</code> 将 create/get/add/send/run-state 映射到 backend HTTP，将 run 与 agent 事件映射为 emitter。</td><td>本 L2 不重复 L1 接口表，详见 common adapter 与 Team Mode 参考。</td></tr>
+      <tr><td>页面入口</td><td><code>TeamIndex</code> 用路由 id 调 <code>team.get</code>，把 <code>TTeam</code> 交给 <code>TeamPage</code>。</td><td>创建成功不等于页面已完成事件订阅，页面必须从路由重新装载。</td></tr>
+      <tr><td>Team 页面状态</td><td><code>TeamPage</code> 组合 workspace、权限 provider、run view、tab slot 和 chat slot。</td><td>页面只编排 renderer 状态，不实现 backend Team 调度。</td></tr>
+      <tr><td>成员 slot</td><td><code>TeamTabsContext</code> 保持 leader 在前、teammate 可排序，保存 active slot；<code>TeamTabs</code> 显示状态点和待确认徽标。</td><td>active slot 被删除时回退 leader 或第一个 assistant。</td></tr>
+      <tr><td>发送注入</td><td><code>TeamChatView</code> 复用 ACP / aionrs Chat，只注入 <code>teamSendMessage</code> 与 <code>teamRuntime</code>。</td><td>leader 调 team send；member 调 slot send。</td></tr>
+      <tr><td>运行态回流</td><td><code>useTeamRunView</code> 把 ack、run event、child turn event 和 reconnect reconcile 合成 slot 级 gate。</td><td>终态 run 清空 active state；事件 team id 不匹配则忽略。</td></tr>
+      <tr><td>E2E 证据</td><td><code>team-create.e2e.ts</code> 与 <code>team-agent-lifecycle.e2e.ts</code> 验证创建、导航、成员添加和 assistant-first contract。</td><td>测试环境没有可用 assistant 时按设计 skip，而不是误报产品失败。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="sources">3. 源码锚点</h2>
+  <table>
+    <thead>
+      <tr><th>文件</th><th>锚点</th><th>在链路中的位置</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/components/TeamCreateModal.tsx</code></td><td><code>handleCreate()</code></td><td>创建 Team 的真实入口；组装 leader assistant payload。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/components/teamCreateModelResolver.ts</code></td><td><code>resolveDefaultTeamAgentModel()</code></td><td>为 leader 解析可用 model，避免 sendbox 因空 model 被禁用。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/index.tsx</code></td><td><code>ipcBridge.team.get.invoke()</code></td><td>路由落点；用 team id 重新读取 Team record。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/TeamPage.tsx</code></td><td><code>TeamPageContent</code>、<code>AssistantChatSlot</code></td><td>页面总装；把 assistants 映射成可滚动 slot。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/hooks/TeamTabsContext.tsx</code></td><td><code>sortTeamAssistants()</code>、<code>switchTab()</code></td><td>active slot、leader 固定在前、teammate 排序与本地持久化。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/components/TeamTabs.tsx</code></td><td><code>data-testid="team-tab-bar"</code></td><td>成员 tab、状态点、拖拽、删除、E2E selector。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/hooks/useTeamSession.ts</code></td><td><code>agentStatusChanged</code>、<code>agentSpawned</code></td><td>成员状态与 Team record 刷新事件。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code></td><td><code>teamSendMessage</code></td><td>leader/member 发送分流和 run ack 应用。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/components/teamSendRuntime.ts</code></td><td><code>buildTeamSendRuntime()</code>、<code>buildTeamStopHandler()</code></td><td>slot 级发送 gate、loading、stop 和 stale pause reconcile。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code></td><td><code>applyAck()</code>、<code>reconcile()</code>、run/child turn subscriptions</td><td>Team run 视图状态的单点汇总。</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/team/hooks/TeamPermissionContext.tsx</code></td><td><code>warmupSession()</code>、<code>propagateMode()</code></td><td>Team session 预热与权限模式写回。</td></tr>
+      <tr><td><code>packages/desktop/src/common/types/team/teamTypes.ts</code></td><td><code>TTeam</code>、<code>TeamAssistant</code>、<code>ITeamRunAck</code>、<code>ITeamRunEvent</code></td><td>创建、成员、run 和事件的共享契约。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.1 添加成员支线</h3>
+  <p>添加成员的 renderer 包装点在 <code>useTeamSession.addAssistant()</code>：它把新 teammate 输入交给 <code>ipcBridge.team.addAgent</code>，再刷新当前 Team record。生命周期 E2E 直接调用同一桥接契约，随后断言新 teammate tab 出现在 <code>team-tab-bar</code>，并用 <code>team.get</code> 证明 Team record 中保留了 <code>assistant_id</code>。</p>
+  <pre><code class="language-tsx">const addAssistant = useCallback(
+  async (assistant: TeamAssistantInput) =&gt; {
+    await ipcBridge.team.addAgent.invoke({ team_id: team.id, assistant });
+    await mutateTeam();
+  },
+  [team.id, mutateTeam]
+);</code></pre>
+  <pre><code class="language-ts">const addResult = await invokeBridge(
+  page,
+  'team.add-agent',
+  {
+    team_id: resolvedTeamId,
+    agent: {
+      name: memberName,
+      role: 'teammate',
+      assistant_id: memberAssistant.assistantId,
+      model: memberAssistant.backend,
+    },
+  },
+  20_000
+);</code></pre>
+
+  <h2 id="runtime">4. 运行与回流</h2>
+  <div class="flow-strip">
+    <section class="flow-step">
+      <strong>ack 快速反馈</strong>
+      <p><code>ITeamRunAck</code> 被 <code>ackToRunEvent()</code> 转成带 <code>slot_work</code> 的 run event，避免 UI 等到 WebSocket 才显示 busy。</p>
+    </section>
+    <section class="flow-step">
+      <strong>WebSocket 校准</strong>
+      <p><code>runAccepted/runStarted/runUpdated</code> 更新 active run；<code>runCompleted/runCancelled/runFailed</code> 清空终态运行视图。</p>
+    </section>
+    <section class="flow-step">
+      <strong>child turn 映射</strong>
+      <p><code>childTurnStarted</code> 把 slot 标为 active；terminal child turn 移除该 slot 的 active turn。</p>
+    </section>
+    <section class="flow-step">
+      <strong>slot gate</strong>
+      <p><code>buildTeamSendRuntime()</code> 根据 <code>slotWorkBySlot</code> 和 <code>childTurnsBySlot</code> 决定 sendbox 是否可发、是否显示 loading。</p>
+    </section>
+  </div>
+  <pre><code class="language-text">用户输入
+  → TeamChatView.teamSendMessage
+  → ipcBridge.team.sendMessage / sendMessageToAgent
+  → common adapter HTTP provider
+  → ITeamRunAck 立即进入 useTeamRunView
+  → run* / childTurn* WebSocket 事件继续校准
+  → TeamTabs 状态点、slot sendbox gate、stop handler 更新</code></pre>
+  <p class="source-note">真实订阅还包括 <code>childTurnCancelled</code>，以及 <code>listChanged/sessionChanged/agentSpawned/agentRemoved/agentRenamed</code> 触发的 <code>reconcile()</code>。这些结构变更事件会按 <code>team_id</code> 过滤，避免其他 Team 的事件污染当前页面。</p>
+
+  <h2 id="boundaries">5. 异常与边界</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>代码落点</th><th>处理策略</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>创建时缺少名称</td><td><code>TeamCreateModal.handleCreate()</code></td><td>显示 warning、聚焦名称输入框、提前 return。</td></tr>
+      <tr><td>创建时未选 leader</td><td><code>TeamCreateModal.handleCreate()</code></td><td>显示 warning、提前 return；确认按钮也会被禁用。</td></tr>
+      <tr><td>无支持的 assistant</td><td><code>TeamCreateModal</code> 与 <code>team-create.e2e.ts</code></td><td>UI 显示空态；E2E 截图后 skip。</td></tr>
+      <tr><td>bridge provider 返回 sentinel error</td><td><code>TeamCreateModal</code></td><td>识别 <code>__bridgeError</code> 并展示创建错误，不调用 <code>onCreated</code>。</td></tr>
+      <tr><td>成员添加没有 <code>slot_id</code></td><td><code>team-agent-lifecycle.e2e.ts</code></td><td>清理已创建 Team，然后 skip，避免污染后续测试。</td></tr>
+      <tr><td>active tab 被删除</td><td><code>TeamTabsContext</code></td><td>优先切回 leader slot，否则回退到第一个 assistant。</td></tr>
+      <tr><td>停止 slot 时 run 已过期</td><td><code>teamSendRuntime.isStaleTeamRunPauseError()</code></td><td>触发 <code>onRunStateStale()</code> 重新拉取 run state；reconcile 失败才提示 stop error。</td></tr>
+      <tr><td>事件不属于当前 Team</td><td><code>useTeamSession</code> 与 <code>useTeamRunView</code></td><td>按 <code>team_id</code> 过滤，防止跨 Team 状态串扰。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="e2e">6. E2E 证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试</th><th>覆盖步骤</th><th>证明点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>tests/e2e/cases/teams/team-create.e2e.ts</code></td><td>侧栏 Teams 区域、创建按钮、modal、名称输入、assistant 选择、确认按钮、导航到 <code>/team/</code>、侧栏出现 team name。</td><td>用户创建 Team 的 UI 主线是可操作的；不证明 <code>sendMessage</code> 或 run event 回流。</td></tr>
+      <tr><td><code>tests/e2e/cases/teams/team-agent-lifecycle.e2e.ts</code></td><td>用 bridge 创建 Team、导航到 team page、调用 <code>team.add-agent</code>、等待 teammate tab 可见、再用 <code>team.get</code> 校验记录。</td><td>assistant-first contract 保留 <code>assistant_id</code>，新增成员会落成可见 slot；不覆盖 run 发送链路。</td></tr>
+    </tbody>
+  </table>
+  <p class="source-note">阅读建议：先用本页图谱定位层次，再回到短课做检索练习；若要继续深挖 HTTP provider 和事件名，跳到 Team Mode L1 的接口清单。</p>
+</main>
+</body>
+</html>

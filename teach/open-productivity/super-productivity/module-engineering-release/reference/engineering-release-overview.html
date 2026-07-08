@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工程化发布模块参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · npm scripts、测试、构建、CI、发布产物与平台目录速查</p>
+    <h1>测试、构建、发布与多平台工程化参考</h1>
+
+    <h2>模块职责</h2>
+    <p>职责一句话：把同一套 Angular renderer 和 workspace 包，按 Web/PWA、Electron 桌面、Capacitor Android/iOS、内置插件和商店发布的不同要求，组织成可测试、可打包、可发布的产物链。</p>
+    <p>它承接 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>里的“测试/构建/发布”层；<a href="../../module-electron-host/reference/electron-host-overview.html">Electron L1</a>、<a href="../../module-mobile-pwa-host/reference/mobile-pwa-host-overview.html">Mobile/PWA L1</a> 与 <a href="../../module-plugin-system/reference/plugin-system-overview.html">Plugin L1</a> 分别负责桌面、移动/PWA 和插件运行时边界。当前主题只说明它们在工程化链路中的构建接点。</p>
+
+    <h2>模块骨架</h2>
+    <div class="filetree">super-productivity/
+├── package.json                    ← npm scripts、workspaces、Electron main、发布 provider
+├── angular.json                    ← Angular build/test/lint target 与输出目录
+├── electron-builder.yaml           ← 桌面包、asar 文件边界、平台目标、afterPack
+├── capacitor.config.ts             ← Capacitor appId、webDir、Android/iOS 插件边界
+├── e2e/                            ← Playwright 配置、POM、fixtures、截图/视频脚本
+├── tools/                          ← env、version、release notes、packaging hooks
+├── scripts/                        ← wait-for-app/WebDAV/SuperSync 与迁移辅助脚本
+├── packages/                       ← sync 包、plugin-api、vite-plugin、plugin-dev 构建
+├── eslint-local-rules/             ← NgRx/effects 架构 lint rule 与 RuleTester spec
+├── build/                          ← electron-builder 平台资源、entitlements、PKGBUILD
+├── fastlane/                       ← App Store lane 与 Android metadata
+├── snap/                           ← Snap install hook
+└── .github/
+    ├── actions/                    ← 复用的 Electron/E2E 环境 setup
+    └── workflows/                  ← PR、smoke、release、商店发布分流</div>
+
+    <h2>入口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>职责</th><th>读码判断</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>package.json</code></td><td>所有工程化链路的第一跳：开发、lint、unit、E2E、package tests、frontend build、Electron build、Capacitor sync、release notes、workspace/plugin build。</td><td>先按 script 名分类，不要直接把 <code>build</code> 理解成全平台 release。</td></tr>
+        <tr><td><code>angular.json</code></td><td><code>sp2</code> 应用构建入口为 <code>src/main.ts</code>，assets 包含 <code>src/assets</code>、<code>src/manifest.json</code>、<code>src/static</code>；Electron 产物输出到 .tmp/angular-dist，Web/Capacitor 输出到 dist/browser。</td><td>区分 <code>production</code>、<code>productionWeb</code>、<code>stage</code>、<code>stageWeb</code> 的输出和 service worker。</td></tr>
+        <tr><td><code>electron-builder.yaml</code></td><td>定义 appId、artifactName、files、排除项、.tmp/app-builds、Windows/Linux/macOS 目标、Snap 目标、Flatpak 配置段和 <code>afterPack</code>；当前 Linux targets 是 AppImage、deb、snap、rpm，不包含 Flatpak。</td><td>桌面包缺文件、asar 过大、平台格式或签名问题先看这里。</td></tr>
+        <tr><td><code>capacitor.config.ts</code></td><td>移动端 appId/name、webDir 指向 dist/browser、Android includePlugins、iOS WebView 行为。</td><td>移动端构建先有 Web 产物，再 <code>npx cap sync</code>，最后进 Gradle/Xcode。</td></tr>
+        <tr><td><code>packages/build-packages.js</code></td><td>构建 sync/plugin 相关包，并把内置插件复制到 <code>src/assets/bundled-plugins</code>。</td><td>插件资产缺失、shared 包 dist 缺失、plugin build 顺序问题先看这里。</td></tr>
+        <tr><td><code>e2e/playwright.config.ts</code></td><td>定义 Playwright 测试目录、global setup、workers、reporter、baseURL、webServer、artifacts。</td><td>E2E 是否启动 4242 服务、是否使用 Docker URL、失败产物在哪里，都在这里。</td></tr>
+        <tr><td><code>eslint.config.js</code><br><code>eslint-local-rules/</code></td><td>TS/HTML lint、package boundary 限制、effects 架构规则、no-console 和本地 RuleTester spec。</td><td>这些是架构回归守卫，不只是格式检查。</td></tr>
+        <tr><td><code>tools/</code></td><td><code>tools/load-env.js</code> 写运行时 env 生成文件，<code>tools/git-version.js</code> 写版本生成文件，<code>tools/release-notes.js</code> 写 GitHub/Play Store notes，<code>tools/afterPack.js</code> 修补 Linux 包。</td><td>凡是“构建前写文件”或“发布前生成元信息”，优先查工具脚本。</td></tr>
+        <tr><td><code>build/</code></td><td>Electron 平台资源、MAS yaml、entitlements、AppX 图标、Linux PKGBUILD 模板、release notes。</td><td>这是打包资源/元数据目录，不是 Angular 构建输出。</td></tr>
+        <tr><td><code>fastlane/</code></td><td>iOS/macOS App Store Connect lane、Android metadata、changelog 文本。</td><td>商店上传和“What's New”文本在这里，不等同于二进制构建。</td></tr>
+        <tr><td><code>snap/</code></td><td>Snap install hook 提示连接 idle/file sync 所需接口。</td><td>Snap 运行时权限问题不只看 electron-builder 的 snap 段。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>脚本分层与产物</h2>
+    <table>
+      <thead>
+        <tr><th>层级</th><th>典型脚本</th><th>关键产物或副作用</th><th>边界</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>开发启动</td><td><code>serve</code>、<code>startFrontend</code>、<code>start</code></td><td>运行时 env 生成文件；Angular dev server 或 Electron dev app。</td><td>面向本地迭代，不生成发布包。</td></tr>
+        <tr><td>预构建</td><td><code>prebuild</code></td><td>env、version 与 workspace/package dist 生成产物。</td><td>被 frontend build 复用，是很多链路的隐藏前置条件。</td></tr>
+        <tr><td>前端构建</td><td><code>buildFrontend:prod:es6</code>、<code>buildFrontend:prodWeb</code>、<code>buildFrontend:e2e</code></td><td>.tmp/angular-dist/browser 或 dist/browser。</td><td>Angular renderer/PWA 产物，不包含 Electron main。</td></tr>
+        <tr><td>Electron 编译</td><td><code>electron:build</code></td><td>Electron main/preload 编译产物、Linux <code>wayland-idle-helper</code>。</td><td>编译主进程与 preload，不负责平台安装包。</td></tr>
+        <tr><td>桌面打包</td><td><code>dist</code>、<code>dist:win</code>、<code>dist:linuxAndWin</code>、<code>dist:mac:mas:buildOnly</code></td><td>.tmp/app-builds 下的 AppImage/deb/snap/rpm/dmg/exe/pkg/appx 等。</td><td>由 electron-builder 和平台签名配置控制。</td></tr>
+        <tr><td>移动打包</td><td><code>dist:android:prod</code>、<code>dist:ios:prod</code>、<code>sync:android</code>、<code>sync:ios</code></td><td>Android APK、iOS Xcode workspace 中同步后的 Web 资源；IPA archive/export 在 CI workflow 里完成。</td><td>先构建 dist/browser，再 Capacitor sync，再原生工具链。</td></tr>
+        <tr><td>测试守门</td><td><code>lint</code>、<code>test</code>、<code>e2e</code>、<code>test:electron</code>、<code>test:lint-rules</code></td><td>Karma/Jasmine、package Vitest、Playwright report、Node test 结果。</td><td>PR 守门和本地验证优先看这一层。</td></tr>
+        <tr><td>发布元数据</td><td><code>version</code>、<code>release-notes:generate</code>、<code>release-notes:prepare-play-store</code></td><td><code>build/release-notes.md</code>、Android changelog、Play Store whatsnew、App Store release_notes。</td><td>改变商店文案，不直接打二进制。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>CI、发布与边界判断</h2>
+    <table>
+      <thead>
+        <tr><th>Workflow</th><th>触发</th><th>实际做什么</th><th>判断信号</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>.github/workflows/ci.yml</code></td><td>PR、手动、release published</td><td>lockfile registry、dependency review、lint、unit、Electron node tests、frontend E2E build、E2E、Lighthouse。</td><td>PR 主守门，不发布产物。</td></tr>
+        <tr><td><code>.github/workflows/plugin-tests.yml</code></td><td>plugin-api、vite-plugin、plugin-dev 相关 PR</td><td>检测变更插件，构建 shared packages，逐插件安装依赖并运行测试。</td><td>插件包边界专用守门。</td></tr>
+        <tr><td><code>.github/workflows/electron-smoke.yml</code></td><td>PR、master、v*、手动</td><td>生产前端、Electron build、linux dir 包、asar require 检查；非 PR 再 xvfb 启动 packaged app。</td><td>防“源码能跑，打包 app.asar 缺文件”。</td></tr>
+        <tr><td><code>.github/workflows/build.yml</code></td><td>master/release/test 分支与 v* tag</td><td>创建 draft release；Linux/macOS/Windows 桌面包；tag 时上传到 GitHub Release，Windows 还走 SignPath。</td><td>桌面 release 主线。</td></tr>
+        <tr><td><code>.github/workflows/build-android.yml</code></td><td>master/release/test 分支、v* tag、手动</td><td>Node/Java/Android SDK、dev versionCode、<code>dist:android:prod</code>、上传 APK、tag 时 GitHub Release 和 Play internal。</td><td>Android 二进制与 Play Store 文案交汇点。</td></tr>
+        <tr><td><code>.github/workflows/auto-publish-google-play-on-release.yml</code></td><td>release published、手动</td><td>把 build-android 上传到 internal track 的 release promote 到 Play production。</td><td>Android production 发布的最后一跳，不重新构建 APK。</td></tr>
+        <tr><td><code>.github/workflows/build-ios.yml</code></td><td>v* tag、手动</td><td>Xcode、证书/profile、版本号、Web build、Capacitor iOS sync、archive/export IPA、Fastlane 上传。</td><td>iOS App Store 主线。</td></tr>
+        <tr><td><code>.github/workflows/build-update-web-app-on-release.yml</code></td><td>release published、手动</td><td>lint/test、<code>buildFrontend:prodWeb</code>、把 dist/browser 通过 SSH 部署到 Web 服务器。</td><td>Web/PWA 发布，不涉及 Electron 包。</td></tr>
+        <tr><td><code>.github/workflows/build-publish-to-snap-on-release.yml</code></td><td>release published、手动</td><td>从 GitHub Release 下载 <code>.snap</code>，用 Canonical snapcraft container 上传 edge/stable。</td><td>发布已有 snap asset，不重新构建。</td></tr>
+        <tr><td><code>.github/workflows/build-publish-to-aur-on-release.yml</code></td><td>release published、手动</td><td>用 <code>build/linux/PKGBUILD_template</code> 生成 AUR PKGBUILD 并重试发布。</td><td>AUR 元包更新。</td></tr>
+        <tr><td><code>.github/workflows/build-publish-to-mac-store-on-release.yml</code></td><td>v* tag、手动</td><td>MAS 签名、<code>dist:mac:mas:buildOnly</code>、Fastlane mac release。</td><td>Mac App Store 专线，不等同普通 dmg。</td></tr>
+        <tr><td><code>.github/workflows/build-create-windows-store-on-release.yml</code></td><td>v* tag/test 分支、手动</td><td>加载 Store 专用 electron-builder yaml，构建 appx artifact，并收集 Partner Center 需要的 release notes。</td><td>Microsoft Store artifact，上传仍偏手动。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>阅读示例 A：追 <code>npm run dist</code></h3>
+    <ol>
+      <li>从 <code>package.json</code> 找到 <code>dist</code>：先跑 <code>buildAllElectron:prod</code>，再调用 <code>electron-builder</code>。</li>
+      <li><code>buildAllElectron:prod</code> 会执行 <code>env</code>、<code>preCheck</code>、<code>buildFrontend:prod:es6</code>、<code>electron:build</code>。</li>
+      <li><code>preCheck</code> 合并 lint、unit、i18n test、E2E；这比 <code>build</code> 的 noTests 分支更重。</li>
+      <li><code>buildFrontend:prod:es6</code> 通过 <code>angular.json</code> 输出 .tmp/angular-dist；<code>electron:build</code> 生成主进程 JS 与 preload bundle。</li>
+      <li><code>electron-builder.yaml</code> 把 Electron 编译产物与 Angular renderer 产物打进 .tmp/app-builds，并在 Linux 下执行 <code>tools/afterPack.js</code>。</li>
+    </ol>
+
+    <h3>阅读示例 B：追 <code>npm run dist:android:prod</code></h3>
+    <ol>
+      <li><code>package.json</code> 显示它先跑 <code>buildFrontend:prodWeb</code>，输出 dist/browser。</li>
+      <li><code>capacitor.config.ts</code> 的 webDir 说明 Capacitor 同步的正是 dist/browser 里的 Web 产物。</li>
+      <li><code>sync:android</code> 调 <code>npx cap sync android</code>，随后 <code>assemble:android:prod</code> 进入 Gradle release assemble。</li>
+      <li><code>.github/workflows/build-android.yml</code> 负责 CI 侧 Java/SDK/keystore、dev versionCode、APK artifact、GitHub Release 上传与 Play internal track；<code>.github/workflows/auto-publish-google-play-on-release.yml</code> 再把 internal release promote 到 production。</li>
+      <li><code>tools/release-notes.js</code> 和 <code>fastlane/metadata/android</code> 处理 Play Store “what's new”，不是 APK 构建本身。</li>
+    </ol>
+
+    <h3>边界判断表</h3>
+    <table>
+      <thead>
+        <tr><th>你看到的问题</th><th>先看哪里</th><th>不要先看哪里</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>本地开发环境变量缺失或 env 生成文件不存在</td><td><code>tools/load-env.js</code>、<code>package.json</code> 的 <code>env</code>/<code>serve</code></td><td>CI release workflow</td></tr>
+        <tr><td>生产 Web/PWA 产物路径不对</td><td><code>angular.json</code> 的 <code>productionWeb</code>、<code>buildFrontend:prodWeb</code></td><td><code>electron-builder.yaml</code></td></tr>
+        <tr><td>Electron 包启动时报缺模块</td><td><code>electron-builder.yaml</code> 的 files/excludes、<code>tools/verify-electron-requires.js</code>、<code>electron-smoke.yml</code></td><td>Angular route 或业务 component</td></tr>
+        <tr><td>Linux Snap 在 Wayland/idle/file sync 上异常</td><td><code>tools/afterPack.js</code>、<code>build/linux/snap-wrapper.sh</code>、<code>snap/hooks/install</code>、<code>electron-builder.yaml</code> 的 snap 段</td><td>通用 Windows/macOS 打包配置</td></tr>
+        <tr><td>插件 assets 没进前端构建</td><td><code>packages/build-packages.js</code>、<code>packages/plugin-dev/scripts/build-all.js</code>、<code>buildFrontend:e2e</code> 的输出校验</td><td>只看 src/assets/bundled-plugins 产物</td></tr>
+        <tr><td>NgRx effects 架构规则失败</td><td><code>eslint.config.js</code>、<code>eslint-local-rules/</code>、<code>test:lint-rules</code></td><td>Stylelint 或 Prettier</td></tr>
+        <tr><td>E2E WebDAV/SuperSync 失败</td><td><code>e2e/playwright.config.ts</code>、<code>scripts/wait-for-webdav.sh</code>、<code>scripts/wait-for-supersync.sh</code>、Docker compose 文件</td><td>Karma unit test 配置</td></tr>
+        <tr><td>Android versionCode、internal upload 或 production promotion 错误</td><td><code>tools/android-dev-version-code.js</code>、<code>tools/bump-android-version.js</code>、<code>tools/release-notes.js</code>、<code>.github/workflows/build-android.yml</code>、<code>.github/workflows/auto-publish-google-play-on-release.yml</code></td><td>Electron Builder mac/win 配置</td></tr>
+        <tr><td>App Store “What's New” 被拒</td><td><code>tools/prepare-appstore-release-notes.js</code>、<code>fastlane/Fastfile</code>、iOS/macOS store workflows</td><td>Google Play changelog 文件</td></tr>
+        <tr><td>Windows release 需要签名后重算 metadata</td><td><code>.github/workflows/build.yml</code> 的 SignPath、blockmap、latest metadata 更新步骤</td><td>普通 <code>dist:win:only</code> 本地命令</td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖与后续 L2 线索</h2>
+    <table>
+      <thead>
+        <tr><th>依赖/机制</th><th>所在链路</th><th>作用</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular CLI / Karma</td><td>前端 build、unit test、lint target</td><td>生成 renderer/PWA 产物并运行 Jasmine/Karma。</td></tr>
+        <tr><td>Playwright</td><td>E2E、截图、视频、Electron screenshot</td><td>通过 4242 server、Docker baseURL 或 Electron mode 验证用户流程与商店素材。</td></tr>
+        <tr><td>Electron / electron-builder</td><td>桌面主进程编译与平台安装包</td><td>生成 macOS/Windows/Linux 包，并通过 files/excludes 控制 asar 内容。</td></tr>
+        <tr><td>Capacitor CLI / Gradle / Xcode</td><td>Android/iOS</td><td>把 dist/browser 同步到原生工程，再由平台工具链产出 APK/IPA。</td></tr>
+        <tr><td>Fastlane</td><td>iOS/macOS App Store</td><td>上传预构建 IPA/PKG、设置 release notes、提交审核。</td></tr>
+        <tr><td>Docker Compose</td><td>E2E WebDAV/SuperSync 与服务端发布</td><td>为同步场景提供可等待、可清理的外部服务。</td></tr>
+        <tr><td>tsup / tsc / Vite</td><td>workspace 包与插件包</td><td>构建 sync-core/sync-providers/shared-schema/plugin-api/vite-plugin 和插件 dist。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>后续 L2 线索：</strong>1. Electron packaged smoke 如何防 asar 缺文件；2. Android versionCode 与 Play/App Store release notes 的生成链；3. bundled plugins 从源码到 <code>src/assets</code> 的构建链；4. WebDAV/SuperSync E2E Docker 矩阵；5. App Store/Fastlane 提交与 review race 处理。</p>
+    </div>
+
+    <p>配套短课：<a href="../lessons/0001-engineering-release-module-tour.html">0001 工程化发布模块导览</a>。</p>
+  </article>
+</main>
+</body>
+</html>

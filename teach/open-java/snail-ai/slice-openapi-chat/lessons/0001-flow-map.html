@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenAPI chat 垂直切片流程图</title>
+  <link rel="stylesheet" href="../assets/openapi-chat.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../module-server-entry/lessons/0001-server-entry-module-tour.html">Server 入口 L1</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 链 L1</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Client L1</a>
+    <a href="../reference/openapi-chat-flow-map.html">OpenAPI chat 速查</a>
+  </nav>
+
+  <h1>OpenAPI chat 垂直切片流程图</h1>
+  <p class="lead">本课只完成一个目标：把一次第三方 OpenAPI chat 请求，从 HTTP 鉴权追到 Client 流式回传，再回到 SSE 或同步聚合响应。</p>
+
+  <p><span class="pill">预计 12 分钟</span> <span class="pill">主来源：OpenApiChatService</span> <span class="pill">输出：一张可复述的链路图</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/service/OpenApiChatService.java</span></p>
+
+  <h2>1. 先记住主路径</h2>
+  <p>OpenAPI chat 不是一套独立模型调用逻辑。它只是在 Server 入口层把外部用户、会话、内容和禁用能力列表转换为内部 Agent 对话命令，随后复用 Agent 责任链。默认部署路径会叠加 <code>application.yml</code> 的 <code>/snail-ai</code> context path，所以外部流式接口通常是 <code>POST /snail-ai/openapi/v1/agent/chat</code>，同步接口是 <code>POST /snail-ai/openapi/v1/agent/chat/sync</code>。</p>
+  <pre class="flow">OpenAPI HTTP
+  ├─ OpenApiAuthInterceptor
+  │   └─ 校验 Snail-Ai-App-Id / Snail-Ai-Token，写入 OpenApiSessionUtils
+  ├─ OpenApiChatController
+  │   ├─ chat      → Flux&lt;ServerSentEvent&lt;String&gt;&gt;
+  │   └─ chatSync  → Result&lt;OpenApiChatSyncResponse&gt;
+  ├─ OpenApiChatService
+  │   └─ OpenApiChatRequest → AgentChatCommand
+  ├─ AgentChatChainService
+  │   └─ Init → Conversation → Model → MCP → Prompt → RAG → Skill → Context → LLM
+  ├─ LlmCallHandler
+  │   └─ ChatDispatchRequest → gRPC /chat/dispatch
+  └─ Agent Client
+      └─ ChatDispatchStreamingHandler → ChatSessionRuntime → ClientChatExecutor</pre>
+
+  <h2>2. 转换点决定能追到哪里</h2>
+  <p>鉴权阶段只证明调用方应用有效；真正的用户身份在 <code>OpenApiChatService#resolveRequestUser</code> 中由 <code>appId + openId</code> 解析成平台 <code>UserPO</code>。随后服务层构造 <code>AgentChatCommand</code>：<code>agentId</code>、<code>conversationId</code>、<code>content</code>、<code>disabledMcpServerIds</code>、<code>disabledSkillIds</code>、<code>requestUser</code>、<code>openId</code>、<code>sid</code> 会进入内部链路；<code>sid</code> 缺省时由服务端生成 UUID。</p>
+  <p>入口路由和字段转换的短源码片段见 <a href="../reference/openapi-chat-flow-map.html#controller-snippet">Controller 路由片段</a> 与 <a href="../reference/openapi-chat-flow-map.html#service-command-snippet">Service 命令构造片段</a>。</p>
+  <p>这里有一个排查时很重要的边界：<code>OpenApiChatRequest</code> 目前还有 <code>deepPlanEnabled</code>、<code>webSearchEnabled</code>、<code>timeout</code> 字段，但当前转换没有把它们写入 <code>AgentChatCommand</code>。如果调用方说“我传了 timeout 但同步仍等 300 秒”，源码答案是同步路径固定使用 <code>SYNC_CHAT_TIMEOUT_MS = 300_000L</code>。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/dto/AgentChatCommand.java</span></p>
+
+  <h2>3. 响应分成两种出口</h2>
+  <p>流式出口使用 <code>FluxBridgeChatStreamWriter</code>。Client 每个文本 chunk 会先变成 <code>ChatStreamResponse.text(sid, text)</code>，Server 再转为 OpenAPI 的 <code>event: text</code>，<code>data</code> 仍是那段 JSON 字符串；thinking 同理。Client 的 completion chunk 不直接透传给 OpenAPI，<code>ChatStreamObserver</code> 用它做持久化，gRPC 完成后 writer 的 <code>complete()</code> 触发 OpenAPI <code>event: done</code>，其中 data 只包含 <code>conversationId</code> 和累计 <code>fullText</code>。</p>
+  <p>同步出口使用 <code>CollectingChatStreamWriter</code>，它阻塞等待 <code>complete()</code>，只聚合 text chunk 的 <code>content</code>，最后返回 <code>Result.ok(OpenApiChatSyncResponse)</code>。因此 usage、thinking、cacheTokens 都不在同步响应里；usage 的真正链路在 Client 的 <code>TokenUsageCollectorAdvisor</code>，随后经 completion chunk 进入 <code>ChatStreamObserver#handleCompletion</code> 持久化。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/LlmCallHandler.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/grpc/handler/ChatDispatchStreamingHandler.java</span></p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：不看上文，按顺序说出从 OpenAPI 请求到 Client 模型执行的 7 个节点；再判断 <code>timeout</code>、<code>sid</code>、<code>disabledSkillIds</code> 这三个字段中，哪些当前会影响内部链路。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>节点可答：鉴权拦截器、Controller、OpenApiChatService、AgentChatService/Chain、LlmCallHandler、gRPC <code>/chat/dispatch</code>、Client <code>ChatDispatchStreamingHandler</code>/<code>ClientChatExecutor</code>。<code>sid</code> 和 <code>disabledSkillIds</code> 会进入内部链路；<code>timeout</code> 当前不会被 OpenAPI chat 服务消费。主要阅读来源是本课标出的三个文件，细节查 <a href="../reference/openapi-chat-flow-map.html">OpenAPI chat 速查</a>。遇到字段去向不确定时，可以继续向 agent 追问“这个字段在哪一层被消费”。</p>
+    </details>
+  </div>
+</main>
+</body>
+</html>

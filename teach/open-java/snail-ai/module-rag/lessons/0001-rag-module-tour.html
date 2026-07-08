@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 功能模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+  </style>
+</head>
+<body>
+  <h1>RAG 功能模块导览</h1>
+  <p class="lead">这一课只做一件事：建立 RAG 模块边界。学完后，你应该能判断一个文件是在做文档摄入、检索召回、策略选择、DTO/枚举，还是 Admin 对外入口。</p>
+  <div class="meta">
+    <span class="pill">学习目标：定位 RAG 分层</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<span class="where">open-java/snail-ai/docs/architecture/rag-pipeline.md</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/pipeline/DocumentPipeline.java</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/search/pipeline/RagSearchPipeline.java</span></span>
+  </div>
+
+  <h2>1. 职责：给模型补上下文</h2>
+  <p>在 Snail AI 的全局架构里，RAG 是 Server 侧的上下文能力，不是 Chat 模型本身。它负责把用户上传或导入的文档变成可检索的 chunk，并在提问时找回相关片段，交给问答服务或 Agent 工具链注入 Prompt。你可以把它分成两条线：摄入线把“文件”变成“索引”；检索线把“query”变成“参考资料”。真正的模型调用由模型运行层处理，RAG 只决定哪些知识片段值得带给模型。</p>
+
+  <h2>2. 位置：Admin 入口到 feature-rag</h2>
+  <div class="filetree">snail-ai-server/
+├── snail-ai-server-admin/              ← 管理端 HTTP 入口
+│   └── controller/
+│       ├── RagDocumentController.java  ← 上传、预览、提交、重处理、分页
+│       └── RagSearchController.java    ← 知识库、搜索调试、流式问答
+└── snail-ai-server-features/           ← Server 侧业务能力
+    └── snail-ai-feature-rag/           ← RAG 核心实现
+        ├── pipeline/                   ← 文档摄入管线
+        ├── search/                     ← 检索管线与 handler
+        └── strategy/                   ← parser、chunker、fusion、rerank</div>
+  <p>Admin 层只接 HTTP 请求并转给 service。若需要先回到系统全图，可对照 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 再看这里的模块位置。文档上传会先落资源和文档行，状态为 <code>PENDING</code>；后台定时任务再批量扫描 pending 文档，调用 <code>DocumentPipeline.processDocument</code>。搜索调试走 <code>POST /rag/search</code>，流式知识库问答走 <code>POST /rag/qa/stream</code>。运行时 Agent 也能通过 gRPC 回调进入同一套 <code>RagSearchService</code>。</p>
+
+  <h2>3. 分层：两条管线加四类策略</h2>
+  <pre class="diagram">Admin / gRPC
+  ↓
+RagDocumentService / RagSearchService
+  ↓
+DocumentPipeline        RagSearchPipeline
+  ↓                     ↓
+parser + chunker        Config → Vector → BM25 → Fusion → Rerank → Finalize
+  ↓                     ↓
+RagDocument/RagChunk    SearchResult + Metrics
+  ↓                     ↓
+VectorStore + SearchEngine + DB</pre>
+  <p>摄入管线依赖 <code>DocumentParserFactory</code> 选择 PDF、DOCX、Excel、Markdown、HTML 或 TXT parser，再由 <code>DocumentChunkingService</code> 按 <code>default</code>、<code>delimiter</code>、<code>regex</code>、<code>smart</code> 分片。检索管线很薄：它只遍历 Spring 注入的 <code>RagSearchHandler</code> 列表。当前 handler 顺序是配置解析、QueryRewrite 空实现、向量检索、BM25、融合、重排、收尾。注意官方文档提到 Query 改写和 PARSING 状态，但当前源码里 Query 改写已移除，文档处理也直接从 <code>PENDING</code> 抢占到 <code>PROCESSING</code>。</p>
+
+  <h2>4. 最小调用示例</h2>
+  <pre class="diagram">POST /rag/search
+Content-Type: application/json
+
+{
+  "ragId": 12,
+  "query": "如何配置向量库？",
+  "debug": true
+}</pre>
+  <p>这个请求由 <code>RagSearchController</code> 转成 <code>RagSearchRequestDTO</code>，再交给 <code>RagSearchService.search</code>。如果 <code>debug</code> 为 true，响应会带上 vector、BM25、fusion、rerank 和 total 耗时。下一步深入时，把摄入细节交给 <code>slice-rag-ingestion</code>，把检索注入细节交给 <code>slice-rag-retrieval</code>；本课只要求你能把文件放回正确层级。</p>
+  <div class="practice"><strong>暂停回忆：</strong>不看上文，回答三个判断：上传接口会立刻解析文档吗？BM25 关闭时融合阶段还会工作吗？RAG 搜索结果最终由哪个 DTO 返回？<br><strong>参考答案：</strong>不会，上传后主要落 PENDING，定时任务触发处理；BM25 没有结果时融合 handler 直接返回，保留向量结果；搜索响应是 <code>RagSearchResponseDTO</code>，其中结果项使用公共 <code>SearchResult</code>。</div>
+  <p>主要推荐来源：先读 <code>docs/architecture/rag-pipeline.md</code> 建立流程图，再用 <a href="../reference/rag-overview.html">RAG 总览参考</a> 对照当前源码实现；字段级契约与工厂异常见 <a href="../reference/rag-api.html">RAG API 速查 (L3)</a>。遇到源码和文档不一致时，以当前工作区源码为准，并继续向 agent 追问具体切片。</p>
+</body>
+</html>

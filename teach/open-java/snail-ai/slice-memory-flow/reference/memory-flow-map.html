@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snail AI 记忆链路速查</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#536471; --line:#d8dee4; --bg:#f6f8fa; --blue:#0969da; --red:#a40e26; --green:#1a7f37; --amber:#9a6700; }
+    body { margin:0; font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:1120px; margin:0 auto; padding:30px 20px 54px; }
+    nav { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:22px; }
+    nav a { color:var(--blue); text-decoration:none; border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
+    h1 { font-size:30px; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:21px; margin:30px 0 10px; letter-spacing:0; }
+    h3 { font-size:17px; margin:22px 0 8px; letter-spacing:0; }
+    p { margin:8px 0; }
+    code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:#eef2f6; border-radius:4px; padding:1px 4px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 18px; table-layout:fixed; }
+    th, td { border:1px solid var(--line); padding:8px 9px; vertical-align:top; overflow-wrap:anywhere; }
+    th { background:var(--bg); text-align:left; }
+    pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px 16px; overflow:auto; line-height:1.5; }
+    pre code { background:transparent; padding:0; border-radius:0; }
+    .lead { font-size:18px; color:var(--muted); }
+    .path { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+    .ok { color:var(--green); font-weight:600; }
+    .warn { color:var(--amber); font-weight:600; }
+    .bad { color:var(--red); font-weight:600; }
+    .note { border-left:4px solid var(--amber); background:#fff8dc; padding:10px 14px; border-radius:4px; }
+    ul { padding-left:22px; }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-memory/reference/memory-overview.html">Memory L1 速查</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">Agent 链速查</a>
+    <a href="../../module-persistence/reference/persistence-overview.html">Persistence 速查</a>
+  </nav>
+
+  <h1>Snail AI 记忆链路速查</h1>
+  <p class="lead">这份 reference 用于排查一次对话里的短期历史、长期记忆接入点、store 差异、DTO/枚举、写入时机、失败/重启/并发边界。</p>
+
+  <h2>1. 真实执行顺序</h2>
+  <table>
+    <thead>
+      <tr><th>顺序</th><th>阶段</th><th>记忆相关行为</th><th>关键源码</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>入口</td><td><code>AgentChatService#chat</code></td><td>把 <code>AgentChatCommand</code> 转成 <code>AgentChatContext</code>，设置 <code>sid</code>、禁用工具列表和请求用户。</td><td><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentChatService.java</span></td></tr>
+      <tr><td>链执行</td><td><code>AgentChatChainService#proceed</code></td><td>遍历 <code>List&lt;AgentChatHandler&gt;</code>。真实顺序来自 Spring 的 <code>@Order</code>。</td><td><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentChatChainService.java</span></td></tr>
+      <tr><td>10</td><td><code>InitContextHandler</code></td><td>加载 <code>UserPO</code> 和 <code>AgentPO</code>。后续是否启用短期历史依赖 <code>agent.memoryEnabled</code>。</td><td><span class="path">.../chain/InitContextHandler.java</span></td></tr>
+      <tr><td>20</td><td><code>ConversationHandler</code></td><td>不存在会话则创建 <code>AgentConversationPO</code>，随后插入当前 user 消息记录，状态为 <code>StatusEnum.RUNNING</code>。</td><td><span class="path">.../chain/ConversationHandler.java</span></td></tr>
+      <tr><td>50</td><td><code>SystemPromptHandler</code></td><td>把 <code>agent.instruction</code> 设置为 <code>systemPrompt</code>。</td><td><span class="path">.../chain/SystemPromptHandler.java</span></td></tr>
+      <tr><td>60</td><td><code>RagHandler</code></td><td>RAG 开启时可能把知识库结果或工具说明追加到 <code>systemPrompt</code>。这证明服务端可以改写 Prompt，但当前没有长期记忆同类处理器。</td><td><span class="path">.../chain/RagHandler.java</span></td></tr>
+      <tr><td>75</td><td><code>ContextCollectorHandler</code></td><td>校验 <code>appId</code>、选择 alive Client，计算短期窗口，执行 <code>shortTermMemoryStore.append(user)</code> 和 <code>loadHistory</code>，写入 <code>ctx.historyMessages</code>。</td><td><span class="path">.../chain/ContextCollectorHandler.java</span></td></tr>
+      <tr><td>长期插槽</td><td><code>memoryContext</code></td><td><span class="bad">当前未闭环</span>：字段存在，但未找到主链中的检索、<code>setMemoryContext</code> 或 Prompt 注入。</td><td><span class="path">.../chain/AgentChatContext.java</span><br><span class="path">.../dto/agent/ChatDispatchRequest.java</span></td></tr>
+      <tr><td>80</td><td><code>LlmCallHandler</code></td><td>组装 <code>ChatDispatchRequest</code>，带上 <code>historyMessages</code>、<code>memoryContext</code>、<code>systemPrompt</code>，通过 <code>/chat/dispatch</code> 发给 Client。</td><td><span class="path">.../chain/LlmCallHandler.java</span></td></tr>
+      <tr><td>Client</td><td><code>DefaultPromptFactory</code></td><td>实际 Prompt 顺序是 <code>SystemMessage</code>、历史消息、当前 <code>UserMessage</code>；没有读取 <code>memoryContext</code>。</td><td><span class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/prompt/DefaultPromptFactory.java</span></td></tr>
+      <tr><td>completion</td><td><code>ChatStreamObserver</code></td><td>收到 <code>TYPE_COMPLETION</code> 后调用 <code>ChatResultPersistService#persistAsync</code>。</td><td><span class="path">.../chain/ChatStreamObserver.java</span></td></tr>
+      <tr><td>异步</td><td><code>ChatResultPersistService</code></td><td>插入 assistant 记录，追加 assistant 到短期 store，更新用量统计。</td><td><span class="path">.../persist/ChatResultPersistService.java</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. 流程图</h2>
+  <pre><code>用户消息保存 → 短期历史加载 → 长期召回插槽 → dispatch → completion 持久化 → memory 更新
+
+ConversationHandler
+  └─ insert user AgentConversationRecord
+
+ContextCollectorHandler(@Order 75)
+  ├─ route alive Client
+  ├─ if memoryEnabled != false
+  │   ├─ shortTermMemoryStore.append(conversationId, "user", content, window)
+  │   └─ loadHistory(query, window) → ctx.historyMessages
+  └─ ctx.memoryContext 当前没有来源
+
+LlmCallHandler(@Order 80)
+  └─ ChatDispatchRequest(historyMessages, memoryContext, systemPrompt, userMessage)
+      └─ gRPC /chat/dispatch
+
+Client DefaultPromptFactory
+  ├─ SystemMessage(systemPrompt)
+  ├─ HistoryMessage... 
+  └─ UserMessage(userMessage)
+
+ChatStreamObserver completion
+  └─ ChatResultPersistService.persistAsync
+      ├─ insert assistant AgentConversationRecord
+      ├─ shortTermMemoryStore.append("assistant", fullText)
+      └─ update usage stat</code></pre>
+
+  <h2>3. 记忆模式与 store 差异</h2>
+  <table>
+    <thead>
+      <tr><th>模式</th><th>当前状态</th><th>写入时机</th><th>读取时机</th><th>边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>短期记忆：<code>db</code></td><td><span class="ok">已实现</span>，<code>DbShortTermMemoryStore</code> 为默认匹配实现。</td><td><code>append</code> 是空操作；实际写入发生在 <code>ConversationHandler</code> 和 <code>ChatResultPersistService</code> 插入会话记录时。</td><td><code>loadHistory</code> 从 <code>AgentConversationRecordMapper</code> 按 <code>createDt DESC</code> 取窗口，再反转为正序并排除最后一条。</td><td>多实例共享 DB，重启不丢；性能取决于 DB 查询；<code>evict</code> 会删除会话记录。</td></tr>
+      <tr><td>短期记忆：<code>memory</code></td><td><span class="ok">已实现</span>，由 <code>snail-ai.memory.short-term.store-type: memory</code> 激活。</td><td><code>ContextCollectorHandler</code> 追加 user；completion 后 <code>ChatResultPersistService</code> 追加 assistant。</td><td>优先读 JVM 队列；队列为空时从 DB 回填窗口，再排除最后一条。</td><td>单实例性能好；多实例队列互不共享；进程重启后靠 DB 回填。</td></tr>
+      <tr><td>长期记忆</td><td><span class="warn">文档有目标设计，当前主链未闭环</span>。</td><td>架构文档描述 completion 后抽取、向量化和保存；当前源码未找到主链触发点。</td><td>架构文档描述对话前向量召回并注入系统提示；当前源码未找到 <code>MemoryInjectionAdvisor</code> 或同等调用。</td><td><code>MemoryRetrieveRequest</code>、<code>ConversationMemoryDTO</code>、枚举和 callback URI 存在，但不能证明已接入对话主路径。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <p><code>memoryEnabled</code> 的命名容易误导。<code>AgentPO</code> 注释写“长期记忆”，但当前 <code>ContextCollectorHandler</code> 和 <code>ChatResultPersistService</code> 用它控制短期历史写读。</p>
+  </div>
+
+  <h2>4. DTO 与枚举速查</h2>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>关键字段或值</th><th>当前链路意义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ShortTermHistoryQuery</code></td><td><code>conversationId</code>、<code>agentId</code>、<code>userId</code>、<code>shortTermMemorySize</code></td><td><code>ContextCollectorHandler#loadHistoryMessages</code> 传给短期 store。</td></tr>
+      <tr><td><code>ShortTermMessage</code></td><td><code>role</code>、<code>content</code></td><td>短期 store 返回的轻量消息，随后转成 <code>ChatDispatchRequest.HistoryMessage</code>。</td></tr>
+      <tr><td><code>ChatDispatchRequest.HistoryMessage</code></td><td><code>role</code>、<code>content</code></td><td>Client 侧转成 <code>AssistantMessage</code> 或 <code>UserMessage</code>。</td></tr>
+      <tr><td><code>MemoryRetrieveRequest</code></td><td><code>agentId</code>、<code>userId</code>、<code>conversationId</code>、<code>query</code>、<code>memoryConfigId</code>、<code>modelId</code>、<code>topK</code></td><td>长期检索契约存在，但当前主链未看到生产或消费。</td></tr>
+      <tr><td><code>ConversationMemoryDTO</code></td><td><code>memoryType</code>、<code>title</code>、<code>content</code>、<code>tags</code>、<code>vectorStoreInstanceId</code>、<code>vectorId</code>、<code>relevanceScore</code>、<code>confidenceScore</code>、<code>status</code></td><td>长期记忆条目结构，用于理解目标架构中的关系库加向量库双存储。</td></tr>
+      <tr><td><code>MemoryTypeEnum</code></td><td><code>FACT</code>、<code>DECISION</code>、<code>PREFERENCE</code>、<code>TASK_PROGRESS</code>、<code>REFERENCE</code></td><td>长期记忆分类。</td></tr>
+      <tr><td><code>MemoryStatusEnum</code></td><td><code>ACTIVE</code>、<code>ARCHIVED</code>、<code>SUPPRESSED</code></td><td>长期记忆生命周期状态。</td></tr>
+      <tr><td><code>ActorRoleEnum</code></td><td><code>USER</code>、<code>AGENT</code>、<code>SYSTEM</code></td><td>兼容 legacy 字符串角色；短期主链当前使用会话记录的 <code>user</code> 和 <code>assistant</code>。</td></tr>
+      <tr><td><code>MemoryEventEnum</code></td><td><code>ADD</code>、<code>UPDATE</code>、<code>DELETE</code>、<code>NOOP</code></td><td>长期记忆操作结果语义。</td></tr>
+      <tr><td><code>CompressionStrategy</code></td><td><code>SLIDING_WINDOW</code>、<code>IMPORTANCE_BASED</code></td><td>压缩策略枚举存在，当前短期 store 主要是窗口截断。</td></tr>
+      <tr><td><code>SummaryTypeEnum</code></td><td><code>INCREMENTAL</code>、<code>FULL</code></td><td><code>FULL</code> 注释为预留能力。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 写入时机</h2>
+  <table>
+    <thead>
+      <tr><th>数据</th><th>谁写</th><th>何时写</th><th>谁读</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>当前用户消息记录</td><td><code>ConversationHandler</code></td><td><code>@Order(20)</code>，LLM dispatch 之前。</td><td><code>DbShortTermMemoryStore</code> 或 <code>InMemoryShortTermMemoryStore</code> 的 DB 回填。</td></tr>
+      <tr><td>当前用户短期队列项</td><td><code>ContextCollectorHandler</code></td><td><code>@Order(75)</code>，读取历史之前。</td><td><code>InMemoryShortTermMemoryStore#loadHistory</code>；最后一条会被排除。</td></tr>
+      <tr><td>历史消息</td><td><code>ContextCollectorHandler</code></td><td>同一阶段读取 store 后写入 <code>ctx.historyMessages</code>。</td><td><code>LlmCallHandler</code> 放入 <code>ChatDispatchRequest</code>，Client <code>DefaultPromptFactory</code> 消费。</td></tr>
+      <tr><td>assistant 回复记录</td><td><code>ChatResultPersistService</code></td><td>Client completion chunk 回来后异步写入。</td><td>下一轮短期历史加载。</td></tr>
+      <tr><td>assistant 短期队列项</td><td><code>ChatResultPersistService</code></td><td>assistant 记录插入后追加。</td><td>下一轮 <code>InMemoryShortTermMemoryStore#loadHistory</code>。</td></tr>
+      <tr><td>长期记忆</td><td>当前主链未确认</td><td>架构文档描述 completion 后抽取，但当前源码未找到触发服务。</td><td>当前主链未确认。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 失败、重启与并发边界</h2>
+  <table>
+    <thead>
+      <tr><th>场景</th><th>现象</th><th>排查含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>appId</code> 缺失、应用停用或没有 alive Client</td><td><code>ContextCollectorHandler</code> 发送 <code>[ERROR]</code> 并终止；此时 user 记录已经由 <code>ConversationHandler</code> 插入。</td><td>会话表可能出现只有 user 记录、没有 assistant 回复的记录。</td></tr>
+      <tr><td>Client 调用失败</td><td><code>ChatStreamObserver#handleError</code> 转发错误文本；没有 completion 就不会触发 <code>persistAsync</code>。</td><td>assistant 记录和 assistant 短期记忆可能缺失。</td></tr>
+      <tr><td>异步持久化失败</td><td><code>ChatResultPersistService#persistAsync</code> 捕获日志错误，不回滚已经发给用户的流式响应。</td><td>用户看到回答，但下一轮历史可能缺 assistant。</td></tr>
+      <tr><td>使用 <code>memory</code> store 后重启</td><td>JVM 队列丢失，下一次 <code>loadHistory</code> 从 DB 回填。</td><td>如果 DB 中没有 assistant 记录，重启后无法恢复这部分短期上下文。</td></tr>
+      <tr><td>多实例部署使用 <code>memory</code> store</td><td>每个实例各自维护 <code>ConcurrentHashMap</code> 队列。</td><td>同一会话被路由到不同实例时，短期队列不共享；DB 回填是兜底。</td></tr>
+      <tr><td>同一会话并发提交</td><td><code>sid</code> 用于区分提交和回流 chunk，但短期 store 的 key 是 <code>conversationId</code>。</td><td>并发 user append 和 completion append 可能影响窗口顺序；排查时同时看 <code>sid</code> 和记录创建时间。</td></tr>
+      <tr><td>长期记忆无效</td><td><code>memoryContext</code> 日志可能为空，Client Prompt 不包含长期记忆。</td><td>先确认是否存在 <code>setMemoryContext</code> 或长期检索 handler，再谈向量召回质量。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 调试 checklist</h2>
+  <ul>
+    <li>确认当前 Agent 的 <code>memoryEnabled</code> 是否为 <code>false</code>；当前源码用它控制短期历史写读。</li>
+    <li>确认 <code>shortTermMemorySize</code> 是否为正数；否则使用默认窗口 <code>20</code>。</li>
+    <li>查看 <code>snail-ai.memory.short-term.store-type</code>，判断当前注入的是 <code>memory</code> 还是 <code>db</code>。</li>
+    <li>查 <code>ContextCollectorHandler</code> 日志：<code>historySize</code>、<code>shortTermEnabled</code>、<code>memoryPresent</code>。</li>
+    <li>查 <code>AgentConversationRecord</code>：是否已有当前 user、上一轮 assistant、状态和 <code>createDt</code> 是否符合预期。</li>
+    <li>如果前端看到 completion 但下一轮没有 assistant 历史，查 <code>ChatResultPersistService</code> 的 <code>persistAll</code> 日志。</li>
+    <li>如果怀疑长期记忆，先全局搜索 <code>setMemoryContext</code>、<code>MemoryInjectionAdvisor</code>、<code>MemoryRetrieveRequest</code> 的生产者和消费者。</li>
+    <li>验证最终 Prompt 时，以 <code>DefaultPromptFactory</code> 为准：当前只消费 <code>systemPrompt</code>、<code>historyMessages</code>、<code>userMessage</code>。</li>
+  </ul>
+
+  <h2>8. 源码定位清单</h2>
+  <table>
+    <thead>
+      <tr><th>想确认的问题</th><th>优先打开的文件</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>责任链顺序是否变了</td><td><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/*.java</span></td></tr>
+      <tr><td>短期窗口怎么读写</td><td><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-memory/src/main/java/com/aizuda/snail/ai/memory/store</span></td></tr>
+      <tr><td>completion 后写了什么</td><td><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/persist/ChatResultPersistService.java</span></td></tr>
+      <tr><td>最终 LLM Prompt 包含什么</td><td><span class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/prompt/DefaultPromptFactory.java</span></td></tr>
+      <tr><td>长期记忆是否接入</td><td><span class="path">open-java/snail-ai/docs/guide/memory/index.md</span><br><span class="path">open-java/snail-ai/docs/architecture/memory-architecture.md</span><br><span class="path">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/dto/memory/MemoryRetrieveRequest.java</span></td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

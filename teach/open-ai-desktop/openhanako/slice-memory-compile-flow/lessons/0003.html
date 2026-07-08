@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 编译流水线（下）：零LLM装配、窗口折叠与最终装配</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 编译流水线（下）：零LLM装配、窗口折叠与最终装配 <span class="tag">编译管线</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能解释 assembleWeekFromDaily 为什么是"零 LLM"设计、rollDailyWindow 的 fold-then-delete 安全保障、compileEditableFacts 如何与 compileToday 共享水位线模式、以及 assemble 如何将四个分文件拼接为最终的 memory.md。
+</div>
+
+<p>上一课我们走完了编译流水线的上半段——从对话到摘要再到今日草稿和日记蒸馏。这一课继续下半段：如何将已蒸馏的日记装配为周报、如何将旧日记折叠进长期记忆、如何增量提取重要事实、以及如何将四个分文件拼接为最终的 memory.md。</p>
+
+<h2>一、assembleWeekFromDaily：零 LLM 的周报装配</h2>
+
+<p><code>compile.ts</code> 第 531-552 行。week.md 不再是独立 LLM 编译产物，改为从 <code>memory/daily/</code> 目录<strong>纯文件拼接</strong>最近 6 个已结束逻辑日的日记条目。零 LLM 调用——每天省下一次 600 token 的编译。</p>
+
+<pre><code>export function assembleWeekFromDaily(dailyDir, weekPath, opts) {
+  const maxDays = opts.maxDays || 6;   // DAILY_WINDOW_RETENTION_DAYS
+  const maxChars = opts.maxChars || 1200; // WEEK_ASSEMBLY_MAX_CHARS
+
+  // 1. 扫描 daily/ 目录，找到最近 6 天的日记文件
+  const entries = _listDailyEntries(dailyDir).slice(-maxDays);
+
+  // 2. 读取每个文件内容，过滤空文件
+  const blocks = entries.map(read).filter(非空);
+
+  // 3. 拼接
+  let content = blocks.join("\n\n");
+
+  // 4. 超长截断：从最老的条目开始丢弃
+  if (content.length > maxChars) {
+    从 blocks 头部开始 shift，直到总长 ≤ maxChars
+    仍超限则从尾部截断 content
+    log.warn 记录截断事件（不静默丢弃）
+  }
+
+  atomicWrite(weekPath, content);
+}</code></pre>
+
+<div class="side">
+💡 <b>设计意图：</b>每条 daily 编译时 LLM budget 仅 100 tokens，6 条拼起来 ≤1200 字符。与旧版 LLM 编译 week 段的体量相当，但成本降为零。这是"上游精准控制、下游零成本装配"的范例——在 compileDaily 阶段就把每条日记压到足够短，下游直接拼接即可。
+</div>
+
+<h2>二、rollDailyWindow：滚动窗口折叠进长期记忆</h2>
+
+<p><code>compile.ts</code> 第 564-596 行。将超出 6 日窗口的 daily 条目折叠进 longterm.md。核心安全设计：<strong>fold 成功后才删源文件</strong>。</p>
+
+<div class="step"><span class="num">1</span><b>计算截止日期</b>：<code>cutoffDate = shiftLogicalDate(referenceDate, -6)</code>。所有 date < cutoffDate 的 daily 条目需要折叠。<br><span class="where">6 天窗口与 assembleWeekFromDaily 的 maxDays=6 对齐</span></div>
+
+<div class="step"><span class="num">2</span><b>拼装内容</b>：将筛选出的条目按 <code>## {date}\n\n{body}</code> 格式拼接为一段文本。<br><span class="where">保持 Markdown 格式，方便 compileLongterm 识别日期边界</span></div>
+
+<div class="step"><span class="num">3</span><b>调用 compileLongterm fold</b>：compileLongterm 是通用 fold 入口——将新旧内容合并后喂给 LLM 压缩（maxTokens=600）。<br><span class="where">fingerprint 去重：内容未变就跳过 LLM 调用</span></div>
+
+<div class="step"><span class="num">4</span><b>安全删除</b>：fold 成功后才删除源 daily 文件。失败则保留源文件，交给下一轮重试。<br><span class="where">这是防止数据静默丢失的关键保障</span></div>
+
+<h3>compileLongterm — 通用 fold 入口</h3>
+
+<pre><code>export async function compileLongterm(content, longtermPath, resolvedModel) {
+  const fp = computeFingerprint([content]);
+  if (已有指纹匹配 && 文件存在) return "skipped";
+
+  const input = 已有 longterm
+    ? `## 上一份长期情况\n\n${已有}\n\n## 新沉淀内容\n\n${content}`
+    : `## 新沉淀内容\n\n${content}`;
+
+  const result = await _compactLLM(input, compileLongtermPrompt, resolvedModel, 600);
+  atomicWrite(longtermPath, result);
+  fs.writeFileSync(fpPath, fp);
+  return "compiled";
+}</code></pre>
+
+<h2>三、compileEditableFacts：重要事实增量提取</h2>
+
+<p><code>compile.ts</code> 第 906-968 行。facts.md 是<strong>唯一的事实产物路径</strong>——不再有"短期事实"和"长期事实"之分。采用与 compileToday 同构的水位线增量编译（editable-facts-state.json）。</p>
+
+<pre><code>// editable-facts-state.json 结构（与 today-state.json 同构）
+{
+  "lastCompiledSummaryUpdatedAt": "2026-07-07T12:00:00.000Z",
+  "updatedAt": "2026-07-07T14:30:00.000Z"
+}
+
+// 增量逻辑：
+// - 只处理 updated_at > 水位线的摘要中的事实段
+// - 只处理含有 "### 重要事实" 标题的摘要（hasFactSectionHeading）
+// - 跳过只有空事实段的摘要（isEmptyFactSection）
+// - 新旧事实合并后喂给 LLM（maxTokens=300），由 LLM 去重、更新、整理</code></pre>
+
+<div class="step"><span class="num">→</span><b>ensureEditableFactsBaseline</b>：确保 facts.md 存在并在状态文件中补上首次水位线。如果 facts.md 不存在则创建空文件；如果状态文件中无水位线但有摘要，则用水位线回填（标记所有已有摘要为已处理），避免把已沉淀过的旧摘要重新计入。</div>
+
+<h2>四、assemble：最终 memory.md 装配（零 LLM）</h2>
+
+<p><code>compile.ts</code> 第 978-1002 行。将四个分文件同步拼接为 memory.md——整个编译链路的<strong>最终输出</strong>。零 LLM 调用，纯模板拼接。</p>
+
+<pre><code>export function assemble(factsPath, todayPath, weekPath, longtermPath, memoryMdPath) {
+  const facts    = normalizeCompiledSectionBody(read(factsPath));
+  const today    = normalizeCompiledSectionBody(read(todayPath));
+  const week     = normalizeCompiledSectionBody(read(weekPath));
+  const longterm = normalizeCompiledSectionBody(read(longtermPath));
+
+  const memoryMd = buildCompiledMemoryMarkdown({ facts, today, week, longterm });
+  atomicWrite(memoryMdPath, memoryMd);
+}
+
+export function buildCompiledMemoryMarkdown({ facts, today, week, longterm }) {
+  const empty = isZh ? "（暂无）" : "(none)";
+  return [
+    `## 重要事实\n\n${facts || empty}`,
+    `## 今天\n\n${today || empty}`,
+    `## 本周早些时候\n\n${week || empty}`,
+    `## 长期情况\n\n${longterm || empty}`,
+  ].join("\n\n") + "\n";
+}</code></pre>
+
+<p><b>四个标题始终保留</b>，空栏写占位符"（暂无）"——避免格式漂移导致下游解析出错。总长控制在约 2000 token 以内。</p>
+
+<div class="side">
+💡 <b>编译流水线全貌：</b>rollingSummary（LLM）→ compileToday（LLM）→ compileDaily（LLM）→ assembleWeekFromDaily（零LLM）→ rollDailyWindow + compileLongterm（LLM）→ compileEditableFacts（LLM）→ assemble（零LLM）。5 次 LLM 调用 + 2 次纯文件操作。每条 daily 编译仅 100 tokens 预算，longterm fold 600 tokens——整个每日流水线约 1000+ tokens 的总 LLM 成本。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. assembleWeekFromDaily 为什么不需要 LLM？</p>
+<span class="opt">A. 因为 week 段不重要，随便拼一下就行</span>
+<span class="opt">B. 因为 compileDaily 阶段已经把每条日记压到 100 tokens 以内，6 条拼接 ≤1200 字符直接可用</span>
+<span class="opt">C. 因为 LLM 不支持周报格式</span>
+<span class="opt">D. 因为 week 段的内容每周才变一次，不需要频繁更新</span>
+<details><summary>看答案</summary><b>B</b>。这是"上游精准控制、下游零成本装配"的设计：compileDaily 的 LLM budget 仅 100 tokens，确保每条日记足够紧凑。下游只需按日期排序拼接即可，省下一次 600 token 的 LLM 调用。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. rollDailyWindow 的 fold 失败时为什么不能删除源 daily 文件？</p>
+<span class="opt">A. 因为文件系统权限问题</span>
+<span class="opt">B. 因为删除操作会触发并发冲突</span>
+<span class="opt">C. 因为 fold 失败意味着内容尚未沉淀进 longterm.md——删除源文件会导致数据永久丢失</span>
+<span class="opt">D. 因为需要保留文件用于审计日志</span>
+<details><summary>看答案</summary><b>C</b>。rollDailyWindow 采用"先 fold 后 delete"策略：只有 compileLongterm 成功返回后才删除源 daily 文件。失败则保留源文件，交给下一轮 _doDaily() 重试。这是防止数据静默丢失的关键设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. compileEditableFacts 与 compileToday 在增量机制上有什么共同点？</p>
+<span class="opt">A. 都使用同一个状态文件</span>
+<span class="opt">B. 都使用水位线增量编译——通过状态文件跟踪 lastCompiledSummaryUpdatedAt，只处理新增/修订的摘要</span>
+<span class="opt">C. 都完全不需要状态文件</span>
+<span class="opt">D. 都只在每日任务中执行</span>
+<details><summary>看答案</summary><b>B</b>。两者使用同构的水位线模式：compileToday 使用 today-state.json，compileEditableFacts 使用 editable-facts-state.json。状态文件结构相同（lastCompiledSummaryUpdatedAt + updatedAt），只处理 updated_at > 水位线的摘要。compileEditableFacts 额外检查是否有 "### 重要事实" 标题和是否为空事实段。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. assemble 函数中四个标题为什么始终保留，空栏写"（暂无）"？</p>
+<span class="opt">A. 为了美观</span>
+<span class="opt">B. 为了避免格式漂移导致下游解析出错——如果某天没有事实或长期记忆更新，标题缺失会破坏 memory.md 的结构约定</span>
+<span class="opt">C. 因为 LLM 要求必须有四个段</span>
+<span class="opt">D. 为了给用户一种"功能齐全"的感觉</span>
+<details><summary>看答案</summary><b>B</b>。<code>buildCompiledMemoryMarkdown</code> 始终输出四个 ## 标题，即使某个段为空也写入"（暂无）"。下游 <code>readCompiledMemorySnapshot</code> 解析 memory.md 时依赖标题匹配来映射四个 key——如果标题缺失，解析结果会错位或丢失字段。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>openhanako/lib/memory/compile.ts</code>，搜索 <code>assembleWeekFromDaily</code>、<code>rollDailyWindow</code>、<code>compileEditableFacts</code>、<code>assemble</code>、<code>buildCompiledMemoryMarkdown</code> 五个函数。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「如果 daily/ 目录中某天的日记文件损坏了，assembleWeekFromDaily 会怎样处理？」「compileEditableFacts 的 ensureEditableFactsBaseline 在什么情况下需要回填水位线？」下一课进入 <strong>检索与注入</strong>——compiled-memory-snapshot 快照读写、compiled-memory-state 状态管理、config-loader 配置加载、buildSystemPrompt 检索命中。</div>
+
+<div class="nav"><a href="0002.html">← 上一课：编译流水线（上）</a> · 课程 0003 / 记忆编译与检索全链路 · 下一课预告：检索与注入——快照读写、状态管理与 System Prompt 注入</div>
+
+</body>
+</html>

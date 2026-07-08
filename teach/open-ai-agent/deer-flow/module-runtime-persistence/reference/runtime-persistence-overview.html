@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime 与 persistence 模块参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; letter-spacing:0; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Runtime 与 persistence 模块参考</h1>
+  <p class="lead">本页是 L1 Runtime 与 persistence 的速查表。短课入口：<a href="../lessons/0001-runtime-persistence-module-tour.html">0001-runtime-persistence-module-tour.html</a>；L3 公共 API 字典：<a href="runtime-persistence-api.html">runtime-persistence-api.html</a>。</p>
+
+  <h2>模块职责与整体位置</h2>
+  <p>在 <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a> 的架构图中，本模块位于 Gateway 与 LangGraph agent 之间：它把 HTTP run 请求变成可恢复、可追踪、可回放的运行记录。</p>
+  <table>
+    <tr><th>职责</th><th>说明</th><th>源码锚点</th></tr>
+    <tr><td>run 生命周期</td><td>创建、并发策略、状态推进、取消、shutdown drain、重启后 orphaned active run recovery。</td><td><code>backend/packages/harness/deerflow/runtime/runs/manager.py</code></td></tr>
+    <tr><td>后台执行</td><td>驱动 LangGraph agent streaming，注入 runtime context，绑定 checkpointer/store，处理 goal continuation、rollback、workspace changes 和最终清理。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td>实时输出</td><td>把 worker 产生的 metadata、values、updates、messages、custom、error、end 事件转成可订阅的桥接流。</td><td><code>backend/packages/harness/deerflow/runtime/stream_bridge/base.py</code></td></tr>
+    <tr><td>可回看事件</td><td>把 LangChain callback、tool result、subagent step、workspace change 标准化为按 thread/run 查询的事件。</td><td><code>backend/packages/harness/deerflow/runtime/journal.py</code>、<code>backend/packages/harness/deerflow/runtime/events/store/base.py</code></td></tr>
+    <tr><td>持久化 schema</td><td>维护 DeerFlow 自己的 ORM tables、repository、engine lifecycle 和 Alembic bootstrap；LangGraph checkpointer 表不归 <code>Base.metadata</code> 管。</td><td><code>backend/packages/harness/deerflow/persistence/</code></td></tr>
+    <tr><td>配置边界</td><td><code>database</code> 统一驱动 checkpointer 与应用 ORM；<code>run_events</code> 决定事件存储；<code>stream_bridge</code> 决定 SSE bridge。</td><td><code>backend/packages/harness/deerflow/config/database_config.py</code>、<code>backend/packages/harness/deerflow/config/run_events_config.py</code>、<code>backend/packages/harness/deerflow/config/stream_bridge_config.py</code></td></tr>
+  </table>
+
+  <div class="diagram">Browser / LangGraph SDK
+  │
+  └── Gateway routers
+      ├── app.gateway.services.start_run()        ← 创建 RunRecord 并启动 worker
+      ├── deerflow.runtime.runs.worker.run_agent()← 执行 agent graph
+      ├── StreamBridge                            ← 实时 SSE replay buffer
+      ├── RunEventStore                           ← 持久消息 / trace / subagent step
+      ├── RunStore                                ← run 状态与 token 汇总
+      ├── LangGraph checkpointer                  ← 线程状态、checkpoint、goal
+      └── SQLAlchemy repositories                 ← DeerFlow 应用表</div>
+
+  <h2>内部分层结构</h2>
+  <div class="filetree">backend/packages/harness/deerflow/
+├── runtime/                         ← run 生命周期与 LangGraph runtime 接线
+│   ├── runs/                        ← RunManager、RunRecord、worker
+│   ├── stream_bridge/               ← SSE producer/consumer bridge
+│   ├── events/                      ← RunEventStore 抽象与实现
+│   ├── checkpointer/                ← LangGraph checkpointer provider
+│   ├── store/                       ← LangGraph Store provider
+│   ├── goal.py                      ← thread-scoped goal continuation
+│   ├── journal.py                   ← LangChain callback 到 run_events
+│   └── serialization.py             ← LangGraph/LangChain 输出序列化
+├── persistence/                     ← DeerFlow 应用数据库层
+│   ├── run/                         ← runs 表和 RunRepository
+│   ├── thread_meta/                 ← threads_meta 表和 ThreadMetaStore
+│   ├── models/                      ← run_events ORM 注册点
+│   ├── migrations/                  ← Alembic schema 演进
+│   ├── engine.py                    ← SQLAlchemy async engine lifecycle
+│   └── bootstrap.py                 ← empty/legacy/versioned bootstrap
+└── config/                          ← database、checkpointer、run_events、stream_bridge 配置</div>
+
+  <h2>Run 生命周期边界</h2>
+  <table>
+    <tr><th>阶段</th><th>runtime 入口</th><th>写入/读取边界</th><th>失败时看哪里</th></tr>
+    <tr><td>Gateway startup</td><td><code>langgraph_runtime()</code></td><td>创建 `StreamBridge`、ORM engine、checkpointer、LangGraph store、repository、event store、`RunManager`。</td><td><code>backend/app/gateway/deps.py</code>、<code>backend/packages/harness/deerflow/persistence/engine.py</code></td></tr>
+    <tr><td>创建 run</td><td><code>start_run()</code> → <code>RunManager.create_or_reject()</code></td><td>`runs` 插入 pending；thread_meta 更新为 running；并发策略 reject/interrupt/rollback 生效。</td><td><code>backend/app/gateway/services.py</code>、<code>backend/packages/harness/deerflow/runtime/runs/manager.py</code></td></tr>
+    <tr><td>开始执行</td><td><code>run_agent()</code></td><td>`RunStore.update_status(running)`；`StreamBridge.publish(metadata)`；pre-run checkpoint/workspace snapshot。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td>流式输出</td><td><code>agent.astream()</code></td><td>`StreamBridge.publish(values/updates/messages/custom)`；custom subagent events 批量写 `RunEventStore.put_batch()`。</td><td><code>backend/packages/harness/deerflow/runtime/stream_bridge/</code>、<code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td>事件记录</td><td><code>RunJournal</code></td><td>callback buffer 写 message/trace/middleware/output events；运行中节流更新 token progress。</td><td><code>backend/packages/harness/deerflow/runtime/journal.py</code>、<code>backend/packages/harness/deerflow/runtime/events/store/db.py</code></td></tr>
+    <tr><td>checkpoint 状态</td><td>LangGraph checkpointer</td><td>保存 thread channel values，如 messages、title、goal；cancel rollback 可恢复到 pre-run checkpoint。</td><td><code>backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py</code>、<code>backend/packages/harness/deerflow/runtime/goal.py</code></td></tr>
+    <tr><td>结束 run</td><td><code>run_agent()</code> finally</td><td>flush journal、写 `RunStore.update_run_completion()`、同步 title/thread status、`publish_end()`、延迟 cleanup。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td>重启恢复</td><td><code>reconcile_orphaned_inflight_runs()</code></td><td>SQLite startup 将没有本地 task 的 pending/running run 标记为 error，并给 retained stream 发 end。</td><td><code>backend/packages/harness/deerflow/runtime/runs/manager.py</code>、<code>backend/app/gateway/deps.py</code></td></tr>
+  </table>
+
+  <h2>对外接口与主要类</h2>
+  <table>
+    <tr><th>接口/类</th><th>类型</th><th>职责</th><th>源码</th></tr>
+    <tr><td><code>RunManager</code></td><td>runtime service</td><td>run registry、线程索引、状态变更、取消、并发策略、store hydration、shutdown drain。</td><td><code>backend/packages/harness/deerflow/runtime/runs/manager.py</code></td></tr>
+    <tr><td><code>RunRecord</code></td><td>dataclass</td><td>运行中的 run 句柄，包含状态、task、abort_event、token counters、store_only 标记。</td><td><code>backend/packages/harness/deerflow/runtime/runs/manager.py</code></td></tr>
+    <tr><td><code>RunContext</code></td><td>dataclass</td><td>worker 的基础设施依赖包：checkpointer、store、event_store、thread_store、app_config、completion hook。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td><code>run_agent()</code></td><td>async function</td><td>后台执行主线，驱动 LangGraph streaming 并完成 status、journal、goal、checkpoint、thread_meta 更新。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></td></tr>
+    <tr><td><code>RunStore</code></td><td>abstract interface</td><td>run metadata 的持久化接口，供 <code>RunManager</code> 使用。</td><td><code>backend/packages/harness/deerflow/runtime/runs/store/base.py</code></td></tr>
+    <tr><td><code>RunRepository</code></td><td>SQLAlchemy repository</td><td><code>runs</code> 表实现，提供 put/get/list/update_status/update_run_completion/aggregate_tokens_by_thread；聚合可通过 <code>include_active</code> 控制是否包含 active run。</td><td><code>backend/packages/harness/deerflow/persistence/run/sql.py</code></td></tr>
+    <tr><td><code>RunEventStore</code></td><td>abstract interface</td><td>message/trace/event 的统一存储接口，保证 thread 内 seq 单调递增。</td><td><code>backend/packages/harness/deerflow/runtime/events/store/base.py</code></td></tr>
+    <tr><td><code>DbRunEventStore</code></td><td>SQLAlchemy event store</td><td><code>run_events</code> 表实现，支持 message/run event 查询、task_id 过滤和批量写。</td><td><code>backend/packages/harness/deerflow/runtime/events/store/db.py</code></td></tr>
+    <tr><td><code>RunJournal</code></td><td>LangChain callback handler</td><td>捕获 LLM/tool/chain 事件，写入 event store，汇总 token 和首尾消息。</td><td><code>backend/packages/harness/deerflow/runtime/journal.py</code></td></tr>
+    <tr><td><code>StreamBridge</code></td><td>abstract interface</td><td>producer publish 与 consumer subscribe 的 SSE 桥接协议。</td><td><code>backend/packages/harness/deerflow/runtime/stream_bridge/base.py</code></td></tr>
+    <tr><td><code>MemoryStreamBridge</code></td><td>runtime implementation</td><td>单进程 event log，支持 retained replay 和 heartbeat。</td><td><code>backend/packages/harness/deerflow/runtime/stream_bridge/memory.py</code></td></tr>
+    <tr><td><code>RedisStreamBridge</code></td><td>runtime implementation</td><td>Redis Streams 后端，支持跨 worker 的 SSE replay。</td><td><code>backend/packages/harness/deerflow/runtime/stream_bridge/redis.py</code></td></tr>
+    <tr><td><code>make_checkpointer()</code></td><td>async provider</td><td>按 legacy <code>checkpointer</code> 或 unified <code>database</code> 创建 LangGraph checkpointer。</td><td><code>backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py</code></td></tr>
+    <tr><td><code>make_store()</code></td><td>async provider</td><td>按同一持久化配置创建 LangGraph Store。</td><td><code>backend/packages/harness/deerflow/runtime/store/async_provider.py</code></td></tr>
+    <tr><td><code>bootstrap_schema()</code></td><td>persistence bootstrap</td><td>根据 empty/legacy/versioned DB 状态执行 create_all、stamp、upgrade。</td><td><code>backend/packages/harness/deerflow/persistence/bootstrap.py</code></td></tr>
+  </table>
+
+  <h2>Repository 与 model 表</h2>
+  <table>
+    <tr><th>表/模型</th><th>Repository/Store</th><th>关键字段</th><th>用途</th><th>源码</th></tr>
+    <tr><td><code>runs</code> / <code>RunRow</code></td><td><code>RunRepository</code></td><td><code>run_id</code>、<code>thread_id</code>、<code>status</code>、<code>model_name</code>、<code>total_tokens</code>、<code>token_usage_by_model</code></td><td>run 列表、状态、错误、token 汇总、首尾消息摘要。</td><td><code>backend/packages/harness/deerflow/persistence/run/model.py</code></td></tr>
+    <tr><td><code>run_events</code> / <code>RunEventRow</code></td><td><code>DbRunEventStore</code></td><td><code>thread_id</code>、<code>run_id</code>、<code>event_type</code>、<code>category</code>、<code>content</code>、<code>seq</code></td><td>跨 run 消息流、单 run trace、subagent step、workspace changes。</td><td><code>backend/packages/harness/deerflow/persistence/models/run_event.py</code></td></tr>
+    <tr><td><code>threads_meta</code> / <code>ThreadMetaRow</code></td><td><code>ThreadMetaRepository</code></td><td><code>thread_id</code>、<code>assistant_id</code>、<code>user_id</code>、<code>display_name</code>、<code>status</code></td><td>线程列表、标题、状态、访问控制和 metadata 搜索。</td><td><code>backend/packages/harness/deerflow/persistence/thread_meta/model.py</code></td></tr>
+    <tr><td><code>feedback</code> / <code>FeedbackRow</code></td><td><code>FeedbackRepository</code></td><td><code>feedback_id</code>、<code>run_id</code>、<code>thread_id</code>、<code>rating</code>、<code>comment</code></td><td>给每个 run 的最后一条 AI message 附加反馈。</td><td><code>backend/packages/harness/deerflow/persistence/feedback/model.py</code></td></tr>
+    <tr><td><code>users</code> / <code>UserRow</code></td><td>auth repositories</td><td><code>id</code>、<code>email</code>、<code>system_role</code>、<code>oauth_provider</code>、<code>token_version</code></td><td>用户和 OAuth 身份；runtime 写入 user-scoped run/events。</td><td><code>backend/packages/harness/deerflow/persistence/user/model.py</code></td></tr>
+    <tr><td><code>channel_connections</code> 等</td><td><code>ChannelConnectionRepository</code></td><td><code>owner_user_id</code>、<code>provider</code>、<code>workspace_id</code>、<code>bot_user_id</code></td><td>IM channel OAuth、凭据、会话到 thread 的映射。</td><td><code>backend/packages/harness/deerflow/persistence/channel_connections/model.py</code></td></tr>
+    <tr><td><code>scheduled_tasks</code> / <code>ScheduledTaskRow</code></td><td><code>ScheduledTaskRepository</code></td><td><code>user_id</code>、<code>prompt</code>、<code>schedule_type</code>、<code>next_run_at</code>、<code>lease_owner</code></td><td>后台定时任务定义；completion hook 与 run runtime 相连。</td><td><code>backend/packages/harness/deerflow/persistence/scheduled_tasks/model.py</code></td></tr>
+    <tr><td><code>scheduled_task_runs</code> / <code>ScheduledTaskRunRow</code></td><td><code>ScheduledTaskRunRepository</code></td><td><code>task_id</code>、<code>thread_id</code>、<code>run_id</code>、<code>scheduled_for</code>、<code>status</code></td><td>一次 scheduled task 触发对应的 run 历史。</td><td><code>backend/packages/harness/deerflow/persistence/scheduled_task_runs/model.py</code></td></tr>
+  </table>
+
+  <h2>配置与后端选择</h2>
+  <table>
+    <tr><th>配置</th><th>可选值</th><th>控制对象</th><th>注意点</th></tr>
+    <tr><td><code>database.backend</code></td><td><code>memory</code>、<code>sqlite</code>、<code>postgres</code></td><td>LangGraph checkpointer + LangGraph store + DeerFlow ORM engine。</td><td>SQLite 模式共享 <code>{sqlite_dir}/deerflow.db</code> 并启用 WAL；Postgres 使用同一 URL 但连接池生命周期独立。</td></tr>
+    <tr><td><code>checkpointer</code></td><td><code>memory</code>、<code>sqlite</code>、<code>postgres</code></td><td>legacy checkpointer 配置。</td><td>存在时优先于 unified database，用于向后兼容。</td></tr>
+    <tr><td><code>run_events.backend</code></td><td><code>memory</code>、<code>db</code>、<code>jsonl</code></td><td>RunEventStore。</td><td><code>db</code> 需要 ORM session factory；<code>jsonl</code> 适合单节点轻量持久化，不适合多进程 seq 保证。</td></tr>
+    <tr><td><code>stream_bridge.type</code></td><td><code>memory</code>、<code>redis</code></td><td>SSE bridge。</td><td>memory 只适合同进程；redis 使用 Redis Streams 支持多 worker replay。</td></tr>
+  </table>
+
+  <h2>常见故障定位</h2>
+  <table>
+    <tr><th>现象</th><th>优先边界</th><th>原因判断</th></tr>
+    <tr><td>刷新后消息还在，但 join run stream 失败。</td><td><code>RunEventStore</code> vs <code>StreamBridge</code></td><td>历史消息和实时 replay 是两套存储面；completed run 的 stream 可能已 cleanup。</td></tr>
+    <tr><td>run 列表显示 pending/running 很久。</td><td><code>RunManager</code> + <code>RunStore</code></td><td>检查本进程是否仍有 task；重启场景看 orphaned recovery 是否把 persisted inflight 标为 error。</td></tr>
+    <tr><td>用户看到答案，但 token 用量为 0。</td><td><code>RunJournal</code> + <code>RunRepository.update_run_completion()</code></td><td>事件流和完成汇总分开；LLM callback token 可能未进入 journal 或最终 flush 失败。</td></tr>
+    <tr><td>cancel rollback 后状态不符合预期。</td><td>checkpointer pre-run snapshot</td><td>rollback 依赖 worker 开始前捕获的 checkpoint；若捕获失败只能标记错误路径。</td></tr>
+    <tr><td>subtask card reload 后 step 丢失。</td><td><code>_SubagentEventBuffer</code> + <code>RunEventStore.put_batch()</code></td><td>SSE 实时显示不等于持久化；custom subagent events 要被识别并批量 flush。</td></tr>
+  </table>
+
+  <h2>源码阅读顺序</h2>
+  <ol>
+    <li>先读 <code>backend/app/gateway/deps.py</code> 的 <code>langgraph_runtime()</code>，确认所有 runtime/persistence singleton 从哪里来。</li>
+    <li>再读 <code>backend/app/gateway/services.py</code> 的 <code>start_run()</code>，看 HTTP 请求如何创建 run 并启动 worker。</li>
+    <li>接着读 <code>backend/packages/harness/deerflow/runtime/runs/worker.py</code> 的 <code>run_agent()</code>，只跟主线，不先钻 helper。</li>
+    <li>然后读 <code>backend/packages/harness/deerflow/runtime/journal.py</code> 与 <code>runtime/events/store/base.py</code>，理解可回看事件。</li>
+    <li>最后读 <code>backend/packages/harness/deerflow/persistence/engine.py</code>、<code>bootstrap.py</code> 和各 model，建立数据库边界。</li>
+  </ol>
+
+  <h2>快照源码清单</h2>
+  <p class="note">以下清单用于课程快照生成和后续源码 diff 基准；它不是新的学习顺序。</p>
+  <table>
+    <tr><th>分组</th><th>源文件</th></tr>
+    <tr><td>Gateway 装配</td><td><span class="where">backend/app/gateway/deps.py</span><br><span class="where">backend/app/gateway/services.py</span><br><span class="where">backend/app/gateway/routers/thread_runs.py</span></td></tr>
+    <tr><td>run 主线</td><td><span class="where">backend/packages/harness/deerflow/runtime/runs/manager.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/runs/worker.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/runs/schemas.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/runs/store/base.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/runs/store/memory.py</span></td></tr>
+    <tr><td>事件与 stream</td><td><span class="where">backend/packages/harness/deerflow/runtime/journal.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/events/store/base.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/events/store/db.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/events/store/memory.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/events/store/jsonl.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/base.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/memory.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/redis.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/async_provider.py</span></td></tr>
+    <tr><td>checkpoint/store/goal</td><td><span class="where">backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/checkpointer/provider.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/store/async_provider.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/store/provider.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/goal.py</span><br><span class="where">backend/packages/harness/deerflow/runtime/serialization.py</span></td></tr>
+    <tr><td>配置</td><td><span class="where">backend/packages/harness/deerflow/config/database_config.py</span><br><span class="where">backend/packages/harness/deerflow/config/checkpointer_config.py</span><br><span class="where">backend/packages/harness/deerflow/config/run_events_config.py</span><br><span class="where">backend/packages/harness/deerflow/config/stream_bridge_config.py</span></td></tr>
+    <tr><td>persistence</td><td><span class="where">backend/packages/harness/deerflow/persistence/base.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/engine.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/bootstrap.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/run/model.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/run/sql.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/thread_meta/model.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/thread_meta/sql.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/models/run_event.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/migrations/versions/0001_baseline.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/migrations/versions/0002_runs_token_usage.py</span><br><span class="where">backend/packages/harness/deerflow/persistence/migrations/versions/0003_scheduled_tasks.py</span></td></tr>
+  </table>
+
+  <p class="note">测试证据优先看 <code>backend/tests/test_run_manager.py</code>、<code>backend/tests/test_run_journal.py</code>、<code>backend/tests/test_stream_bridge.py</code>、<code>backend/tests/test_persistence_bootstrap.py</code>、<code>backend/tests/test_run_event_store.py</code>、<code>backend/tests/test_goal_worker.py</code>、<code>backend/tests/test_run_worker_rollback.py</code>。</p>
+</main>
+</body>
+</html>

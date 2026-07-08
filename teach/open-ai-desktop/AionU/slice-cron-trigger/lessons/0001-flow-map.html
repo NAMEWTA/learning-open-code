@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cron 任务创建与触发全链路短课</title>
+  <link rel="stylesheet" href="../assets/slice.css" />
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Cron 任务创建与触发全链路</h1>
+    <p class="subtitle">学习目标：用一条从 `/scheduled` 到 `ipcBridge.cron`、事件刷新、run-now 和 AI 对话入口的路径，建立可调试的 Cron flow map。</p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">主路径：手动创建 / 立即执行</span>
+      <span class="pill">边界：manual / run-now / AI 更新</span>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <a href="../reference/cron-trigger-flow-map.html">参考图谱：cron-trigger-flow-map</a>
+    <a href="./0002-create-edit-path.html">短课 0002：创建与编辑分流</a>
+    <a href="./0003-run-now-refresh.html">短课 0003：run-now 与刷新</a>
+    <a href="./0004-ai-local-cron-and-tests.html">短课 0004：AI 入口与测试边界</a>
+    <a href="../../module-cron/reference/cron-overview.html">回链：Cron 模块</a>
+    <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">回链：Conversation Runtime</a>
+    <a href="../../module-common-adapter/reference/common-adapter-overview.html">回链：Common Adapter</a>
+    <a href="../../00-overview/reference/00-overview.html">回链：L0 项目总览</a>
+  </nav>
+
+  <h2>入口点</h2>
+  <p>手动入口在 <code>ScheduledTasksPage</code>：列表页用 <code>useAllCronJobs()</code> 读取全部任务，用户点击“手动创建”时只打开 <code>CreateTaskDialog</code>；点击任务卡进入 <code>/scheduled/:job_id</code>。同一页还有“对话创建”入口，它跳到 <code>/guid</code> 并预填 Cron prompt，后续由 AI 使用注入的 HTTP helper 创建或更新任务。</p>
+  <p>真正把表单变成任务负载的是弹窗的 <code>handleSubmit</code>。下面是真实连续节选：它先校验表单，生成带 timezone 的 schedule，再在可编辑 agent 配置时解析 <code>agent_config</code>。创建 / 编辑分流放在 <a href="./0002-create-edit-path.html">短课 0002</a> 单独拆开。</p>
+  <pre><code class="language-typescript">const values = await form.validate();
+setSubmitting(true);
+
+const scheduleExpr = scheduleInfo.expr;
+const scheduleDesc = scheduleInfo.description;
+const schedule = createCronSchedule(scheduleExpr, scheduleDesc);
+const assistantValue = typeof values.assistant === 'string' ? values.assistant : selectedAssistantId;
+const resolvedExecutionMode: ExecutionMode = isTeamOwnedTask ? 'existing' : execution_mode;
+
+let agent_config: ICreateCronJobParams['agent_config'] | ICronJobUpdateParams['metadata']['agent_config'];
+if (canEditAgentConfig) {
+  if (!assistantValue) {
+    throw new Error(t('cron.page.form.assistantRequired'));
+  }
+  agent_config = resolveCronAgentConfig({
+    agentValue: assistantValue,
+    presetAssistants,
+    selectedAionrsProvider: geminiCurrentModel
+      ? {
+          id: geminiCurrentModel.id as string | undefined,
+          name: geminiCurrentModel.name,
+        }
+      : undefined,
+    model_id,
+    config_options,
+    workspace,
+    localeKey,
+    getMode: resolveAutoApproveModeFromAgentMetadata,
+    aionrsModelRequiredMessage: t('cron.page.form.aionrsModelRequired'),
+  }).agent_config;
+}</code></pre>
+
+  <h2>链路地图</h2>
+  <p>读这条链时要分清五层：页面层负责入口与反馈；工具层构造 <code>schedule</code>、<code>agent_config</code>；hook 层负责读取和订阅事件；common adapter 把调用映射到 HTTP/WS；会话层在任务执行后展示结果或处理 AI 对话创建后的消息清理。</p>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant User as 用户
+  participant Page as ScheduledTasksPage
+  participant Dialog as CreateTaskDialog
+  participant Hook as useCronJobs
+  participant Adapter as ipcBridge.cron
+  participant Backend as /api/cron
+  participant Detail as TaskDetailPage
+  participant Chat as Conversation
+  User-&gt;&gt;Page: 手动创建 / 编辑 / 启停
+  Page-&gt;&gt;Dialog: open form
+  Dialog-&gt;&gt;Dialog: createCronSchedule + resolveCronAgentConfig
+  alt 新建
+    Dialog-&gt;&gt;Adapter: addJob.invoke(params)
+  else 编辑
+    Dialog-&gt;&gt;Adapter: updateJob.invoke({ job_id, updates })
+  end
+  Adapter-&gt;&gt;Backend: HTTP /api/cron/jobs
+  Backend--&gt;&gt;Hook: cron.job-created / cron.job-updated
+  Hook--&gt;&gt;Page: 更新列表、状态、会话历史标记
+  User-&gt;&gt;Detail: Run now
+  Detail-&gt;&gt;Adapter: runNow.invoke({ job_id })
+  Adapter-&gt;&gt;Backend: POST /api/cron/jobs/:id/run
+  Backend--&gt;&gt;Detail: conversation_id
+  Detail-&gt;&gt;Chat: navigate(/conversation/:id)</code></pre>
+
+  <h2>状态刷新与边界</h2>
+  <div class="flow">
+    <div class="step"><strong>列表刷新：</strong><code>useAllCronJobs</code> 首次调用 <code>listJobs</code>，随后订阅 created、updated、removed 事件，本地替换或删除任务。</div>
+    <div class="step"><strong>执行刷新：</strong><code>useCronJobsMap</code> 看到 <code>last_run_at_ms</code> 变化后刷新会话历史、标记未读，并为 new-conversation 执行结果重命名会话。</div>
+    <div class="step"><strong>run-now：</strong><code>TaskDetailPage</code> 用 <code>runningNowRef</code> 防止双击重入，拿到 <code>conversation_id</code> 后轮询会话、补齐 <code>cron_job_id</code>，再导航到会话页。</div>
+  </div>
+  <p class="callout warn">边界路径：<code>frequency === 'manual'</code> 时 schedule expr 为空，列表和详情页把它当“只允许手动执行”的任务，不显示启停开关；旧任务缺失 <code>schedule.tz</code> 时，读取 hook 会调用 <code>repairCronJobTimeZone</code> 通过 <code>updateJob</code> 补 timezone；AI 对话更新任务的 E2E 明确断言 job id 保持不变，避免“删除再新建”破坏历史。</p>
+  <p>会话侧的 <code>localCronCommands</code> 不再解析创建命令；注释写明创建、更新、列表由注入 HTTP helper 处理。它只在 AionRS 消息完成后剥离 <code>&lt;think&gt;</code> 内容，必要时替换展示文本。</p>
+
+  <h2>检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果用户说“任务创建成功但列表没出现”，你先查哪两层？</p>
+    <p><strong>参考答案：</strong>先查 <code>CreateTaskDialog</code> 是否真的走到 <code>ipcBridge.cron.addJob.invoke</code> 或 <code>updateJob.invoke</code>；再查 <code>useAllCronJobs/useCronJobSubscription</code> 是否收到 <code>cron.job-created</code> 或初始 <code>listJobs</code> 返回。</p>
+    <p><strong>主要来源：</strong><code>CreateTaskDialog.tsx</code>、<code>useCronJobs.ts</code>、<code>TaskDetailPage.tsx</code> 与 <code>cron-crud.e2e.ts</code>。下一步若不清楚后端如何真正到点执行任务，继续追问后端 Cron scheduler 切片。</p>
+  </div>
+</main>
+</body>
+</html>

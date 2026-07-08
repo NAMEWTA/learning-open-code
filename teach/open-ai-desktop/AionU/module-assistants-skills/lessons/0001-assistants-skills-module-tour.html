@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 助手与技能模块 15 分钟导览</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>助手、技能与工具配置：从保存动作看模块边界</h1>
+    <p class="subtitle">15 分钟短课：只追一条主线，打开助手编辑器后，保存配置时哪些数据走 assistants，哪些走 skills，哪些只是引用 MCP server。</p>
+    <div class="meta">
+      <span class="pill">L1：module-assistants-skills</span>
+      <span class="pill">主线：assistant editor save</span>
+      <span class="pill">目标：定位正确修改层</span>
+    </div>
+  </section>
+
+  <p class="muted">
+    回链：先看 <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>；
+    adapter 边界看 <a href="../../module-common-adapter/reference/common-adapter-overview.html">common-adapter</a>；
+    路由壳层看 <a href="../../module-renderer-core/reference/renderer-core-overview.html">renderer-core</a>；
+    完整清单看 <a href="../reference/assistants-skills-overview.html">本模块 reference</a>。
+  </p>
+
+  <h2>1. 先把模块切成三块</h2>
+  <p>
+    这个 L1 模块不是单个页面，而是三条设置入口的组合：<code>/assistants</code> 管助手预设，
+    <code>/settings/skills</code> 管可导入、可选择的 Skill，<code>/settings/tools</code> 管 MCP server 与内置图像生成工具。
+    它们都在 renderer 中呈现，但业务真值不在 renderer。renderer 负责列表、表单、只读规则、弹窗和乐观刷新；
+    真正的 catalog、导入、保存和测试连接都通过 <code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</code> 发给 backend。
+  </p>
+
+  <div class="filetree">module-assistants-skills/
+├── AssistantSettings/              ← 助手列表、详情、编辑器和只读规则
+├── SkillsHubSettings.tsx           ← 技能列表、导入、删除、搜索和导入历史
+├── ToolsSettings/                  ← Tools 设置页外壳
+├── hooks/assistant/                ← 助手列表与编辑状态机
+├── hooks/mcp/                      ← MCP server catalog、CRUD、连接与 OAuth
+└── common/adapter/ipcBridge.ts     ← assistants、skills、mcpService 的 HTTP 映射</div>
+
+  <h2>2. 保存助手时的调用链</h2>
+  <p>
+    主线从 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/settings/AssistantSettings/index.tsx</code> 开始：
+    页面把列表 hook、编辑 hook、runtime catalog 和多个 section 组装成 <code>AssistantEditorViewModel</code>。
+    真正的保存逻辑在 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/hooks/assistant/useAssistantEditor.ts</code>。
+    保存前先校验名称、固定模型、固定权限和思考等级；如果有 pending skill，会先调用 <code>ipcBridge.fs.importSkills.invoke</code>。
+  </p>
+
+  <pre><code class="language-text">保存动作的最短链路
+AssistantEditorPage
+  -> editor.actions.save
+  -> useAssistantEditor.handleSave
+     -> ipcBridge.fs.importSkills.invoke      // 仅 pending skill 需要
+     -> ipcBridge.assistants.create/update    // profile、agent、defaults、skill ids
+     -> ipcBridge.fs.writeAssistantRule       // 非 builtin 的 rules 内容
+     -> refreshAssistantCatalog + SWR mutate</code></pre>
+
+  <p>
+    这里最容易误判的是 rules 和 skills：规则正文不是写到 assistants endpoint，而是写到
+    <code>/api/skills/assistant-rule/write</code>；技能文件也不是嵌入 assistant 记录，而是先被导入技能库，
+    assistant 只保存已启用技能名、custom skill 名称和禁用的 builtin auto skill。
+  </p>
+
+  <h2>3. 三个修改判断点</h2>
+  <p>
+    第一，看字段属于哪个层级。名字、头像、默认模型、默认权限、默认 MCP id 属于 assistant 请求；
+    规则正文属于 assistant-rule；MCP server 的创建、切换和连接测试属于 <code>mcpService</code>。
+  </p>
+  <p>
+    第二，看 source。builtin assistant 只能改主 Agent 和部分 defaults，profile、prompt、rules 以只读方式展示；
+    generated assistant 锁定身份字段；user assistant 才能完整编辑和删除。这个规则由
+    <code>AssistantSettings/index.tsx</code> 和 <code>AssistantEditorSections.tsx</code> 共同落实。
+  </p>
+  <p>
+    第三，看测试证据。当前 <code>open-ai-desktop/AionU/tests/e2e/features/settings/skills/</code>
+    明确覆盖 Skills Hub 的导入、搜索、刷新、外部源、批量导入和异常 highlight；
+    <code>open-ai-desktop/AionU/tests/e2e/specs/assistant-settings-*.e2e.ts</code> 也覆盖助手 CRUD、prompts、defaults、permissions、skills/MCP 默认项。
+    Tools MCP 目前主要由 <code>ext-mcp.e2e.ts</code> 和单元测试兜底，若要改 CRUD、OAuth 或图像生成开关，仍应补更直接的端到端测试。
+  </p>
+
+  <h2>4. 检索练习</h2>
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>如果用户在助手编辑器里新增一个本地 Skill，然后点击 Save，至少会触发哪两类 adapter 调用？</p>
+    <p><strong>参考答案：</strong>先触发 <code>ipcBridge.fs.importSkills.invoke</code> 把本地 Skill 导入技能库；再触发
+      <code>ipcBridge.assistants.create.invoke</code> 或 <code>ipcBridge.assistants.update.invoke</code> 保存 assistant 配置。
+      如果 rules 非空且不是 builtin assistant，还会触发 <code>ipcBridge.fs.writeAssistantRule.invoke</code>。</p>
+  </div>
+
+  <p class="muted">
+    推荐主来源：继续阅读 <a href="../reference/assistants-skills-overview.html#interfaces">接口清单</a>，
+    然后打开 <code>useAssistantEditor.ts</code> 对照本课的保存链路。下一步可以向 agent 追问：
+    “请沿着一个 Skill 从导入到会话注入的完整链路继续讲 L2”。
+  </p>
+</main>
+</body>
+</html>

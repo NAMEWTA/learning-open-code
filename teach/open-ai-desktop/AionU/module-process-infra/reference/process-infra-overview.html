@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Process 基础设施参考清单</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css" />
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .compact td,
+    .compact th {
+      padding: 8px 10px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Process 基础设施参考清单</h1>
+    <p class="subtitle">速查 `initializeProcess` 周边的职责边界、入口、依赖和测试证据。</p>
+    <div class="meta">
+      <span class="pill">主题：module-process-infra</span>
+      <span class="pill">配套 lesson：0001</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="参考文档导航">
+    <a href="#responsibility">模块职责</a>
+    <a href="#interfaces">入口与接口清单</a>
+    <a href="#layers">内部分层</a>
+    <a href="#tests">测试佐证</a>
+  </nav>
+
+  <h2 id="responsibility">模块职责</h2>
+  <p>Main process 基础设施位于 Electron main 层和 aioncore backend 之间。它不直接实现聊天、Team 或 Cron 业务，而是负责让这些业务有稳定运行环境：Chromium 启动参数、用户数据目录、配置存储、legacy 数据迁移、IPC bridge、main process i18n、更新服务、backend 二进制解析、启动失败诊断、托盘/窗口/WebUI 配置。</p>
+  <p>在整体架构中，<code>open-ai-desktop/AionU/packages/desktop/src/index.ts</code> 是 Electron 总入口；<code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts</code> 是基础设施汇合点；<code>@aionui/web-host</code> 和 aioncore 是后续运行时依赖。判断启动问题时，优先按“Electron app ready → initializeProcess → backend start → mode branch → window/WebUI”顺序定位。</p>
+
+  <h2 id="interfaces">入口与接口清单</h2>
+  <p>这一节分成两部分看：先确认哪些文件是主进程基础设施的稳定入口，再确认这些入口真正向外暴露了哪些函数、常量或存储代理。L1 关注的是“别人从哪里接入”和“接入后能拿到什么”。</p>
+  <table class="compact">
+    <thead>
+      <tr><th>入口文件</th><th>对外作用</th><th>阅读重点</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts</code></td>
+        <td>导出 <code>initializeProcess()</code>，注册初始化副作用。</td>
+        <td>区分导入副作用与显式 <code>await initStorage()</code>。</td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>导出 <code>ProcessConfig</code>、<code>ProcessEnv</code>、<code>getSystemDir()</code> 等存储基础设施。</td>
+        <td>目录、配置拦截、助手/技能目录、legacy DB 迁移。</td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initBridge.ts</code></td>
+        <td>副作用注册所有 main process bridge。</td>
+        <td>下一跳是 <code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts</code>。</td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/i18n/index.ts</code></td>
+        <td>初始化 main process i18n，并导出语言切换能力。</td>
+        <td>静态导入 locale，避免生产包运行时读文件失败。</td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/index.ts</code></td>
+        <td>对外再导出 backend 二进制解析能力。</td>
+        <td>向上层屏蔽 <code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.ts</code> 的实现细节。</td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.ts</code></td>
+        <td>实现 <code>aioncore</code> 二进制路径解析和诊断。</td>
+        <td>先查 packaged resources，再查系统 PATH，并附带诊断。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <table class="compact">
+    <thead>
+      <tr><th>导出接口</th><th>来源文件</th><th>作用</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>initializeProcess()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts</code></td>
+        <td>主进程基础设施总入口；等待存储、迁移和系统目录提供者就绪。</td>
+      </tr>
+      <tr>
+        <td><code>ProcessConfig</code>、<code>ProcessEnv</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>main process 的配置与环境变量存储代理，供其他模块统一读写。</td>
+      </tr>
+      <tr>
+        <td><code>ProcessChat</code>、<code>ProcessChatMessage</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>对旧版聊天会话和消息文件的读写代理，兼容 legacy 数据布局。</td>
+      </tr>
+      <tr>
+        <td><code>getSystemDir()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>返回 cache、work、log 目录及平台/架构信息，供 bridge 暴露系统信息。</td>
+      </tr>
+      <tr>
+        <td><code>getAssistantsDir()</code>、<code>getSkillsDir()</code>、<code>getCronSkillsDir()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>返回用户助手规则、用户技能和 cron job 技能目录路径。</td>
+      </tr>
+      <tr>
+        <td><code>BUILTIN_IMAGE_GEN_ID</code>、<code>getBuiltinMcpScriptPath()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code></td>
+        <td>内建 MCP 图像服务标识与 entry script 路径解析，供 main process 启动外部 node 进程。</td>
+      </tr>
+      <tr>
+        <td><code>BridgeDependencies</code>、<code>initAllBridges()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts</code></td>
+        <td>bridge 聚合层的类型与注册入口，统一挂接 renderer 可调用的原生能力。</td>
+      </tr>
+      <tr>
+        <td><code>initApplicationBridge()</code>、<code>initDialogBridge()</code>、<code>initNotificationBridge()</code>、<code>initSystemSettingsBridge()</code>、<code>initThemeBridge()</code>、<code>initUpdateBridge()</code>、<code>initWindowControlsBridge()</code>、<code>initWebuiBridge()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts</code></td>
+        <td>分别暴露各子 bridge 的显式注册函数，便于测试或按需装配。</td>
+      </tr>
+      <tr>
+        <td><code>registerWindowMaximizeListeners()</code>、<code>disposeAllTeamSessions()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts</code></td>
+        <td>前者补充窗口最大化事件监听；后者当前是 team session 清理占位实现。</td>
+      </tr>
+      <tr>
+        <td><code>i18nReady</code>、<code>setInitialLanguage()</code>、<code>changeLanguage()</code>、<code>normalizeLanguageCode()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/i18n/index.ts</code></td>
+        <td>提供主进程 i18n 初始化完成信号、语言设置与语言码标准化能力。</td>
+      </tr>
+      <tr>
+        <td><code>default i18n</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/i18n/index.ts</code></td>
+        <td>导出已初始化的 i18next 实例，供需要直接翻译的主进程服务复用。</td>
+      </tr>
+      <tr>
+        <td><code>resolveBinaryPath()</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/index.ts</code> / <code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.ts</code></td>
+        <td>解析 <code>aioncore</code> 可执行文件位置；找不到时抛出附带诊断的错误。</td>
+      </tr>
+      <tr>
+        <td><code>BackendBinaryResolveDiagnostics</code></td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.ts</code></td>
+        <td>描述 bundled 路径、PATH 查找命令和目录枚举等诊断字段。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">内部分层</h2>
+  <div class="filetree">packages/desktop/src/process/
+├── index.ts                    ← initializeProcess 汇合点
+├── utils/                      ← 主进程工具与运行时配置
+│   ├── configureChromium.ts    ← app name、headless、CDP、GPU 恢复前置
+│   ├── initStorage.ts          ← 配置/目录/legacy DB 迁移
+│   ├── initBridge.ts           ← bridge 注册副作用
+│   ├── webuiConfig.ts          ← 桌面托管 WebUI 配置与恢复
+│   ├── tray.ts                 ← 托盘与关闭到托盘状态
+│   ├── windowBounds.ts         ← 窗口尺寸持久化
+│   └── deepLink.ts             ← aionui:// 链接分发
+├── services/                   ← 主进程服务
+│   ├── i18n/index.ts           ← main process 翻译资源
+│   ├── autoUpdaterService.ts   ← 自动更新状态机
+│   ├── autoUpdateDiagnostics.ts← 更新诊断事件
+│   ├── installerLastFailure.ts ← 安装器失败标记消费
+│   └── database/               ← legacy SQLite 迁移与修复
+├── backend/                    ← backend 二进制解析
+│   ├── index.ts                ← resolveBinaryPath 再导出
+│   └── binaryResolver.ts       ← bundled/PATH 查找与诊断
+└── startup/                    ← 相邻启动编排层（不属于本模块内部基础设施）
+    ├── backendStartup.ts       ← backend 启动成功/失败包装
+    ├── backendStartupFailure.ts← 失败分类
+    ├── quitCleanup.ts          ← 退出清理
+    └── architectureCompatibility.ts ← macOS 架构兼容检查</div>
+  <p><code>open-ai-desktop/AionU/packages/desktop/src/process/startup/</code> 与本模块紧邻，负责消费这里准备好的基础设施继续编排启动链，但它不是 <code>open-ai-desktop/AionU/packages/desktop/src/process/</code> 基础设施层的内部实现；阅读时要把“准备环境”和“驱动启动”区分开。</p>
+
+  <table class="compact">
+    <thead>
+      <tr><th>层</th><th>关键依赖</th><th>为什么重要</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Electron app</td><td><code>app</code>、<code>BrowserWindow</code>、<code>ipcMain</code></td><td>提供主进程 API、路径、窗口、IPC 和协议注册。</td></tr>
+      <tr><td>本地存储</td><td><code>ConfigStorage</code>、<code>EnvStorage</code>、<code>better-sqlite3</code></td><td>启动前必须建立目录、配置拦截和 legacy DB 基线。</td></tr>
+      <tr><td>Bridge</td><td><code>@office-ai/platform</code> logger、<code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/*</code></td><td>统一注册 renderer 可调用的桌面原生能力。</td></tr>
+      <tr><td>Backend</td><td><code>BackendLifecycleManager</code>、<code>resolveBinaryPath()</code></td><td>决定 aioncore 从哪里启动，以及失败时提供何种诊断。</td></tr>
+      <tr><td>服务</td><td><code>electron-updater</code>、<code>i18next</code>、更新诊断</td><td>支撑自动更新、语言、安装完整性与用户可见错误。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="tests">测试佐证</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>测试文件</th><th>佐证行为</th><th>对应源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>open-ai-desktop/AionU/tests/unit/bootstrap/configMigrationIntegration.test.ts</code></td>
+        <td>过期 DB 会迁移；缺 DB 会跳过；当前版本仍修复 handoff；迁移完成或异常都会关闭 driver。</td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/database/runLegacyDatabaseMigrations.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/tests/unit/bootstrap/backendStartup.test.ts</code></td>
+        <td>backend 成功时注册端口；失败时先采集失败再退出；关闭取消不误报。</td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/startup/backendStartup.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/tests/unit/bootstrap/backendStartupFailure.test.ts</code></td>
+        <td>区分 GLIBC 不兼容、数据迁移失败、可恢复数据库损坏、安装不完整、macOS 架构不匹配。</td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/startup/backendStartupFailure.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.test.ts</code></td>
+        <td>找不到 <code>aioncore</code> 时，错误对象包含 resources、runtime、PATH 查询等诊断字段。</td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/binaryResolver.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>open-ai-desktop/AionU/tests/unit/process/services/autoUpdaterService.test.ts</code></td>
+        <td>自动更新服务覆盖 CDN provider、下载去重、macOS native handoff、错误广播和 Windows 安装行为。</td>
+        <td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/autoUpdaterService.ts</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <section class="callout">
+    <p><strong>阅读路径建议：</strong>先读 <code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts</code>，再读 <code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</code>，然后按现象选择 bridge、services、backend 或 startup 测试。配套短课见 <a href="../lessons/0001-process-infra-module-tour.html">Main process 基础设施模块导览</a>。</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>主进程 IPC 边界模块导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>主进程 IPC：renderer 到 main 的受控门口</h1>
+        <p class="meta">目标：15 分钟内能从一个 renderer API 追到 preload channel 和 main handler。</p>
+
+        <h2>先看边界</h2>
+        <p>
+          Orca 的 renderer 只负责 UI 和交互，不能直接碰 Node 文件系统、PTY、Git 或 runtime server。
+          这些能力从 <code>src/preload/index.ts</code> 暴露成 <code>window.api</code>，
+          再经 <code>ipcRenderer.invoke/send/on</code> 到 main 侧的 handler。读 IPC 时先分三层：
+          preload API 是门牌，channel 字符串是门锁，main handler 才是真正执行和校验的地方。
+        </p>
+
+        <h2>三类关键文件</h2>
+        <div class="filetree">src/
+├── preload/
+│   └── index.ts                     ← renderer 可见 API 与 contextBridge
+└── main/
+    └── ipc/
+        ├── register-core-handlers.ts ← 总注册入口与窗口信任 ID
+        └── pty.ts                    ← 终端 IPC、provider 路由和事件回传</div>
+        <p>
+          <code>registerCoreHandlers()</code> 只负责把很多 domain handler 装上去，并在 macOS 重新开窗时刷新 trusted
+          webContents ID。终端比较特殊：<code>registerPtyHandlers()</code> 会移除旧 handler 再重绑，因为 PTY 数据、窗口事件和
+          renderer delivery 都跟当前窗口有关。
+        </p>
+
+        <h2>一次调用怎么穿过边界</h2>
+        <pre><code class="language-typescript">pty: {
+  spawn: (opts) => ipcRenderer.invoke('pty:spawn', opts),
+  write: (id, data) => ipcRenderer.send('pty:write', { id, data }),
+  resize: (id, cols, rows) => ipcRenderer.send('pty:resize', { id, cols, rows })
+}</code></pre>
+        <p>
+          同一个 PTY API 里同时有 <code>invoke</code> 和 <code>send</code>：spawn/kill 需要结果或错误，所以走 request-response；
+          write/resize 是高频火并忘事件，main 侧用 <code>ipcMain.on</code> 减少空回复。main handler 会先等本地 daemon startup
+          barrier，再按 <code>connectionId</code> 选择 SSH provider 或本地/daemon provider，并在 resize 时用 runtime driver 状态挡住
+          mobile 正在接管的桌面 resize。
+        </p>
+
+        <h2>检索练习</h2>
+        <p>
+          如果 UI 里点“提交 commit”报错，你会先查哪里？A. renderer 组件；B. preload 的 <code>git.commit</code>；
+          C. main 侧 Git handler；D. git runner。
+        </p>
+        <div class="answer">
+          参考路径：先在 renderer 找调用点，再查 <code>src/preload/index.ts</code> 中是否映射到 <code>git:commit</code>，
+          接着去 main 侧 Git handler，因为当前版本 Git IPC 在文件与 Git IPC 边界中注册。
+          只有确认参数校验、connectionId 分流和本地/SSH handler 选择后，才继续下钻到 git runner；具体文件见
+          <a href="../reference/main-ipc-overview.html">模块总览参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/preload/index.ts</code>、<code>src/main/ipc/register-core-handlers.ts</code>、
+          <code>src/main/ipc/pty.ts</code>。可以继续向 agent 追问 worktree 创建链路如何跨过这些 IPC。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

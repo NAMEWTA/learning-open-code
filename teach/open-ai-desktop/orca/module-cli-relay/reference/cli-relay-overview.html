@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CLI 与 Relay 模块参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <p class="meta">L1 参考文档 · CLI 与远端 relay 模块</p>
+        <h1>CLI 与 Relay 模块参考</h1>
+
+        <h2>职责定位</h2>
+        <p>
+          <code>src/cli</code> 是 Orca 的本地命令行入口，负责把用户输入规范化为 runtime RPC 或本地启动行为；<code>src/relay</code> 是远端 SSH 主机上的轻量 daemon，负责把 PTY、文件、Git、preflight、agent hook 和 workspace session 能力通过 framed JSON-RPC 暴露给桌面端。
+        </p>
+
+        <h2>在整体架构中的位置</h2>
+        <pre><code class="language-text">orca CLI
+├── parseArgs / validateCommandAndFlags
+├── RuntimeClient
+└── desktop runtime 或 headless runtime
+
+desktop main / SSH
+└── deploy relay.js on remote host
+    ├── protocol frame
+    ├── RelayDispatcher
+    └── Pty/Fs/Git/Preflight/AgentExec handlers</code></pre>
+        <p>
+          回到 L0：CLI 与 relay 位于 <a href="../../00-overview/reference/00-overview.html">项目总览图</a> 的脚本化和远端执行边界。
+        </p>
+
+        <h2>源码索引</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>职责</th>
+              <th>阅读提示</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/cli/index.ts</code></td>
+              <td>CLI 入口、特殊 shim、help、校验、RuntimeClient 创建。</td>
+              <td>先看 <code>main()</code> 的控制流。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/dispatch.ts</code></td>
+              <td>汇总 handler group 并按 commandPath 分发。</td>
+              <td>查一个命令落地位置时从这里反查。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/specs/index.ts</code></td>
+              <td>聚合 browser、project、file、computer、orchestration 等命令规格。</td>
+              <td>判断命令和 flag 是否合法。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/runtime-client.ts</code></td>
+              <td>兼容 barrel，导出拆分后的 runtime client。</td>
+              <td>实际实现继续进入 <code>src/cli/runtime/</code>。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/relay.ts</code></td>
+              <td>relay 进程入口、参数、connect mode、daemon mode、socket 和 handler 装配。</td>
+              <td>后续 L4 会专门讲 reconnect。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/protocol.ts</code></td>
+              <td>frame header、handshake、keepalive、JSON-RPC message 和 payload 上限。</td>
+              <td>这是 relay 与桌面端互通的最低层契约。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/dispatcher.ts</code></td>
+              <td>多客户端 dispatcher、请求/通知、ack、超时和 stale client 管理。</td>
+              <td>理解断线和重连行为必须读这里。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>对外接口清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>接口族</th>
+              <th>入口</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CLI 命令</td>
+              <td><code>COMMAND_SPECS</code> + <code>dispatch()</code></td>
+              <td>规格定义合法命令，dispatch 查找对应 handler。</td>
+            </tr>
+            <tr>
+              <td>Runtime RPC</td>
+              <td><code>RuntimeClient</code></td>
+              <td>CLI 调用桌面/headless runtime 的主要通道。</td>
+            </tr>
+            <tr>
+              <td>Relay frame</td>
+              <td><code>encodeFrame()</code>、<code>FrameDecoder</code></td>
+              <td>独立于 Electron 的远端传输格式。</td>
+            </tr>
+            <tr>
+              <td>Relay JSON-RPC</td>
+              <td><code>RelayDispatcher.onRequest()</code>、<code>onNotification()</code></td>
+              <td>远端 handler 注册点，服务 PTY、FS、Git 等能力。</td>
+            </tr>
+            <tr>
+              <td>Grace reconnect</td>
+              <td><code>--connect</code>、Unix socket、handshake</td>
+              <td>桌面端重连到仍持有 PTY 的 relay 进程。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键依赖</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>方向</th>
+              <th>依赖对象</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>CLI 依赖</td>
+              <td><code>args</code>、<code>specs</code>、<code>runtime</code>、<code>handlers</code></td>
+              <td>参数解析与命令规格先保证输入合法，再由 RuntimeClient 或 handler 执行。</td>
+            </tr>
+            <tr>
+              <td>CLI 被谁调用</td>
+              <td>用户、agent、脚本、特殊 shim</td>
+              <td><code>orca</code> 是自动化入口，<code>agent-teams-tmux</code> 和 <code>claude-teams</code> 是兼容桥。</td>
+            </tr>
+            <tr>
+              <td>Relay 依赖</td>
+              <td><code>protocol</code>、<code>dispatcher</code>、PTY/FS/Git/preflight handlers</td>
+              <td>协议层解帧，dispatcher 路由，handler 执行远端能力。</td>
+            </tr>
+            <tr>
+              <td>Relay 被谁调用</td>
+              <td>main SSH 服务、远端 <code>orca --connect</code> 桥、relay socket client</td>
+              <td>桌面端部署 relay，重连时通过 socket 接回仍持有 PTY 的进程。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>简单调用示例</h2>
+        <pre><code class="language-text">orca browser click --selector "#run"
+├── src/cli/index.ts       ← parseArgs + validateCommandAndFlags
+├── RuntimeClient          ← 连接 desktop/headless runtime
+├── src/cli/dispatch.ts    ← commandPath: browser click
+└── browser handler        ← 组装 runtime 请求并输出结果</code></pre>
+
+        <h2>后续主题建议</h2>
+        <ul>
+          <li>L2：<code>slice-orca-cli-command-flow</code>，追一个 CLI 命令从参数解析到 RuntimeClient 的完整链路。</li>
+          <li>L2：<code>slice-ssh-relay-session-flow</code>，追 SSH relay 从部署到 PTY 会话恢复。</li>
+          <li>L4：<code>deep-dive-relay-reconnect</code>，拆解 <code>--connect</code>、socket identity、generation 和 stale request。</li>
+          <li>L3：为 <code>RelayDispatcher</code>、<code>FrameDecoder</code>、<code>RuntimeClient</code> 和常用 CLI handler 生成 API 参考。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

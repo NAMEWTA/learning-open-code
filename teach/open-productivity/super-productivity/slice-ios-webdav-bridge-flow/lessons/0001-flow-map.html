@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 iOS WebDAV 桥接与同步全链路路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断 iOS WebDAV 请求从 sync provider 到 URLSession 的完整路径与 no-cache 防线</p>
+    <h1>iOS WebDAV 插件、no-cache 与同步 provider 全链路</h1>
+    <p class="lead">iOS 上 WebDAV 同步不走 <code>CapacitorHttp</code>，而是由 <code>CustomViewController</code> 注册的 <code>WebDavHttp</code> 插件经 <code>URLSession</code> 发请求；JS 侧 <code>WebDavHttpAdapter</code> 在 native 路径额外注入 no-cache 头，并与 Swift 侧禁用 <code>URLCache</code> 形成双层防线，避免 content-hash 冲突检测读到陈旧 <code>sync-data.json</code>。</p>
+
+    <h2>1. 时序路径图</h2>
+    <pre class="diagram">sequenceDiagram
+  participant ST as SyncTriggerService
+  participant SW as SyncWrapperService
+  participant WP as WrappedProviderService
+  participant FBA as FileBasedSyncAdapter
+  participant WDV as WebdavBaseProvider
+  participant API as WebdavApi
+  participant AD as WebDavHttpAdapter
+  participant AH as APP_WEBDAV_NATIVE_HTTP
+  participant CAP as Capacitor WebDavHttp
+  participant PL as WebDavHttpPlugin.swift
+  participant SES as URLSession
+
+  ST-&gt;&gt;SW: triggerSync / 手动 sync
+  SW-&gt;&gt;WP: getOperationSyncCapable(WebDAV)
+  WP-&gt;&gt;FBA: wrap 文件型 provider
+  FBA-&gt;&gt;WDV: downloadFile / uploadFile
+  WDV-&gt;&gt;API: GET / PUT / PROPFIND
+  API-&gt;&gt;AD: request()
+  AD-&gt;&gt;AD: 合并 NO_CACHE_HEADERS
+  AD-&gt;&gt;AH: nativeHttp (isNativePlatform)
+  AH-&gt;&gt;CAP: WebDavHttp.request()
+  CAP-&gt;&gt;PL: request(call)
+  PL-&gt;&gt;SES: dataTask (reloadIgnoringLocalCacheData)
+  SES--&gt;&gt;PL: HTTP body + status
+  PL--&gt;&gt;CAP: resolve(data, status, headers)
+  CAP--&gt;&gt;AD: 文本响应
+  AD--&gt;&gt;API: 记录 cacheHeaders 诊断
+  API--&gt;&gt;SW: rev + dataStr / 冲突或成功</pre>
+    <p>插件注册首查 <span class="where">ios/App/App/CustomViewController.swift</span> 的 <code>capacitorDidLoad</code>；HTTP 实现在 <span class="where">ios/App/App/WebDavHttpPlugin.swift</span>。JS 工厂在 <span class="where">src/app/op-log/sync-providers/file-based/webdav/webdav.ts</span> 注入 <code>APP_WEBDAV_NATIVE_HTTP</code>。同步编排入口见 <span class="where">src/app/imex/sync/sync-wrapper.service.ts</span>。</p>
+
+    <h2>2. 三层 no-cache 防线</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层级</th><th>位置</th><th>作用</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>请求头</td><td><code>WebDavHttpAdapter.NO_CACHE_HEADERS</code></td><td>native 路径附加 <code>Cache-Control: no-cache, no-store</code>，提示上游代理勿返回陈旧副本。</td></tr>
+          <tr><td>会话策略</td><td><code>WebDavHttpPlugin.swift</code> lazy <code>URLSession</code></td><td><code>requestCachePolicy = .reloadIgnoringLocalCacheData</code>，<code>urlCache = nil</code>，禁用 iOS 默认共享缓存。</td></tr>
+          <tr><td>冲突检测依赖</td><td><code>WebdavApi.upload</code> 上传前 GET</td><td>用 content-hash 比对 <code>expectedRev</code>；若 GET 命中缓存，会误判远端未变并静默覆盖（#7144）。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Web 端用 <code>fetch({ cache: 'no-store' })</code> 达到同等效果；不在浏览器请求中加 <code>Cache-Control</code>，是为避免 CORS 预检失败。</p>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>插件方法未定义或请求直接失败，先查 <code>CustomViewController</code> 是否在 <code>capacitorDidLoad</code> 调用了 <code>registerPluginInstance(WebDavHttpPlugin())</code>，以及 Capacitor 是否加载了同名 <code>WebDavHttp</code> 插件。</p>
+    <p><strong>判断二：</strong>双端数据不一致却未弹冲突，查上传前 GET 是否返回了与本地 <code>expectedRev</code> 相同的 hash——结合日志中 <code>cacheHeaders</code>（<code>age</code>、<code>x-cache</code>）判断是客户端还是代理缓存；对照 Swift 侧 <code>urlCache = nil</code> 是否生效。</p>
+    <p><strong>判断三：</strong>恢复前台后远端变更未拉取，<code>ios-interface.ts</code> 的 <code>onResume$</code> 只负责补时与 <code>flushPendingWrites</code>，真正 WebDAV 拉取仍由 <code>SyncTriggerService</code> → <code>SyncWrapperService.downloadRemoteOps</code> 触发；勿把 resume Subject 当成 HTTP 桥。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：iOS 客户端 A 与 B 共用 WebDAV；B 修改了远端 <code>sync-data.json</code> 后，A 在后台挂起数小时再回前台触发同步，A 却用旧内容覆盖了 B 的更新且未报冲突。最可能失效的是哪一层 no-cache 防线？应优先查看哪两个日志字段？</p>
+    <div class="answer">参考答案：最可能是上传前 GET 读到了陈旧 body，导致 <code>WebdavApi.upload</code> 的 content-hash 比对认为 <code>currentHash === expectedRev</code> 而放行 PUT。优先查 <code>WebDavHttpAdapter.response()</code> 日志里的 <code>cacheHeaders</code>（若出现 <code>age&gt;0</code> 或 <code>x-cache=HIT</code> 则怀疑代理缓存），以及 Swift 插件是否使用带 <code>urlCache = nil</code> 的专用 <code>URLSession</code> 而非默认配置。</div>
+    <p>主要来源：<a href="../reference/ios-webdav-bridge-flow-reference.html">iOS WebDAV 桥接全链路速查</a>。父模块：<a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端与 PWA 宿主导览</a>。相邻主题：<a href="../../slice-op-log-sync-flow/lessons/0001-flow-map.html">op-log 同步全链路</a>、<a href="../../slice-mobile-background-flush-flow/lessons/0001-flow-map.html">移动端后台恢复 flush</a>。如果某一步不清楚，可以向 agent 追问：“请从 <code>WebDavHttpAdapter.request</code> 跟到 <code>WebDavHttpPlugin.request</code> 的 header 传递”。</p>
+  </article>
+</main>
+</body>
+</html>

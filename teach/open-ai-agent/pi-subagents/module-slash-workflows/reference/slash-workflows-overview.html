@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slash Workflows Overview</title>
+  <link rel="stylesheet" href="../assets/slash-workflows.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-slash-workflows-module-tour.html">短课：模块主链路</a>
+    <a href="#commands">命令清单</a>
+    <a href="#prompts">Prompt 模板</a>
+    <a href="#tests">测试证据</a>
+  </nav>
+
+  <h1>Slash 命令与 prompt workflow 模块参考</h1>
+  <p class="lead">本页是 L1 参考资料，用于快速查阅命令注册、prompt workflow 模板、入口衔接、边界条件和测试证据。短课只讲主链路；这里保存完整清单。</p>
+
+  <h2 id="flow">1. 入口衔接总图</h2>
+  <div class="diagram">Pi extension 启动
+  → registerSlashSubagentBridge
+  → registerPromptTemplateDelegationBridge
+  → registerSlashCommands
+  → registerPromptWorkflowCommands 注入 runSlashSubagent
+  → 用户运行 /run、/chain、/parallel、/prompt-workflow 或 /chain-prompts
+  → 解析为 SubagentParamsLike
+  → buildSlashInitialResult 创建 live card
+  → emit subagent:slash:request
+  → slash bridge 调用 executor.execute
+  → progress update 写入 slash-live-state
+  → response finalize 为最终 snapshot</div>
+
+  <table>
+    <tr><th>阶段</th><th>核心文件</th><th>职责</th></tr>
+    <tr><td>扩展启动</td><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td><td>注册 slash bridge、prompt template bridge，并在工具和 renderer 注册后调用 `registerSlashCommands`。</td></tr>
+    <tr><td>命令注册</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code></td><td>注册用户可输入的 slash 命令，并提供 `runSlashSubagent` 作为共同执行出口。</td></tr>
+    <tr><td>模板命令</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code></td><td>发现 Markdown prompt，解析 frontmatter，替换参数，注册 `/prompt-workflow` 与 `/chain-prompts`。</td></tr>
+    <tr><td>事件桥</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code></td><td>监听 `subagent:slash:*` 事件，管理取消信号，把请求交给 executor。</td></tr>
+    <tr><td>Live state</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code></td><td>为 single、parallel、chain 创建 placeholder，接收 progress，保存 final snapshot。</td></tr>
+    <tr><td>Prompt template bridge</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-template-bridge.ts</code></td><td>服务 `prompt-template:subagent:*` 委派事件，支持单任务与 tasks 并行 payload。</td></tr>
+  </table>
+
+  <h2 id="commands">2. Slash 命令清单</h2>
+  <table>
+    <tr><th>命令</th><th>注册位置</th><th>输入形态</th><th>执行出口</th></tr>
+    <tr><td><code>/run</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 980</td><td>单个 agent，可无 task；支持 inline config、`--bg`、`--fork`。</td><td>`runSlashSubagent`，参数含 `agent`、`task`。</td></tr>
+    <tr><td><code>/chain</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1010</td><td>顺序链；支持 `agent "task" -> agent2` 和 parallel group。</td><td>`runSlashSubagent`，参数含 `chain`、`task`。</td></tr>
+    <tr><td><code>/run-chain</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1024</td><td>已保存 chain 名称加 `-- task`。</td><td>`discoverSavedChains` 后映射为 `chain`。</td></tr>
+    <tr><td><code>/parallel</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1054</td><td>多个 agent 任务并行；支持 shared task 或 per-step task。</td><td>`runSlashSubagent`，参数含 `tasks`。</td></tr>
+    <tr><td><code>/subagent-cost</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1078</td><td>无参数。</td><td>直接 `sendSlashText` 输出 parent/child usage。</td></tr>
+    <tr><td><code>/subagents-doctor</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1085</td><td>无参数。</td><td>`runSlashSubagent`，参数 `action: "doctor"`。</td></tr>
+    <tr><td><code>/subagents-fleet</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1092</td><td>无参数。</td><td>`runSlashSubagent`，参数 `action: "status"`、`view: "fleet"`。</td></tr>
+    <tr><td><code>/prompt-workflow</code></td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 269</td><td>模板名加参数；`list` 或空参数列出 workflows。</td><td>`workflowParams` 或 workflow frontmatter `chain`。</td></tr>
+    <tr><td><code>/chain-prompts</code></td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 303</td><td>`prompt-a -> prompt-b -- args`。</td><td>多个 workflow 转成 native `chain`。</td></tr>
+    <tr><td><code>/subagents-models</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1104</td><td>可选 builtin agent 名。</td><td>`runSlashSubagent`，参数 `action: "models"`。</td></tr>
+    <tr><td><code>/subagents-profiles</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1127</td><td>无参数。</td><td>直接读取 profile 列表并 `sendSlashText`。</td></tr>
+    <tr><td><code>/subagents-load-profile</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1139</td><td>profile 名称。</td><td>调用 profiles 模块，必要时询问是否切换当前模型。</td></tr>
+    <tr><td><code>/subagents-refresh-provider-models</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1192</td><td>provider，可加 `--force`。</td><td>刷新 provider model catalog。</td></tr>
+    <tr><td><code>/subagents-generate-profiles</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1226</td><td>provider。</td><td>基于 provider catalog 生成 quota/quality profiles。</td></tr>
+    <tr><td><code>/subagents-check-profile</code></td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 1264</td><td>profile 名称。</td><td>检查 profile 模型是否仍可用。</td></tr>
+  </table>
+
+  <h2 id="prompts">3. 内置 prompt workflow 模板</h2>
+  <p>内置模板都位于 package prompts 目录。当前这些模板只有 `description` frontmatter，没有显式 `subagent`，因此 `parseAgent` 默认使用 `delegate`。运行时可以用 `/prompt-workflow name --subagent reviewer ...` 覆盖。</p>
+  <table>
+    <tr><th>模板文件</th><th>description</th><th>正文目标</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/gather-context-and-clarify.md</code></td><td>Use subagents to gather context, then ask clarifying questions</td><td>先用 scout/researcher 收集上下文，再向用户提出剩余澄清问题。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/parallel-cleanup.md</code></td><td>Parallel cleanup review</td><td>并行运行 deslop 与 verbosity 方向的 review，可选择 autofix。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/parallel-context-build.md</code></td><td>Parallel context builders for planning handoff</td><td>并行 context-builder 产出 request/scope、codebase/patterns、validation/risks。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/parallel-handoff-plan.md</code></td><td>Parallel research/context builders into an implementation handoff plan</td><td>先并行研究与本地上下文，再综合为 implementation-ready meta-prompt。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/parallel-research.md</code></td><td>Parallel subagents research</td><td>用 researcher/scout 从外部证据、本地代码、实践 tradeoff 三个角度调研。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/parallel-review.md</code></td><td>Parallel subagents review</td><td>动态选择 review 角度，要求 reviewer 返回证据化 findings。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/prompts/review-loop.md</code></td><td>Review/fix loop until clean</td><td>由父会话控制 worker/reviewer 多轮循环，限制单写者和最大轮数。</td></tr>
+  </table>
+
+  <h2>4. Prompt workflow 解析规则</h2>
+  <table>
+    <tr><th>规则</th><th>实现位置</th><th>说明</th></tr>
+    <tr><td>发现目录</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 41</td><td>依次读取 package prompts、用户 prompts、项目 prompts。</td></tr>
+    <tr><td>覆盖优先级</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 119</td><td>同名 workflow 放进 `Map`，后写入覆盖前写入；项目级最后进入。</td></tr>
+    <tr><td>保留命令名</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 26</td><td>`run`、`chain`、`parallel`、`prompt-workflow` 等名字不能被 prompt 文件注册。</td></tr>
+    <tr><td>默认 agent</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 88</td><td>frontmatter 无 `subagent` 或值为 true 时，使用 `delegate`。</td></tr>
+    <tr><td>frontmatter 字段</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 94</td><td>支持 `description`、`subagent`、`inheritContext`/`fork`、`fresh`、`model`、`skill`、`cwd`、`worktree`、`chain`。</td></tr>
+    <tr><td>参数替换</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 165</td><td>`$ARGUMENTS` 与 `$@` 替换全部参数，`$1` 替换第一个参数，`${1:-fallback}` 支持默认值。</td></tr>
+    <tr><td>运行时 flags</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 174</td><td>`--fork`、`--fresh`、`--worktree`、`--bg`/`--async`、`--subagent`。</td></tr>
+    <tr><td>单 workflow 参数</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 223</td><td>`workflowParams` 输出 `SubagentParamsLike`，设置 `clarify: false` 与 `agentScope: "both"`。</td></tr>
+    <tr><td>workflow chain</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code> 行 240</td><td>`workflowChainStep` 把每个模板变成 `ChainStep`，供 `/chain-prompts` 或 frontmatter `chain` 使用。</td></tr>
+  </table>
+
+  <h2>5. Bridge 与 live-state 边界</h2>
+  <table>
+    <tr><th>组件</th><th>入口事件或函数</th><th>关键边界</th></tr>
+    <tr><td>slash requester</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code> 行 395</td><td>`requestSlashRun` 监听 started/response/update，并在没有 bridge 响应时快速报错。</td></tr>
+    <tr><td>slash bridge</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code> 行 51</td><td>request 携带 ctx 时优先使用 request ctx；否则回退到当前 extension context。</td></tr>
+    <tr><td>取消</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code> 行 64</td><td>已启动请求 abort controller；请求前到达的 cancel 进入 pending set。</td></tr>
+    <tr><td>进度</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code> 行 123</td><td>executor update 被压缩为 `SlashSubagentUpdate`，再发往 live-state。</td></tr>
+    <tr><td>初始结果</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code> 行 180</td><td>根据 `tasks`、`chain` 或单 agent 生成 parallel/chain/single placeholder。</td></tr>
+    <tr><td>更新结果</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code> 行 203</td><td>按 progress index 更新 results，并维护 chain 的 current step。</td></tr>
+    <tr><td>最终结果</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code> 行 224</td><td>response 进入 final snapshot，live snapshot 删除。</td></tr>
+    <tr><td>prompt template bridge</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-template-bridge.ts</code> 行 288</td><td>独立事件域 `prompt-template:subagent:*`；可把 `tasks` payload 转成并行执行。</td></tr>
+  </table>
+
+  <h2 id="tests">6. 测试证据</h2>
+  <table>
+    <tr><th>测试文件</th><th>关键断言</th><th>保护的行为</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/prompt-workflows.test.ts</code></td><td>项目 workflow 覆盖用户 workflow；`/prompt-workflow` 生成 agent/model/skill/context/worktree；`/chain-prompts` 生成 chain。</td><td>prompt 发现优先级与参数转换。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/prompt-template-bridge.test.ts</code></td><td>成功请求发 started/update/response；无 active context 返回结构化错误；pending/in-flight cancel 生效；tasks payload 输出 parallelResults。</td><td>prompt template 委派桥的生命周期与错误边界。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/slash-bridge.test.ts</code></td><td>request 提供 ctx 时，bridge 使用 request ctx，而不是 stale fallback ctx。</td><td>slash 命令在当前 UI context 下执行。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/slash-live-state.test.ts</code></td><td>progress 写入 visible snapshot；40-step chain placeholder 稳定；final snapshot 可从 custom message 恢复。</td><td>UI live card 不丢进度，不被长 chain 打散。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/slash-commands.test.ts</code></td><td>`/run` 可无 task；初始消息可见、最终消息 UI 下隐藏；`/parallel` 转发 inline config；9 个并行任务不被旧限制硬拦截。</td><td>用户命令到 `SubagentParamsLike` 的实际投递行为。</td></tr>
+  </table>
+
+  <h2>7. 阅读顺序建议</h2>
+  <ol>
+    <li>先读 <code>open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</code>：理解 Markdown 如何变成 workflow。</li>
+    <li>再读 <code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code>：找到 `registerPromptWorkflowCommands` 和 `runSlashSubagent` 的接缝。</li>
+    <li>随后读 <code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code> 与 <code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code>：确认事件、进度、最终快照。</li>
+    <li>最后读 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code> 的注册片段：确认 bridge 最终接到 executor。</li>
+  </ol>
+
+  <h2>8. 后续 L2 候选</h2>
+  <table>
+    <tr><th>候选</th><th>建议主题目录</th><th>切片目标</th></tr>
+    <tr><td>Prompt workflow frontmatter 与模板参数 API</td><td><code>slice-prompt-workflow-api</code></td><td>从一个 Markdown prompt 到 `SubagentParamsLike` 字段逐项落地。</td></tr>
+    <tr><td>Slash chain parser 与 parallel group</td><td><code>slice-slash-chain-parser</code></td><td>读懂 `parseChainExpression`、inline config、outputSchema、acceptance 的校验边界。</td></tr>
+    <tr><td>Slash live card 生命周期</td><td><code>slice-slash-live-card</code></td><td>从 initial placeholder 到 progress update、final snapshot、session rewrite。</td></tr>
+    <tr><td>Prompt template bridge 委派</td><td><code>slice-prompt-template-delegation</code></td><td>跟踪 `prompt-template:subagent:*` 单任务与 tasks 并行 payload 如何进入 executor。</td></tr>
+    <tr><td>Profiles/model slash 命令跨模块链路</td><td><code>slice-slash-profiles-models</code></td><td>解释 profile 加载、provider model cache、生成/check profile 如何跨到 profiles 模块。</td></tr>
+  </table>
+</main>
+</body>
+</html>

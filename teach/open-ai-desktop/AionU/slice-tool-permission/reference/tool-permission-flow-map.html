@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工具调用确认全链路参考图谱</title>
+  <link rel="stylesheet" href="../assets/tool-permission.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>工具调用确认全链路参考图谱</h1>
+    <p class="subtitle">L2 速查：入口点、沿途层级、调用时序、边界路径、UI 区分、approval memory 与测试证据。</p>
+    <div class="meta">
+      <span class="pill">L2：slice-tool-permission</span>
+      <span class="pill">主课：<a href="../lessons/0001-flow-map.html">0001-flow-map</a></span>
+      <span class="pill">L0：<a href="../../00-overview/reference/00-overview.html">00-overview</a></span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#boundary">1. 切片边界与入口点</a>
+    <a href="#sequence">2. 调用时序</a>
+    <a href="#layers">3. 沿途每一层</a>
+    <a href="#ui">4. 权限确认 UI 与普通消息渲染</a>
+    <a href="#approval">5. Approval store 与 always allow</a>
+    <a href="#edges">6. 异常 / 边界路径</a>
+    <a href="#evidence">7. E2E 证据</a>
+    <a href="#links">8. 交叉链接</a>
+  </nav>
+
+  <h2 id="boundary">1. 切片边界与入口点</h2>
+  <p>本切片从 renderer 收到“需要用户确认”的会话消息开始，不追入 aioncore 内部工具执行器。入口有三类：</p>
+  <table>
+    <thead>
+      <tr><th>入口消息</th><th>进入点</th><th>语义</th><th>后续 UI</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>acp_permission</code></td><td><code>platforms/acp/useAcpMessage.ts</code></td><td>ACP agent 请求用户批准某个 tool call。</td><td><code>MessageAcpPermission</code></td></tr>
+      <tr><td><code>permission</code></td><td><code>platforms/aionrs/useAionrsMessage.ts</code> 或 pending recovery</td><td>通用 confirmation 形状，包含 <code>call_id</code>、<code>options</code>、<code>command_type</code>。</td><td><code>MessagePermission</code></td></tr>
+      <tr><td><code>tool_group.confirmationDetails</code></td><td><code>MessageToolGroup</code></td><td>普通工具组内联确认，常见于 edit / exec / info / mcp。</td><td><code>ConfirmationDetails</code></td></tr>
+    </tbody>
+  </table>
+  <p><code>acp_tool_call</code> 不是确认入口；它是 tool call 的状态、输入、diff、文本或图片输出展示。</p>
+  <h3>入口代码摘录</h3>
+  <pre><code class="language-typescript">case 'acp_permission':
+  mergeLiveMessage(transformMessage(message));
+  break;</code></pre>
+  <pre><code class="language-typescript">case 'permission':
+case 'acp_permission':
+  // Backend aionrs emits wire type 'acp_permission' but the payload is
+  // Confirmation-shaped (legacy), which matches MessagePermission.
+  mergeLiveMessage(transformMessage({
+    ...message,
+    type: message.type === 'acp_permission' ? 'permission' : message.type,
+  }));</code></pre>
+  <pre><code class="language-tsx">case 'permission':
+  return &lt;MessagePermission message={message}&gt;&lt;/MessagePermission&gt;;
+case 'acp_permission':
+  return &lt;MessageAcpPermission message={message}&gt;&lt;/MessageAcpPermission&gt;;</code></pre>
+
+  <h2 id="sequence">2. 调用时序</h2>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant Stream as ACP / aionrs stream
+  participant Recovery as pending recovery
+  participant Merge as Messages hooks
+  participant List as MessageList
+  participant Card as Permission card
+  participant Adapter as common adapter
+  participant Backend as backend
+  Stream-&gt;&gt;Merge: acp_permission / permission
+  Recovery-&gt;&gt;Merge: confirmation.list() 补回缺失卡
+  Merge-&gt;&gt;List: mergeLiveMessage()
+  List-&gt;&gt;Card: type 分派
+  Card-&gt;&gt;Adapter: confirmMessage / confirmation.confirm
+  Adapter-&gt;&gt;Backend: POST /confirmations/:call_id/confirm
+  Backend--&gt;&gt;Merge: confirmation.remove(id)
+  Backend--&gt;&gt;Merge: tool update / turn.completed
+  Merge--&gt;&gt;List: 移除 pending 卡或展示结果</code></pre>
+  <div class="sequence">1. ACP / aionrs stream 发出需要确认的消息
+2. useAcpMessage 或 useAionrsMessage 把消息转成 TMessage
+3. useMergeLiveMessage 在 hooks.ts 中合并进 MessageList 状态
+4. MessageList 按 type 分派到 MessageAcpPermission / MessagePermission / MessageToolGroup
+5. 用户选择 option；按钮禁用直到有选项且正在响应时防重复
+6. UI 调 common adapter：confirmMessage 或 confirmation.confirm
+7. common adapter 发 POST /api/conversations/:id/confirmations/:call_id/confirm
+8. backend 决定批准、拒绝或继续等待，并通过 WS 发 remove / tool update / turn.completed
+9. renderer 移除 pending 卡、展示工具结果或显示错误 / tips</div>
+
+  <h2 id="layers">3. 沿途每一层</h2>
+  <table>
+    <thead>
+      <tr><th>层级</th><th>关键文件</th><th>职责</th><th>注意点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>平台消息流</td><td><code>platforms/acp/useAcpMessage.ts</code>、<code>platforms/aionrs/useAionrsMessage.ts</code></td><td>消费 stream，决定是否设置 running / streamRunning，并把消息交给 merge。</td><td>aionrs 会把 confirmation-shaped 的 <code>acp_permission</code> 改标成 <code>permission</code>。</td></tr>
+      <tr><td>会话页面挂载</td><td><code>AcpChat.tsx</code>、<code>AionrsChat.tsx</code></td><td>挂载 <code>useMessageLstCache()</code> 与 <code>usePendingConfirmationsRecovery()</code>，再渲染 <code>MessageList</code>。</td><td>pending recovery 是页面生命周期能力，不是单个卡片能力。</td></tr>
+      <tr><td>消息状态</td><td><code>Messages/hooks.ts</code></td><td>按 <code>msg_id</code>、<code>call_id</code>、<code>tool_call_id</code> 建索引，合并流式消息。</td><td><code>permission</code> 按 <code>content.call_id</code> 去重；普通 <code>tool_call</code> 缺 <code>call_id</code> 会被丢弃并 warn。</td></tr>
+      <tr><td>消息分派</td><td><code>Messages/MessageList.tsx</code></td><td>把消息 type 分派到 text、tips、tool、permission、acp_permission、acp_tool_call 等组件。</td><td>tool call 会被聚合为 summary；permission 不走 tool summary。</td></tr>
+      <tr><td>确认卡 UI</td><td><code>MessageAcpPermission.tsx</code>、<code>MessagePermission.tsx</code></td><td>展示选项、处理本地响应中状态、调用确认接口。</td><td>前端只传选择结果，不在本地判断 tool 是否真的可执行。</td></tr>
+      <tr><td>普通工具展示</td><td><code>MessageAcpToolCall.tsx</code>、<code>MessageToolGroup.tsx</code></td><td>展示工具执行状态、输入、diff、图片、结果；tool group 可内嵌确认细节。</td><td>不要把 <code>acp_tool_call</code> 当成确认状态源。</td></tr>
+      <tr><td>adapter contract</td><td><code>common/adapter/ipcBridge.ts</code></td><td>定义 <code>confirmMessage</code>、<code>confirmation.confirm/list/remove</code>、<code>approval.check</code>。</td><td><code>confirmMessage</code> 和 <code>confirmation.confirm</code> 指向同一 confirm endpoint，但 payload 形状不同。</td></tr>
+      <tr><td>preload 安全边界</td><td><code>preload/main.ts</code></td><td>通过 <code>contextBridge</code> 暴露受控 <code>electronAPI.emit/on</code>、文件路径 helper、反馈和启动状态。</td><td>确认业务不在 preload 内做授权判断；preload 只是隔离 renderer 与宿主能力。</td></tr>
+      <tr><td>approval memory</td><td><code>common/chat/approval/ApprovalStore.ts</code></td><td>提供会话级 approval key cache，支持 <code>isApproved</code>、<code>approve</code>、<code>allApproved</code>、<code>approveAll</code>。</td><td>renderer 未直接 import 这个 store；always allow 通过确认 payload / backend contract 传播。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="ui">4. 权限确认 UI 与普通消息渲染</h2>
+  <table>
+    <thead>
+      <tr><th>组件</th><th>输入</th><th>确认动作</th><th>不是它负责的事</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>MessageAcpPermission</code></td><td><code>IMessageAcpPermission.content.tool_call</code> + ACP options</td><td>把 <code>option_id</code> 作为 <code>confirm_key</code> 发给 <code>conversation.confirmMessage.invoke()</code>。</td><td>不展示工具最终结果；缺 <code>tool_call</code> 时返回 <code>null</code>。</td></tr>
+      <tr><td><code>MessagePermission</code></td><td><code>IConfirmation</code></td><td>把 <code>{ value: selected }</code> 和 <code>always_allow</code> 发给 <code>conversation.confirmation.confirm.invoke()</code>。</td><td>不决定 selected 是批准还是拒绝，选项语义由 backend 提供。</td></tr>
+      <tr><td><code>MessageToolGroup</code></td><td>普通工具组 content 数组</td><td>当 <code>confirmationDetails</code> 存在时发送 <code>ToolConfirmationOutcome</code>，包括 <code>Cancel</code>。</td><td>不是 ACP 专用确认卡。</td></tr>
+      <tr><td><code>MessageAcpToolCall</code></td><td><code>ToolCallUpdate</code></td><td>没有确认按钮。</td><td>只展示 pending / in progress、raw input、diff、图片或文本结果。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="approval">5. Approval store 与 always allow</h2>
+  <p><code>BaseApprovalStore</code> 是 common 层的抽象缓存，key 由 <code>action</code> 与可选 <code>identifier</code> 序列化为字符串。它只记 true，<code>clear()</code> 清空整张 Map，<code>allApproved(keys)</code> 要求 keys 非空且全部已批准。</p>
+  <p>UI 侧能观察到两条入口：通用 <code>MessagePermission</code> 在用户选中 <code>proceed_always</code> 时传 <code>always_allow: true</code>；common adapter 还提供 <code>approval.check</code>，用 <code>action</code> 和可选 <code>command_type</code> 查询是否已批准。源码没有显示 renderer 直接写 <code>BaseApprovalStore</code>，这正是安全边界：UI 发意图，是否缓存由后端 / agent adapter 执行。</p>
+
+  <h2 id="edges">6. 异常 / 边界路径</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>源码行为</th><th>风险 / 结论</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>缺失 pending confirmation</td><td><code>usePendingConfirmationsRecovery()</code> 调 <code>confirmation.list</code>，把缺失项构造成 <code>permission</code> 消息，<code>msg_id</code> 为 <code>confirmation:{id}</code>，并按 <code>call_id</code> 跳过重复项。</td><td>刷新或错过 live stream 后仍能补回确认卡。</td></tr>
+      <tr><td>pending 被移除</td><td>订阅 <code>confirmation.remove</code>，remove 事件携带 <code>id</code>，前端用该值同时尝试匹配 confirmation <code>id</code> 和 <code>call_id</code>。</td><td>确认完成、拒绝或后端取消后，UI 不应继续显示旧卡。</td></tr>
+      <tr><td>recovery 请求失败</td><td>catch 中只打印 <code>[pending-confirmations] failed to recover pending confirmations</code>。</td><td>没有用户可见 fallback；如果 live stream 也没有重发，用户可能看不到卡。</td></tr>
+      <tr><td>拒绝 / 取消</td><td><code>MessageToolGroup</code> 的 outcome 包含 <code>Cancel</code>；<code>MessagePermission</code> 和 ACP 卡把用户选择原样传回。</td><td>前端不硬编码“拒绝”语义，拒绝后的状态由 backend 决定并通过 remove / tool status / tips 回传。</td></tr>
+      <tr><td>普通 tool_call 缺 call_id</td><td><code>logDroppedToolCallWithoutCallId()</code> 会 warn 并丢弃。</td><td>避免不可合并、不可确认的工具状态污染消息列表。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">7. E2E 证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试</th><th>证明什么</th><th>与本切片的关系</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>tests/e2e/features/conversations/acp/cron-busy.e2e.ts</code></td><td>创建需要权限的 ACP 会话，等待权限卡出现，确认目标会话处于 active turn，再验证 Cron run-now 遇忙返回 409，释放 busy 后可重试成功。</td><td>证明“权限确认会让会话保持忙态，外部调度不能绕过”。</td></tr>
+      <tr><td><code>tests/e2e/features/conversations/acp/send-error-surfacing.e2e.ts</code></td><td>拦截发送接口返回 ACP 初始化失败，UI 展示 backend 原始错误文本。</td><td>证明非确认失败路径不会被普通重试文案吞掉。</td></tr>
+      <tr><td><code>tests/e2e/features/conversations/acp/empty-turn-warning.e2e.ts</code></td><td>注入 ACP empty turn info tip，断言显示本地化中性提示且后续对话仍可用。</td><td>证明没有可见回复时走 tips，而不是误造权限卡。</td></tr>
+    </tbody>
+  </table>
+  <p class="mini">补充单元证据：<code>tests/unit/renderer/pendingConfirmationsRecovery.test.ts</code> 覆盖 pending confirmation 构造、按 <code>call_id</code> 检测和按 id / call_id 移除。</p>
+
+  <h2 id="links">8. 交叉链接</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>上游总览</h3>
+      <p><a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>：理解 renderer、preload、common adapter、backend 的总体边界。</p>
+    </section>
+    <section class="panel">
+      <h3>消息运行时</h3>
+      <p><a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">Conversation Runtime</a>：理解 <code>MessageList</code> 在会话页面中的位置。</p>
+    </section>
+    <section class="panel">
+      <h3>安全桥</h3>
+      <p><a href="../../module-preload-ipc/reference/preload-ipc-overview.html">Preload / IPC</a>：理解 renderer 不能直接拿宿主能力。</p>
+    </section>
+    <section class="panel">
+      <h3>能力映射</h3>
+      <p><a href="../../module-common-adapter/reference/common-adapter-overview.html">Common Adapter</a>：理解 confirm endpoint、HTTP / WS 和 mapper 的契约位置。</p>
+    </section>
+  </div>
+</main>
+</body>
+</html>

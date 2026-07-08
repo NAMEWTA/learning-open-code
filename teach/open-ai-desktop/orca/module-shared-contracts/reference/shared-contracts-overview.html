@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>共享协议与类型模块参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <p class="meta">L1 参考文档 · shared 契约层</p>
+        <h1>共享协议与类型模块参考</h1>
+
+        <h2>职责定位</h2>
+        <p>
+          <code>src/shared</code> 维护跨 renderer、main、preload、CLI、relay、mobile 的共享契约：静态类型、运行时 schema、协议版本、capability、路径/id 解析和纯函数。它降低各端字段漂移的风险，是阅读垂直切片时的共同地基。
+        </p>
+
+        <h2>在整体架构中的位置</h2>
+        <pre><code class="language-text">renderer UI       → imports shared UI/runtime/worktree types
+main process      → imports shared IPC/runtime/SSH/session contracts
+CLI               → directly reuses shared runtime envelope/status contracts
+mobile            → reuses many shared domain types and mirrors transport compatibility locally
+relay             → mirrors selected protocol pieces when it must stay Electron-free</code></pre>
+        <p>
+          回到 L0：shared 位于 <a href="../../00-overview/reference/00-overview.html">项目总览图</a> 的所有进程之间，负责让数据形态先稳定下来。
+        </p>
+
+        <h2>核心类型簇</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>类型簇</th>
+              <th>代表文件</th>
+              <th>覆盖内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Runtime RPC</td>
+              <td><code>src/shared/runtime-rpc-envelope.ts</code>、<code>src/shared/runtime-types.ts</code></td>
+              <td>响应 envelope、keepalive、runtime status、terminal/browser/mobile session graph。</td>
+            </tr>
+            <tr>
+              <td>SSH 与 Relay</td>
+              <td><code>src/shared/ssh-types.ts</code></td>
+              <td>SSH target、连接状态、relay grace period、远端 PTY lease、端口转发。</td>
+            </tr>
+            <tr>
+              <td>Workspace / Worktree</td>
+              <td><code>src/shared/worktree-id.ts</code>、<code>src/shared/workspace-session-schema.ts</code></td>
+              <td>worktree id 拆分、folder workspace suffix、session JSON 恢复校验。</td>
+            </tr>
+            <tr>
+              <td>协议兼容</td>
+              <td><code>src/shared/protocol-version.ts</code></td>
+              <td>runtime protocol version、客户端/服务端最小兼容版本、capability 清单。</td>
+            </tr>
+            <tr>
+              <td>业务聚合</td>
+              <td><code>src/shared/types.ts</code></td>
+              <td>Repo、Worktree、Tab、Terminal、Git、Browser、Notification 等共享业务模型。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>内部结构与依赖</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>分层</th>
+              <th>代表文件</th>
+              <th>依赖 / 下游</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>协议版本层</td>
+              <td><code>src/shared/protocol-version.ts</code></td>
+              <td>被 desktop、CLI、mobile/headless 兼容检查读取；mobile 侧有本地镜像版本文件。</td>
+            </tr>
+            <tr>
+              <td>运行时 schema 层</td>
+              <td><code>src/shared/runtime-rpc-envelope.ts</code></td>
+              <td>依赖 <code>zod</code>；被 CLI/runtime client 用来识别成功、失败和 keepalive frame。</td>
+            </tr>
+            <tr>
+              <td>领域类型层</td>
+              <td><code>src/shared/runtime-types.ts</code>、<code>src/shared/types.ts</code></td>
+              <td>被 renderer store、main IPC、preload API、CLI 和移动端页面共同引用。</td>
+            </tr>
+            <tr>
+              <td>持久化 schema 层</td>
+              <td><code>src/shared/workspace-session-schema.ts</code></td>
+              <td>依赖 <code>zod</code> 和 sibling 类型；保护磁盘 session 恢复不会污染 React 状态。</td>
+            </tr>
+            <tr>
+              <td>ID / 路径工具层</td>
+              <td><code>src/shared/worktree-id.ts</code></td>
+              <td>被 main、renderer 和 source-control/worktree 逻辑用于 repo/worktree 映射。</td>
+            </tr>
+            <tr>
+              <td>SSH relay 契约层</td>
+              <td><code>src/shared/ssh-types.ts</code></td>
+              <td>被 main SSH 服务、settings UI、relay 配置请求和端口转发状态共同使用。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键接口速查</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>接口/函数</th>
+              <th>签名或形态</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>RuntimeRpcEnvelopeSchema</code></td>
+              <td>Zod union：success / failure / keepalive</td>
+              <td>运行时校验 runtime RPC frame。</td>
+            </tr>
+            <tr>
+              <td><code>isKeepaliveFrame(frame)</code></td>
+              <td><code>unknown → RuntimeRpcKeepaliveFrame</code></td>
+              <td>识别 runtime keepalive，避免把心跳当业务响应。</td>
+            </tr>
+            <tr>
+              <td><code>getRepoIdFromWorktreeId()</code></td>
+              <td><code>string → string</code></td>
+              <td>从 worktree id 中提取 repo id。</td>
+            </tr>
+            <tr>
+              <td><code>splitWorktreeIdForFilesystem()</code></td>
+              <td><code>string → ParsedWorktreeId | null</code></td>
+              <td>去掉 folder workspace UUID suffix，得到真实文件系统路径。</td>
+            </tr>
+            <tr>
+              <td><code>RUNTIME_CAPABILITIES</code></td>
+              <td>字符串 capability 清单</td>
+              <td>声明 runtime 能力，供客户端判断兼容特性。</td>
+            </tr>
+            <tr>
+              <td><code>SSH_RELAY_CONFIGURE_GRACE_TIME_METHOD</code></td>
+              <td><code>'relay.configureGraceTime'</code></td>
+              <td>relay grace 配置方法名，连接 main 与 relay 的协议约定。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>阅读规则</h2>
+        <ul>
+          <li>跨端字段先找 shared，再找调用端；不要只在 renderer 或 main 内搜索。</li>
+          <li>涉及磁盘恢复的数据优先看 Zod schema 和容错策略。</li>
+          <li>涉及 CLI/mobile/headless 的变更优先看 <code>src/shared/protocol-version.ts</code> 的兼容规则。</li>
+          <li>relay 需要 Electron-free 时可能镜像协议定义，阅读时要检查注释中的同步关系。</li>
+        </ul>
+
+        <h2>后续主题建议</h2>
+        <ul>
+          <li>L3：<code>RuntimeRpcEnvelopeSchema</code>、<code>isKeepaliveFrame</code> 和 runtime response 类型。</li>
+          <li>L3：<code>src/shared/worktree-id.ts</code> 的 id 解析和 folder workspace suffix 处理。</li>
+          <li>L3：<code>src/shared/workspace-session-schema.ts</code> 的 session 恢复边界与降级策略。</li>
+          <li>L2：移动端配对与会话恢复链路中，追 shared pairing/runtime 类型如何被 desktop 与 mobile 共用。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cron 定时任务模块导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Cron 模块：把“计划执行”接到会话工作台</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂定时任务列表页如何通过统一 hook 和 common adapter 调用 `/api/cron/*`，并把执行结果回收到会话历史。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：ScheduledTasksPage / useCronJobs / ipcBridge</span>
+    </div>
+  </section>
+
+  <p class="muted">L0 回链：先看 <a href="../../00-overview/lessons/0001-project-map.html">AionU 项目地图</a>。交叉主题：桥接层看 <a href="../../module-common-adapter/lessons/0001-common-adapter-module-tour.html">module-common-adapter</a>，路由壳层看 <a href="../../module-renderer-core/lessons/0001-renderer-core-module-tour.html">module-renderer-core</a>，执行后的会话回收看 <a href="../../module-conversation-runtime/lessons/0001-conversation-runtime-module-tour.html">module-conversation-runtime</a>。</p>
+
+  <h2 id="role">1. 先给模块一句话定位</h2>
+  <p>Cron 模块不是调度器本体，而是 AionU renderer 中的“定时任务管理面”。它负责让用户查看任务、切换启停、进入详情、手动创建，或跳到首页用 AI 对话创建任务；真正的任务存储、执行和事件流由 backend 通过 <code>/api/cron/*</code> 提供。</p>
+  <p>读码时先抓三层即可：<span class="where">open-ai-desktop/AionU/packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/index.tsx</span> 是列表入口，<span class="where">open-ai-desktop/AionU/packages/desktop/src/renderer/pages/cron/useCronJobs.ts</span> 是状态和订阅层，<span class="where">open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</span> 是 HTTP/WS 调用面。</p>
+
+  <h2 id="flow">2. 一条主线：列表页怎样拿到任务</h2>
+  <p>用户点击侧边栏的“定时任务”后，renderer-core 的路由命中 <code>/scheduled</code>，懒加载 <code>ScheduledTasksPage</code>。页面本身不直接写 fetch，而是调用 <code>useAllCronJobs()</code>：它先请求全部任务，再订阅 created、updated、removed 三类事件。这样列表页既能首次展示，也能在后台任务变化时自动更新。</p>
+  <pre><code class="language-tsx">const { jobs, loading, pauseJob, resumeJob } = useAllCronJobs();
+
+const handleToggleEnabled = async (job) => {
+  if (job.enabled) await pauseJob(job.id);
+  else await resumeJob(job.id);
+};</code></pre>
+  <p>这里的关键判断是：页面只表达用户意图，hook 负责状态一致性，adapter 负责传输。完整 hook 返回值和事件优先级放在 <a href="../reference/cron-overview.html#hooks">reference</a>。</p>
+
+  <h2 id="adapter">3. adapter 把意图落成 `/api/cron/*`</h2>
+  <p><code>useAllCronJobs()</code> 最终调用的是 common adapter 的 <code>ipcBridge.cron</code>。这个名字沿用了旧桥接风格，但 Cron 域已经主要走 HTTP 和 WebSocket：列表、创建、更新、删除、立即执行是 REST；任务创建、更新、删除、执行完成通知是 WS 事件。</p>
+  <pre><code class="language-typescript">export const cron = {
+  listJobs: httpGet&lt;ICronJob[], void&gt;('/api/cron/jobs'),
+  updateJob: httpPut&lt;ICronJob, { job_id: string; updates: ICronJobUpdateParams }&gt;(
+    (p) =&gt; `/api/cron/jobs/${p.job_id}`
+  ),
+  onJobUpdated: wsEmitter&lt;ICronJob&gt;('cron.job-updated'),
+};</code></pre>
+  <p>所以新增 Cron 能力时，不应先找 Electron main process，而应先问“backend 是否已经拥有这个状态”。如果答案是肯定的，接口通常应该落在 common adapter 的 HTTP/WS 域，再由页面 hook 消费。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果用户在任务详情页点击“立即执行”，执行后跳到新会话，你应该沿哪三层读源码？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先从详情页的 <code>handleRunNow</code> 找到用户动作，再看 <code>ipcBridge.cron.runNow.invoke({ job_id })</code> 怎样调用 <code>POST /api/cron/jobs/:id/run</code>，最后跳到 conversation runtime 看返回的 <code>conversation_id</code> 怎样导航到 <code>/conversation/:id</code>。如果你只回答“看调度器”，说明抓到了后端执行，但遗漏了 renderer 负责的页面状态和会话回收。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先重读 <code>packages/desktop/src/renderer/pages/cron/useCronJobs.ts</code>。接着追问 agent：请带我按“列表页 → useAllCronJobs → ipcBridge.cron → WebSocket 事件”走一次暂停 / 恢复链路。</p>
+</main>
+</body>
+</html>

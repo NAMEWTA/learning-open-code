@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟串起 parallel 与 chain 执行</title>
+  <link rel="stylesheet" href="../assets/slice-parallel-chain.css">
+</head>
+<body>
+<main>
+  <h1>15 分钟串起 parallel 与 chain 执行</h1>
+  <p class="lead">学习目标：给定一条 <code>chain</code> 或一组 <code>tasks</code>，你能从前台入口指到 child spawn，并说出并行聚合、<code>{previous}</code> 传递与 workflow graph 在哪一层产生。完整 step 形态表与测试索引见 <a href="../reference/parallel-chain-overview.html">parallel / chain 参考页</a>。</p>
+  <p class="meta"><span class="pill">L2 垂直切片</span><span class="pill">前置：<a href="../../slice-single-foreground-run/lessons/0001-flow-map.html">单次前台 run</a></span><span class="pill">关联：<a href="../../module-runs-execution/lessons/0001-runs-execution-module-tour.html">runs 执行模块</a></span></p>
+
+  <h2>1. 入口：top-level parallel 与 chain 分流</h2>
+  <p><span class="where">open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</span> 看到 <code>tasks</code>（或 action 别名 <code>parallel</code>）时走 top-level parallel：对每项直接 <code>runSync</code>，<code>details.mode</code> 为 <code>parallel</code>。看到 <code>chain: [...]</code> 则转 <span class="where">open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</span> 的 <code>executeChain</code>，<code>details.mode</code> 为 <code>chain</code>。二者都依赖 <code>mapConcurrent</code> 控制并发，但 chain 还维护 <code>prev</code>、命名输出 <code>outputs</code> 与逐步 summary。</p>
+  <pre>subagent-executor
+  ├─ tasks / parallel action → mapConcurrent + runSync（顶层并行）
+  └─ chain → executeChain（链式编排 + 图快照）</pre>
+
+  <h2>2. executeChain 主循环：三种 step</h2>
+  <p><code>executeChain</code> 先 <code>validateChainOutputBindings</code>、<code>createChainDir</code>、<code>resolveChainTemplates</code>，再按 step 类型分支。类型判断在 <span class="where">open-ai-agent/pi-subagents/src/shared/settings.ts</span>：<code>isParallelStep</code>（<code>parallel</code> 数组）、<code>isDynamicParallelStep</code>（<code>expand</code> + <code>collect</code> + 单对象 <code>parallel</code>）、否则为顺序 step。顺序 step 解析模板后单次 <code>runSync</code>，把输出写入 <code>prev</code> 与可选的 <code>as</code> 命名槽。</p>
+  <pre>for each chain step:
+  sequential → runSync → prev = child output
+  parallel[] → runParallelChainTasks → aggregateParallelOutputs → prev
+  dynamic    → materialize → runParallelChainTasks → collect → outputs[collect.as]</pre>
+
+  <h2>3. 并行内核与 dynamic fanout</h2>
+  <p><code>runParallelChainTasks</code> 对 step 内每个 task 解析 <code>{task}</code>、<code>{previous}</code>、<code>{outputs.x}</code>，再经 <code>mapConcurrent</code> 调 <code>runSync</code>；<code>failFast</code> 会在首个非零 exit 后跳过后续 task。动态扇出在 <span class="where">open-ai-agent/pi-subagents/src/runs/shared/dynamic-fanout.ts</span>：<code>materializeDynamicParallelStep</code> 从上游 structured output 展开数组、渲染 per-item 模板，跑完后 <code>collectDynamicResults</code> 写入 <code>collect.as</code>。空数组可走 skip 或 fail，由 <code>expand.onEmpty</code> 决定。</p>
+
+  <h2>4. 观测：workflowGraph 与测试</h2>
+  <p>每次 <code>onUpdate</code> 与最终 <code>details</code> 都调用 <span class="where">open-ai-agent/pi-subagents/src/runs/shared/workflow-graph.ts</span> 的 <code>buildWorkflowGraphSnapshot</code>：顺序 step 为 <code>kind: step</code>，静态并行为 <code>parallel-group</code>，动态扇出为 <code>dynamic-parallel-group</code> 并挂 materialized children。行为佐证见 <code>test/integration/chain-execution.test.ts</code>（<code>{previous}</code>、parallel step、fanout、graph 状态）与 <code>test/integration/parallel-execution.test.ts</code>（并发上限与顺序保持）。</p>
+  <div class="quiz">
+    <p><strong>检索练习：</strong>一条 chain 第二步是 dynamic fanout，且 <code>expand.from.path</code> 指向上一步 <code>as: "items"</code> 的 structured 数组。若该数组为空且 <code>onEmpty: "skip"</code>，第三步收到的 <code>{previous}</code> 大致是什么？</p>
+    <p><strong>参考答案：</strong>固定文案 <code>Dynamic fanout produced 0 results.</code>；同时 <code>outputs[collect.as]</code> 为 <code>[]</code> 的 JSON，workflow graph 上该 dynamic 组标记为 <code>completed</code> 且无 children（见 chain-execution 空 fanout 分支与对应 integration test）。</p>
+  </div>
+  <p class="source">主要来源：<code>chain-execution.ts</code>、<code>dynamic-fanout.ts</code>、<code>workflow-graph.ts</code>。想沿某条分支下钻（worktree、acceptance、failFast），向 agent 追问并带上 step 配置片段。</p>
+</main>
+</body>
+</html>

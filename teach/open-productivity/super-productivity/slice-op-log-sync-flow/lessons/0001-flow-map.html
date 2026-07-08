@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 本地操作到同步的路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断一条本地操作卡在捕获、落盘、flush、上传还是下载 apply</p>
+    <h1>从 NgRx action 到远端 operation 的同步路径</h1>
+    <p class="lead">这条链路的核心判断是：本地 action 先变成可回放 operation，写进 <code>SUP_OPS</code> 后才允许上传；远端 operation 下载后必须校验、判冲突、apply，再推进游标。</p>
+
+    <h2>1. 路径图</h2>
+    <pre class="diagram">src/app/root-store/meta/task-shared.actions.ts
+  ↓ meta.isPersistent / entityType / opType
+src/app/op-log/capture/operation-capture.meta-reducer.ts
+  ↓ pending counter；remote replay 会被 meta.isRemote 过滤
+src/app/op-log/capture/operation-log.effects.ts
+  ↓ uuidv7 + vectorClock + validateOperationPayload()
+src/app/op-log/persistence/operation-log-store.service.ts
+  ↓ appendWithVectorClockUpdate() 同事务写 ops + vector_clock
+src/app/op-log/sync/operation-write-flush.service.ts
+  ↓ 等 pending=0，再拿 operation-log 锁
+src/app/imex/sync/sync-wrapper.service.ts
+  ↓ downloadRemoteOps() 先于 uploadPendingOps()
+src/app/op-log/sync/operation-log-upload.service.ts
+src/app/op-log/sync/operation-log-download.service.ts
+  ↓ provider: superSyncOps 或 fileSnapshotOps
+src/app/op-log/sync/remote-ops-processing.service.ts
+  ↓ schema migration / SYNC_IMPORT filter / LWW / state validation
+src/app/op-log/apply/operation-converter.util.ts
+  ↓ meta.isRemote，避免二次捕获</pre>
+    <p>先记住一个不变量：<span class="where">src/app/op-log/capture/operation-log.effects.ts</span> 写本地 operation，<span class="where">src/app/op-log/sync/remote-ops-processing.service.ts</span> 应用远端 operation。两者不能互相混淆。</p>
+
+    <h2>2. 三个关键判断</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>你看到的现象</th><th>优先判断</th><th>证据入口</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>用户刚点完操作就触发同步，远端少了一条变更。</td><td>上传前是否完成 flush：pending counter 是否归零，operation-log 锁是否重新获取成功。</td><td><code>src/app/op-log/sync/operation-write-flush.service.ts</code></td></tr>
+          <tr><td>远端 replay 后本地又生成同一条 operation。</td><td>转换出来的 action 是否带 <code>meta.isRemote</code>，capture 层是否过滤 remote action。</td><td><code>src/app/op-log/apply/operation-converter.util.ts</code></td></tr>
+          <tr><td>同步结束却不应该显示已同步。</td><td>session validation latch、pending ops、piggyback ops、permanent rejection 是否仍然存在。</td><td><code>src/app/imex/sync/sync-wrapper.service.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. provider 分叉</h2>
+    <p>SuperSync 是真正的 operation API：<span class="where">packages/sync-providers/src/super-sync/super-sync.ts</span> 通过 <span class="endpoint">POST /api/sync/ops</span> 上传，通过 <span class="endpoint">GET /api/sync/ops</span> 下载，并要求 E2EE；payload 加密发生在 <span class="where">src/app/op-log/sync/operation-encryption.service.ts</span>。文件型 provider 则由 <span class="where">src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</span> 包成 <code>fileSnapshotOps</code>：远端同步文件里有完整 state、recentOps、vectorClock 和 syncVersion，整个文件可压缩/加密。</p>
+
+    <h2>4. 暂停 60 秒判断</h2>
+    <p>场景：Client A 下载到 Client B 的远端 operation，同时用户在 A 上新建任务。为了不让这个新建任务拿到“没包含远端 operation”的旧 vector clock，系统应该把这个本地 action 立刻写入 op-log，还是先缓冲到远端 apply 后再写？为什么？</p>
+    <div class="answer">参考答案：应该先缓冲。<code>src/app/op-log/capture/operation-capture.meta-reducer.ts</code> 在远端 apply 窗口会把本地 persistent action 放入 deferred buffer；远端 apply 完成并合并远端 vector clock 后，<code>src/app/op-log/sync/process-deferred-actions-flush.util.ts</code> 再驱动 <code>src/app/op-log/capture/operation-log.effects.ts</code> 写这些本地 action。这样新 operation 的 clock 会支配刚应用的远端 operation，避免下一轮被判为 CONCURRENT。</div>
+    <p>主要来源：<a href="../../../../../open-productivity/super-productivity/docs/sync-and-op-log/operation-log-architecture.md"><code>docs/sync-and-op-log/operation-log-architecture.md</code></a>。完整入口清单和故障排查见 <a href="../reference/op-log-sync-flow-reference.html">参考文档</a>。如果仍不清楚，可以向 agent 追问“以 updateTask 为例逐行追一次”。</p>
+  </article>
+</main>
+</body>
+</html>

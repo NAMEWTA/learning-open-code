@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>0003 完成结果 delivery 与 receipt</title>
+	<link rel="stylesheet" href="../../module-intercom/assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-native-supervisor-intercom 短课 0003</p>
+		<h1>完成结果 delivery 与 receipt</h1>
+		<p>学习目标：能解释 foreground run 完成后 grouped payload 如何构建、如何等待 delivery acknowledgement，以及为何普通 tool result 会被压缩成 compact receipt。</p>
+	</header>
+
+	<section>
+		<h2>1. 出口：executor 在返回前尝试 intercom</h2>
+		<p>single、parallel、chain 三条前台路径在拿到 <code>details.results</code> 后，若子结果未 <code>detached</code> 且未 <code>interrupted</code>，会调用 <code>maybeBuildForegroundIntercomReceipt</code>。它先经 <code>emitForegroundResultIntercom</code> 把每个 child 转成 <code>SubagentResultIntercomChild</code>（含 status、summary、artifact、session、intercomTarget），再 <code>buildSubagentResultIntercomPayload</code> 生成 grouped message。</p>
+	</section>
+
+	<section>
+		<h2>2. delivery acknowledgement：500ms 闸门</h2>
+		<p><code>deliverSubagentResultIntercomEvent</code> 向事件总线发出 <code>subagent:result-intercom</code>，并订阅 <code>subagent:result-intercom-delivery</code>，默认 500ms 内必须收到 <code>delivered: true</code> 才算成功。成功则返回 payload；失败则 <code>maybeBuildForegroundIntercomReceipt</code> 得到 null，executor 回退展示完整 legacy foreground output。</p>
+		<pre>bridge.active && orchestratorTarget
+  → buildPayload(to: orchestratorTarget)
+  → emit + wait delivery ack (500ms)
+      delivered → formatSubagentResultReceipt + stripDetailsOutputs
+      not delivered → null → legacy details 原样返回</pre>
+	</section>
+
+	<section>
+		<h2>3. receipt 与 heavy output 剥离</h2>
+		<p>delivery 成功后，父会话看到的 tool result 文本来自 <code>formatSubagentResultReceipt</code>：列出 run id、children 状态计数、artifacts、sessions、intercom targets，并注明 <em>Full grouped output was sent over intercom</em>。同时 <code>stripDetailsOutputsForIntercomReceipt</code> 从每个 <code>SingleResult</code> 移除 <code>messages</code>、<code>finalOutput</code>、<code>truncation</code>——完整内容在 grouped event 的 message 字段里，不在普通 details 里。</p>
+		<p>parallel 与 chain 模式只发<strong>一个</strong> grouped event（见 integration test），避免父会话收到重复通知。</p>
+	</section>
+
+	<section class="quiz">
+		<h2>检索练习</h2>
+		<p>bridge 为 <code>always</code> 且 orchestrator target 存在，但父会话仍看到完整 child output 而非 receipt。最可能的原因是？</p>
+		<ol>
+			<li>子 agent 使用了 progress_update。</li>
+			<li>500ms 内没有 listener 确认 delivery，或 child 被标记 detached。</li>
+			<li>父 session 没有启动 supervisor channel poller。</li>
+		</ol>
+		<div class="answer">
+			<p><strong>参考答案：2。</strong><code>emitForegroundResultIntercom</code> 在 delivery 失败或 detached children 为空时返回 null；poller 只影响运行中请求，不影响完成 delivery（见 <code>intercom-result-delivery.test.ts</code>）。</p>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>主要来源</h3>
+		<p><code>result-intercom.ts</code> 的 <code>buildSubagentResultIntercomPayload</code>、<code>deliverSubagentResultIntercomEvent</code>、<code>formatSubagentResultReceipt</code>；<code>subagent-executor.ts</code> 的 <code>emitForegroundResultIntercom</code>。</p>
+		<p>上一节：<a href="0002-supervisor-request-reply.html">0002 supervisor 请求回复</a> · <a href="../reference/native-supervisor-intercom-flow-map.html">参考图谱</a>。</p>
+	</section>
+
+	<nav class="lesson-nav">
+		<p>课程导航 · <a href="0001-flow-map.html">0001 流程图</a> · <a href="0002-supervisor-request-reply.html">0002 supervisor 请求回复</a> · <a href="../reference/native-supervisor-intercom-flow-map.html">参考图谱</a></p>
+	</nav>
+</main>
+</body>
+</html>

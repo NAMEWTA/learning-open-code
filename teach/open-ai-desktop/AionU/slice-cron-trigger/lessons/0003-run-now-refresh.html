@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cron run-now 与刷新短课</title>
+  <link rel="stylesheet" href="../assets/slice.css" />
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>run-now 与执行后刷新</h1>
+    <p class="subtitle">学习目标：读懂详情页“立即执行”如何防重入、拿到会话、修正会话 cache，并把用户带到结果会话。</p>
+    <div class="meta">
+      <span class="pill">短课 0003</span>
+      <span class="pill">入口：TaskDetailPage</span>
+      <span class="pill">边界：当前缺少自动化测试</span>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <a href="./0001-flow-map.html">返回 0001 flow map</a>
+    <a href="../reference/cron-trigger-flow-map.html#evidence">测试证据</a>
+    <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">Conversation Runtime</a>
+  </nav>
+
+  <h2>1. run-now 的主入口</h2>
+  <p>详情页不是直接写会话消息，而是调用 Cron API 的 <code>runNow</code>。同步防重入用的是 <code>runningNowRef</code>，它比 React state 更早生效，能挡住快速双击。</p>
+  <pre><code class="language-typescript">const handleRunNow = useCallback(async () =&gt; {
+  if (!job) return;
+  if (runningNowRef.current) return;
+  runningNowRef.current = true;
+  setRunningNow(true);
+  try {
+    const result = await ipcBridge.cron.runNow.invoke({ job_id: job.id });
+    Message.success(t('cron.runNowSuccess'));
+    if (result?.conversation_id) {
+      const conversationKey = `conversation/${result.conversation_id}`;
+      const deadline = Date.now() + 15_000;
+      let latestConversation: TChatConversation | null = null;</code></pre>
+
+  <h2>2. 为什么还要轮询会话</h2>
+  <p>后端返回 <code>conversation_id</code> 不等于 renderer cache 已经有完整会话。源码会在 15 秒内轮询 <code>conversation.get</code>，对 new-conversation 模式还会等待 workspace 出现。随后它可能重命名新执行会话，并补齐 <code>cron_job_id</code> / <code>cronJobId</code>，最后写入 SWR cache 再导航。</p>
+  <pre><code class="language-typescript">if (latestConversation) {
+  if (job.target.execution_mode === 'new_conversation') {
+    const nextName = formatCronRunConversationTitle(job.name, latestConversation.created_at || Date.now());
+    if (latestConversation.name !== nextName) {
+      await ipcBridge.conversation.update.invoke({
+        id: result.conversation_id,
+        updates: { name: nextName },
+      });
+      latestConversation = {
+        ...latestConversation,
+        name: nextName,
+      };
+    }
+  }</code></pre>
+
+  <h2>3. 证据边界</h2>
+  <p><code>ipcBridge.cron.runNow</code> 的 adapter 是 <code>POST /api/cron/jobs/:id/run</code>。但当前在 <code>tests/e2e/specs/cron-crud.e2e.ts</code> 和 <code>tests/unit/cron/</code> 中没有找到 run-now 自动化覆盖；本课把 run-now 作为源码证明，不把它包装成测试已覆盖行为。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>判断题：</strong>“run-now 成功返回 <code>conversation_id</code> 后，页面立刻无条件导航，不处理本地会话 cache。”对还是错？</p>
+    <p><strong>参考答案：</strong>错。源码先尝试读取并修正会话信息，必要时重命名 new-conversation 执行会话、补齐 cron job id，再 <code>navigate('/conversation/:id')</code>。</p>
+  </div>
+</main>
+</body>
+</html>

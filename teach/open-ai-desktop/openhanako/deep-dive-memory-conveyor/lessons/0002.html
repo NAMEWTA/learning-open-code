@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 编译流水线深度拆解：水位线状态机与指纹去重</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 编译流水线深度拆解：水位线状态机与指纹去重 <span class="tag">算法核心</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能解释 compileToday 的水位线增量扫描机制（7 步算法），理解 compileDaily 的指纹去重原理和三输入源降级策略，以及为什么 compileDaily 必须在 compileToday 之前执行。
+</div>
+
+<p>传送带的前两级编译器——<code>compileToday</code> 和 <code>compileDaily</code>——是每天运行最频繁的两个组件。它们共享一个关键约束：<b>执行顺序不可颠倒</b>。理解这个约束的原因，是理解整个 daily 任务调度逻辑的钥匙。</p>
+
+<h2>一、compileToday：水位线增量编译</h2>
+
+<h3>1.1 功能定位</h3>
+
+<p><code>compileToday</code> 是传送带的第一级蒸馏器，负责将<b>当天进行中的 session 摘要</b>编译成 <code>today.md</code> 草稿。它是唯一一个<b>高频更新</b>的编译器（每 10 轮对话触发一次）。</p>
+
+<div class="side">
+💡 <b>关键设计：水位线增量扫描（watermark incremental scan）。</b>每次调用不重新扫描所有摘要，而是通过 <code>today-state.json</code> 记录上次扫过的摘要时间戳，只处理<b>新增或修订过的摘要</b>，然后以 delta 形式注入 LLM 续写草稿。
+</div>
+
+<h3>1.2 七步算法流程</h3>
+
+<div class="step"><span class="num">1</span><b>逻辑日检测与切换</b>：调用 <code>getLogicalDay()</code> 获取当前逻辑日（按 <code>DAY_BOUNDARY_HOUR</code> 划分，默认凌晨 4 点为日界）。如果 <code>today-state.json</code> 中的日期与当前逻辑日不一致，清空 <code>today.md</code> 并重置状态。<br><span class="where">compile.ts → getLogicalDay()</span></div>
+
+<div class="step"><span class="num">2</span><b>水位线读取</b>：从 <code>today-state.json</code> 读取 <code>lastCompiledSummaryUpdatedAt</code>——上次编译时处理过的最新摘要的 <code>updated_at</code> 时间戳。<br><span class="where">compile.ts → readTodayState()</span></div>
+
+<div class="step"><span class="num">3</span><b>增量扫描</b>：调用 <code>getCandidateSummariesForCompile(summaryManager, watermark)</code>，只返回 <code>updated_at > watermark</code> 的摘要。如果为 0 条且已有水位线，保留当前草稿退出（暂无新内容）。如果为 0 条且无水位线，清空草稿（防止陈旧内容残留）。<br><span class="where">compile.ts → getCandidateSummariesForCompile()</span></div>
+
+<div class="step"><span class="num">4</span><b>时间线条目提取与过滤</b>：对增量摘要调用 <code>timelineEventsForLogicalDate()</code>，从 "### 事情经过" 段提取条目，按 <code>YYYY-MM-DD HH:MM</code> 正则提取时间戳，只保留逻辑日匹配当前日的条目。对没有规范 timeline 段的旧摘要，使用 <code>fallbackSummaryAsEvent</code>。<br><span class="where">compile.ts → timelineEventsForLogicalDate()</span></div>
+
+<div class="step"><span class="num">5</span><b>delta 标注（新增 vs 修订）</b>：对每条事件判断其 session 的 <code>created_at</code> 是否晚于水位线——晚于则标注"新增"，早于但 <code>updated_at</code> 晚于则标注"取代先前相关记述"（旧内容需被替换而非并列）。<br><span class="where">compile.ts → formatTimelineEvents()</span></div>
+
+<div class="step"><span class="num">6</span><b>LLM 续写</b>：将上一版草稿 + delta 时间线条目拼接为输入，调用 LLM（<code>maxTokens: 450</code>，温度 0.3），由 <code>buildCompileTodayPrompt</code> 提供 System Prompt。<br><span class="where">compile.ts → buildCompileTodayPrompt()</span></div>
+
+<div class="step"><span class="num">7</span><b>落盘与水位线更新</b>：将 LLM 输出写入 <code>today.md</code>，更新 <code>today-state.json</code> 的 <code>lastCompiledSummaryUpdatedAt</code> 为本次处理过的最新 <code>updated_at</code>。<br><span class="where">compile.ts → updateWatermark()</span></div>
+
+<h3>1.3 核心伪代码</h3>
+
+<pre><code>function compileToday(summaryManager, outputPath, resolvedModel):
+    state = readTodayState("today-state.json")
+    today = getLogicalDay().logicalDate
+
+    // 日期切换：重置草稿和状态
+    if state exists and state.logicalDate != today:
+        truncate(outputPath, "")
+        state = null
+
+    watermark = max(state.lastCompiledAt, opts.since)
+    sessions = getSummariesNewerThan(watermark)
+
+    if sessions is empty:
+        if state is null: truncate(outputPath, "")
+        return "compiled"
+
+    nextWatermark = max(updated_at of sessions)
+    events = extractTimelineEvents(sessions)
+               .filter(event.logicalDate == today)
+
+    if events is empty:
+        updateWatermark(statePath, today, nextWatermark)
+        return "compiled"
+
+    previousDraft = readFile(outputPath)
+    delta = formatTimelineEvents(events, since=watermark,
+                                  includeRevisionMarker=true)
+    input = buildInput(previousDraft, delta)
+
+    result = callLLM(
+        systemPrompt = buildCompileTodayPrompt(locale),
+        userContent  = input,
+        maxTokens    = 450,
+        temperature  = 0.3
+    )
+
+    writeFile(outputPath, result)
+    updateWatermark(statePath, today, nextWatermark)
+    return "compiled"</code></pre>
+
+<h3>1.4 设计要点总结</h3>
+
+<table>
+<tr><th>设计点</th><th>实现</th><th>理由</th></tr>
+<tr><td>水位线增量</td><td><code>today-state.json</code> + <code>lastCompiledSummaryUpdatedAt</code></td><td>避免每天对 50+ 份摘要重复编译，只在有新摘要时才调 LLM</td></tr>
+<tr><td>逻辑日归属</td><td><code>DAY_BOUNDARY_HOUR</code> (凌晨 4:00)</td><td>凌晨对话属于前一天，避免跨夜 session 被切分成两天</td></tr>
+<tr><td>修订标注</td><td><code>includeRevisionMarker</code> → "(取代先前相关记述)"</td><td>让 LLM 理解旧条目需要被<b>替换</b>而非<b>并列</b>，避免时间线上的自相矛盾</td></tr>
+<tr><td>日期切换保护</td><td>逻辑日变化时清空 <code>today.md</code></td><td>保证 today.md 始终只含<b>今天</b>的内容，不会残留昨天的草稿</td></tr>
+<tr><td>空 sessions 兼容</td><td>无水位线时清空草稿</td><td>老用户升级或状态丢失时，不能信任旧草稿的时效性</td></tr>
+</table>
+
+<h2>二、compileDaily：日记条目指纹编译</h2>
+
+<h3>2.1 功能定位</h3>
+
+<p><code>compileDaily</code> 将<b>已经翻篇的昨天</b>蒸馏成 <code>memory/daily/{date}.md</code> 里的一条 2-3 句日记条目。与 compileToday 的关键区别：compileToday 编译"当天进行中"的草稿（高频更新），compileDaily 编译"已经翻篇的那天"（一天只落一次盘，按指纹覆盖不追加）。</p>
+
+<div class="danger">
+⚠️ <b>执行顺序约束：</b>compileDaily 必须<b>先于</b> compileToday 执行。原因：compileDaily 读取的是"昨天最终版 today.md 草稿"，这份草稿在日期切换前仍然躺在 today.md 里；compileToday 一旦先跑，日期切换会把 today.md 重置为新一天的空白草稿，昨天的内容就再也读不到了。这个顺序约束在 <code>memory-ticker.ts</code> 中通过 <code>DAILY_STEP_KEYS</code> 数组的固定顺序强制执行。
+</div>
+
+<h3>2.2 六步算法流程</h3>
+
+<div class="step"><span class="num">1</span><b>输入源优先级匹配</b>：先尝试从 session 摘要的 timeline 段提取精确时间线条目。如果 <code>timelineEventsForLogicalDate</code> 返回非空，以 timeline 为输入。如果无 timeline 则回落到 <code>today.md</code> 草稿。两者都没有则回落到按当天摘要整段编译（<code>includeFallback: true</code>）。<br><span class="where">compile.ts → compileDaily()</span></div>
+
+<div class="step"><span class="num">2</span><b>指纹计算与去重</b>：对输入源的事件 key 列表（<code>sessionId:updatedAt:index:timeLabel:sha1(前12位)</code>）做 MD5 哈希，写入 <code>{date}.md.fingerprint</code>。如果指纹文件已有且与当前指纹一致且产物文件存在，直接跳过（返回 <code>"skipped"</code>）。<br><span class="where">compile.ts → 指纹去重逻辑</span></div>
+
+<div class="step"><span class="num">3</span><b>草稿不可用时的受控降级</b>：如果 <code>todayDraftPath</code> 指向的文件不存在或为空且 timeline 条目也为空，通过 <code>fallbackSummaryAsEvent</code> 回退到整段摘要编译。记录 warn 日志。<br><span class="where">compile.ts → fallbackSummaryAsEvent()</span></div>
+
+<div class="step"><span class="num">4</span><b>零占位策略</b>：如果当天确实没有任何内容（无 timeline、无草稿、摘要也无法归到该逻辑日），不产文件。同时清理可能存在的旧指纹文件，避免之后补齐时被过期指纹挡住。<br><span class="where">compile.ts → 零占位检查</span></div>
+
+<div class="step"><span class="num">5</span><b>LLM 蒸馏</b>：<code>maxTokens: 100</code>，温度 0.3。这是所有编译器中 token 预算最紧的一个——每条日记只有 60 字（中文）或 30 词（英文）的上限。<br><span class="where">compile.ts → callLLM()</span></div>
+
+<div class="step"><span class="num">6</span><b>落盘</b>：输出格式 <code>## {date}\n\n{body}\n</code>，写入 <code>daily/{date}.md</code> + 指纹文件。<br><span class="where">compile.ts → writeFile()</span></div>
+
+<h3>2.3 核心伪代码</h3>
+
+<pre><code>function compileDaily(summaryManager, dailyDir, logicalDate, resolvedModel):
+    outputPath = dailyDir + "/{logicalDate}.md"
+    fpPath = outputPath + ".fingerprint"
+
+    // 优先使用 timeline 条目，回落到 today 草稿
+    draftText = readFile(todayDraftPath)
+    summaries = getSummariesForDate(logicalDate)
+    timelineEvents = extractTimelineEvents(summaries)
+                       .filter(event.logicalDate == logicalDate)
+
+    if timelineEvents is not empty:
+        input = formatTimelineEvents(timelineEvents)
+        fpKeys = timelineEvents.map(event => event.key)
+    else if draftText is not empty:
+        input = draftText
+        fpKeys = ["draft:" + draftText]
+    else:
+        fallback = extractFallbackEvents(summaries, logicalDate)
+        if fallback is empty:
+            delete(fingerprintFile)      // 零占位
+            return "skipped"
+        log.warn("草稿不可用，回落到摘要编译")
+        input = formatTimelineEvents(fallback)
+        fpKeys = fallback.map(event => event.key)
+
+    // 指纹去重
+    fp = md5(fpKeys.join("\n"))
+    if readFile(fpPath) == fp and fileExists(outputPath):
+        return "skipped"
+
+    result = callLLM(
+        systemPrompt = buildCompileDailyPrompt(locale),
+        userContent  = input,
+        maxTokens    = 100,          // 最紧的 budget
+        temperature  = 0.3
+    )
+
+    body = normalizeOutput(result)
+    writeFile(outputPath, "## {logicalDate}\n\n{body}\n")
+    writeFile(fpPath, fp)
+    return "compiled"</code></pre>
+
+<h3>2.4 设计要点总结</h3>
+
+<table>
+<tr><th>设计点</th><th>实现</th><th>理由</th></tr>
+<tr><td>指纹去重</td><td>事件 key 的 MD5 哈希 + 独立 .fingerprint 文件</td><td>防止同一天被重复编译（多次切换日期、重启），指纹不与产物文件耦合</td></tr>
+<tr><td>三输入源降级</td><td>timeline → draft → fallback summary</td><td>确保任何数据状态下都能产出日记：有规范 timeline 最好，没有就用草稿，草稿也没有就用旧摘要</td></tr>
+<tr><td>零占位</td><td>无内容时不产文件 + 清理旧指纹</td><td>避免 <code>daily/</code> 目录被空文件污染；清理旧指纹防止后续真实编译被误判为"已处理"</td></tr>
+<tr><td>不追加</td><td>指纹命中直接 skip，不覆盖已存在文件</td><td>compileDaily 是一天只落一次盘的"终版"编译，不同于 compileToday 的草稿增量模型</td></tr>
+</table>
+
+<h2>三、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. compileToday 的水位线机制解决了什么问题？</p>
+<span class="opt">A. 让 LLM 调用更快</span>
+<span class="opt">B. 避免每天对 50+ 份摘要重复编译——只处理上次编译之后新增或修订的摘要，以 delta 形式续写草稿</span>
+<span class="opt">C. 让 today.md 文件更小</span>
+<span class="opt">D. 让日期切换更准确</span>
+<details><summary>看答案</summary><b>B</b>。水位线通过 <code>today-state.json</code> 记录 <code>lastCompiledSummaryUpdatedAt</code>，每次只扫描 <code>updated_at > watermark</code> 的新摘要。这是编译链降本的核心机制之一。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 compileDaily 必须在 compileToday 之前执行？</p>
+<span class="opt">A. 因为 compileDaily 更快，先跑可以减少等待时间</span>
+<span class="opt">B. 因为 compileDaily 需要读取昨天的 today.md 草稿，而 compileToday 一旦先跑会把 today.md 重置为新一天的空白草稿</span>
+<span class="opt">C. 因为 compileDaily 的 token 预算更紧</span>
+<span class="opt">D. 两者没有顺序依赖，可以任意执行</span>
+<details><summary>看答案</summary><b>B</b>。日期切换时，compileDaily 需要昨天的 today.md 作为输入源之一。如果 compileToday 先执行，日期切换逻辑会把 today.md 清空（新一天从空白开始），compileDaily 就读不到昨天的内容了。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. compileDaily 的指纹去重是如何工作的？</p>
+<span class="opt">A. 比较 today.md 文件的修改时间</span>
+<span class="opt">B. 对输入源的事件 key 列表做 MD5 哈希，与 .fingerprint 文件对比，相同则跳过</span>
+<span class="opt">C. 比较 daily/{date}.md 的文件大小</span>
+<span class="opt">D. 让 LLM 判断内容是否重复</span>
+<details><summary>看答案</summary><b>B</b>。指纹由事件 key 列表（sessionId:updatedAt:index:timeLabel:sha1前12位）的 MD5 哈希生成，存入 <code>{date}.md.fingerprint</code>。如果指纹相同且产物文件已存在，直接返回 "skipped"，完全不调 LLM。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. compileDaily 的三输入源降级顺序是什么？</p>
+<span class="opt">A. today.md → daily.md → longterm.md</span>
+<span class="opt">B. timeline 条目 → today.md 草稿 → 摘要回落（fallbackSummaryAsEvent）</span>
+<span class="opt">C. session 摘要 → LLM 生成 → 人工审核</span>
+<span class="opt">D. facts → today → week → longterm</span>
+<details><summary>看答案</summary><b>B</b>。优先级：规范 timeline 条目（最佳）→ today.md 草稿（次选）→ 旧摘要整段回落（兜底）。三级降级保证在任何数据状态下都能产出日记，不会静默丢失数据。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>open-ai-desktop/openhanako/lib/memory/compile.ts</code>，搜索 <code>export async function compileToday</code> 和 <code>export async function compileDaily</code>，对照本课的伪代码阅读实际 TypeScript 实现。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果水位线状态文件丢失了怎么办？」「compileToday 的修订标注机制在什么情况下会失效？」下一课我们深入 <b>折叠与装配机制</b>——assembleWeekFromDaily 的零 LLM 拼接设计、rollDailyWindow 的失败重试保护、以及 compileLongterm 的通用 fold 入口。</div>
+
+<div class="nav"><a href="0001.html">← 上一课：设计哲学</a> · 课程 0002 / 记忆传送带深度剖析 · <a href="0003.html">下一课：折叠与装配机制 →</a></div>
+
+</body>
+</html>

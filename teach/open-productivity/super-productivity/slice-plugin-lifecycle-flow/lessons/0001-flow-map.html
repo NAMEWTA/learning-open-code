@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件生命周期路径图</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+    <style>
+      .filetree {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.75;
+        background: #fafbfc;
+        border: 1px solid #ebebeb;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="lesson">
+      <p class="eyebrow">L2 垂直切片 · 15 分钟</p>
+      <h1>插件生命周期路径图</h1>
+      <p class="lede">
+        本课只训练一个判断技能：看到一个插件入口时，先判断它处于“展示、发现、加载、Bridge 调用、桌面授权、provider 调用”哪一段，再去对应源码。
+      </p>
+
+      <div class="source-rail">
+        主要源码：
+        <span class="where">src/main.ts</span>，
+        <span class="where">src/app/plugins/plugin-initializer.ts</span>，
+        <span class="where">src/app/core/startup/startup.service.ts</span>，
+        <span class="where">src/app/plugins/plugin.service.ts</span>，
+        <span class="where">src/app/plugins/plugin-bridge.service.ts</span>。
+        细节索引见
+        <a href="../reference/plugin-lifecycle-flow-reference.html">插件生命周期参考文档</a>。
+      </div>
+
+      <h2>1. 先看整条路径</h2>
+      <div class="flow" aria-label="插件生命周期路径图">
+        <div class="node green"><strong>社区列表</strong><small>只用于管理页展示，不代表已安装。</small></div>
+        <div class="node green"><strong>manifest 发现</strong><small>内置路径和 uploaded cache 生成 PluginState。</small></div>
+        <div class="node blue"><strong>启用判断</strong><small>只有 isEnabled 的插件才进入 activatePlugin。</small></div>
+        <div class="node blue"><strong>加载执行</strong><small>读取资源，new Function 执行 plugin.js。</small></div>
+        <div class="node gold"><strong>Bridge/API</strong><small>PluginAPI 绑定到宿主服务、iframe、OAuth。</small></div>
+        <div class="node red"><strong>边界能力</strong><small>OAuth、nodeExecution、issue provider 另有守门点。</small></div>
+      </div>
+      <p>
+        入口不是单一文件。<code>src/main.ts</code> 注册的 <code>PLUGIN_INITIALIZER_PROVIDER</code> 是 provider token 接线；真实初始化由
+        <span class="where">src/app/core/startup/startup.service.ts</span> 的 <code>_initPlugins()</code> 等初始数据和同步完成后直接调用
+        <code>PluginService.initializePlugins()</code>。社区插件列表来自 JSON 和管理页，只是“可见目录”，不是运行时自动发现机制。
+      </p>
+      <pre class="sequence">src/main.ts provider token
+  -> PLUGIN_INITIALIZER_PROVIDER
+     只注册 'PLUGIN_INITIALIZER'
+
+StartupService deferred init
+  -> wait data loaded + current sync done/disabled
+  -> PluginService.initializePlugins()
+  -> discover manifest
+  -> activate enabled plugin
+  -> bridge / OAuth / Node / issue provider</pre>
+
+      <h2>2. 三条边界别混在一起</h2>
+      <p>
+        web iframe 边界处理插件 UI：宿主把 `index.html` 包进 `srcdoc`，再通过 postMessage、bridge token 和允许方法列表转发调用。Electron OAuth 边界处理授权登录：renderer 构造 PKCE 流程，main process 开 loopback server 和系统浏览器。Node executor 边界处理本机执行：插件必须声明 `nodeExecution`，宿主在 `onReady` 前申请 main process grant 并 ping bridge。
+      </p>
+      <p>
+        issue provider 也要拆开看：插件初始化时可以调用 <code>registerIssueProvider()</code> 登记 provider；Bridge 立即注册 sync adapter 的条件是 create/delete 或 fieldMappings+updateIssue。后续双向同步的 resolver 还可能为 updateIssue-only provider 懒创建 adapter。provider 已注册不等于已经开始双向同步。
+      </p>
+
+      <h2>3. 关键判断表</h2>
+      <table>
+        <thead>
+          <tr><th>你看到的现象</th><th>先判断</th><th>下一步源码</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>插件出现在 Community Plugins</td>
+            <td>只是列表展示，尚未安装</td>
+            <td>管理页 JSON 读取；不是 `initializePlugins()`</td>
+          </tr>
+          <tr>
+            <td>manifest 被发现但插件没跑</td>
+            <td>`isEnabled`、平台、Node 授权是否允许加载</td>
+            <td>`PluginService.activatePlugin()`</td>
+          </tr>
+          <tr>
+            <td>iframe UI 能打开但 API 调用失败</td>
+            <td>方法是否在 iframe allowlist，bridge token/generation 是否匹配</td>
+            <td>参考文档的 iframe bridge 章节</td>
+          </tr>
+          <tr>
+            <td>issue provider 能搜索但不能推送</td>
+            <td>先分清 Bridge 是否立即注册 adapter、resolver 是否能懒创建 adapter、字段 push 是否有 mappings</td>
+            <td><code>PluginBridgeService._registerIssueProvider()</code> 与 <code>IssueSyncAdapterResolverService.getAdapter()</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>4. 60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          一个第三方插件显示在 Community Plugins；用户下载并上传后，manifest 声明了 `iFrame: true` 和 `nodeExecution`，但启动时没有任何 issue provider。你会先得出哪三个结论？
+        </p>
+        <details>
+          <summary>参考答案与反馈</summary>
+          <p>
+            第一，社区列表只说明它被展示，不说明已安装或已启用。第二，上传后发现 manifest 也不等于代码执行；必须启用，并在 Electron 中拿到 nodeExecution grant，`onReady` 才会跑。第三，没有 issue provider 很可能是插件没有调用 `registerIssueProvider()`，或注册失败；这与 Node 授权是不同边界。下一步读 reference 中“加载阶段”和“issue provider 注册/调用”两节。
+          </p>
+        </details>
+      </div>
+      <p class="callout">
+        复习建议：先读 <a href="./0002-startup-init-path.html">启动初始化时序</a>，再读
+        <a href="./0003-bridge-issue-provider-path.html">Bridge 与 issue provider 调用时序</a>。相邻主题可回看
+        <a href="../../module-plugin-system/">插件系统 L1</a> 与 <a href="../../slice-issue-import-sync-flow/">Issue 导入与同步 L2</a>。
+      </p>
+    </main>
+  </body>
+</html>

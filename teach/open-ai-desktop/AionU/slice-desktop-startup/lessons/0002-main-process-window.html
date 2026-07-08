@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>main/process 到窗口装载主路径</title>
+  <link rel="stylesheet" href="../assets/aionu-startup.css">
+</head>
+<body>
+  <main class="page">
+    <header>
+      <p class="eyebrow">L2 垂直切片 · 主路径</p>
+      <h1>0002 · 从 app ready 走到 BrowserWindow</h1>
+      <nav>
+        <a href="0001-flow-map.html">上一课：链路地图</a>
+        <a href="0003-renderer-first-screen-and-boundary.html">下一课：renderer 首屏</a>
+        <a href="../reference/desktop-startup-flow-map.html">完整参考图谱</a>
+        <a href="../../module-process-infra/reference/process-infra-overview.html">L1 process 参考</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2>学习目标</h2>
+      <p>本课只看 main process 的成功路径：<code>handleAppReady()</code> 如何先准备 process 基础设施和 backend，再进入默认桌面分支创建窗口。主要来源是 <code>open-ai-desktop/AionU/packages/desktop/src/index.ts:603-850</code>、<code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts:7-29</code> 和 <code>open-ai-desktop/AionU/packages/desktop/src/process/startup/backendStartup.ts:22-38</code>。</p>
+    </section>
+
+    <section>
+      <h2>process 前置不是只有一个函数</h2>
+      <p><code>process/index.ts</code> 的顶层 import 已经做了部分副作用：注册 Electron platform、配置 Chromium、按 packaged 状态设置 <code>PREBUILDS_ONLY</code>、导入 bridge 和 main i18n。真正的 <code>initializeProcess()</code> 当前只等待 <code>initStorage()</code>，但它依赖这些前置已经完成。</p>
+      <pre><code class="language-typescript">import '@/common/platform/register-electron';
+import '@process/utils/configureChromium';
+import initStorage from './utils/initStorage';
+import './utils/initBridge';
+import './services/i18n';
+
+export const initializeProcess = async () =&gt; {
+  await initStorage();
+};</code></pre>
+      <p>`initBridge` 继续调用 `initAllBridges()`，注册 dialog、application、window controls、system settings、notification、webui 和 theme 等 main bridge。也就是说 bridge 是启动前置的一部分，不是首屏后才按需注册。</p>
+    </section>
+
+    <section>
+      <h2>backend 后创建窗口</h2>
+      <p><code>handleAppReady()</code> 在默认桌面分支前启动 backend。<code>startBackendOrExit()</code> 成功时把 port 交给 <code>onStarted()</code>；主入口再把它暴露到 <code>globalThis.__backendPort</code>，并在 backend 进入 running 时标记 ready、注册系统恢复通知和延迟迁移。</p>
+      <pre><code class="language-typescript">await initializeProcess();
+const backendStartup = await startBackendOrExit({
+  startBackend: async () =&gt; backendManager.start(...),
+  onStarted: (backendPort) =&gt; {
+    exposeBackendPort(backendPort);
+    if (backendManager.status === 'running') {
+      markBackendReady(backendPort, 'backendManager.start');
+    }
+  },
+  exitOnFailure: isWebUIMode || isResetPasswordMode,
+});</code></pre>
+      <p>注意最后一行：默认桌面模式下 `exitOnFailure` 是 false。失败不会直接结束应用，而是留给 renderer 显示可恢复的启动失败 UI；这是第三课的边界路径。</p>
+      <h3>窗口装载有两层兜底</h3>
+      <p>进入桌面分支后，E2E 模式会禁用关闭到托盘；普通模式会读取托盘设置。随后 <code>createWindow()</code> 建立隐藏窗口、绑定 preload、等首帧或加载完成再显示，并按环境选择 dev URL 或构建后的 HTML。</p>
+      <pre><code class="language-typescript">mainWindow = new BrowserWindow({
+  show: false,
+  webPreferences: {
+    preload: path.join(__dirname, '../preload/index.js'),
+    webviewTag: true,
+  },
+});
+
+if (!app.isPackaged &amp;&amp; rendererUrl) {
+  mainWindow.loadURL(rendererUrl).catch(() =&gt; mainWindow.loadFile(fallbackFile));
+} else {
+  mainWindow.loadFile(fallbackFile);
+}</code></pre>
+      <p>`ready-to-show`、`did-finish-load` 和 5 秒 fallback 共同避免窗口长期隐藏；`render-process-gone` 会尝试重新加载 renderer。这些边界不证明业务可用，但证明 Electron 壳努力把首屏推出来。</p>
+    </section>
+
+    <section class="quiz">
+      <h2>判断练习</h2>
+      <p>判断：<code>initializeProcess()</code> 内部没有调用 <code>initAllBridges()</code>，所以 bridge 要等 renderer 发起 IPC 时才注册。</p>
+      <p class="answer"><strong>答案：</strong>错。<code>process/index.ts</code> 顶层导入 <code>./utils/initBridge</code>，而 <code>initBridge.ts</code> 顶层调用 <code>initAllBridges()</code>；注册发生在 process 模块加载阶段。</p>
+      <p class="muted">下一步建议向 agent 追问：“`did-finish-load` 为什么还要触发 backend migration？”</p>
+    </section>
+  </main>
+</body>
+</html>

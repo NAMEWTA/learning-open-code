@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Client 路由策略 API</title>
+  <link rel="stylesheet" href="../assets/commons-grpc.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-commons-grpc-module-tour.html">返回短课</a>
+    <a href="commons-grpc-overview.html">模块地图</a>
+    <a href="commons-grpc-api.html">公共类型 API</a>
+    <a href="../../slice-store-instance-routing/reference/store-instance-routing-flow-map.html">StoreInstance 路由切片</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+  </nav>
+
+  <h1>Client 路由策略 API</h1>
+  <p class="lead">本页是 L3 微观 API 字典，覆盖 <code>ClientRouteStrategy</code> 策略接口、<code>RouteStrategyType</code> 常量与六种内置实现的选择算法、线程安全与适用场景。<a href="commons-grpc-overview.html">commons-grpc-overview.html</a> 负责模块地图；<a href="commons-grpc-api.html">commons-grpc-api.html</a> 收录 <code>HeartbeatBody</code> 等负载字段。</p>
+
+  <div class="meta">
+    <span class="pill">层级 L3</span>
+    <span class="pill">goal L3-route-strategy-api</span>
+    <span class="pill">7 个源文件</span>
+    <span class="pill">包 com.aizuda.snail.ai.route</span>
+  </div>
+
+  <h2>1. 在分发链路中的位置</h2>
+  <div class="diagram">Agent 聊天责任链 ContextCollectorHandler (@Order 75)
+  │
+  ├─ instanceManager.getAliveInstances(appId)  → List&lt;ClientInstanceInfo&gt; candidates
+  ├─ app.routeStrategy（空则 LEAST_LOAD）      → routeStrategyManager.get(type)
+  └─ routeStrategy.select(candidates, conversationId) → ctx.setTargetClient(...)
+       │
+       └─ LlmCallHandler 用 targetClient 的 hostIp:grpcPort 发 /chat/dispatch</div>
+
+  <p class="note"><code>routeKey</code> 在运行时由 <code>ContextCollectorHandler</code> 传入 <code>ctx.getConversationId()</code>。只有 <code>CONSISTENT_HASH</code> 与 <code>LRU</code> 会读取该键；其余策略忽略它。</p>
+
+  <h2>2. 与 StoreInstance 路由的区别</h2>
+  <table>
+    <thead>
+      <tr><th>维度</th><th>Client 路由策略（本文）</th><th>StoreInstance 路由</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>路由对象</td>
+        <td>同一 <code>appId</code> 下在线的 Agent Client 节点（<code>ClientInstanceInfo</code>）</td>
+        <td>向量库 / 全文搜索后端连接（PgVector、Milvus、Elasticsearch 等）</td>
+      </tr>
+      <tr>
+        <td>配置入口</td>
+        <td><code>AppPO.routeStrategy</code>（应用级）</td>
+        <td><code>RagPO.vectorStoreInstanceId</code>、<code>searchEngineInstanceId</code></td>
+      </tr>
+      <tr>
+        <td>触发时机</td>
+        <td>每次聊天分发前，在 Server 责任链选目标 Client</td>
+        <td>RAG 摄入、检索时由 <code>VectorStoreFactory</code> / <code>SearchEngineFactory</code> 查表</td>
+      </tr>
+      <tr>
+        <td>延伸阅读</td>
+        <td>本文 + <a href="commons-grpc-overview.html">commons-grpc-overview</a></td>
+        <td><a href="../../slice-store-instance-routing/reference/store-instance-routing-flow-map.html">store-instance-routing-flow-map.html</a></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 核心接口与类型常量</h2>
+
+  <h3>ClientRouteStrategy</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>约束与返回值</th><th>边界 / 异常</th><th>调用示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>select</code></td>
+        <td><code>ClientInstanceInfo select(List&lt;ClientInstanceInfo&gt; candidates, String routeKey)</code></td>
+        <td>从已过滤的活跃实例中选一个；由 Spring 注入的实现类承担算法。</td>
+        <td>调用方保证 <code>candidates</code> 非空；否则 <code>First</code> 等实现会 <code>IndexOutOfBoundsException</code>。</td>
+        <td><code>strategy.select(alive, conversationId)</code></td>
+      </tr>
+      <tr>
+        <td><code>getType</code></td>
+        <td><code>String getType()</code></td>
+        <td>返回与 <code>RouteStrategyType</code> 对齐的策略标识，供 <code>ClientRouteStrategyManager</code> 匹配。</td>
+        <td>大小写由 Manager 的 <code>equalsIgnoreCase</code> 消化。</td>
+        <td><code>RouteStrategyType.CONSISTENT_HASH.equals(s.getType())</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>RouteStrategyType</h3>
+  <p class="note">工具类（非 enum），仅暴露 <code>public static final String</code> 常量，构造器抛 <code>UnsupportedOperationException</code>。</p>
+  <table>
+    <thead><tr><th>常量</th><th>值</th><th>实现类</th><th>本 goal 源文件</th></tr></thead>
+    <tbody>
+      <tr><td><code>LEAST_LOAD</code></td><td><code>"LEAST_LOAD"</code></td><td><code>LeastLoadClientRoute</code></td><td>—（默认策略，见 §6）</td></tr>
+      <tr><td><code>RANDOM</code></td><td><code>"RANDOM"</code></td><td><code>RandomClientRoute</code></td><td>✅</td></tr>
+      <tr><td><code>ROUND_ROBIN</code></td><td><code>"ROUND_ROBIN"</code></td><td><code>RoundRobinClientRoute</code></td><td>✅</td></tr>
+      <tr><td><code>CONSISTENT_HASH</code></td><td><code>"CONSISTENT_HASH"</code></td><td><code>ConsistentHashClientRoute</code></td><td>✅</td></tr>
+      <tr><td><code>LRU</code></td><td><code>"LRU"</code></td><td><code>LruClientRoute</code></td><td>✅</td></tr>
+      <tr><td><code>FIRST</code></td><td><code>"FIRST"</code></td><td><code>FirstClientRoute</code></td><td>✅</td></tr>
+    </tbody>
+  </table>
+
+  <h3>候选实例 ClientInstanceInfo（输入契约）</h3>
+  <p>定义于 <code>ClientInstanceManager</code>，策略只读以下字段：</p>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>策略用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>hostId</code></td><td><code>String</code></td><td>一致性哈希虚拟节点键、LRU 会话记忆键</td></tr>
+      <tr><td><code>hostIp</code> / <code>grpcPort</code></td><td><code>String</code> / <code>int</code></td><td>选中后由责任链写入分发目标（非策略内使用）</td></tr>
+      <tr><td><code>maxConcurrent</code></td><td><code>volatile int</code></td><td><code>LEAST_LOAD</code> 分母；为 0 时负载率视为 <code>Double.MAX_VALUE</code></td></tr>
+      <tr><td><code>activeChats</code></td><td><code>volatile int</code></td><td><code>LEAST_LOAD</code> 分子；来自心跳，见 <a href="commons-grpc-api.html">commons-grpc-api §6 HeartbeatBody</a></td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 六种实现：算法、线程安全、场景</h2>
+
+  <h3>策略总览</h3>
+  <table>
+    <thead>
+      <tr><th>实现类</th><th>算法摘要</th><th>使用 routeKey</th><th>线程安全</th><th>典型场景</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>FirstClientRoute</code></td>
+        <td>始终 <code>candidates.get(0)</code></td>
+        <td>否</td>
+        <td>无状态，并发安全</td>
+        <td>单 Client、主备、开发环境</td>
+      </tr>
+      <tr>
+        <td><code>RandomClientRoute</code></td>
+        <td><code>ThreadLocalRandom</code> 均匀抽索引</td>
+        <td>否</td>
+        <td><code>ThreadLocalRandom</code> 线程本地，安全</td>
+        <td>测试、对均衡要求不高的同构集群</td>
+      </tr>
+      <tr>
+        <td><code>RoundRobinClientRoute</code></td>
+        <td><code>AtomicLong</code> 自增后对候选数取模</td>
+        <td>否</td>
+        <td><code>getAndIncrement</code> 原子，安全</td>
+        <td>同构集群、希望长期均匀分摊</td>
+      </tr>
+      <tr>
+        <td><code>ConsistentHashClientRoute</code></td>
+        <td>每节点 100 虚拟节点上环；<code>routeKey</code> 哈希后顺时针找宿主</td>
+        <td>是（会话亲和）</td>
+        <td>每次 <code>select</code> 重建环，无共享可变状态</td>
+        <td>同一会话固定落同一 Client</td>
+      </tr>
+      <tr>
+        <td><code>LruClientRoute</code></td>
+        <td>按 <code>routeKey</code> 记住上次 <code>hostId</code>，优先选<strong>不同</strong>节点；缓存最多 100 个 routeKey</td>
+        <td>是</td>
+        <td><code>synchronized(accessOrder)</code></td>
+        <td>同会话在节点间轮换，减轻单点粘连</td>
+      </tr>
+      <tr>
+        <td><code>LeastLoadClientRoute</code></td>
+        <td><code>min(activeChats / maxConcurrent)</code></td>
+        <td>否</td>
+        <td>无状态，并发安全</td>
+        <td>生产默认；异构并发容量</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>FirstClientRoute</h3>
+  <pre><code>@Override
+public ClientInstanceInfo select(List&lt;ClientInstanceInfo&gt; candidates, String routeKey) {
+    return candidates.get(0);
+}</code></pre>
+  <p class="warn">候选列表顺序取决于 <code>getAliveInstances</code> 缓存迭代顺序，不是 DB 主键序。「第一个」= 当前快照中的首个活跃实例。</p>
+
+  <h3>RandomClientRoute</h3>
+  <pre><code>private int generateRandomIndex(int candidateSize) {
+    return ThreadLocalRandom.current().nextInt(candidateSize);
+}</code></pre>
+
+  <h3>RoundRobinClientRoute</h3>
+  <pre><code>private int calculateIndex(int candidateSize) {
+    long currentCount = counter.getAndIncrement();
+    int index = (int) (currentCount % candidateSize);
+    return Math.abs(index);
+}</code></pre>
+  <p class="note">计数器为<strong>全局</strong>（非按 appId 分桶）。多应用共享同一 JVM 时轮询相位连续，不影响单 app 内均匀性，但不同 app 的请求会共用计数序列。</p>
+
+  <h3>ConsistentHashClientRoute</h3>
+  <table>
+    <thead><tr><th>参数</th><th>值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>VIRTUAL_NODES_COUNT</code></td><td>100</td><td>每个物理节点映射 100 个虚拟点</td></tr>
+      <tr><td><code>HASH_SEED</code></td><td>31</td><td>字符串滚动哈希（非 Murmur/CRC）</td></tr>
+      <tr><td>虚拟键格式</td><td><code>{hostId}#{index}</code></td><td>区分同 host 多虚拟点</td></tr>
+    </tbody>
+  </table>
+  <pre><code>private ClientInstanceInfo selectFromRing(TreeMap&lt;Long, ClientInstanceInfo&gt; ring, String routeKey) {
+    long keyHash = calculateHash(routeKey);
+    SortedMap&lt;Long, ClientInstanceInfo&gt; tailMap = ring.tailMap(keyHash);
+    return tailMap.isEmpty()
+            ? ring.firstEntry().getValue()
+            : tailMap.get(tailMap.firstKey());
+}</code></pre>
+  <p class="warn">每次调用都 <code>buildHashRing</code>，节点数变化会立即反映；无跨请求环缓存。官方文档 <code>docs/guide/app/route-strategy.md</code> 描述一致，但实现未做环持久化。</p>
+
+  <h3>LruClientRoute</h3>
+  <pre><code>synchronized (accessOrder) {
+    String lastUsedHostId = accessOrder.get(routeKey);
+    for (ClientInstanceInfo c : candidates) {
+        if (!c.getHostId().equals(lastUsedHostId)) {
+            accessOrder.put(routeKey, c.getHostId());
+            return c;
+        }
+    }
+    ClientInstanceInfo first = candidates.get(0);
+    accessOrder.put(routeKey, first.getHostId());
+    return first;
+}</code></pre>
+  <p class="warn"><strong>与官方文档差异：</strong>源码按 <code>conversationId → 上次 hostId</code> 做「避开上次节点」轮换，并非按全局节点最近分配时间排序的经典 LRU。单节点时行为退化为始终选 <code>candidates.get(0)</code>。</p>
+
+  <h2>5. 策略选择与装配</h2>
+  <table>
+    <thead><tr><th>环节</th><th>类 / 字段</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>应用配置</td>
+        <td><code>AppPO.routeStrategy</code></td>
+        <td>Admin 创建/编辑应用时写入；空串时运行时用 <code>LEAST_LOAD</code></td>
+      </tr>
+      <tr>
+        <td>策略解析</td>
+        <td><code>ClientRouteStrategyManager</code></td>
+        <td>Spring 注入全部 <code>ClientRouteStrategy</code> Bean；<code>get(type)</code> 按 <code>getType()</code> 忽略大小写匹配，未命中回退 <code>LeastLoadClientRoute</code></td>
+      </tr>
+      <tr>
+        <td>运行时调用</td>
+        <td><code>ContextCollectorHandler</code></td>
+        <td><code>routeStrategy.select(candidates, ctx.getConversationId())</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <pre><code>String routeKey = StrUtil.isNotBlank(app.getRouteStrategy())
+        ? app.getRouteStrategy() : RouteStrategyType.LEAST_LOAD;
+ClientRouteStrategy routeStrategy = routeStrategyManager.get(routeKey);
+ClientInstanceInfo target = routeStrategy.select(candidates, ctx.getConversationId());</code></pre>
+
+  <h2>6. 决策速查</h2>
+  <table>
+    <thead><tr><th>需求</th><th>推荐策略</th><th>原因</th></tr></thead>
+    <tbody>
+      <tr><td>生产通用 / 节点并发上限不同</td><td><code>LEAST_LOAD</code></td><td>读心跳 <code>activeChats</code>/<code>maxConcurrent</code>，动态避过载</td></tr>
+      <tr><td>同构集群、长期均匀</td><td><code>ROUND_ROBIN</code></td><td>原子计数轮询，不依赖心跳精度</td></tr>
+      <tr><td>会话粘滞（同 conversationId 同节点）</td><td><code>CONSISTENT_HASH</code></td><td><code>routeKey</code> 即 <code>conversationId</code></td></tr>
+      <tr><td>同会话刻意轮换 Client</td><td><code>LRU</code></td><td>按会话记住上次 host，下次选其他节点</td></tr>
+      <tr><td>单 Client 或主备</td><td><code>FIRST</code></td><td>零开销，行为可预测</td></tr>
+      <tr><td>压测 / 快速验证</td><td><code>RANDOM</code></td><td>无状态，实现最简单</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 源码文件索引</h2>
+  <div class="filetree">snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/route/
+├── ClientRouteStrategy.java          ← 策略接口
+├── RouteStrategyType.java            ← 类型常量
+├── FirstClientRoute.java             ← 固定首节点
+├── RandomClientRoute.java            ← 随机
+├── RoundRobinClientRoute.java        ← 轮询
+├── ConsistentHashClientRoute.java    ← 一致性哈希
+└── LruClientRoute.java               ← 按会话避开上次节点</div>
+  <p class="where">完整路径前缀：<code>open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/route/</code></p>
+
+  <div class="exercise">
+    <strong>检索练习：</strong>某 Agent 绑定应用 A，A 配置 <code>CONSISTENT_HASH</code>，同一 <code>conversationId</code> 连续发两条消息，第二条是否保证落到同一 Client？若此时新增一个 Client 节点上线，该会话是否一定仍落原节点？
+    <details><summary>参考答案</summary>
+      <p>同一 <code>conversationId</code> 在节点集合不变时，哈希环映射稳定，通常仍落同一 Client。新增节点会重建环，部分会话（含该会话）可能映射到新节点——与一致性哈希扩缩容特性一致，非 bug。</p>
+    </details>
+  </div>
+
+  <p class="where">goal：<code>L3-route-strategy-api</code> · 交叉引用：<a href="commons-grpc-api.html">commons-grpc-api.html</a>（<code>HeartbeatBody</code> 负载字段）</p>
+</main>
+</body>
+</html>

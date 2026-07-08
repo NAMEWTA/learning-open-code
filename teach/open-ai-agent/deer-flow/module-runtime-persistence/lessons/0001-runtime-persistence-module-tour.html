@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime 与 persistence：一次 run 会落到哪些边界</title>
+  <style>
+    :root { color-scheme: light; --ink:#18212f; --muted:#5d6b7a; --line:#d9e2ea; --soft:#f7fafc; --accent:#2563eb; --ok:#0f766e; --warn:#9a3412; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.68; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 72px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.22rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f8; padding:.1rem .32rem; border-radius:5px; }
+    pre { margin:12px 0; padding:14px 16px; overflow:auto; background:#0f172a; color:#e5eefb; border-radius:8px; font-size:.84rem; line-height:1.6; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin:12px 0; }
+    .box { border:1px solid var(--line); border-radius:8px; padding:12px 14px; background:#fff; }
+    .box strong { display:block; margin-bottom:4px; }
+    .callout { border:1px solid var(--line); border-left:4px solid var(--ok); border-radius:8px; padding:12px 14px; background:var(--soft); }
+    .answer { border-left-color:var(--warn); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Runtime 与 persistence：一次 run 会落到哪些边界</h1>
+  <p class="lead">目标：15 分钟内建立一张判断图。以后看到“run 没结束、消息没出现、重启后状态异常、token 不准”时，先知道该去 runtime 还是 persistence。</p>
+
+  <h2>1. 先抓住四个存储面</h2>
+  <p>DeerFlow 的长任务不是单个“调用模型”的函数，而是四个存储面协作。<code>RunManager</code> 管生命周期，<code>StreamBridge</code> 管实时 SSE，<code>RunEventStore</code> 管可回看的消息和 trace，LangGraph checkpointer 管线程状态恢复。SQLAlchemy persistence 不是替代 runtime，而是给 runtime 提供 durable backing。</p>
+  <div class="grid">
+    <div class="box"><strong>RunStore</strong><code>runs</code> 行：状态、模型、错误、token 汇总、首尾消息摘要。</div>
+    <div class="box"><strong>RunEventStore</strong><code>run_events</code> 行或 JSONL：message、trace、subagent step。</div>
+    <div class="box"><strong>Checkpointer</strong>LangGraph 线程状态：messages、goal、title、可回滚 checkpoint。</div>
+    <div class="box"><strong>StreamBridge</strong>短期实时缓冲：SSE replay、heartbeat、end marker。</div>
+  </div>
+  <p>主参考页在 <a href="../reference/runtime-persistence-overview.html">runtime-persistence-overview.html</a>（模块地图）；接口签名与参数约束见 L3 <a href="../reference/runtime-persistence-api.html">runtime-persistence-api.html</a>。</p>
+
+  <h2>2. 一次 run 的主线</h2>
+  <div class="diagram">Gateway /runs/stream
+  │
+  ├── start_run()                         ← 校验请求、创建 RunRecord
+  │   └── RunManager.create_or_reject()    ← 写 pending 到 RunStore
+  │
+  ├── asyncio.create_task(run_agent())     ← 后台执行 LangGraph agent
+  │
+  ├── worker.run_agent()
+  │   ├── set_status(running)              ← RunStore 状态推进
+  │   ├── bridge.publish(metadata/values)  ← SSE 实时输出
+  │   ├── RunJournal callbacks             ← message/trace/token 写入事件缓冲
+  │   ├── checkpointer                     ← 保存线程状态，可 rollback/resume
+  │   └── set_status(success/error/...)    ← 最终状态和完成数据
+  │
+  └── sse_consumer()                       ← 订阅 StreamBridge，发给前端</div>
+  <p>真实装配点在 <code>backend/app/gateway/deps.py</code>：lifespan 先创建 <code>make_stream_bridge()</code>，再初始化 SQLAlchemy engine，然后创建 <code>make_checkpointer()</code>、<code>make_store()</code>、<code>RunRepository</code>、<code>make_run_event_store()</code>，最后把 <code>RunManager(store=run_store)</code> 放进 <code>app.state</code>。</p>
+
+  <h2>3. 调用示例：HTTP 入口怎样接入 worker</h2>
+  <p><code>backend/app/gateway/services.py</code> 的 <code>start_run()</code> 是最短调用链。下面是压缩后的形状，保留了关键边界：</p>
+  <pre><code class="language-python">record = await run_mgr.create_or_reject(
+    thread_id,
+    body.assistant_id,
+    on_disconnect=disconnect,
+    metadata=body.metadata or {},
+    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+    multitask_strategy=body.multitask_strategy,
+    model_name=model_name,
+    user_id=owner_user_id,
+)
+
+task = asyncio.create_task(
+    run_agent(
+        bridge, run_mgr, record,
+        ctx=run_ctx,
+        agent_factory=agent_factory,
+        graph_input=graph_input,
+        config=config,
+        stream_modes=stream_modes,
+    )
+)
+record.task = task</code></pre>
+  <p>读这段时要分清两件事：<code>record</code> 是 run 生命周期的可见句柄；<code>run_ctx</code> 是基础设施包，里面带着 checkpointer、LangGraph store、event store、thread store 和 app config。worker 不直接 new 数据库对象，它只消费这个 context。</p>
+
+  <h2>4. 检索练习</h2>
+  <p>暂停 60 秒，先不要看答案：如果前端刷新后能看到旧消息，但不能继续 join 某个已完成 run 的 SSE，你会优先查哪两个边界？如果用户说“重启后 run 一直显示 running”，你又会查哪一个恢复逻辑？</p>
+  <div class="callout answer">
+    <p><strong>参考答案：</strong>旧消息来自 <code>RunEventStore.list_messages()</code>，而 join SSE 依赖 <code>StreamBridge</code> 是否还保留该 run 的 stream；两者不是一个存储面。重启后 active run 卡住，要查 <code>RunManager.reconcile_orphaned_inflight_runs()</code> 以及 <code>runs</code> 表中的 pending/running 行。</p>
+  </div>
+  <p>主来源建议先读 <code>backend/packages/harness/deerflow/runtime/runs/worker.py</code>，再回到参考页查接口表。下一步可追问：“帮我沿着 cancel/rollback 分支讲一次”。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>single foreground run 参考图谱</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:.52rem .6rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>single foreground run 参考图谱</h1>
+  <p class="note">本页承载 L2 长清单：完整流程、函数索引、类型产物、环境变量与测试佐证。短课 <a href="../lessons/0001-flow-map.html">0001-flow-map</a> 只保留八跳记忆技能。</p>
+
+  <h2>1. 总流程（ASCII）</h2>
+  <pre>Pi 父会话调用 subagent tool
+  ↓
+extension/index.ts
+  createSubagentExecutor → executor.execute (executeWithSingleDispatchGuard)
+  ↓
+subagent-executor.ts :: execute()
+  ├─ action? → management / status / resume / …
+  ├─ effectiveAsync? → runAsyncPath → background/async-execution.ts
+  ├─ chain? → runChainPath
+  ├─ tasks? → runParallelPath
+  └─ agent+task → runSinglePath
+        ↓
+      runSinglePath()
+        查 AgentConfig · model/skill/output · sessionRoot
+        foregroundControl 注册（interrupt 用）
+        ↓
+      execution.ts :: runSync()
+        拼 prompt · artifact 输入 · model 候选列表
+        ↓
+      runSingleAttempt()
+        buildPiArgs → getPiSpawnCommand (pi-spawn.ts)
+        spawn(child) · stdout JSONL · onUpdate(progress)
+        ↓
+      child exit → SingleResult
+        ↓
+      AgentToolResult { details.mode: "single", results: [SingleResult] }</pre>
+
+  <h2>2. 进入条件（门卫表）</h2>
+  <table>
+    <tr><th>条件</th><th>必须满足</th><th>否则去向</th></tr>
+    <tr><td>无 <code>action</code></td><td>参数不是管理/观测动作</td><td>management 分支</td></tr>
+    <tr><td><code>effectiveAsync === false</code></td><td><code>async</code> 未设或为 false，且 <code>clarify !== true</code> 时未转后台</td><td><code>runAsyncPath</code></td></tr>
+    <tr><td>无 <code>chain</code> / <code>tasks</code></td><td>只有单 agent+task</td><td>chain / parallel 路径</td></tr>
+    <tr><td>spawn 限额</td><td><code>reserveSubagentSpawns</code> 通过</td><td>错误 tool result</td></tr>
+    <tr><td>递归深度</td><td><code>checkSubagentDepth</code> 通过</td><td>错误 tool result</td></tr>
+    <tr><td>重复调度</td><td><code>subagentInProgress</code> 为 false（非 action 调用）</td><td>duplicate guard 错误</td></tr>
+  </table>
+
+  <h2>3. 关键函数索引</h2>
+  <table>
+    <tr><th>文件</th><th>符号</th><th>职责</th></tr>
+    <tr><td><code>extension/index.ts</code></td><td><code>registerSubagentExtension</code></td><td>注册 subagent/wait tool、创建 executor、session 生命周期</td></tr>
+    <tr><td><code>extension/index.ts</code></td><td><code>tool.execute</code></td><td><code>executeSubagentCollapsed</code> → <code>executor.execute</code></td></tr>
+    <tr><td><code>subagent-executor.ts</code></td><td><code>createSubagentExecutor</code></td><td>返回带 duplicate guard 的 <code>execute</code></td></tr>
+    <tr><td><code>subagent-executor.ts</code></td><td><code>execute</code></td><td>action/async/chain/tasks/single 总分流</td></tr>
+    <tr><td><code>subagent-executor.ts</code></td><td><code>runSinglePath</code></td><td>单次前台：校验 agent、clarify 转 async、调 <code>runSync</code>、包装 result</td></tr>
+    <tr><td><code>execution.ts</code></td><td><code>runSync</code></td><td>artifact、model fallback 循环、聚合 usage</td></tr>
+    <tr><td><code>execution.ts</code></td><td><code>runSingleAttempt</code></td><td>spawn、JSONL 解析、timeout/control/intercom detach</td></tr>
+    <tr><td><code>pi-spawn.ts</code></td><td><code>getPiSpawnCommand</code></td><td>解析 <code>pi</code> 或 <code>PI_SUBAGENT_PI_BINARY</code></td></tr>
+    <tr><td><code>pi-args.ts</code></td><td><code>buildPiArgs</code></td><td><code>--mode json -p</code>、session、model、system prompt、深度 env</td></tr>
+  </table>
+
+  <h2>4. 产物与类型</h2>
+  <table>
+    <tr><th>类型 / 字段</th><th>产生位置</th><th>用途</th></tr>
+    <tr><td><code>SingleResult</code></td><td><code>runSingleAttempt</code> / <code>runSync</code></td><td>单 child 的 exitCode、messages、usage、progress、artifactPaths</td></tr>
+    <tr><td><code>Details.mode = "single"</code></td><td><code>runSinglePath</code> 返回</td><td>TUI 与调用方识别前台单次模式</td></tr>
+    <tr><td><code>Details.runId</code></td><td>executor 生成 UUID</td><td>session 目录、foregroundControl 键、artifact 命名</td></tr>
+    <tr><td><code>AgentProgress</code></td><td>JSONL 事件驱动更新</td><td>运行中 spinner、currentTool、recentOutput</td></tr>
+    <tr><td>artifact 文件</td><td><code>getArtifactPaths</code></td><td>input、jsonl、output、transcript、metadata</td></tr>
+    <tr><td>session 目录</td><td><code>sessionRoot/run-0/session.jsonl</code></td><td>child Pi 会话持久化（若启用）</td></tr>
+  </table>
+
+  <h2>5. spawn 与环境</h2>
+  <table>
+    <tr><th>变量 / 机制</th><th>说明</th></tr>
+    <tr><td><code>PI_SUBAGENT_PI_BINARY</code></td><td>覆盖默认 <code>pi</code> 命令路径</td></tr>
+    <tr><td><code>SUBAGENT_CHILD_ENV</code></td><td>子进程标记；extension 在 child 中不重复注册</td></tr>
+    <tr><td><code>getSubagentDepthEnv</code></td><td>传递当前嵌套深度，限制递归 spawn</td></tr>
+    <tr><td><code>buildPiArgs</code></td><td><code>--mode json -p</code> + task prompt；继承 tools/extensions/skills 配置</td></tr>
+    <tr><td>Windows</td><td><code>resolveWindowsPiCliScript</code> 用 node 执行 pi 包 bin 脚本</td></tr>
+  </table>
+
+  <h2>6. JSONL 事件（runSingleAttempt 摘要）</h2>
+  <table>
+    <tr><th>事件类型</th><th>progress 影响</th></tr>
+    <tr><td><code>message_end</code>（assistant）</td><td>累计 tokens/turns，检测 tool_use / stop</td></tr>
+    <tr><td>tool 相关行</td><td>更新 <code>currentTool</code>、<code>toolCount</code>、<code>recentTools</code></td></tr>
+    <tr><td>activity 定时器</td><td>1s 刷新 <code>durationMs</code>、<code>activityState</code></td></tr>
+    <tr><td>timeout / turnBudget</td><td>SIGINT → SIGTERM → SIGKILL 级联终止</td></tr>
+    <tr><td>control event</td><td><code>needs_attention</code>、<code>active_long_running</code> 通知父会话</td></tr>
+    <tr><td>intercom detach</td><td>子进程可 detached 继续，前台返回 -2</td></tr>
+  </table>
+
+  <h2>7. 测试佐证（single-execution.test.ts）</h2>
+  <table>
+    <tr><th>测试主题</th><th>佐证链路环节</th></tr>
+    <tr><td>基本 single run</td><td>spawn 参数、final output、exitCode 0</td></tr>
+    <tr><td>未知 agent</td><td><code>runSinglePath</code> 早期失败</td></tr>
+    <tr><td>spawn 限额 / duplicate guard</td><td>executor 门卫层</td></tr>
+    <tr><td>usage / cost 累计</td><td>JSONL <code>message_end</code> 解析</td></tr>
+    <tr><td>model fallback</td><td><code>runSync</code> 多候选重试</td></tr>
+    <tr><td>control event / completion guard</td><td>长运行与 mutating tool 防护</td></tr>
+    <tr><td>file-only output</td><td><code>finalizeSingleOutput</code> 路径</td></tr>
+    <tr><td>timeout</td><td><code>resolveAttemptTimeout</code> 与信号终止</td></tr>
+  </table>
+
+  <h2>8. 与相邻 L1/L2 的交叉引用</h2>
+  <table>
+    <tr><th>主题</th><th>关系</th></tr>
+    <tr><td><a href="../../module-extension-runtime/reference/extension-runtime-overview.html">extension-runtime</a></td><td>上游：tool 注册、state、session 钩子</td></tr>
+    <tr><td><a href="../../module-agent-system/reference/agent-system-overview.html">agent-system</a></td><td>上游：<code>AgentConfig</code>、discovery、management action</td></tr>
+    <tr><td><a href="../../module-runs-execution/reference/runs-execution-overview.html">runs-execution</a></td><td>并列：parallel、chain、async 分流总览</td></tr>
+    <tr><td><a href="../../slice-parallel-chain-execution/lessons/0001-flow-map.html">slice-parallel-chain-execution</a></td><td>扩展：多 task / chain step</td></tr>
+    <tr><td><a href="../../slice-async-lifecycle-status-wait/reference/async-lifecycle-flow-map.html">slice-async-lifecycle-status-wait</a></td><td>对比：<code>effectiveAsync</code> 为 true 时的路径</td></tr>
+  </table>
+
+  <h2>9. 建议后续短课拆分</h2>
+  <table>
+    <tr><th>编号</th><th>课题</th><th>主要文件</th></tr>
+    <tr><td>0002</td><td>runSinglePath 准备层（clarify、output、session）</td><td><code>subagent-executor.ts</code></td></tr>
+    <tr><td>0003</td><td>spawn 与 pi-args 参数构造</td><td><code>pi-args.ts</code>、<code>pi-spawn.ts</code></td></tr>
+    <tr><td>0004</td><td>JSONL 解析与 progress 推送</td><td><code>execution.ts</code> <code>processLine</code></td></tr>
+    <tr><td>0005</td><td>model fallback 与 acceptance</td><td><code>execution.ts</code> <code>runSync</code> 循环</td></tr>
+  </table>
+</main>
+</body>
+</html>

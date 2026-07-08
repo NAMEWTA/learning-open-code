@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills 系统参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 8px; letter-spacing:0; }
+    h2 { font-size:1.3rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.91rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .endpoint { font-family:"SF Mono",Consolas,monospace; color:#314155; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Skills 系统参考</h1>
+  <p class="lead">本页是 L1 模块参考：集中放置职责、架构位置、API、内部分层、生命周期、内置 skill 表与测试锚点。短课入口：<a href="../lessons/0001-skills-module-tour.html">0001-skills-module-tour.html</a>；L3 公共 API 速查：<a href="skills-api.html">skills-api.html</a>；整体位置对照 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>中的 Skills/Tools 能力扩展层。</p>
+
+  <h2>模块职责与架构位置</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码证据</th></tr>
+    <tr><td>一句话职责</td><td>Skills 系统把 skill file 目录树变成 runtime 可见的能力索引，并通过 prompt、slash middleware、durable context 和 tool policy 影响 lead agent 行为。</td><td><code>backend/packages/harness/deerflow/skills/</code></td></tr>
+    <tr><td>整体架构位置</td><td>位于配置/存储层与 lead agent 之间；在 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>中对应 Skills/Tools 能力扩展层。Gateway 管理 skill 生命周期，lead agent 在每次创建 graph 时加载启用 skill，prompt 与工具集合据此变化。</td><td><code>backend/app/gateway/routers/skills.py</code>、<code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td></tr>
+    <tr><td>运行时路径</td><td>host 侧默认从项目 <code>skills/</code> 读取；sandbox/container 侧默认挂载到 skills container root，按 <code>public</code>、<code>custom</code>、<code>legacy</code> 分类。</td><td><code>backend/packages/harness/deerflow/config/skills_config.py</code></td></tr>
+    <tr><td>与 Tools/MCP 的边界</td><td>Skills 不直接等于工具。它们先指导模型如何工作，再用 <code>allowed-tools</code> 对已加载工具做过滤；MCP 工具发现与 promotion 由 Tools/MCP 模块负责。</td><td><code>backend/packages/harness/deerflow/skills/tool_policy.py</code></td></tr>
+  </table>
+
+  <h2>内部分层</h2>
+  <div class="filetree">backend/packages/harness/deerflow/skills/
+├── types.py                 ← Skill、SkillCategory、SecretRequirement
+├── parser.py                ← skill file frontmatter 解析
+├── validation.py            ← 安装/编辑时的 frontmatter 校验
+├── catalog.py               ← SkillCatalog 搜索索引
+├── describe.py              ← describe_skill 工具与 &lt;skill_index&gt; prompt
+├── slash.py                 ← /skill-name 解析与解析结果
+├── tool_policy.py           ← allowed-tools 工具过滤
+├── installer.py             ← .skill ZIP 安装与安全抽取
+├── permissions.py           ← 安装后 sandbox 可读权限
+└── storage/                 ← 存储后端
+    ├── skill_storage.py              ← 抽象模板方法与公共校验
+    ├── local_skill_storage.py        ← 本地 public/custom 实现
+    └── user_scoped_skill_storage.py  ← 用户隔离 custom/legacy 实现</div>
+
+  <div class="filetree">backend/packages/harness/deerflow/agents/
+├── lead_agent/
+│   ├── agent.py             ← 加载 skills、过滤 tools、创建 agent
+│   └── prompt.py            ← &lt;skill_system&gt; 与 prompt cache
+├── middlewares/
+│   ├── skill_activation_middleware.py  ← slash 激活与 secrets 绑定
+│   ├── skill_context.py                ← 从 read_file 结果提取 skill 引用
+│   ├── durable_context_middleware.py   ← 将 skill_context 注入后续调用
+│   └── tool_error_handling_middleware.py ← 给 skill read 结果打 metadata
+└── thread_state.py          ← skill_context reducer 与保留窗口</div>
+
+  <h2>生命周期速查</h2>
+  <table>
+    <tr><th>阶段</th><th>发生什么</th><th>关键源码</th><th>常见故障点</th></tr>
+    <tr><td>1. 配置解析</td><td><code>SkillsConfig</code> 解析 host 路径、container 路径和 <code>deferred_discovery</code>。</td><td><code>backend/packages/harness/deerflow/config/skills_config.py</code></td><td>路径不在预期项目根；container path 与 prompt 中路径不一致。</td></tr>
+    <tr><td>2. 存储发现</td><td><code>load_skills</code> 遍历 public、custom、legacy 分类下的 skill file，解析 frontmatter，按名字去重并排序。</td><td><code>storage/skill_storage.py</code>、<code>storage/user_scoped_skill_storage.py</code></td><td>frontmatter 缺 <code>name</code> 或 <code>description</code>；后发现的同名 skill 覆盖前者。</td></tr>
+    <tr><td>3. 启用状态合并</td><td>PUBLIC 走全局 extensions config；CUSTOM/LEGACY 在 user-scoped storage 中叠加用户级状态文件。</td><td><code>storage/user_scoped_skill_storage.py</code>、<code>backend/app/gateway/routers/skills.py</code></td><td>public toggle 影响所有用户；custom toggle 只影响当前用户。</td></tr>
+    <tr><td>4. agent 白名单</td><td>custom agent 可配置 <code>skills</code>：省略表示继承所有启用 skill，<code>[]</code> 表示禁用所有，列表表示只允许这些名字。</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td><td>slash 激活已安装 skill 但当前 agent 不允许。</td></tr>
+    <tr><td>5. prompt 装入</td><td>默认渲染 <code>&lt;available_skills&gt;</code> 摘要；开启 <code>deferred_discovery</code> 时只渲染 <code>&lt;skill_index&gt;</code> 并追加 <code>describe_skill</code>。</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/prompt.py</code>、<code>skills/describe.py</code></td><td>cache 未刷新导致 UI toggle 后短时看见旧 prompt。</td></tr>
+    <tr><td>6. slash 激活</td><td><code>/skill-name</code> 命中后读取完整 skill file，注入隐藏 <code>HumanMessage</code>，并记录审计信息。</td><td><code>agents/middlewares/skill_activation_middleware.py</code>、<code>skills/slash.py</code></td><td>reserved slash 命令、disabled skill、路径越界、文件不可读。</td></tr>
+    <tr><td>7. durable skill context</td><td>模型用 <code>read_file</code> 读过的 skill file 会被记录为 name/path/description 引用；后续只提醒引用，不持久化正文。</td><td><code>agents/middlewares/skill_context.py</code>、<code>agents/thread_state.py</code></td><td>读工具名不在 <code>skill_file_read_tool_names</code> 中，导致无法捕获。</td></tr>
+    <tr><td>8. 工具约束</td><td>若任一可用 skill 声明 <code>allowed-tools</code>，工具集合按声明并集收窄；lead agent 额外保留 skill loading 工具名。</td><td><code>skills/tool_policy.py</code>、<code>agents/lead_agent/agent.py</code></td><td>混合 legacy skill 与 explicit skill 时，未声明者不会恢复 allow-all。</td></tr>
+    <tr><td>9. 安装与演进</td><td>Gateway 安装 <code>.skill</code>，或 agent 在 skill evolution 开启时通过 <code>skill_manage</code> 管理 custom skill；都会走校验、扫描、历史和 cache 刷新。</td><td><code>skills/installer.py</code>、<code>tools/skill_manage_tool.py</code></td><td>ZIP traversal、可执行脚本扫描、support file path 越界。</td></tr>
+  </table>
+
+  <h2>优先级与过滤顺序</h2>
+  <table>
+    <tr><th>层级</th><th>真实顺序</th><th>结果</th><th>源码锚点</th></tr>
+    <tr><td>Local storage discovery</td><td><code>LocalSkillStorage._iter_skill_files()</code> 按 <code>public</code>、<code>custom</code>、<code>legacy</code> 的枚举顺序遍历；<code>SkillStorage.load_skills()</code> 用 <code>skills_by_name[skill.name] = skill</code> 合并。</td><td>后出现的同名 skill 覆盖前者，所以同名 custom 可以 shadow public。</td><td><code>backend/packages/harness/deerflow/skills/storage/local_skill_storage.py</code>、<code>backend/packages/harness/deerflow/skills/storage/skill_storage.py</code></td></tr>
+    <tr><td>User-scoped discovery</td><td><code>UserScopedSkillStorage</code> 总是读取 global public，再读取当前用户 custom；只有当用户 custom 目录没有任何 skill 时，才把 global custom 作为 LEGACY fallback 暴露。</td><td>一旦用户创建任意 custom skill，legacy fallback 对该用户消失；同名用户 custom 也会覆盖 global public。</td><td><code>backend/packages/harness/deerflow/skills/storage/user_scoped_skill_storage.py</code></td></tr>
+    <tr><td>Enabled state</td><td>PUBLIC 的 enabled state 来自全局 extensions config；CUSTOM/LEGACY 先保留全局默认，再与用户级 enabled state 做 AND 合并。</td><td>PUBLIC toggle 是全局的；CUSTOM/LEGACY toggle 是用户级的，同时不会绕过升级前的全局禁用。</td><td><code>backend/packages/harness/deerflow/skills/storage/user_scoped_skill_storage.py</code>、<code>backend/packages/harness/deerflow/config/extensions_config.py</code></td></tr>
+    <tr><td>Agent whitelist</td><td>custom agent 的 <code>skills</code> 字段在 enabled skill 列表之后过滤：省略表示继承所有 enabled skill，空数组表示不允许任何 skill，列表表示只允许这些名字。</td><td>slash、deferred discovery、prompt 和 allowed-tools 都只能看到当前 agent 允许的 skill。</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td></tr>
+    <tr><td>Prompt / slash / tool policy</td><td>prompt 只渲染过滤后的 skill；slash 激活再次校验 enabled 与 whitelist；<code>allowed-tools</code> 在过滤后的 skill 集合上求并集。</td><td>未被允许的 skill 不会通过 slash 绕过限制；未声明 <code>allowed-tools</code> 的 skill 不会把工具恢复成 allow-all。</td><td><code>backend/packages/harness/deerflow/agents/middlewares/skill_activation_middleware.py</code>、<code>backend/packages/harness/deerflow/skills/tool_policy.py</code></td></tr>
+  </table>
+
+  <h2>对外 API 与公共函数</h2>
+  <h3>Gateway HTTP API</h3>
+  <table>
+    <tr><th>接口</th><th>权限</th><th>用途</th><th>源码</th></tr>
+    <tr><td><span class="endpoint">GET /api/skills</span></td><td>普通用户可读</td><td>列出当前用户可见的 public、custom、legacy skills。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">GET /api/skills/{skill_name}</span></td><td>普通用户可读</td><td>读取单个 skill 的 metadata。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">PUT /api/skills/{skill_name}</span></td><td>admin</td><td>切换启用状态。PUBLIC 写全局配置；CUSTOM/LEGACY 写用户级状态。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">POST /api/skills/install</span></td><td>admin</td><td>从线程 user-data 路径安装 <code>.skill</code> ZIP。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">GET /api/skills/custom</span></td><td>普通用户可读</td><td>只列出用户自有 CUSTOM skills，不含 LEGACY。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">GET /api/skills/custom/{skill_name}</span></td><td>admin</td><td>读取 custom skill 的原始正文。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">PUT /api/skills/custom/{skill_name}</span></td><td>admin</td><td>编辑 custom skill，扫描后写历史并刷新 prompt cache。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">DELETE /api/skills/custom/{skill_name}</span></td><td>admin</td><td>删除 custom skill，保留可回滚历史。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">GET /api/skills/custom/{skill_name}/history</span></td><td>admin</td><td>读取 custom skill JSONL 历史。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+    <tr><td><span class="endpoint">POST /api/skills/custom/{skill_name}/rollback</span></td><td>admin</td><td>从历史恢复 custom skill，恢复前仍执行 validation 与 scanner。</td><td><code>backend/app/gateway/routers/skills.py</code></td></tr>
+  </table>
+
+  <h3>前端入口</h3>
+  <table>
+    <tr><th>入口</th><th>职责</th><th>源码</th></tr>
+    <tr><td>Settings dialog</td><td>侧边设置页把 Skills 作为一个 section 暴露给用户。</td><td><span class="where"><code>frontend/src/components/workspace/settings/settings-dialog.tsx</code></span></td></tr>
+    <tr><td>Skill settings page</td><td>列出 skills、按 category 过滤、展示 admin gate，并通过 hook 切换 enabled 状态。</td><td><span class="where"><code>frontend/src/components/workspace/settings/skill-settings-page.tsx</code></span></td></tr>
+    <tr><td>Skills API hooks</td><td><code>api.ts</code> 封装 list、toggle、install；<code>hooks.ts</code> 负责 React Query cache invalidation。</td><td><span class="where"><code>frontend/src/core/skills/api.ts</code></span>、<span class="where"><code>frontend/src/core/skills/hooks.ts</code></span></td></tr>
+    <tr><td>输入框 slash 建议</td><td><code>input-box.tsx</code> 读取 enabled skills，<code>input-box-helpers.ts</code> 生成 slash skill suggestions，并与内置 slash 命令合并。</td><td><span class="where"><code>frontend/src/components/workspace/input-box.tsx</code></span>、<span class="where"><code>frontend/src/components/workspace/input-box-helpers.ts</code></span></td></tr>
+    <tr><td>artifact install</td><td>artifact 文件列表和详情页在 <code>.skill</code> 文件上展示安装按钮，调用 <span class="endpoint">POST /api/skills/install</span>。</td><td><span class="where"><code>frontend/src/components/workspace/artifacts/artifact-file-list.tsx</code></span>、<span class="where"><code>frontend/src/components/workspace/artifacts/artifact-file-detail.tsx</code></span></td></tr>
+  </table>
+
+  <h3>Python 侧公共入口</h3>
+  <table>
+    <tr><th>符号</th><th>位置</th><th>用途</th></tr>
+    <tr><td><code>Skill</code>、<code>SkillCategory</code></td><td><code>skills/types.py</code></td><td>运行时 skill metadata 数据结构和 public/custom/legacy 分类。</td></tr>
+    <tr><td><code>parse_skill_file</code></td><td><code>skills/parser.py</code></td><td>从 skill file frontmatter 解析 name、description、license、allowed tools 和 secrets 字段。</td></tr>
+    <tr><td><code>SkillCatalog.search</code></td><td><code>skills/catalog.py</code></td><td>支持 <code>select:</code>、<code>+required</code> 和 regex/keyword 的 deferred skill 搜索。</td></tr>
+    <tr><td><code>build_skill_search_setup</code></td><td><code>skills/describe.py</code></td><td>生成 <code>describe_skill</code> 工具和 name-only skill index。</td></tr>
+    <tr><td><code>get_skill_index_prompt_section</code></td><td><code>skills/describe.py</code></td><td>渲染 deferred discovery 模式下的 <code>&lt;skill_system&gt;</code>。</td></tr>
+    <tr><td><code>parse_slash_skill_reference</code>、<code>resolve_slash_skill</code></td><td><code>skills/slash.py</code></td><td>解析 <code>/skill-name task</code>，避开 reserved control commands，并校验 enabled/whitelist。</td></tr>
+    <tr><td><code>SkillActivationMiddleware</code></td><td><code>agents/middlewares/skill_activation_middleware.py</code></td><td>显式 slash 激活、隐藏上下文注入、run journal 记录和 request-scoped secrets 绑定。</td></tr>
+    <tr><td><code>build_skill_entry_metadata_from_read</code></td><td><code>agents/middlewares/skill_context.py</code></td><td>把读取 skill file 的 ToolMessage 转为 durable skill metadata。</td></tr>
+    <tr><td><code>extract_skills</code>、<code>render_skill_context</code></td><td><code>agents/middlewares/skill_context.py</code></td><td>从历史 tool call 提取已加载 skill，并渲染后续提醒。</td></tr>
+    <tr><td><code>SkillStorage.load_skills</code></td><td><code>skills/storage/skill_storage.py</code></td><td>模板方法：发现、解析、合并启用状态、过滤和排序。</td></tr>
+    <tr><td><code>get_or_new_skill_storage</code></td><td><code>skills/storage/__init__.py</code></td><td>全局或 config-scoped storage factory。</td></tr>
+    <tr><td><code>get_or_new_user_skill_storage</code></td><td><code>skills/storage/__init__.py</code></td><td>用户隔离 custom skill storage，带 LRU 缓存。</td></tr>
+    <tr><td><code>filter_tools_by_skill_allowed_tools</code></td><td><code>skills/tool_policy.py</code></td><td>根据可用 skill 的 <code>allowed-tools</code> 声明过滤 tool list。</td></tr>
+    <tr><td><code>skill_manage_tool</code></td><td><code>tools/skill_manage_tool.py</code></td><td>agent-managed custom skill create/patch/edit/delete/support file 操作。</td></tr>
+  </table>
+
+  <h2>关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>角色</th><th>关键源码</th></tr>
+    <tr><td>AppConfig / ExtensionsConfig</td><td>决定 skills host/container 路径、deferred discovery、skill evolution 和启用状态。</td><td><code>backend/packages/harness/deerflow/config/</code></td></tr>
+    <tr><td>lead agent factory</td><td>把 skills 应用到 prompt、tools、middleware 和 tracing metadata。</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td></tr>
+    <tr><td>LangChain middleware</td><td>在模型调用前后插入 slash activation、durable context、tool result stamping。</td><td><code>backend/packages/harness/deerflow/agents/middlewares/</code></td></tr>
+    <tr><td>ThreadState</td><td>保存最多 8 个 skill_context 引用，按 path 去重并刷新最近性。</td><td><code>backend/packages/harness/deerflow/agents/thread_state.py</code></td></tr>
+    <tr><td>tools layer</td><td>提供原始工具集合、<code>read_file</code>、<code>skill_manage</code>、MCP/ACP/subagent 工具，再被 skills policy 过滤。</td><td><code>backend/packages/harness/deerflow/tools/</code></td></tr>
+    <tr><td>Gateway auth</td><td>保护 skills mutating endpoints，普通用户只能读取列表和详情。</td><td><code>backend/app/gateway/deps.py</code>、<code>backend/tests/test_skills_router_authz.py</code></td></tr>
+  </table>
+
+  <h2>调用示例</h2>
+  <h3>显式 slash 激活</h3>
+  <pre><code class="language-text">/data-analysis analyze uploads/orders.csv</code></pre>
+  <p>处理顺序：<code>parse_slash_skill_reference</code> 提取名字和剩余任务文本；storage 加载当前用户可见 skills；检查 enabled 与 agent allowlist；读取 container 内的完整 skill file；构造隐藏 <code>&lt;slash_skill_activation&gt;</code> 消息。</p>
+
+  <h3>deferred discovery 查询</h3>
+  <pre><code class="language-python">catalog.search("select:data-analysis,deep-research")
+catalog.search("+podcast gen")
+catalog.search("chart visualization")</code></pre>
+  <p>这些查询由 <code>describe_skill</code> 工具暴露给模型。它只返回 description、allowed tools 和 file location，不会自动读取完整 skill file。</p>
+
+  <h3>Gateway 切换 skill 状态</h3>
+  <pre><code class="language-http">PUT /api/skills/data-analysis
+Content-Type: application/json
+
+{"enabled": true}</code></pre>
+  <p>PUBLIC skill 写全局 extensions config 并清空所有用户 prompt cache；CUSTOM/LEGACY 写当前用户级状态文件并只刷新该用户 cache。</p>
+
+  <h2>内置 public skills</h2>
+  <table>
+    <tr><th>运行时 name</th><th>目录</th><th>用途摘要</th></tr>
+    <tr><td><code>academic-paper-review</code></td><td><code>skills/public/academic-paper-review/</code></td><td>单篇论文、preprint 或科研文章的结构化评审、方法评价和总结。</td></tr>
+    <tr><td><code>bootstrap</code></td><td><code>skills/public/bootstrap/</code></td><td>通过 onboarding 对话生成或更新自定义 agent 的 SOUL 文件。</td></tr>
+    <tr><td><code>chart-visualization</code></td><td><code>skills/public/chart-visualization/</code></td><td>从数据意图中选择图表类型，并调用脚本生成可视化图像。</td></tr>
+    <tr><td><code>claude-to-deerflow</code></td><td><code>skills/public/claude-to-deerflow/</code></td><td>从 Claude Code 通过 DeerFlow HTTP API 创建线程、上传文件、下发研究任务和查看状态。</td></tr>
+    <tr><td><code>code-documentation</code></td><td><code>skills/public/code-documentation/</code></td><td>为代码、API、仓库和库生成 README、API reference、架构说明和开发者文档。</td></tr>
+    <tr><td><code>consulting-analysis</code></td><td><code>skills/public/consulting-analysis/</code></td><td>生成咨询级市场、品牌、财务、行业和竞争分析报告。</td></tr>
+    <tr><td><code>data-analysis</code></td><td><code>skills/public/data-analysis/</code></td><td>分析 CSV/Excel，生成统计、汇总、透视、SQL、CSV/JSON/Markdown 结果。</td></tr>
+    <tr><td><code>deep-research</code></td><td><code>skills/public/deep-research/</code></td><td>替代单次 WebSearch 的系统化多角度在线研究流程。</td></tr>
+    <tr><td><code>find-skills</code></td><td><code>skills/public/find-skills/</code></td><td>帮助用户发现、选择和安装适合某任务的 agent skills。</td></tr>
+    <tr><td><code>frontend-design</code></td><td><code>skills/public/frontend-design/</code></td><td>生成或改进 production-grade 前端页面、组件、artifact 和 Web UI。</td></tr>
+    <tr><td><code>github-deep-research</code></td><td><code>skills/public/github-deep-research/</code></td><td>对 GitHub repo 做多轮深度研究、时间线复盘、竞争分析和结构化报告。</td></tr>
+    <tr><td><code>image-generation</code></td><td><code>skills/public/image-generation/</code></td><td>根据结构化 prompt 与参考图生成图像。</td></tr>
+    <tr><td><code>music-generation</code></td><td><code>skills/public/music-generation/</code></td><td>使用 MiniMax 音乐 API 根据风格、情绪和可选歌词生成音乐。</td></tr>
+    <tr><td><code>newsletter-generation</code></td><td><code>skills/public/newsletter-generation/</code></td><td>生成 newsletter、邮件摘要、weekly digest 和主题内容策展。</td></tr>
+    <tr><td><code>podcast-generation</code></td><td><code>skills/public/podcast-generation/</code></td><td>把文本内容转换成双主持对话式播客音频。</td></tr>
+    <tr><td><code>ppt-generation</code></td><td><code>skills/public/ppt-generation/</code></td><td>为演示文稿生成视觉丰富的 slides，并组合成 PowerPoint 文件。</td></tr>
+    <tr><td><code>skill-creator</code></td><td><code>skills/public/skill-creator/</code></td><td>创建、修改、评估和优化 skills，包括 eval 与 benchmark 工作流。</td></tr>
+    <tr><td><code>surprise-me</code></td><td><code>skills/public/surprise-me/</code></td><td>动态发现并组合其他 enabled skills，生成意外的创意展示。</td></tr>
+    <tr><td><code>systematic-literature-review</code></td><td><code>skills/public/systematic-literature-review/</code></td><td>跨多篇论文做系统综述、survey、annotated bibliography 和格式化引用报告。</td></tr>
+    <tr><td><code>vercel-deploy</code></td><td><code>skills/public/vercel-deploy-claimable/</code></td><td>部署应用或网站到 Vercel，并返回 preview URL 与 claimable link。</td></tr>
+    <tr><td><code>video-generation</code></td><td><code>skills/public/video-generation/</code></td><td>根据结构化 prompt 与参考图生成视频。</td></tr>
+    <tr><td><code>web-design-guidelines</code></td><td><code>skills/public/web-design-guidelines/</code></td><td>按 Web Interface Guidelines 审查 UI、可访问性、UX 和视觉实现。</td></tr>
+  </table>
+
+  <h2>测试锚点</h2>
+  <table>
+    <tr><th>测试文件</th><th>验证内容</th></tr>
+    <tr><td><code>backend/tests/test_lead_agent_skills.py</code></td><td>prompt 渲染、deferred skill index、custom agent skill 白名单、allowed-tools 工具过滤、冷 cache 和失败闭合。</td></tr>
+    <tr><td><code>backend/tests/test_slash_skills.py</code></td><td>slash 解析、reserved commands、隐藏上下文注入、去重、错误消息、路径安全、UTF-8 失败处理和审计。</td></tr>
+    <tr><td><code>backend/tests/test_skill_context.py</code></td><td>读取 skill file 的 metadata 提取、path 校验、description 截断、render skill context。</td></tr>
+    <tr><td><code>backend/tests/test_skill_catalog.py</code></td><td><code>SkillCatalog</code> 的 select、required-prefix、regex、排序、cap 和 cached names 行为。</td></tr>
+    <tr><td><code>backend/tests/test_skill_describe.py</code></td><td><code>describe_skill</code> metadata 格式、tool message 返回、skill index prompt 和自定义 container path。</td></tr>
+    <tr><td><code>backend/tests/test_skills_parser.py</code></td><td>frontmatter name/description/license/allowed-tools 解析、无效 YAML 和错误提示。</td></tr>
+    <tr><td><code>backend/tests/test_skills_validation.py</code></td><td>安装/编辑路径上的 frontmatter 必填项、命名、description 和 allowed-tools 校验。</td></tr>
+    <tr><td><code>backend/tests/test_skills_loader.py</code></td><td>skills root 解析、递归发现、隐藏目录跳过、custom shadow public。</td></tr>
+    <tr><td><code>backend/tests/test_user_scoped_skill_storage.py</code></td><td>用户级 custom skill 隔离、legacy fallback、per-user enabled state。</td></tr>
+    <tr><td><code>backend/tests/test_skill_storage_lifecycle.py</code></td><td>storage singleton 并发创建、reset、per-user LRU cache。</td></tr>
+    <tr><td><code>backend/tests/test_skills_installer.py</code></td><td>ZIP traversal、防 symlink、大小限制、二进制拒绝、安全扫描和安装提交。</td></tr>
+    <tr><td><code>backend/tests/test_skills_custom_router.py</code></td><td>安装、编辑、删除、回滚、历史、cache 刷新和多用户隔离的 Gateway 生命周期。</td></tr>
+    <tr><td><code>backend/tests/test_skills_router_authz.py</code></td><td>mutating endpoints 的 admin gate 与普通列表读取。</td></tr>
+    <tr><td><code>backend/tests/test_skill_manage_tool.py</code></td><td><code>skill_manage</code> create/patch/edit/delete/support file、安全扫描和用户隔离。</td></tr>
+    <tr><td><code>backend/tests/test_skill_request_scoped_secrets.py</code></td><td>slash 与 in-context skill 的 request-scoped secrets 绑定、缺失值、autonomous opt-out 和泄漏面。</td></tr>
+    <tr><td><code>tests/skills/test_image_generation.py</code>、<code>tests/skills/test_music_generation.py</code>、<code>tests/skills/test_podcast_generation.py</code>、<code>tests/skills/test_video_generation.py</code></td><td>内置 generation 类 skills 的 provider 选择、API payload、输出写入和错误处理。</td></tr>
+  </table>
+
+  <h2>源码索引</h2>
+  <table>
+    <tr><th>源码路径</th><th>用途</th><th>关键度</th></tr>
+    <tr><td><span class="where"><code>README.md</code></span></td><td>Skills & Tools 用户级定位、progressive loading、slash 激活说明。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>config.example.yaml</code></span></td><td>skills、custom agent skills whitelist、summarization skill_context 配置。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/skills_config.py</code></span></td><td>skills path、container path、deferred discovery 配置。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/types.py</code></span></td><td>Skill 数据结构与类别。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/parser.py</code></span></td><td>skill file frontmatter parser。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/storage/skill_storage.py</code></span></td><td>SkillStorage 抽象、校验、load_skills 模板方法。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/storage/local_skill_storage.py</code></span></td><td>本地 public/custom 读写、安装、历史。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/storage/user_scoped_skill_storage.py</code></span></td><td>用户隔离 custom、legacy fallback、per-user state。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/catalog.py</code></span></td><td>deferred skill catalog 搜索。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/describe.py</code></span></td><td>describe_skill 工具与 skill index prompt。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/slash.py</code></span></td><td>slash skill 解析和 resolved activation。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/tool_policy.py</code></span></td><td>allowed-tools policy。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/skills/installer.py</code></span></td><td>.skill archive 安全抽取、扫描、安装。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></span></td><td>skill 加载、白名单、工具过滤、agent 创建。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/lead_agent/prompt.py</code></span></td><td>skill system prompt、cache、deferred discovery prompt。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/skill_activation_middleware.py</code></span></td><td>slash 激活、隐藏消息、secrets 绑定。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/skill_context.py</code></span></td><td>skill read metadata 提取与渲染。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py</code></span></td><td>skill_context 捕获与后续注入。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/thread_state.py</code></span></td><td>skill_context reducer。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/app/gateway/routers/skills.py</code></span></td><td>skills HTTP API。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/extensions_config.py</code></span></td><td>PUBLIC 全局 enabled state 与 CUSTOM/LEGACY 全局默认。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/agents_config.py</code></span></td><td>custom agent 的 skills whitelist 配置 schema。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>frontend/src/core/skills/api.ts</code></span></td><td>前端 settings 对 skills API 的读取、toggle、安装调用。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/core/skills/hooks.ts</code></span></td><td>前端 skills query/mutation 与 cache invalidation。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/settings/settings-dialog.tsx</code></span></td><td>Settings 中的 Skills section 入口。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/settings/skill-settings-page.tsx</code></span></td><td>skills 列表、分类过滤和 enable toggle UI。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/input-box.tsx</code></span></td><td>输入框读取 skills 并展示 slash suggestions。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/input-box-helpers.ts</code></span></td><td>slash skill suggestions 匹配、排序和内置命令合并。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/artifacts/artifact-file-list.tsx</code></span></td><td>artifact 列表中的 .skill 安装入口。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/artifacts/artifact-file-detail.tsx</code></span></td><td>artifact 详情页中的 .skill 预览与安装入口。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>skills/public/</code></span></td><td>内置 public skills 内容。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_lead_agent_skills.py</code></span></td><td>lead agent 与 skills 集成回归。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_slash_skills.py</code></span></td><td>slash 激活回归。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_context.py</code></span></td><td>skill read metadata、durable context 渲染。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_catalog.py</code></span></td><td>deferred skill catalog 搜索。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_describe.py</code></span></td><td>describe_skill 与 skill index prompt。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_parser.py</code></span></td><td>frontmatter parser。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_validation.py</code></span></td><td>安装/编辑时的 skill frontmatter 校验。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_loader.py</code></span></td><td>skills root 发现、custom shadow public。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_user_scoped_skill_storage.py</code></span></td><td>用户级 custom 隔离、legacy fallback 和 per-user enabled state。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_storage_lifecycle.py</code></span></td><td>storage singleton、reset 和 per-user cache。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_installer.py</code></span></td><td>.skill 安装安全边界。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_custom_router.py</code></span></td><td>custom skill lifecycle API。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skills_router_authz.py</code></span></td><td>skills mutating endpoints 的 admin gate。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_manage_tool.py</code></span></td><td>skill_manage create/patch/edit/delete。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_skill_request_scoped_secrets.py</code></span></td><td>request-scoped secrets 绑定与隔离。</td><td>辅助</td></tr>
+  </table>
+
+  <p class="callout">阅读顺序建议：先读短课，再看本页“生命周期速查”，随后按你正在排查的问题跳到对应测试文件。若问题涉及 MCP 工具是否被加载，不在本页深挖，转到 Tools/MCP 模块。</p>
+</main>
+</body>
+</html>

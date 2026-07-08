@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Renderer 核心模块导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Renderer 核心：provider、路由与 shell 怎样接上</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU renderer 启动后，怎样从根入口依次拼出 provider 栈、受保护路由和统一 UI shell。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：main.tsx / Router.tsx / Layout.tsx</span>
+    </div>
+  </section>
+
+  <h2 id="entry">1. 从根入口先拿到“能渲染”的最低条件</h2>
+  <p><code>packages/desktop/src/renderer/main.tsx</code> 先做三件基础工作：尽早挂上 Sentry 与运行时补丁、提前初始化 <code>configService</code>，再把 i18n、样式和 provider 栈装进根组件。真正值得记住的是 <code>Main</code> 里的双重闸门：<code>useAuth()</code> 给出认证就绪信号，<code>bootstrapRendererConfig()</code> 等待配置初始化结束；两者没完成前直接返回 <code>null</code>，因此路由树不会过早读取空配置。</p>
+  <pre><code class="language-tsx">const Main = () => {
+  const { ready } = useAuth();
+  const [configReady, setConfigReady] = useState(false);
+
+  useEffect(() => {
+    if (!ready) return;
+    void bootstrapRendererConfig().finally(() => setConfigReady(true));
+  }, [ready]);
+
+  if (!ready || !configReady) return null;
+  return &lt;Router layout={&lt;ConversationHistoryProvider&gt;&lt;Layout sider={&lt;Sider /&gt;} /&gt;&lt;/ConversationHistoryProvider&gt;} /&gt;;
+};</code></pre>
+  <p>这意味着 renderer 的第一个职责不是“展示页面”，而是先把全局运行环境变成稳定态。完整 provider 清单和职责见 <a href="../reference/renderer-core-overview.html#providers">参考文档</a>。</p>
+
+  <h2 id="router">2. Router 负责把认证状态翻译成页面入口</h2>
+  <p><code>Router.tsx</code> 用 <code>HashRouter</code> 包住整个 panel，并把页面组件全部做成懒加载。这里的关键不是路由数量，而是保护方式：<code>ProtectedLayout</code> 先看认证状态，<code>checking</code> 时给 <code>AppLoader</code>，未认证就跳 <code>/login</code>，认证后才把外层传入的 <code>Layout</code> 克隆出来承载子路由。于是 renderer 核心把“登录门槛”放在壳层前，而不是散落到每个页面组件内部。</p>
+  <pre><code class="language-tsx">&lt;Route element={&lt;ProtectedLayout layout={layout} /&gt;}&gt;
+  &lt;Route index element={&lt;Navigate to="/guid" replace /&gt;} /&gt;
+  &lt;Route path="/guid" element={withRouteFallback(Guid)} /&gt;
+  &lt;Route path="/conversation/:id" element={withRouteFallback(Conversation)} /&gt;
+  &lt;Route path="/settings/agent" element={withRouteFallback(AgentSettings)} /&gt;
+&lt;/Route&gt;</code></pre>
+  <p>读这层时，把页面当作“挂点”即可：<code>/guid</code> 是默认工作台，<code>/conversation/:id</code> 和 <code>/team/:id</code> 是会话工作区，设置页是一串独立入口。完整路由表和历史兼容重定向请跳到 <a href="../reference/renderer-core-overview.html#routes">reference</a>。</p>
+
+  <h2 id="shell">3. Layout 把系统级交互收口成统一壳层</h2>
+  <p><code>Layout.tsx</code> 不是普通页面容器，而是 renderer 的 UI shell。它在最外层建立 <code>LayoutContext</code> 与 <code>NavigationHistoryProvider</code>，然后接入深链、通知点击、浏览器通知、目录选择器、会话快捷键、托盘事件和全局导航暴露。换句话说，Router 决定“去哪页”，Layout 决定“这些页共享什么交互框架”。</p>
+  <pre><code class="language-tsx">useDeepLink();
+useNotificationClick();
+useBrowserNotification();
+useConversationShortcuts({ navigate });
+
+return (
+  &lt;LayoutContext.Provider value={{ isMobile, siderCollapsed: collapsed, setSiderCollapsed: setCollapsed }}&gt;
+    &lt;NavigationHistoryProvider&gt;
+      &lt;Titlebar workspaceAvailable={workspaceAvailable} /&gt;
+      ...
+      &lt;Outlet /&gt;
+    &lt;/NavigationHistoryProvider&gt;
+  &lt;/LayoutContext.Provider&gt;
+);</code></pre>
+  <p>一个很实用的阅读顺序是：先看 hook 名字，再追它们各自监听的事件源。比如 <code>useDeepLink</code> 监听 main process 发来的深链 payload，<code>useBrowserNotification</code> 监听会话流消息并在后台标签页弹通知，二者都不直接渲染页面，却决定了用户如何被带回正确路由。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果用户启动应用后直接点击系统通知回到某个会话，这条链路更可能先经过 <code>Router.tsx</code> 还是 <code>Layout.tsx</code>？为什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先经过 <code>Layout.tsx</code>。原因是通知点击由 <code>useNotificationClick()</code> 订阅并调用 <code>navigate('/conversation/:id')</code>；Router 随后只负责把这个路径匹配到对应页面。如果你先想到 Router，说明你抓到了“目标页面”，但还没分清“谁发起导航”和“谁解释导航”。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先回读 <code>main.tsx</code>，再用官方文档对照 <a href="https://reactrouter.com/api/declarative-routers/HashRouter">HashRouter</a> 的职责。接着追问 agent：请按“事件源 → hook → navigate/状态 → 路由页面”带我读一次 renderer 的真实调用链。</p>
+</main>
+</body>
+</html>

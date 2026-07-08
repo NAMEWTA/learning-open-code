@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>移动端 Companion 模块总览参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>移动端 Companion 模块总览参考</h1>
+        <p class="meta">定位：L1 模块速查。配合 <a href="../lessons/0001-mobile-companion-module-tour.html">导览短课</a> 使用。</p>
+
+        <h2>职责边界</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>核心文件</th>
+              <th>职责</th>
+              <th>边界不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>根布局</td>
+              <td><code>mobile/app/_layout.tsx</code></td>
+              <td>注册 Expo Router Stack，安装 <code>RpcClientProvider</code>，处理 pairing deep link、通知跳转和 splash。</td>
+              <td>所有路由共享同一个 per-host client provider。</td>
+            </tr>
+            <tr>
+              <td>Pairing 路由</td>
+              <td><code>mobile/app/pair.tsx</code>、<code>mobile/app/pair-scan.tsx</code>、<code>mobile/app/pair-confirm.tsx</code></td>
+              <td>接受 QR/deep link/paste code，连接桌面 runtime，验证 <code>status.get</code>，保存 host。</td>
+              <td>扫码 UI 是入口之一；L1 只定位边界，完整 QR 扫码链路留到 L2 mobile pairing flow。</td>
+            </tr>
+            <tr>
+              <td>Pairing payload</td>
+              <td><code>mobile/src/transport/pairing.ts</code></td>
+              <td>解析 <code>orca://pair</code>、query/hash code 和裸 base64 desktop QR payload。</td>
+              <td>pairing 阶段有独立整体超时；连接成功但保存失败要显示本地保存错误。</td>
+            </tr>
+            <tr>
+              <td>Host 存储</td>
+              <td><code>mobile/src/transport/host-store.ts</code></td>
+              <td>保存 host metadata、读取 host 列表、重命名/移除 host、更新 lastConnected。</td>
+              <td>native device token 进 SecureStore；AsyncStorage 只存 metadata。</td>
+            </tr>
+            <tr>
+              <td>连接池</td>
+              <td><code>mobile/src/transport/client-context.tsx</code></td>
+              <td>每 host 一个共享 <code>RpcClient</code>，提供 acquire/release、forceReconnect、closeHost 和状态订阅。</td>
+              <td>页面切换不应重复打开 N 个 WebSocket；foreground/network 恢复会通知 live clients。</td>
+            </tr>
+            <tr>
+              <td>RPC 传输</td>
+              <td><code>mobile/src/transport/rpc-client.ts</code></td>
+              <td>E2EE handshake、加密请求、stream subscribe、terminal/browser binary frame、重连和 stream replay。</td>
+              <td>请求必须等 connected；订阅断线后 replay；授权失败先有限重试，再进入 auth-failed。</td>
+            </tr>
+            <tr>
+              <td>首页</td>
+              <td><code>mobile/app/index.tsx</code></td>
+              <td>聚合 hosts、worktrees、stats、account usage、task providers、resume card 和 host 操作。</td>
+              <td>缓存只用于冷启动 seed；connected 后以桌面 RPC 响应覆盖。</td>
+            </tr>
+            <tr>
+              <td>Resume fallback</td>
+              <td><code>mobile/src/worktree/resume-worktree.ts</code></td>
+              <td>在首页 last visited 未命中时，从 worktree 列表中选择桌面 active、最近输出或第一项。</td>
+              <td>last visited 是 <code>mobile/app/index.tsx</code> 的外层策略；helper 只负责 fallback 选择。</td>
+            </tr>
+            <tr>
+              <td>Host detail</td>
+              <td><code>mobile/app/h/[hostId]/index.tsx</code></td>
+              <td>展示 worktree list，读写桌面 UI 偏好，执行 worktree activate/sleep/remove。</td>
+              <td>view settings 与桌面 shared UI store 同步，不只存在手机本地。</td>
+            </tr>
+            <tr>
+              <td>Session route</td>
+              <td><code>mobile/app/h/[hostId]/session/[worktreeId].tsx</code></td>
+              <td>承载 terminal、session tabs、browser、file、markdown、source-control 等移动端工作区面板。</td>
+              <td>真实状态来自 runtime subscriptions；手机端只是渲染和发送操作。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键流程</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>流程</th>
+              <th>入口</th>
+              <th>主调用</th>
+              <th>读法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>配对</td>
+              <td><code>orca://pair</code>、QR scan、paste code</td>
+              <td><code>connect()</code>、<code>status.get</code>、<code>saveHost()</code></td>
+              <td>先验证 URL/code 解析，再看连接日志和 host-store 保存边界。</td>
+            </tr>
+            <tr>
+              <td>首页刷新</td>
+              <td><code>mobile/app/index.tsx</code></td>
+              <td><code>stats.summary</code>、<code>worktree.ps</code>、<code>accounts.list</code></td>
+              <td>首页是多 host 聚合层；不要把它误读成 session 业务实现。</td>
+            </tr>
+            <tr>
+              <td>Worktree 列表</td>
+              <td><code>mobile/app/h/[hostId]/index.tsx</code></td>
+              <td><code>repo.list</code>、<code>worktree.ps</code>、<code>ui.get</code>、<code>ui.set</code></td>
+              <td>列表和过滤排序偏好要与桌面端共享 UI 状态对齐。</td>
+            </tr>
+            <tr>
+              <td>打开会话</td>
+              <td><code>mobile/app/h/[hostId]/session/[worktreeId].tsx</code></td>
+              <td><code>terminal.subscribe</code>、<code>session.tabs.subscribe</code>、<code>terminal.send</code></td>
+              <td>先看 transport 是否 connected，再看 stream 是否收到 ready/snapshot。</td>
+            </tr>
+            <tr>
+              <td>前后台恢复</td>
+              <td><code>client-context.tsx</code>、<code>rpc-client.ts</code></td>
+              <td><code>notifyForeground()</code>、activity probe、reconnect backoff</td>
+              <td>半开连接靠 foreground probe 触发恢复，超过重试上限后需要用户或 foreground nudge。</td>
+            </tr>
+            <tr>
+              <td>协议兼容与调试</td>
+              <td><code>mobile/README.md</code></td>
+              <td>记录本地开发、mock server、实机调试、protocol compatibility 和 validation 命令。</td>
+              <td>协议兼容由 <code>status.get</code> 与 protocol-version 常量兜底；细节归 shared/L2 继续拆。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>核心调用示例</h2>
+        <pre><code class="language-typescript">response = await client.sendRequest('status.get')
+await saveHost({
+  id: hostId,
+  endpoint: offer.endpoint,
+  deviceToken: offer.deviceToken,
+  publicKeyB64: offer.publicKeyB64
+})</code></pre>
+        <p>
+          pairing confirm 的最小成功条件是：offer 可解析，WebSocket/E2EE/device token 可通过 <code>status.get</code>，
+          然后 host metadata 和 token 能保存。后续首页、host detail、session screen 都只是在这个 host profile 上 acquire 共享 client。
+        </p>
+
+        <h2>测试佐证</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行为</th>
+              <th>测试文件</th>
+              <th>不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>pairing URL/code 解析</td>
+              <td><code>mobile/src/transport/pairing.test.ts</code></td>
+              <td>支持 query/hash/bare code，拒绝相似但错误的 route。</td>
+            </tr>
+            <tr>
+              <td>pair confirm 状态</td>
+              <td><code>mobile/src/transport/pair-confirm-state.test.ts</code></td>
+              <td>缺 code、非法 payload 和合法 offer 都进入明确状态。</td>
+            </tr>
+            <tr>
+              <td>pairing 连接尝试</td>
+              <td><code>mobile/src/transport/pairing-connection-attempt.test.ts</code></td>
+              <td>初次 pairing 有整体超时和 dispose，避免无限 Connecting。</td>
+            </tr>
+            <tr>
+              <td>RPC client</td>
+              <td><code>mobile/src/transport/rpc-client.test.ts</code></td>
+              <td>连接超时会关闭 socket；stale socket 事件不污染新连接；stream dispose 会发 unsubscribe。</td>
+            </tr>
+            <tr>
+              <td>实网恢复 harness</td>
+              <td><code>mobile/src/transport/rpc-client-live-recovery.test.ts</code></td>
+              <td>foreground probe 能回收半开连接，parked retry loop 能被 foreground nudge 唤醒。</td>
+            </tr>
+            <tr>
+              <td>Resume card</td>
+              <td><code>mobile/src/worktree/resume-worktree.test.ts</code></td>
+              <td>测试覆盖 fallback helper：优先桌面 active worktree，再 fallback 到最近输出，最后取第一项；手机 last visited 是首页外层策略。</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </main>
+  </body>
+</html>

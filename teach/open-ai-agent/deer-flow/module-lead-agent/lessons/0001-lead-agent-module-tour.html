@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 lead agent 如何被装配成可运行 agent</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#246bfe; --green:#207a4c; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 58px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:var(--green); }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 lead agent 如何被装配成可运行 agent</h1>
+  <p class="lede">学习目标：读完后，你能沿着一次 run 的入口说明 deer-flow 如何把模型、工具、prompt、middleware 和 <code>ThreadState</code> 装配成真正可执行的 LangGraph agent。</p>
+
+  <h2>1. lead agent 站在 Gateway 后面</h2>
+  <p>L0 已经说明 Gateway 是默认运行外壳。lead agent 是 Gateway 背后的 runtime 核心：<span class="where">backend/langgraph.json</span> 把 graph 名 <code>lead_agent</code> 注册到 <code>deerflow.agents:make_lead_agent</code>，同时声明 auth 和 checkpointer。前端默认也以 <code>assistantId: "lead_agent"</code> 发起线程流。</p>
+  <p>所以读 runtime 时不要从 UI 组件开始猜模型行为，而应先问：这次 run 的 <code>RunnableConfig</code> 里有哪些 context？它们会被 <code>make_lead_agent</code> 解析成什么模型、工具和中间件？</p>
+
+  <h2>2. 装配主线只有四步</h2>
+  <div class="diagram">HTTP / SDK run
+  ↓
+resolve_agent_factory(...) → make_lead_agent(...)
+  ↓
+_make_lead_agent: 解析 config、agent_name、model、skills
+  ↓
+get_available_tools → skill policy → assemble_deferred_tools
+  ↓
+create_agent(model, tools, middleware, system_prompt, state_schema=ThreadState)</div>
+  <p>核心源码在 <span class="where">backend/packages/harness/deerflow/agents/lead_agent/agent.py</span>。入口 <code>make_lead_agent(config)</code> 先合并 <code>configurable</code> 与 <code>context</code>，再进入 <code>_make_lead_agent</code>。后者按“请求模型 → agent config → 全局默认”的顺序解析模型；按 <code>agent_name</code> 读取 custom agent 配置；再加载 skills，用 allowed-tools policy 过滤工具，并把 MCP 工具交给 <code>tool_search</code> 延迟暴露。</p>
+  <p>最终它调用 LangChain 的 <code>create_agent</code>，传入 <code>apply_prompt_template(...)</code> 生成的 system prompt、<code>build_middlewares(...)</code> 生成的中间件链，以及 <code>ThreadState</code> 作为 state schema。</p>
+
+  <h2>3. 一次真实调用长这样</h2>
+  <pre><code class="language-python">agent_factory = resolve_agent_factory(body.assistant_id)
+config = build_run_config(thread_id, body.config, body.metadata,
+                          assistant_id=body.assistant_id)
+
+agent = agent_factory(config=initial_runnable_config)
+
+async for chunk in agent.astream(
+    graph_input,
+    config=initial_runnable_config,
+    stream_mode=lg_modes,
+):
+    await bridge.publish(run_id, sse_event, serialize(chunk))</code></pre>
+  <p>这段链路横跨 <code>backend/app/gateway/services.py</code> 与 <code>backend/packages/harness/deerflow/runtime/runs/worker.py</code>。注意 custom agent 没有独立 graph：Gateway 会把非默认 <code>assistant_id</code> 规范化为 <code>agent_name</code>，仍然路由到同一个 <code>lead_agent</code> graph，由 <code>make_lead_agent</code> 在内部加载对应 SOUL、模型、skill 白名单和工具组。</p>
+  <p>中间件是这条链最容易漏看的部分。基础层负责输入清洗、线程目录、上传、sandbox、工具错误和读写安全；lead-only 层再追加动态日期与 memory、skill 激活、摘要、title、vision、deferred tool 过滤、subagent 限制、loop/token budget 和 clarification。</p>
+
+  <h2>4. 暂停回忆</h2>
+  <div class="exercise">
+    <strong>检索练习：</strong>不看上文，按顺序说出 lead agent 被装配成可运行 agent 的 5 个关键输入。
+    <div class="answer">参考答案：<code>RunnableConfig</code>、解析后的 chat model、经过 skill policy 与 deferred tool 处理后的 tools、<code>apply_prompt_template</code> 生成的 system prompt、<code>build_middlewares</code> 生成的 middleware 链，以及作为数据边界的 <code>ThreadState</code>。如果你漏掉 <code>ThreadState</code>，说明还只看到“模型加工具”，没有看到 LangGraph graph 的状态边界。</div>
+  </div>
+  <p class="note">主要参考来源：<code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code>。导出函数、内部分层、中间件完整清单和源码索引见 <a href="../reference/lead-agent-overview.html">lead agent 参考页</a>。如果某段链路不清楚，可以继续追问 agent：“从这个函数继续展开到下一层”。</p>
+</main>
+</body>
+</html>

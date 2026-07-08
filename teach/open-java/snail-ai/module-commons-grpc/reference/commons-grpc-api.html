@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commons 与 gRPC 公共类型 API</title>
+  <link rel="stylesheet" href="../assets/commons-grpc.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-commons-grpc-module-tour.html">返回短课</a>
+    <a href="commons-grpc-overview.html">模块地图</a>
+    <a href="route-strategy-api.html">路由策略 API</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+    <a href="../../slice-agent-chain-grpc/reference/agent-chain-grpc-flow-map.html">责任链 gRPC 切片</a>
+  </nav>
+
+  <h1>Commons 与 gRPC 公共类型 API</h1>
+  <p class="lead">本页是 L3 微观 API 字典，按类/接口分组列出签名、约束、返回值、边界条件与调用示例。<a href="commons-grpc-overview.html">commons-grpc-overview.html</a> 负责模块地图、URI 表和兼容风险；本文覆盖 <code>_progress.json</code> 中 L3-commons-grpc-api 列出的 45 个源文件。</p>
+
+  <div class="meta">
+    <span class="pill">层级 L3</span>
+    <span class="pill">commons-core 38 文件</span>
+    <span class="pill">commons-grpc 7 文件</span>
+    <span class="pill">源码 commit 2ae56c0</span>
+  </div>
+
+  <h2>1. Spring 装配与生命周期</h2>
+
+  <h3>SnailAiCommonStarter</h3>
+  <table>
+    <thead>
+      <tr><th>成员</th><th>签名</th><th>约束与返回值</th><th>边界 / 异常</th><th>调用示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>配置类</td>
+        <td><code>@Configuration @ComponentScan("com.aizuda.snail.ai.common")</code></td>
+        <td>无公开方法；被 starter 或上层模块 import 后自动扫描 commons-core Bean。</td>
+        <td>未引入该配置时，<code>SnailSpringContext</code> 等 Bean 不会注册。</td>
+        <td><code>@Import(SnailAiCommonStarter.class)</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Lifecycle</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>约束与返回值</th><th>边界 / 异常</th><th>调用示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>start()</code></td>
+        <td><code>void start()</code></td>
+        <td>启动组件；实现类自行定义幂等策略。</td>
+        <td>接口本身不抛受检异常；实现可抛运行时异常中断启动。</td>
+        <td><code>lifecycle.start();</code></td>
+      </tr>
+      <tr>
+        <td><code>close()</code></td>
+        <td><code>void close()</code></td>
+        <td>关闭组件；与 <code>start()</code> 成对调用。</td>
+        <td>重复 <code>close()</code> 是否安全取决于实现。</td>
+        <td><code>lifecycle.close();</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>SnailSpringContext</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>约束与返回值</th><th>边界 / 异常</th><th>调用示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>getBeanFactory()</code></td>
+        <td><code>static ListableBeanFactory getBeanFactory()</code></td>
+        <td>优先返回 <code>BeanFactoryPostProcessor</code> 注入的 factory，否则回退 <code>ApplicationContext</code>。</td>
+        <td>两者都未注入时抛 <code>SnailAiException</code>。</td>
+        <td><code>SnailSpringContext.getBeanFactory().getBean(MyService.class)</code></td>
+      </tr>
+      <tr>
+        <td><code>getContext()</code></td>
+        <td><code>static ApplicationContext getContext()</code></td>
+        <td>可能为 <code>null</code>（Spring 尚未回调 <code>setApplicationContext</code>）。</td>
+        <td>非 Spring 环境或未装配时为 <code>null</code>。</td>
+        <td><code>var ctx = SnailSpringContext.getContext();</code></td>
+      </tr>
+      <tr>
+        <td><code>getBean*</code></td>
+        <td><code>static &lt;T&gt; T getBean(String name)</code><br><code>static &lt;T&gt; T getBean(Class&lt;T&gt;)</code><br><code>static &lt;T&gt; T getBean(String, Class&lt;T&gt;)</code></td>
+        <td>按名称或类型取 Bean；失败时记录 error 日志并返回 <code>null</code>（不抛异常）。</td>
+        <td><code>BeansException</code>、<code>NullPointerException</code> 被吞掉；调用方必须判空。</td>
+        <td><code>var svc = SnailSpringContext.getBean(RpcClient.class);</code></td>
+      </tr>
+      <tr>
+        <td><code>getBeanByType</code></td>
+        <td><code>static &lt;T&gt; T getBeanByType(Class&lt;T&gt; clazz)</code></td>
+        <td>直接委托 <code>getBeanFactory().getBean(clazz)</code>；Bean 不存在时抛 Spring 异常。</td>
+        <td>与 <code>getBean(Class)</code> 不同：这里会抛异常而不是返回 null。</td>
+        <td><code>SnailSpringContext.getBeanByType(JsonUtil.class)</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note">Bean 名固定为 <code>snailAiSpringContext</code>，<code>@Order(HIGHEST_PRECEDENCE)</code> 保证尽早拿到 factory。</p>
+
+  <h2>2. 工具类与常量</h2>
+
+  <h3>StreamUtils</h3>
+  <p class="note">所有方法对 <code>null</code> 或空集合返回空容器/空字符串，不抛异常。重复 key 合并策略为保留左侧（<code>(l,r) -&gt; l</code>）。</p>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>返回值</th><th>边界</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>SEPARATOR</code></td><td><code>static final String SEPARATOR = ","</code></td><td>默认 join 分隔符</td><td>—</td><td><code>StreamUtils.join(ids, Object::toString)</code></td></tr>
+      <tr><td><code>filter</code></td><td><code>&lt;E&gt; List&lt;E&gt; filter(Collection&lt;E&gt;, Predicate&lt;E&gt;)</code></td><td>过滤列表</td><td>空集合 → 空 ArrayList</td><td><code>StreamUtils.filter(nodes, n -&gt; n.isActive())</code></td></tr>
+      <tr><td><code>join</code></td><td><code>&lt;E&gt; String join(Collection&lt;E&gt;, Function&lt;E,String&gt;)</code><br><code>join(..., CharSequence delimiter)</code></td><td>拼接字符串</td><td>mapper 结果为 null 会被过滤</td><td><code>StreamUtils.join(tags, Tag::getName, ";")</code></td></tr>
+      <tr><td><code>sorted</code></td><td><code>&lt;E&gt; List&lt;E&gt; sorted(Collection&lt;E&gt;, Comparator&lt;E&gt;)</code></td><td>排序列表</td><td>过滤 null 元素</td><td><code>StreamUtils.sorted(items, Comparator.comparing(Item::getScore))</code></td></tr>
+      <tr><td><code>toIdentityMap</code></td><td><code>&lt;V,K&gt; Map&lt;K,V&gt; toIdentityMap(Collection&lt;V&gt;, Function&lt;V,K&gt; key)</code></td><td>value 即元素本身</td><td>重复 key 保留第一个</td><td><code>StreamUtils.toIdentityMap(agents, Agent::getId)</code></td></tr>
+      <tr><td><code>toMap</code></td><td><code>&lt;E,K,V&gt; Map&lt;K,V&gt; toMap(Collection&lt;E&gt;, key, value)</code></td><td>自定义 value 映射</td><td>重复 key 保留第一个</td><td><code>StreamUtils.toMap(list, Item::getId, Item::getName)</code></td></tr>
+      <tr><td><code>groupByKey</code></td><td><code>&lt;E,K&gt; Map&lt;K,List&lt;E&gt;&gt; groupByKey(...)</code></td><td>LinkedHashMap 保序</td><td>空集合 → 空 Map</td><td><code>StreamUtils.groupByKey(rows, Row::getType)</code></td></tr>
+      <tr><td><code>groupBy2Key</code></td><td><code>&lt;E,K,U&gt; Map&lt;K,Map&lt;U,List&lt;E&gt;&gt;&gt;</code></td><td>二级分组</td><td>—</td><td><code>StreamUtils.groupBy2Key(events, Event::getAgentId, Event::getType)</code></td></tr>
+      <tr><td><code>group2Map</code></td><td><code>&lt;E,T,U&gt; Map&lt;T,Map&lt;U,E&gt;&gt;</code></td><td>二级 map，内层 value 为元素</td><td><code>key1</code> 或 <code>key2</code> 为 null → 空 Map</td><td><code>StreamUtils.group2Map(items, Item::getCat, Item::getCode)</code></td></tr>
+      <tr><td><code>toList / toSet</code></td><td><code>&lt;E,T&gt; List/Set&lt;T&gt; toList/toSet(Collection&lt;E&gt;, Function)</code></td><td>映射后集合</td><td><code>toSet</code> 在 function 为 null 时返回空 Set</td><td><code>StreamUtils.toList(users, User::getOpenId)</code></td></tr>
+      <tr><td><code>merge</code></td><td><td><code>&lt;K,X,Y,V&gt; Map&lt;K,V&gt; merge(Map&lt;K,X&gt;, Map&lt;K,Y&gt;, BiFunction)</code></td><td>对两侧 key 并集调用 merge；结果为 null 的 key 不入 map</td><td>任一侧为空时另一侧当作空 Map</td><td><code>StreamUtils.merge(m1, m2, (a,b) -&gt; a != null ? a : b)</code></td></tr>
+      <tr><td><code>toSetByFlatMap</code></td><td>两个重载：带 mapper+flatMap 或仅 flatMap</td><td>flatMap 后去重 Set</td><td>空集合 → 空 Set</td><td><code>StreamUtils.toSetByFlatMap(groups, Group::streamItems)</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>SnailAiVersion</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>返回值</th><th>边界 / 异常</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>getVersion()</code></td>
+        <td><code>static String getVersion()</code></td>
+        <td>JAR <code>Implementation-Version</code>；读不到返回 <code>null</code>。</td>
+        <td>类声明包名为 <code>com.aizuda.snailjob.common.core.util</code>，与目录 <code>com/aizuda/snail/ai/common/util</code> 不一致——IDE/反射可能读到错误 manifest。</td>
+        <td><code>SystemConstants.LOGO.formatted(SnailAiVersion.getVersion())</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>VectorMetadataKeys</h3>
+  <table>
+    <thead><tr><th>常量</th><th>值</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>AGENT_ID</code></td><td><code>"agentId"</code></td><td>向量 metadata 中的 Agent 标识</td></tr>
+      <tr><td><code>USER_ID</code></td><td><code>"userId"</code></td><td>用户标识</td></tr>
+      <tr><td><code>CONVERSATION_ID</code></td><td><code>"conversationId"</code></td><td>会话标识</td></tr>
+      <tr><td><code>MEMORY_TYPE</code></td><td><code>"memoryType"</code></td><td>记忆类型过滤键</td></tr>
+      <tr><td><code>TITLE</code></td><td><code>"title"</code></td><td>记忆标题</td></tr>
+    </tbody>
+  </table>
+
+  <h3>SystemConstants</h3>
+  <table>
+    <thead><tr><th>常量</th><th>值 / 类型</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>YYYY_MM_DD_HH_MM_SS</code></td><td><code>"yyyy-MM-dd HH:mm:ss"</code></td><td>长时间格式 pattern</td></tr>
+      <tr><td><code>YYYY_MM_DD</code></td><td><code>"yyyy-MM-dd"</code></td><td>短日期 pattern</td></tr>
+      <tr><td><code>SKILL_MD</code></td><td><code>"SKILL.md"</code></td><td>Skill 包内主文档文件名</td></tr>
+      <tr><td><code>RAG_MCP_SERVER_NAME</code></td><td><code>"snail-ai-rag-mcp-server"</code></td><td>RAG MCP server 注册名</td></tr>
+      <tr><td><code>LOGO</code></td><td>多行 ASCII art + <code>(v{})</code></td><td>启动 banner；需 <code>formatted(version)</code> 注入版本</td></tr>
+    </tbody>
+  </table>
+
+  <h3>MemoryIntegrationDefaults</h3>
+  <table>
+    <thead><tr><th>常量</th><th>类型 / 值</th><th>语义</th></tr></thead>
+    <tbody>
+      <tr><td><code>DEFAULT_EMBEDDING_MODEL_ID</code></td><td><code>long 1L</code></td><td>未指定嵌入模型时的默认模型 ID</td></tr>
+      <tr><td><code>RECENT_MEMORIES_LOOKBACK_DAYS</code></td><td><code>int 3650</code></td><td>约 10 年回溯，等价「全部近期」</td></tr>
+      <tr><td><code>DEFAULT_RELEVANCE_SCORE</code></td><td><code>BigDecimal 0.8</code></td><td>新增记忆默认相关性</td></tr>
+      <tr><td><code>DEFAULT_CONFIDENCE_SCORE</code></td><td><code>BigDecimal 0.8</code></td><td>新增记忆默认置信度</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. 异常体系</h2>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>继承</th><th>构造 / 成员</th><th>典型用途</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AbstractError</code></td>
+        <td>抽象类</td>
+        <td>预置 <code>SUCCESS</code>、<code>ERROR</code>、<code>PARAM_INCORRECT</code>；字段 <code>zhMsg</code>/<code>enMsg</code>；<code>getMsg(AbstractError)</code> 返回中文</td>
+        <td>错误码文案模板（复制自 snail-job）</td>
+        <td><code>AbstractError.getMsg(AbstractError.PARAM_INCORRECT)</code></td>
+      </tr>
+      <tr>
+        <td><code>BaseSnailAiException</code></td>
+        <td><code>RuntimeException</code></td>
+        <td>支持 SLF4J <code>MessageFormatter</code> 占位符；可变参最后一个可为 <code>Throwable</code></td>
+        <td>所有业务运行时异常基类</td>
+        <td><code>throw new BaseSnailAiException("agent {} not found", agentId);</code></td>
+      </tr>
+      <tr>
+        <td><code>SnailAiException</code></td>
+        <td><code>BaseSnailAiException</code></td>
+        <td>与基类相同构造器重载</td>
+        <td>通用运行时错误；<code>SnailSpringContext</code>、proto map 反射等</td>
+        <td><code>throw new SnailAiException("No ConfigurableListableBeanFactory...");</code></td>
+      </tr>
+      <tr>
+        <td><code>SnailAiCommonException</code></td>
+        <td><code>BaseSnailAiException</code></td>
+        <td>无 <code>(Throwable)</code> 单参构造</td>
+        <td>commons 层可预期业务失败</td>
+        <td><code>throw new SnailAiCommonException("invalid token");</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. 日志门面</h2>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>成员 / 方法</th><th>行为</th><th>边界</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>SnailAiLog</code></td>
+        <td><code>LOCAL</code>、<code>REMOTE</code></td>
+        <td>静态持有两个策略实例</td>
+        <td>不可实例化</td>
+        <td><code>SnailAiLog.LOCAL.info("started {}", name);</code></td>
+      </tr>
+      <tr>
+        <td><code>AbstractLog</code></td>
+        <td><code>trace/debug/info/warn/error</code></td>
+        <td>委托单一 SLF4J <code>Logger</code>（类名为 AbstractLog）</td>
+        <td><code>trace/debug</code> 受级别门控；<code>error(Throwable)</code> 消息为空串</td>
+        <td><code>SnailAiLog.REMOTE.warn("retry {}", count);</code></td>
+      </tr>
+      <tr>
+        <td><code>Local</code></td>
+        <td>构造器</td>
+        <td><code>setRemote(false)</code></td>
+        <td>标记本地日志策略</td>
+        <td><code>new Local()</code>（通常用单例 <code>LOCAL</code>）</td>
+      </tr>
+      <tr>
+        <td><code>Remote</code></td>
+        <td>构造器</td>
+        <td><code>setRemote(true)</code></td>
+        <td>当前实现与 Local 写入同一 Logger，仅标志位不同</td>
+        <td><code>SnailAiLog.REMOTE.info("dispatch {}", uri);</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. WebSearchTool</h2>
+  <table>
+    <thead>
+      <tr><th>成员</th><th>签名</th><th>约束</th><th>返回值 / 异常</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>构造器</td>
+        <td><code>WebSearchTool(String apiKey, int maxResults)</code></td>
+        <td><code>apiKey</code> 非空由调用方保证；内部创建默认 <code>RestClient</code></td>
+        <td>—</td>
+        <td><code>new WebSearchTool(tavilyKey, 5)</code></td>
+      </tr>
+      <tr>
+        <td><code>search</code></td>
+        <td><code>@Tool String search(String query)</code></td>
+        <td>POST Tavily <code>https://api.tavily.com/search</code>；<code>include_raw_content=false</code></td>
+        <td>成功返回格式化文本；失败捕获异常并返回 <code>"Search failed: ..."</code> 字符串（不抛异常）</td>
+        <td><code>tool.search("Snail AI release notes")</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="warn">API Key 经 HTTP 明文发送给 Tavily；日志仅 warn 级别记录失败原因，不会自动脱敏 key。</p>
+
+  <h2>6. Agent DTO 与枚举</h2>
+
+  <h3>HeartbeatBody</h3>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>约束</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>maxConcurrentChats</code></td><td><code>int</code></td><td>无校验注解；默认 0</td><td>节点最大并发聊天数</td></tr>
+      <tr><td><code>activeChats</code></td><td><code>int</code></td><td>无校验注解</td><td>当前活跃聊天数；路由策略 <code>LEAST_LOAD</code> 使用（详见 <a href="route-strategy-api.html">route-strategy-api.html</a>）</td></tr>
+    </tbody>
+  </table>
+  <p class="note">Lombok <code>@Builder</code> 支持链式构建。Server 心跳 handler 当前使用同字段的 <code>HeartbeatBodyRequest</code>（不同包），序列化 JSON 形状一致。</p>
+  <pre><code>HeartbeatBody body = HeartbeatBody.builder()
+    .maxConcurrentChats(8)
+    .activeChats(2)
+    .build();</code></pre>
+
+  <h3>StatusEnum</h3>
+  <table>
+    <thead><tr><th>枚举值</th><th><code>value</code></th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>RUNNING</code></td><td><code>1</code></td><td>对话记录执行中</td></tr>
+      <tr><td><code>SUCCESS</code></td><td><code>2</code></td><td>成功结束</td></tr>
+      <tr><td><code>FAIL</code></td><td><code>3</code></td><td>失败结束</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. Embedding 模型类型</h2>
+  <table>
+    <thead><tr><th>类</th><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr>
+        <td rowspan="3"><code>EmbeddingVector</code></td>
+        <td><code>index</code></td><td><code>int</code></td><td>批量嵌入中的序号</td>
+      </tr>
+      <tr><td><code>input</code></td><td><code>String</code></td><td>原始输入文本</td></tr>
+      <tr><td><code>vector</code></td><td><code>float[]</code></td><td>嵌入向量；JSON 序列化依赖上层配置</td></tr>
+      <tr>
+        <td rowspan="2"><code>Usage</code></td>
+        <td><code>promptTokens</code></td><td><code>Integer</code></td><td>提示 token 数</td>
+      </tr>
+      <tr><td><code>totalTokens</code></td><td><code>Integer</code></td><td>总 token 数</td></tr>
+    </tbody>
+  </table>
+  <pre><code>EmbeddingVector ev = EmbeddingVector.builder()
+    .index(0)
+    .input("hello")
+    .vector(new float[]{0.1f, 0.2f})
+    .build();</code></pre>
+
+  <h2>8. OpenAPI DTO 字段字典</h2>
+  <p class="note">以下 DTO 供 HTTP OpenAPI 层使用，与 gRPC <code>ChatDispatchRequest</code> 无直接等价关系。带 <code>@NotBlank/@NotNull/@Min</code> 的字段在 Controller 启用校验时缺失会返回 400。</p>
+
+  <h3>请求类型</h3>
+  <table>
+    <thead>
+      <tr><th>类</th><th>字段</th><th>类型</th><th>校验 / 默认</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td rowspan="9"><code>OpenApiChatRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>目标 Agent</td>
+      </tr>
+      <tr><td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>OpenAPI 用户标识</td></tr>
+      <tr><td><code>conversationId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>会话 ID</td></tr>
+      <tr><td><code>content</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>用户消息</td></tr>
+      <tr><td><code>disabledMcpServerIds</code></td><td><code>List&lt;Long&gt;</code></td><td>可选</td><td>本次禁用 MCP</td></tr>
+      <tr><td><code>disabledSkillIds</code></td><td><code>List&lt;Long&gt;</code></td><td>可选</td><td>本次禁用 Skill</td></tr>
+      <tr><td><code>deepPlanEnabled</code></td><td><code>Boolean</code></td><td>可选</td><td>深度规划开关</td></tr>
+      <tr><td><code>webSearchEnabled</code></td><td><code>Boolean</code></td><td>可选</td><td>联网搜索开关</td></tr>
+      <tr><td><code>sid</code> / <code>timeout</code></td><td><code>String</code> / <code>long</code></td><td>可选 / 默认 0</td><td>并发提交 ID；超时毫秒</td></tr>
+
+      <tr>
+        <td rowspan="2"><code>OpenApiAgentQueryRequest</code></td>
+        <td><code>page</code></td><td><code>Integer</code></td><td><code>@Min(1)</code>，默认 1</td><td>页码</td>
+      </tr>
+      <tr><td><code>size</code></td><td><code>Integer</code></td><td><code>@Min(1)</code>，默认 50</td><td>页大小</td></tr>
+
+      <tr>
+        <td><code>OpenApiAgentIdentityRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>Agent 主键</td>
+      </tr>
+
+      <tr>
+        <td rowspan="3"><code>OpenApiConversationIdentityRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>—</td>
+      </tr>
+      <tr><td><code>conversationId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>—</td></tr>
+      <tr><td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>—</td></tr>
+
+      <tr>
+        <td rowspan="2"><code>OpenApiConversationClearRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>清空该用户在该 Agent 下会话</td>
+      </tr>
+      <tr><td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>—</td></tr>
+
+      <tr>
+        <td rowspan="3"><code>OpenApiCreateConversationRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>—</td>
+      </tr>
+      <tr><td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>—</td></tr>
+      <tr><td><code>title</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>会话标题</td></tr>
+
+      <tr>
+        <td rowspan="4"><code>OpenApiConversationQueryRequest</code></td>
+        <td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>—</td>
+      </tr>
+      <tr><td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>—</td></tr>
+      <tr><td><code>page</code></td><td><code>Integer</code></td><td><code>@Min(1)</code>，默认 1</td><td>—</td></tr>
+      <tr><td><code>size</code></td><td><code>Integer</code></td><td><code>@Min(1)</code>，默认 20</td><td>—</td></tr>
+
+      <tr>
+        <td rowspan="3"><code>OpenApiEmbedTokenRequest</code></td>
+        <td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>嵌入式用户 ID</td>
+      </tr>
+      <tr><td><code>trustedCredential</code></td><td><code>String</code></td><td>可选</td><td>可信凭据</td></tr>
+      <tr><td><code>ttlSeconds</code></td><td><code>Integer</code></td><td><code>@Min(60) @Max(86400)</code></td><td>token 有效期秒数</td></tr>
+
+      <tr>
+        <td rowspan="2"><code>OpenApiUserAgentRequest</code></td>
+        <td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>订阅/取消订阅</td>
+      </tr>
+      <tr><td><code>agentId</code></td><td><code>Long</code></td><td><code>@NotNull</code></td><td>—</td></tr>
+
+      <tr>
+        <td><code>OpenApiUserQueryRequest</code></td>
+        <td><code>openId</code></td><td><code>String</code></td><td><code>@NotBlank</code></td><td>查询用户</td>
+      </tr>
+
+      <tr>
+        <td rowspan="3"><code>OpenApiUserRegisterRequest</code></td>
+        <td><code>externalId</code></td><td><code>String</code></td><td>无校验</td><td>外部系统用户 ID</td>
+      </tr>
+      <tr><td><code>nickname</code></td><td><code>String</code></td><td>无校验</td><td>昵称</td></tr>
+      <tr><td><code>avatarUrl</code></td><td><code>String</code></td><td>无校验</td><td>头像 URL</td></tr>
+    </tbody>
+  </table>
+
+  <h3>响应 / 视图类型</h3>
+  <table>
+    <thead>
+      <tr><th>类</th><th>主要字段</th><th>类型</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>OpenApiAgentVO</code></td>
+        <td><code>id</code>, <code>name</code>, <code>description</code>, <code>avatar</code>, <code>greeting</code>, <code>presetQuestions</code>, <code>mcpEnabled</code>, <code>mcpServers</code>, <code>skillEnabled</code>, <code>skills</code>, <code>webSearchEnabled</code>, <code>viewCount</code>, <code>isFeatured</code>, <code>status</code>, <code>createDt</code>, <code>updateDt</code>, <code>subscribed</code></td>
+        <td>混合</td>
+        <td>Agent 广场卡片；<code>mcpServers</code>/<code>skills</code> 元素类型为 <code>OpenApiAgentToolVO</code></td>
+      </tr>
+      <tr>
+        <td><code>OpenApiAgentToolVO</code></td>
+        <td><code>id</code>, <code>name</code>, <code>description</code></td>
+        <td><code>Long</code>, <code>String</code>×2</td>
+        <td>MCP / Skill 工具摘要</td>
+      </tr>
+      <tr>
+        <td><code>OpenApiConversationVO</code></td>
+        <td><code>conversationId</code>, <code>agentId</code>, <code>title</code>, <code>createDt</code>, <code>updateDt</code></td>
+        <td>—</td>
+        <td>时间为 <code>String</code> 格式字段</td>
+      </tr>
+      <tr>
+        <td><code>OpenApiMessageVO</code></td>
+        <td><code>role</code>, <code>content</code>, <code>thinking</code>, <code>status</code>, <code>createDt</code></td>
+        <td>—</td>
+        <td><code>status</code> 可对齐 <code>StatusEnum.value</code></td>
+      </tr>
+      <tr>
+        <td><code>OpenApiUserVO</code></td>
+        <td><code>openId</code>, <code>externalId</code>, <code>nickname</code>, <code>avatarUrl</code>, <code>created</code></td>
+        <td>—</td>
+        <td><code>created</code> 表示是否新注册</td>
+      </tr>
+      <tr>
+        <td><code>OpenApiEmbedTokenResponse</code></td>
+        <td><code>token</code>, <code>tokenType</code>, <code>authHeader</code>, <code>expiresAt</code>, <code>ttlSeconds</code>, <code>openId</code>, <code>nickname</code>, <code>avatarUrl</code></td>
+        <td>—</td>
+        <td>嵌入式对话鉴权响应</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>9. gRPC 信封与生成类型</h2>
+  <p class="note">proto 定义见 <span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-grpc/src/main/proto/snail_ai_grpc_service.proto</span>。Java 类位于 <code>com.aizuda.snail.ai.common.grpc.auto</code>，由 protoc 生成，<strong>禁止手改</strong>。</p>
+
+  <h3>Proto 消息字段</h3>
+  <table>
+    <thead>
+      <tr><th>消息</th><th>字段</th><th>Proto 类型</th><th>Java 访问器</th><th>语义 / 边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td rowspan="3"><code>GrpcSnailAiRequest</code></td>
+        <td><code>reqId</code></td><td><code>int64</code></td><td><code>long getReqId()</code></td><td>请求关联 ID；Builder <code>setReqId</code></td>
+      </tr>
+      <tr><td><code>metadata</code></td><td><code>Metadata</code></td><td><code>hasMetadata()</code>, <code>getMetadata()</code></td><td>未设置时 <code>getMetadata()</code> 返回 default instance</td></tr>
+      <tr><td><code>body</code></td><td><code>string</code></td><td><code>getBody()</code>, <code>getBodyBytes()</code></td><td>业务 JSON 字符串；默认空串</td></tr>
+
+      <tr>
+        <td rowspan="4"><code>GrpcSnailAiResult</code></td>
+        <td><code>reqId</code></td><td><code>int64</code></td><td><code>long getReqId()</code></td><td>回显请求 ID</td>
+      </tr>
+      <tr><td><code>status</code></td><td><code>int32</code></td><td><code>int getStatus()</code></td><td>业务状态码；与 HTTP <code>Result.status</code> 独立</td></tr>
+      <tr><td><code>message</code></td><td><code>string</code></td><td><code>getMessage()</code></td><td>错误或提示文案</td></tr>
+      <tr><td><code>data</code></td><td><code>string</code></td><td><code>getData()</code></td><td>业务 JSON 载荷；流式 chunk 也放此字段</td></tr>
+
+      <tr>
+        <td rowspan="2"><code>Metadata</code></td>
+        <td><code>uri</code></td><td><code>string</code> field 3</td><td><code>getUri()</code></td><td>业务路由键，如 <code>/beat</code>、<code>/chat/dispatch</code></td>
+      </tr>
+      <tr><td><code>headers</code></td><td><code>map&lt;string,string&gt;</code> field 7</td><td><code>getHeadersMap()</code>, <code>containsHeaders(...)</code></td><td>app/token/host 等；非法 map field number 抛 <code>SnailAiException</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>OrBuilder 与 Builder 模式</h3>
+  <table>
+    <thead>
+      <tr><th>接口 / 类</th><th>关键 API</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>GrpcSnailAiRequestOrBuilder</code></td>
+        <td><code>getReqId()</code>, <code>hasMetadata()</code>, <code>getMetadataOrBuilder()</code>, <code>getBody()</code></td>
+        <td>只读访问 request</td>
+      </tr>
+      <tr>
+        <td><code>GrpcSnailAiResultOrBuilder</code></td>
+        <td><code>getReqId()</code>, <code>getStatus()</code>, <code>getMessage()</code>, <code>getData()</code></td>
+        <td>只读访问 result</td>
+      </tr>
+      <tr>
+        <td><code>MetadataOrBuilder</code></td>
+        <td><code>getUri()</code>, <code>getHeadersMap()</code></td>
+        <td>只读访问 metadata</td>
+      </tr>
+      <tr>
+        <td>各类 <code>*.Builder</code></td>
+        <td><code>newBuilder()</code>, <code>mergeFrom()</code>, <code>build()</code>, <code>buildPartial()</code></td>
+        <td>标准 protobuf 构建；<code>build()</code> 校验失败抛 <code>UninitializedMessageException</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>ServerTimestampResponse</h3>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th><th>示例</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>serverTimestamp</code></td>
+        <td><code>Long</code></td>
+        <td>心跳 <code>/beat</code> 与 ping 响应中的服务端毫秒时间戳</td>
+        <td><code>ServerTimestampResponse.builder().serverTimestamp(System.currentTimeMillis()).build()</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>组装 gRPC 请求示例</h3>
+  <pre><code>GrpcSnailAiRequest request = GrpcSnailAiRequest.newBuilder()
+    .setReqId(reqId)
+    .setMetadata(Metadata.newBuilder()
+        .setUri("/beat")
+        .putHeaders("app-id", appId)
+        .putHeaders("token", token)
+        .build())
+    .setBody(JsonUtil.toJsonString(heartbeatBody))
+    .build();</code></pre>
+
+  <h2>10. 跨类型对照</h2>
+  <table>
+    <thead>
+      <tr><th>场景</th><th>应使用的类型</th><th>不要混用</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>HTTP OpenAPI 聊天</td><td><code>OpenApiChatRequest</code></td><td><code>ChatDispatchRequest</code>（gRPC body）</td></tr>
+      <tr><td>gRPC 业务路由</td><td><code>Metadata.uri</code> + JSON <code>body</code></td><td>独立 proto service message</td></tr>
+      <tr><td>心跳负载</td><td><code>HeartbeatBody</code> / <code>HeartbeatBodyRequest</code></td><td><code>OpenApiMessageVO</code></td></tr>
+      <tr><td>向量 metadata 键</td><td><code>VectorMetadataKeys.*</code></td><td>裸字符串字面量</td></tr>
+      <tr><td>非 Spring 工具取 Bean</td><td><code>SnailSpringContext.getBeanByType</code>（抛错）</td><td><code>getBean(Class)</code>（返回 null）</td></tr>
+    </tbody>
+  </table>
+
+  <p class="where">源码根：<code>open-java/snail-ai/snail-ai-commons/</code> · 本页 goal：<code>L3-commons-grpc-api</code></p>
+</main>
+</body>
+</html>

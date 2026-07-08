@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟串起一次聊天流式执行</title>
+  <link rel="stylesheet" href="../../module-frontend-core/assets/core-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>15 分钟串起一次聊天流式执行</h1>
+    <p class="lead">
+      学习目标：用户在聊天框点发送后，你能从前端页面一直指到 lead agent，并说出 SSE 在哪一层产生、UI 在哪一层消费。
+      完整接口表与异常分支见
+      <a href="../reference/chat-streaming-run-flow-map.html">流式执行参考页</a>。
+    </p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">关联：<a href="../../module-frontend-workspace/lessons/0001-frontend-workspace-module-tour.html">workspace</a> · <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">gateway</a> · <a href="../../module-runtime-persistence/lessons/0001-runtime-persistence-module-tour.html">runtime</a> · <a href="../../module-lead-agent/lessons/0001-lead-agent-module-tour.html">lead-agent</a></span>
+    </div>
+
+    <h2>1. 入口：工作区页面只接线，不跑 agent</h2>
+    <p class="note">分叉说明：消息「重新生成」走 <code>regenerate/prepare</code> 与 <code>regenerateMessage</code>，不经过本节 <code>sendMessage</code> 主路径；本课只讲首次提交与流式回复。</p>
+    <p>
+      路由 <span class="where">frontend/src/app/workspace/chats/[thread_id]/page.tsx</span> 是用户可见入口。
+      它把输入框的 <code>onSubmit</code> 接到 <code>useThreadStream().sendMessage</code>，用 <code>thread.isLoading</code> 驱动「流式中 / 可停止」状态，本身不调用 HTTP。
+      新会话时 <code>onStart</code> 用 <code>history.replaceState</code> 换成真实 <code>thread_id</code>，避免 Next.js 路由重挂载丢状态（见页面注释）。
+    </p>
+    <pre>InputBox.onSubmit
+  -> handleSubmit -> sendMessage(threadId, message)
+  -> thread.submit({ messages: [...] }, { streamSubgraphs, streamResumable, context })</pre>
+    <p>
+      真正的流式逻辑在
+      <a href="../../module-frontend-core/lessons/0001-frontend-core-module-tour.html">core 数据层</a> 的
+      <span class="where">frontend/src/core/threads/hooks.ts</span>。
+    </p>
+
+    <h2>2. 前端 → Gateway：SDK 与 SSE</h2>
+    <p>
+      <span class="where">frontend/src/core/api/api-client.ts</span> 的 <code>getAPIClient()</code> 创建 LangGraph SDK，
+      基址为 <code>/api/langgraph</code>（nginx 改写到 Gateway <code>/api/*</code>）。
+      <code>useStream</code> 在首次提交时 POST <code>/api/threads/{thread_id}/runs/stream</code>，读 <code>Content-Location</code> 得到 <code>run_id</code>，再消费 <code>text/event-stream</code>。
+      SDK 包装层处理 CSRF、终端 run 跳过重连、以及 store-only run 的 409。
+    </p>
+    <pre>useStream (hooks.ts)
+  -> getAPIClient().runs.stream
+  -> POST /api/threads/{id}/runs/stream
+  -> SSE: metadata | values | messages-tuple | custom | end</pre>
+
+    <h2>3. Gateway → Agent：创建 run 与后台 worker</h2>
+    <p>
+      <span class="where">backend/app/gateway/routers/thread_runs.py</span> 的 <code>stream_run</code> 调用
+      <code>app.gateway.services.start_run</code>，再返回 <code>StreamingResponse(sse_consumer(...))</code>。
+      <code>start_run</code> 经 <code>RunManager.create_or_reject</code> 登记 run，<code>asyncio.create_task(run_agent(...))</code> 启动后台任务。
+      <span class="where">backend/packages/harness/deerflow/runtime/runs/worker.py</span> 里 <code>run_agent</code> 先 <code>bridge.publish(metadata)</code>，再 <code>agent_factory</code> 构图并 <code>agent.astream(...)</code>，把 chunk 写入 StreamBridge。
+      默认工厂是
+      <span class="where">backend/packages/harness/deerflow/agents/lead_agent/agent.py</span> 的 <code>make_lead_agent</code>。
+    </p>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant UI as ChatPage
+    participant Hook as useThreadStream
+    participant SDK as api-client
+    participant RT as thread_runs.stream_run
+    participant SVC as start_run
+    participant W as worker.run_agent
+    participant A as make_lead_agent
+
+    UI->>Hook: sendMessage / submit
+    Hook->>SDK: runs.stream(threadId, lead_agent, input)
+    SDK->>RT: POST .../runs/stream
+    RT->>SVC: start_run(body, thread_id)
+    SVC->>W: create_task(run_agent)
+    RT-->>SDK: SSE (sse_consumer)
+    W->>A: agent_factory(config)
+    W->>W: agent.astream → bridge.publish
+    SDK-->>Hook: metadata / values / messages
+    Hook-->>UI: thread.messages 更新</pre>
+    </div>
+
+    <h2>4. 异常路径：线程已有活跃 run</h2>
+    <p>
+      默认 <code>multitask_strategy="reject"</code>：同线程已有 pending/running run 时，
+      <code>RunManager.create_or_reject</code> 抛 <code>ConflictError</code>，Gateway 转 HTTP <strong>409</strong>。
+      前端表现为提交失败，不会静默覆盖旧流。
+      另一条常见边界：SSE 客户端断开且 <code>on_disconnect=cancel</code> 时，
+      <code>sse_consumer</code> 的 <code>finally</code> 会 <code>run_mgr.cancel</code>，run 状态变为 <code>interrupted</code>。
+      更多 409 文案（不可取消、无法 join 非本 worker 流）见
+      <a href="../reference/chat-streaming-run-flow-map.html#errors">参考页错误表</a>。
+    </p>
+
+    <h3>检索练习</h3>
+    <div class="callout">
+      <p>判断对错（不看上文）：</p>
+      <p>A. <code>page.tsx</code> 直接调用 <code>fetch</code> 打开 SSE。</p>
+      <p>B. <code>stream_run</code> 在返回 SSE 之前已经 <code>create_task(run_agent)</code>。</p>
+      <p>C. <code>make_lead_agent</code> 在 Gateway 进程内、与 FastAPI 同进程执行。</p>
+    </div>
+    <div class="answer">
+      <p><strong>参考答案：</strong>A 错，页面只调 <code>sendMessage</code>，SSE 由 LangGraph SDK + <code>useStream</code> 处理。B 对，<code>start_run</code> 在 <code>StreamingResponse</code> 之前启动后台任务。C 对，embedded runtime 无独立 LangGraph Server 进程。</p>
+    </div>
+
+    <p class="note">
+      主要来源：<code>frontend/AGENTS.md</code> Data Flow 节、<code>backend/docs/STREAMING.md</code>。
+      想沿某一层下钻，向 agent 追问「从 Gateway <code>sse_consumer</code> 继续」或「<code>run_agent</code> 的 stream_mode 映射」。
+    </p>
+  </article>
+</main>
+</body>
+</html>

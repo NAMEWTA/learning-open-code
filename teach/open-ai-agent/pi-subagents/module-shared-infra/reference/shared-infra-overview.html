@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared Infra Overview Reference</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.65; }
+    main { max-width: 1080px; margin: 0 auto; padding: 36px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.22rem; margin: 2rem 0 0.7rem; padding-top: 1rem; border-top: 1px solid var(--line); letter-spacing: 0; }
+    h3 { font-size: 1.02rem; margin-top: 1.2rem; }
+    p, li { font-size: 0.98rem; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.55rem 0.65rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.9em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .note { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; }
+    @media print { body { background: #fff; } main { max-width: none; padding: 18mm; } a { color: inherit; text-decoration: none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>共享基础设施速查</h1>
+  <p class="note">本页是 L1 短课的参考资料，适合回查字段、文件职责、依赖边界和测试证据。短课只讲判断路径；本页保存完整索引。</p>
+
+  <h2>1. 模块定位</h2>
+  <table>
+    <tr><th>问题</th><th>结论</th><th>主要证据</th></tr>
+    <tr><td>一句话职责</td><td>`src/shared` 为 agent、extension、runs、slash、TUI 提供跨层共享的类型契约、目录约定、文件写入、状态格式化、chain 行为和 session/model 工具。</td><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code></td></tr>
+    <tr><td>架构位置</td><td>位于具体执行器之下、展示与控制入口之下；它被多层导入，但只做公共基础设施，不持有业务编排主流程。</td><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code>、<code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td></tr>
+    <tr><td>与 L0 的衔接</td><td>L0 的 async 可观测性依赖 status JSON、events JSONL、output log、artifact paths；这些文件形状和路径大多从 shared 出发。</td><td><a href="../../00-overview/lessons/0001-project-map.html">L0 项目整体架构与学习地图</a></td></tr>
+  </table>
+  <div class="diagram">src/shared
+  ├─ 契约：types.ts
+  ├─ 文件：artifacts.ts、atomic-json.ts、jsonl-writer.ts
+  ├─ 行为：settings.ts、status-format.ts、model-info.ts
+  └─ 会话/工具：fork-context.ts、session-identity.ts、session-tokens.ts、utils.ts</div>
+
+  <h2>2. 文件职责索引</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>典型消费者</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code></td><td>定义 `Details`、`SingleResult`、`AsyncStatus`、`AsyncJobState`、`SubagentState`、事件名、目录常量、action 列表、递归深度和输出截断。</td><td>runs、extension、slash、TUI、agents。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/artifacts.ts</code></td><td>解析 project-local `.pi-subagents`、session fallback、temp artifacts；生成 input/output/jsonl/transcript/meta 路径；清理旧 artifacts。</td><td>extension startup、foreground execution、background runner、fanout child。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/atomic-json.ts</code></td><td>创建同步 JSON writer：mkdir、写临时文件、rename、可选 retry、finally 删除临时文件。</td><td>background status、nested events、control channel、scheduled runs、stale reconciler。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/jsonl-writer.ts</code></td><td>创建 events/transcript JSONL writer，处理无路径 no-op、stream 创建失败、背压 pause/resume、最大字节数和 close。</td><td>foreground/background execution 的事件流记录。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/settings.ts</code></td><td>定义 sequential/parallel/dynamic chain step；解析 output、reads、progress、skills、model；创建 chain 目录、progress 文件和并行输出目录。</td><td>chain serializer、foreground chain、background async chain、slash workflows。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/fork-context.ts</code></td><td>解析 fresh/fork context；从父 session 创建 branched session；过滤不安全 thinking block；必要时追加 thinking off entry。</td><td>foreground subagent executor。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/session-identity.ts</code></td><td>从 session manager 获取当前 session file 或 session id；缺失时抛错。</td><td>extension index、scheduled runs、subagent executor。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/session-tokens.ts</code></td><td>扫描最新 session JSONL，累加 input/output token usage；异常时返回 null。</td><td>background subagent runner。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/status-format.ts</code></td><td>格式化 activity label、聚合 step status、生成 parallel outcome 文案。</td><td>TUI、run-status、fleet view、nested render。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/model-info.ts</code></td><td>规范 model info，解析 thinking suffix，按 provider 查找 model，计算支持的 thinking levels。</td><td>slash commands、profiles、agent management、model fallback。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/utils.ts</code></td><td>配置目录、agent 目录、child cwd、status 读取缓存、session 查找、最终输出提取、usage/cost 汇总、foreground 结果压缩、错误检测、tool args preview。</td><td>runs、extension RPC、agents、slash、TUI、profiles。</td></tr>
+  </table>
+
+  <h2>3. 核心类型与常量</h2>
+  <table>
+    <tr><th>对象</th><th>用途</th><th>阅读提示</th></tr>
+    <tr><td><code>Details</code></td><td>一次 subagent 调用返回给父会话的总明细：mode、results、async metadata、progress、artifacts、workflowGraph、outputs、usage/cost。</td><td>看父会话工具结果如何承载多个 `SingleResult`。</td></tr>
+    <tr><td><code>SingleResult</code></td><td>单个 child agent 的结果：exitCode、usage、model、controlEvents、sessionFile、artifactPaths、finalOutput、structuredOutput、acceptance、children。</td><td>看 foreground/async 最终结果如何归一。</td></tr>
+    <tr><td><code>AsyncStatus</code></td><td>后台 run 的磁盘状态：runId、mode、state、activity、steps、parallelGroups、workflowGraph、session/output、tokens/cost。</td><td>状态查询、wait、TUI 和 stale reconciliation 都围绕它。</td></tr>
+    <tr><td><code>AsyncJobState</code></td><td>extension 内存中的后台 job 投影：asyncId、asyncDir、status、pid、steps、cursors、nested children。</td><td>偏 UI/tracker，不等同于磁盘完整状态。</td></tr>
+    <tr><td><code>ArtifactPaths</code></td><td>一组 run artifact 路径：input、output、jsonl、transcript、metadata。</td><td>由 `getArtifactPaths` 根据 runId、agent、index 生成。</td></tr>
+    <tr><td><code>RESULTS_DIR</code>、<code>ASYNC_DIR</code>、<code>CHAIN_RUNS_DIR</code>、<code>TEMP_ARTIFACTS_DIR</code></td><td>scoped temp root 下的后台结果、运行状态、chain 临时目录和 artifacts 目录。</td><td>temp scope 优先用 uid；无 uid 时使用用户名、home 或 shared。</td></tr>
+    <tr><td><code>SUBAGENT_ASYNC_STARTED_EVENT</code>、<code>SUBAGENT_ASYNC_COMPLETE_EVENT</code>、<code>SUBAGENT_CONTROL_EVENT</code></td><td>extension event bus 的生命周期和控制事件名。</td><td>不要手写字符串；从 `types.ts` 导入。</td></tr>
+    <tr><td><code>SUBAGENT_ACTIONS</code></td><td>管理动作列表：list、get、models、create、update、delete、eject、disable、enable、reset、status、interrupt、resume、steer、append-step、doctor、schedule 等。</td><td>schema、doctor、管理命令应与该列表保持一致。</td></tr>
+  </table>
+
+  <h2>4. 文件状态与路径规则</h2>
+  <table>
+    <tr><th>场景</th><th>规则</th><th>风险边界</th></tr>
+    <tr><td>project-local artifacts</td><td>`getProjectSubagentsDir(cwd)` 返回 `<cwd>/.pi-subagents`；artifacts 在 `<cwd>/.pi-subagents/artifacts`，chain runs 在 `<cwd>/.pi-subagents/chain-runs`。</td><td>适合项目级可检查产物；测试见 <code>open-ai-agent/pi-subagents/test/unit/artifacts.test.ts</code>。</td></tr>
+    <tr><td>session fallback</td><td>`getArtifactsDir(sessionFile)` 返回 session 目录下的 `subagent-artifacts`；无 session 和 project cwd 时使用 temp artifacts。</td><td>确保无 project cwd 的旧路径仍可工作。</td></tr>
+    <tr><td>artifact 文件名</td><td>`getArtifactPaths` 将 agent 名中的非 `\w.-` 字符替换为 `_`，再生成 `_input.md`、`_output.md`、`.jsonl`、`_transcript.jsonl`、`_meta.json`。</td><td>防止 agent 名污染路径。</td></tr>
+    <tr><td>status JSON 写入</td><td>`createAtomicJsonWriter` 写 `.basename.pid.now.random.tmp`，再 rename 到目标；finally 中删除临时文件。</td><td>避免 reader 看到半写入 JSON；测试覆盖 retry 和清理。</td></tr>
+    <tr><td>Windows rename 锁</td><td>默认仅在 win32 启用 retry；可重试错误为 `EACCES`、`EBUSY`、`EPERM`，默认延迟从 10ms 到 4000ms。</td><td>非重试错误直接抛出。</td></tr>
+    <tr><td>events JSONL</td><td>`createJsonlWriter` 对空路径返回 no-op；每行追加换行；超过 `maxBytes` 后停止写；stream 背压时 pause source，drain 后 resume。</td><td>事件日志不会无限增长，也不会在背压时继续推流。</td></tr>
+    <tr><td>status 读取</td><td>`readStatus(asyncDir)` 读取 `status.json` 并按 mtime 缓存，最多保留 50 条。</td><td>文件缺失返回 null；解析失败抛带路径的错误。</td></tr>
+  </table>
+
+  <h2>5. 依赖边界</h2>
+  <table>
+    <tr><th>方向</th><th>依赖</th><th>说明</th></tr>
+    <tr><td>shared 依赖外部</td><td>Node `fs`、`path`、`os`、`crypto`；`@earendil-works/pi-ai` Message；`@earendil-works/pi-coding-agent` SessionManager/ExtensionContext。</td><td>文件、session 和消息类型是基础依赖。</td></tr>
+    <tr><td>shared 依赖项目内部</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/skills.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/formatters.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/parallel-utils.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code></td><td>`settings.ts` 与 `utils.ts` 有少量内部依赖；这意味着 shared 不是完全零依赖内核。</td></tr>
+    <tr><td>依赖 shared 的执行层</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code></td><td>负责写状态、创建 artifacts、解析 chain 行为、汇总结果。</td></tr>
+    <tr><td>依赖 shared 的控制入口</td><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/rpc.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/fanout-child.ts</code>、<code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code>、<code>open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</code></td><td>负责注册、状态查询、RPC 和 slash 参数/结果桥接。</td></tr>
+    <tr><td>依赖 shared 的配置和展示</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-management.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>、<code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code>、<code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td><td>agent/profiles 使用配置目录和 model info；TUI 使用状态格式、输出提取和类型。</td></tr>
+  </table>
+
+  <h2>6. 测试佐证</h2>
+  <table>
+    <tr><th>测试文件</th><th>验证点</th><th>本轮结果</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/artifacts.test.ts</code></td><td>project cwd 下生成 `.pi-subagents/artifacts` 和 `.pi-subagents/chain-runs`；无 project cwd 时使用 session fallback。</td><td>通过。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/atomic-json.test.ts</code></td><td>retry transient rename failure、默认 Windows retry 延迟、非重试错误、失败后清理临时文件。</td><td>通过。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/jsonl-writer.test.ts</code></td><td>追加换行、背压 pause/resume、close 幂等、无路径 no-op、maxBytes 截止。</td><td>通过。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/status-format.test.ts</code></td><td>activity label、一组 step status 聚合、parallel outcome 文案。</td><td>通过。</td></tr>
+  </table>
+  <p>执行命令：<span class="mono">node --experimental-strip-types --test test/unit/artifacts.test.ts test/unit/atomic-json.test.ts test/unit/jsonl-writer.test.ts test/unit/status-format.test.ts</span>。结果：4 个 suite、14 个测试全部通过。</p>
+
+  <h2>7. 后续未覆盖点</h2>
+  <table>
+    <tr><th>对象</th><th>为什么未展开</th><th>建议层级</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/formatters.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/file-coalescer.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/child-transcript.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/post-exit-stdio-guard.ts</code></td><td>属于 shared 辅助文件，但不在本任务单源码范围内；只在依赖边界中记录。</td><td>L2/L3 辅助工具专题。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code></td><td>它们是状态写入的调用方，不是本 L1 的共享基础设施本体。</td><td>L2 async lifecycle 垂直切片。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td><td>本页只说明它依赖 shared；展示组件细节留给 TUI 专题。</td><td>L2 状态展示与 TUI。</td></tr>
+    <tr><td>`fork-context` 的 session JSONL 格式</td><td>本主题只解释清理 unsafe thinking block 的作用；完整 session schema 来自宿主 Pi runtime。</td><td>L3 session/fork 安全边界。</td></tr>
+  </table>
+</main>
+</body>
+</html>

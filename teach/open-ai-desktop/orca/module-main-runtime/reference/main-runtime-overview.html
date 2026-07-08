@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>主进程 Runtime 与 Daemon 模块总览参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>主进程 Runtime 与 Daemon 模块总览参考</h1>
+        <p class="meta">定位：L1 模块速查。配合 <a href="../lessons/0001-main-runtime-module-tour.html">导览短课</a> 使用。</p>
+
+        <h2>职责边界</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>核心文件</th>
+              <th>一句话职责</th>
+              <th>典型调用者</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>状态层</td>
+              <td><code>src/main/runtime/orca-runtime.ts</code></td>
+              <td><code>OrcaRuntimeService</code> 持有 renderer graph、terminal handle、PTY 输出、mobile 会话、worktree、automation 和账号快照等活状态。</td>
+              <td>IPC handler、runtime RPC method、窗口装配、headless server。</td>
+            </tr>
+            <tr>
+              <td>控制面</td>
+              <td><code>src/main/runtime/runtime-rpc.ts</code></td>
+              <td><code>OrcaRuntimeRpcServer</code> 接收 Unix socket / named pipe 和 WebSocket 请求，完成认证、授权、keepalive、dispatch 和 metadata 发布。</td>
+              <td><code>src/cli</code>、移动端、web runtime、headless serve。</td>
+            </tr>
+            <tr>
+              <td>PTY 宿主</td>
+              <td><code>src/main/daemon/daemon-init.ts</code>、<code>src/main/daemon/daemon-entry.ts</code></td>
+              <td>在独立 Node 进程中保留终端会话，并在当前协议、legacy 协议、degraded fallback 之间路由。</td>
+              <td>本地 terminal IPC、worktree teardown、Manage Sessions、应用退出/更新。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>对外接口清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>接口</th>
+              <th>来源</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>new OrcaRuntimeService(store, stats, deps)</code></td>
+              <td><code>orca-runtime.ts</code></td>
+              <td>创建主进程 runtime；<code>deps.getLocalProvider</code> 必须延迟解析 daemon provider。</td>
+            </tr>
+            <tr>
+              <td><code>getRuntimeId()</code> / <code>getStartedAt()</code> / <code>getStatus()</code></td>
+              <td><code>orca-runtime.ts</code></td>
+              <td>供 RPC error、metadata、status client 和调试面板识别当前 runtime。</td>
+            </tr>
+            <tr>
+              <td><code>attachWindow()</code> / <code>syncWindowGraph()</code></td>
+              <td><code>orca-runtime.ts</code></td>
+              <td>接收 renderer 发布的 tab/leaf/PTY 图，成为 terminal 查询、移动端投屏和 headless 状态的依据。</td>
+            </tr>
+            <tr>
+              <td><code>registerPty()</code> / <code>onPtyData()</code> / <code>subscribeToTerminalData()</code></td>
+              <td><code>orca-runtime.ts</code></td>
+              <td>维护 PTY 到 terminal handle、移动端输出流和 agent 状态检测的热路径。</td>
+            </tr>
+            <tr>
+              <td><code>new OrcaRuntimeRpcServer(options)</code></td>
+              <td><code>runtime-rpc.ts</code></td>
+              <td>构造 runtime 控制面；内部创建 <code>RpcDispatcher</code> 并绑定同一个 runtime 实例。</td>
+            </tr>
+            <tr>
+              <td><code>start()</code> / <code>stop()</code></td>
+              <td><code>runtime-rpc.ts</code></td>
+              <td>启动/停止 socket 和 WebSocket transport，启动成功后写 runtime metadata。</td>
+            </tr>
+            <tr>
+              <td><code>createPairingOffer()</code></td>
+              <td><code>runtime-rpc.ts</code></td>
+              <td>生成带 endpoint、device token、E2EE public key 和 scope 的 pairing URL；可返回 web client URL。</td>
+            </tr>
+            <tr>
+              <td><code>initDaemonPtyProvider()</code></td>
+              <td><code>daemon-init.ts</code></td>
+              <td>启动或复用 daemon，创建 current adapter，发现 legacy session，并安装为 local PTY provider。</td>
+            </tr>
+            <tr>
+              <td><code>restartDaemon()</code></td>
+              <td><code>daemon-init.ts</code></td>
+              <td>执行 7 步重启：先 fanout synthetic exits，再解绑监听器、清理当前 daemon、复用 spawner、替换 provider、重新绑定。</td>
+            </tr>
+            <tr>
+              <td><code>cleanupDaemonForProtocol()</code></td>
+              <td><code>daemon-init.ts</code></td>
+              <td>按协议版本关闭 daemon、统计被杀 session，必要时 fallback 到 PID 级清理。</td>
+            </tr>
+            <tr>
+              <td><code>MOBILE_PAIRING_USERDATA_FILES</code></td>
+              <td><code>src/main/runtime/mobile-pairing-files.ts</code></td>
+              <td>把 userData 中的 device registry 文件与 E2EE keypair 文件绑定迁移，避免 token 与密钥分裂。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>内部分层与关键依赖</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>关系</th>
+              <th>说明</th>
+              <th>读源码入口</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>index.ts</code> → runtime</td>
+              <td>构造 runtime，并把 agent hook、账号、stats、store 注入进去。</td>
+              <td><code>src/main/index.ts</code> 创建 <code>runtimeService</code> 附近。</td>
+            </tr>
+            <tr>
+              <td>runtime → PTY provider</td>
+              <td>runtime 通过 thunk 获取当前 provider，避免 daemon 初始化后 provider 替换失效。</td>
+              <td><code>OrcaRuntimeService.constructor</code> 与 <code>getLocalProvider()</code>。</td>
+            </tr>
+            <tr>
+              <td>RPC server → runtime</td>
+              <td>RPC server 不直接实现业务，认证后把请求交给 <code>RpcDispatcher</code>，dispatcher 再调 runtime 或 method 模块。</td>
+              <td><code>OrcaRuntimeRpcServer.handleMessage()</code>。</td>
+            </tr>
+            <tr>
+              <td>WebSocket → mobile</td>
+              <td>WebSocket channel 经过 E2EE 握手和 device token 验证，mobile scope 还要经过 method allowlist。</td>
+              <td><code>handleWebSocketMessage()</code> 与 <code>MOBILE_RPC_METHOD_ALLOWLIST</code>。</td>
+            </tr>
+            <tr>
+              <td>daemon-init → ipc/pty</td>
+              <td>安装 <code>DaemonPtyAdapter</code> / <code>DaemonPtyRouter</code> 后调用 <code>setLocalPtyProvider()</code>，让既有 IPC 路径透明使用 daemon。</td>
+              <td><code>initDaemonPtyProvider()</code> 与 <code>replaceDaemonProvider()</code>。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>简单调用示例</h2>
+        <pre><code class="language-typescript">const server = new OrcaRuntimeRpcServer({
+  runtime,
+  userDataPath: getCanonicalUserDataPath(),
+  enableWebSocket: true
+})
+
+await server.start()
+const offer = server.createPairingOffer({
+  address: '100.64.1.20',
+  name: 'CLI test',
+  scope: 'runtime'
+})</code></pre>
+        <p>
+          这个示例对应 <code>runtime-rpc.test.ts</code> 的 pairing 测试：server 启动后，metadata 中已有 transport 和 auth token；
+          pairing URL 会携带 endpoint、device token、public key 和 scope。若传入完整 <code>wss://runtime.example.com/orca</code>，
+          测试还验证 web client URL 会保留 proxy path 前缀。
+        </p>
+
+        <h2>行为测试佐证</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行为</th>
+              <th>测试文件</th>
+              <th>锁定的不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>long-poll keepalive</td>
+              <td><code>src/main/runtime/runtime-rpc.test.ts</code></td>
+              <td><code>orchestration.check</code> 和 <code>terminal.wait</code> 长等待期间会发送 <code>{"_keepalive": true}</code> frame。</td>
+            </tr>
+            <tr>
+              <td>long-poll cap</td>
+              <td><code>src/main/runtime/runtime-rpc.test.ts</code></td>
+              <td>cap 满时返回 <code>runtime_busy</code>，短 RPC 仍可执行，关闭中的 long-poll 会释放槽位。</td>
+            </tr>
+            <tr>
+              <td>pairing endpoint</td>
+              <td><code>src/main/runtime/runtime-rpc.test.ts</code></td>
+              <td>IPv6、host:port、完整 wss URL 和 proxy path 都会被格式化进 pairing URL。</td>
+            </tr>
+            <tr>
+              <td>daemon restart 顺序</td>
+              <td><code>src/main/daemon/daemon-init.test.ts</code></td>
+              <td>synthetic exits 必须在解绑监听器前发出，provider 替换后再 rebind。</td>
+            </tr>
+            <tr>
+              <td>legacy / degraded provider</td>
+              <td><code>src/main/daemon/daemon-init.test.ts</code></td>
+              <td>旧协议 session 保留原 adapter；degraded current daemon 的 session 也会在重启时 fanout exit。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>后续切片入口</h2>
+        <ul>
+          <li><code>slice-worktree-create-flow</code>：从 renderer 新建 workspace 到 runtime 创建 worktree、Git 操作和 terminal 启动。</li>
+          <li><code>slice-mobile-pairing-flow</code>：从 desktop pairing offer 到 mobile RPC client 连接、设备授权和会话恢复。</li>
+          <li><code>slice-ssh-relay-session-flow</code>：runtime/daemon 与 relay 的会话保活边界，依赖本主题的 RPC 与 PTY 宿主概念。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

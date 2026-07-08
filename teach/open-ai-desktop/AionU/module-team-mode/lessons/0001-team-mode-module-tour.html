@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 模块导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode：把多 Agent 团队装进同一个会话工作台</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 Team Mode 的边界，以及一条 Team 消息如何从团队页进入现有 ACP / aionrs 会话运行时。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：TeamPage.tsx / TeamChatView.tsx / ipcBridge.ts</span>
+    </div>
+  </section>
+
+  <p class="muted">L0 回链：先看 <a href="../../00-overview/lessons/0001-project-map.html">AionU 项目地图</a>。交叉参考：<a href="../../module-renderer-core/reference/renderer-core-overview.html">renderer-core</a> 说明路由与 shell，<a href="../../module-common-adapter/reference/common-adapter-overview.html">common-adapter</a> 说明桥接层，<a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">conversation-runtime</a> 说明会话工作台。</p>
+
+  <h2>1. 模块边界：Team Mode 不是新的聊天系统</h2>
+  <p>Team Mode 位于 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/</code>。它负责团队页的 UI 编排：读团队记录、展示 leader 与 teammate tab、维护 active slot、显示运行状态、把权限模式写回 team record，并在删除成员或团队前清理关联 Cron。真正的 Agent 执行、消息持久化和 Team run 编排不在这个 renderer 目录中，而是通过 <code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</code> 的 <code>team</code> 域进入 backend REST / WebSocket。</p>
+  <div class="filetree">packages/desktop/src/renderer/pages/team/
+├── index.tsx                         ← /team/:id 入口，读取 team 记录
+├── TeamPage.tsx                      ← 团队工作台总装
+├── hooks/                            ← tab、权限、session、run 状态
+├── components/                       ← 创建 modal、tab、chat slot、发送 runtime
+└── utils/                            ← workspace 视图与 Cron 清理</div>
+
+  <h2>2. 打开团队页：先拿 team，再组装团队工作台</h2>
+  <p>入口从 renderer-core 的路由表开始：<code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Router.tsx</code> 在 <code>TEAM_MODE_ENABLED</code> 打开时把 <code>/team/:id</code> 指到 <code>TeamIndex</code>。<code>TeamIndex</code> 只做一件事：用 <code>ipcBridge.team.get.invoke({ id })</code> 取团队记录，然后把 <code>TTeam</code> 交给 <code>TeamPage</code>。</p>
+  <p><code>TeamPage</code> 再包两层上下文：<code>TeamTabsProvider</code> 负责 active slot、tab 排序、重命名和删除；<code>TeamPermissionProvider</code> 给会话发送框提供 team-only 能力，例如 <code>warmupSession()</code> 和 <code>setSessionMode</code>。这说明 Team Mode 的页面状态在 renderer，本地持久状态通过 common adapter 回到 backend。</p>
+
+  <h2>3. 发送主线：TeamChatView 把“团队发送”注入现有 Chat</h2>
+  <p>关键点在 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code>：它没有重写 ACP 或 aionrs 的聊天组件，而是按 conversation type 复用 <code>AcpChat</code> / <code>AionrsChat</code>，只额外传入 <code>teamSendMessage</code> 与 <code>teamRuntime</code>。leader 的输入走 <code>ipcBridge.team.sendMessage</code>；成员 tab 的输入走 <code>ipcBridge.team.sendMessageToAgent</code>。两者返回 <code>ITeamRunAck</code> 后，<code>useTeamRunView</code> 立即把 ack 映射成可显示的 run 状态。</p>
+  <pre><code class="language-tsx">const teamSendMessage = async ({ input, files }) =&gt; {
+  if (isLeader) {
+    const ack = await ipcBridge.team.sendMessage.invoke({ team_id, input, files });
+    onTeamRunAck?.(ack);
+    return;
+  }
+  const ack = await ipcBridge.team.sendMessageToAgent.invoke({
+    team_id,
+    slot_id,
+    input,
+    files,
+  });
+  onTeamRunAck?.(ack);
+};</code></pre>
+  <p>这样做的收益很直接：Team Mode 只接管“这条消息发给团队还是发给某个成员”，消息列表、附件、命令队列、模型选择和 stop 按钮仍尽量复用 conversation-runtime。完整接口和事件清单见 <a href="../reference/team-mode-overview.html#interfaces">Team Mode reference</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果一个成员 tab 正在运行，为什么 Team Mode 不应该只依赖普通 conversation runtime 的 processing 状态？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>因为 Team run 是团队级状态，可能包含 leader、多个 teammate、pending wake、starting child turn、paused slot 等信息。<code>useTeamRunView</code> 需要消费 <code>team.run*</code> 和 <code>team.childTurn*</code> 事件，把每个 slot 的工作状态映射到发送框 gate；普通单会话 runtime 只知道当前 conversation 是否忙，不足以表达团队内多个 slot 的并发状态。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先读 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/TeamPage.tsx</code>，再读 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code>。接着追问 agent：请按“路由入口 → TeamPage → TeamChatView → ipcBridge.team → WebSocket 事件”带我走一遍 Team 消息发送链。</p>
+</main>
+</body>
+</html>

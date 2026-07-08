@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commons 与 gRPC 基础模块导览</title>
+  <link rel="stylesheet" href="../assets/commons-grpc.css">
+  <style>
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 责任链</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Agent Client</a>
+    <a href="../reference/commons-grpc-overview.html">Commons 速查</a>
+  </nav>
+
+  <h1>Commons 与 gRPC 基础模块导览</h1>
+  <p class="lead">本课只完成一个目标：看懂 <code>commons-core</code> 的共享 DTO/枚举/工具类，如何通过 <code>commons-grpc</code> 的统一信封支撑 Server 与 Agent Client 之间的心跳、回调和聊天分发。</p>
+  <div class="meta">
+    <span class="pill">层级：L1 模块总览</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">前置：L0 项目地图</span>
+  </div>
+
+  <h2>1. 先分清两层契约</h2>
+  <p><code>snail-ai-commons</code> 有两个子模块。<code>commons-core</code> 放跨端业务对象，例如 <code>ChatDispatchRequest</code>、<code>ChatStreamResponse</code>、<code>RagSearchRequest</code>、<code>SkillContentResponse</code>、枚举、<code>Result</code> 和 <code>JsonUtil</code>。<code>commons-grpc</code> 不表达业务领域，它只提供统一 gRPC 外壳、常量、分发 SPI 和调用工具。</p>
+  <div class="filetree">snail-ai-commons/
+├── snail-ai-commons-core/           ← DTO、枚举、Result、JsonUtil、异常和通用工具
+└── snail-ai-commons-grpc/           ← proto 信封、URI 常量、handler SPI、client/server 工具
+    └── src/
+        └── main/
+            ├── proto/               ← 统一 request/result/metadata 消息
+            └── java/                ← 生成类、GrpcChannelUtil、Dispatcher、ServiceDefinitionBuilder</div>
+  <p>记住这个边界：业务字段变动先看 <code>commons-core</code> DTO；传输方法、header、URI 或流式方式变动才看 <code>commons-grpc</code>。</p>
+
+  <h2>2. gRPC 只传信封，业务放 JSON</h2>
+  <p>当前 proto 只有三个 message：请求、响应和 metadata。没有 <code>ChatRequest</code>、<code>HeartbeatRequest</code> 这样的业务 message，也没有生成 service stub。<code>GrpcChannelUtil</code> 会手工构建 unary 或 server-streaming <code>MethodDescriptor</code>，把 <code>uri</code> 写进 metadata，把业务 DTO 序列化成 <code>body</code> 字符串。</p>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-grpc/src/main/proto/snail_ai_grpc_service.proto</span></p>
+  <pre><code class="language-protobuf">message GrpcSnailAiRequest {
+  int64 reqId = 1;
+  Metadata metadata = 2;
+  string body = 3;
+}
+
+message Metadata {
+  string uri = 3;
+  map&lt;string, string&gt; headers = 7;
+}</code></pre>
+  <p><code>GrpcRequestDispatcher</code> 再按 <code>uri</code> 找 <code>GrpcRequestHandler</code> 或 <code>GrpcStreamingRequestHandler</code>。因此 <code>/beat</code>、<code>/callback/rag/search</code>、<code>/chat/dispatch</code> 是真正的业务路由键；proto 字段本身只是运输容器。</p>
+
+  <h2>3. Server 与 Client 怎么接上</h2>
+  <p>Client 启动后，<code>ClientHeartbeatScheduler</code> 每 10 秒用 unary <code>/beat</code> 上报 <code>app-id</code>、<code>token</code>、<code>host-id</code>、<code>host-ip</code>、<code>host-port</code> 和并发数据。Server 的 <code>BeatRequestHandler</code> 校验 token 后交给 <code>ClientInstanceManager</code> 注册实例、刷新 DB 过期时间并创建到 Client 的 channel。</p>
+  <p>用户对话走相反方向：Server 责任链终点 <code>LlmCallHandler</code> 把上下文装成 <code>ChatDispatchRequest</code>，通过 server-streaming <code>/chat/dispatch</code> 发给目标 Client；Client 的 <code>ChatDispatchStreamingHandler</code> 解析 JSON，执行本地模型调用后，把 <code>ChatStreamResponse</code> 序列化进 <code>GrpcSnailAiResult.data</code> 流式返回。</p>
+  <div class="diagram">ClientHeartbeatScheduler
+  └─ unary /beat
+      └─ SnailAiServerGrpcServer
+          └─ BeatRequestHandler
+              └─ ClientInstanceManager
+
+LlmCallHandler
+  └─ streaming /chat/dispatch
+      └─ ClientGrpcServer
+          └─ ChatDispatchStreamingHandler
+              └─ ChatStreamResponse in result.data</div>
+  <p class="note">Agent Client 也会通过 <code>RpcClient</code> 回调 Server，例如保存会话记录、读取 Skill、执行 RAG 搜索。这个接口同样走 unary 信封，只是 path 来自 <code>@Mapping</code> 注解。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：如果一次聊天流能连上 Client，但 Client 报“解析 dispatch body 失败”，你优先检查 proto、<code>UriConstants.CHAT_DISPATCH</code>，还是 <code>ChatDispatchRequest</code> 与 <code>JsonUtil</code>？为什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>优先检查 <code>ChatDispatchRequest</code> 与 <code>JsonUtil</code>。连接已建立且命中了 <code>/chat/dispatch</code>，说明 gRPC 信封和 URI 路由大概率可用；失败点更可能是 Server 序列化出的 JSON 与 Client 反序列化目标 DTO 不匹配。若错误是 unknown URI，才优先查 <code>UriConstants</code> 和 handler 注册；若连方法都找不到，才回到 gRPC 服务名、方法名或 proto 生成类。</p>
+    </details>
+  </div>
+  <p>主要阅读来源：<code>ChatDispatchRequest</code>、<code>ChatStreamResponse</code>、<code>snail_ai_grpc_service.proto</code>、<code>GrpcChannelUtil</code>、<code>BeatRequestHandler</code> 和 <code>ChatDispatchStreamingHandler</code>。接着打开 <a href="../reference/commons-grpc-overview.html">速查参考</a>，按 DTO、URI、Server feature-common、Agent Client 边界和兼容风险五块复盘。遇到字段版本、URI 扩展或心跳注册问题，可以继续向 agent 追问具体调用栈。</p>
+</main>
+</body>
+</html>

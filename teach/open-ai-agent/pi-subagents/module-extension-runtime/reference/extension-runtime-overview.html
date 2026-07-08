@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Extension Runtime Overview Reference</title>
+  <link rel="stylesheet" href="../assets/module-extension-runtime.css">
+</head>
+<body>
+<main class="reference">
+  <h1>extension runtime 参考页</h1>
+  <p class="callout">本页是 L1 速查资料：lesson 讲最小注册链路，本页收纳注册点、源码职责、依赖和测试佐证。阅读时把 <span class="mono">src/extension</span> 看成 Pi runtime 适配层，而不是 subagent 执行算法层。</p>
+
+  <h2>1. 模块边界</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>证据</th></tr>
+    <tr><td>一句话职责</td><td>把 subagent 运行能力注册进 Pi runtime，并桥接 tool、wait、renderer、slash、RPC、async tracker、supervisor channel 和 session 生命周期。</td><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td></tr>
+    <tr><td>架构位置</td><td>位于 Pi host 与内部 runs/agents/slash/intercom/shared 模块之间；向上接 <code>ExtensionAPI</code>，向下调用 executor、watcher、tracker、discovery。</td><td><code>open-ai-agent/pi-subagents/package.json</code>、<code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td></tr>
+    <tr><td>不负责</td><td>不实现 single、parallel、chain 的核心执行算法；不实现 agent discovery 规则；不持久化 async 状态文件的全部语义。</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+  </table>
+
+  <h2>2. 对外接口与注册点</h2>
+  <table>
+    <tr><th>注册点</th><th>注册位置</th><th>对外行为</th><th>内部落点</th></tr>
+    <tr><td><code>pi.registerTool(subagent)</code></td><td><code>index.ts</code></td><td>暴露 single、parallel、chain、management、async、control、schedule 等入口。</td><td><code>createSubagentExecutor(...).execute</code></td></tr>
+    <tr><td><code>pi.registerTool(wait)</code></td><td><code>index.ts</code></td><td>阻塞等待当前 session 的后台 run 完成、失败或需要注意。</td><td><code>waitForSubagents</code>、<code>resolveWaitToolConfig</code></td></tr>
+    <tr><td><code>pi.registerMessageRenderer(SLASH_RESULT_TYPE)</code></td><td><code>index.ts</code></td><td>把 slash workflow 的 live result 渲染成 TUI 结果块。</td><td><code>getSlashRenderableSnapshot</code>、<code>renderSubagentResult</code></td></tr>
+    <tr><td><code>pi.registerMessageRenderer(SLASH_TEXT_RESULT_TYPE)</code></td><td><code>index.ts</code></td><td>渲染 slash text result。</td><td><code>Text</code> component</td></tr>
+    <tr><td><code>pi.registerMessageRenderer("subagent-notify")</code></td><td><code>index.ts</code></td><td>渲染后台完成、失败、暂停通知。</td><td><code>parseSubagentNotifyContent</code>、<code>SubagentNotifyDetails</code></td></tr>
+    <tr><td><code>pi.registerMessageRenderer(SUBAGENT_CONTROL_MESSAGE_TYPE)</code></td><td><code>index.ts</code></td><td>渲染控制通知，例如 child 需要父会话介入。</td><td><code>SubagentControlNoticeComponent</code>、<code>control-notices.ts</code></td></tr>
+    <tr><td><code>registerSlashCommands</code></td><td><code>index.ts</code></td><td>注册用户可见 slash 命令。</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-commands.ts</code></td></tr>
+    <tr><td><code>registerSlashSubagentBridge</code></td><td><code>index.ts</code></td><td>把 slash request 转成 subagent 执行。</td><td><code>open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</code></td></tr>
+    <tr><td><code>registerPromptTemplateDelegationBridge</code></td><td><code>index.ts</code></td><td>把 prompt template delegation 转成 single 或 parallel params。</td><td><code>open-ai-agent/pi-subagents/src/slash/prompt-template-bridge.ts</code></td></tr>
+    <tr><td><code>registerSubagentRpcBridge</code></td><td><code>index.ts</code>、<code>rpc.ts</code></td><td>通过 Pi events 提供 versioned in-process RPC。</td><td><code>ping</code>、<code>status</code>、<code>spawn</code>、<code>interrupt</code>、<code>stop</code></td></tr>
+    <tr><td><code>createAsyncJobTracker</code></td><td><code>index.ts</code></td><td>跟踪后台 run、恢复 active jobs、处理 started/complete 事件。</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code></td></tr>
+    <tr><td><code>createResultWatcher</code></td><td><code>index.ts</code></td><td>监听结果目录，重启/prime 已有结果。</td><td><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></td></tr>
+    <tr><td><code>createScheduledRunManager</code></td><td><code>index.ts</code></td><td>处理 opt-in scheduled run 管理动作。</td><td><code>open-ai-agent/pi-subagents/src/runs/background/scheduled-runs.ts</code></td></tr>
+    <tr><td><code>createNativeSupervisorChannel</code></td><td><code>index.ts</code></td><td>让子会话能通过 native supervisor channel 找父会话处理控制请求。</td><td><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></td></tr>
+    <tr><td><code>pi.on("tool_result")</code></td><td><code>index.ts</code></td><td>在 subagent tool result 后刷新 async widget 与 poller。</td><td><code>renderWidget</code>、<code>ensurePoller</code></td></tr>
+    <tr><td><code>pi.on("session_start")</code></td><td><code>index.ts</code></td><td>重置 session state、设置父 session 环境变量、恢复 jobs 与 slash snapshot。</td><td><code>resetSessionState</code>、<code>rpcBridge.emitReady</code>、<code>supervisorChannel.start</code></td></tr>
+    <tr><td><code>pi.on("session_shutdown")</code></td><td><code>index.ts</code></td><td>取消事件订阅、停 watcher/scheduler、清理 timer/job/widget/snapshot。</td><td><code>runtimeCleanup</code>、bridge dispose、timer cleanup</td></tr>
+    <tr><td><code>registerFanoutChildSubagentExtension</code></td><td><code>fanout-child.ts</code></td><td>只在 child + fanout 环境暴露 child-safe <code>subagent</code> 工具。</td><td><code>createSubagentExecutor</code> with <code>allowMutatingManagementActions: false</code></td></tr>
+  </table>
+
+  <h2>3. 源码职责索引</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>阅读要点</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td><td>主入口，注册 Pi tools/renderers/events，维护 runtime/session cleanup。</td><td>先看 child 早退、state 创建、executor 创建、注册点、session start/shutdown。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/schemas.ts</code></td><td>TypeBox schema；导出 <code>SubagentParams</code> 和 <code>WaitParams</code>。</td><td><code>keepTopLevelParameterDescriptions</code> 是 provider payload 控制点。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/rpc.ts</code></td><td>事件总线 RPC bridge。</td><td>协议版本是 <code>1</code>；request/reply/ready event 名固定；<code>spawn</code> 强制 async。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/config.ts</code></td><td>读写 extension config。</td><td><code>loadConfig</code> 出错时打印错误并返回空配置；<code>saveConfig</code> 使用 tab 格式化。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/doctor.ts</code></td><td>构建 read-only doctor report。</td><td>报告 runtime、filesystem、discovery、permission system、intercom bridge；单项失败不会阻断整份报告。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/tool-description.ts</code></td><td>生成 subagent tool description。</td><td>支持 full、compact、custom；custom 会补强制安全提示。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/control-notices.ts</code></td><td>控制通知去重、延迟、投递。</td><td>忽略 <code>active_long_running</code> 的直接消息；foreground notice 延迟确认仍需注意再发。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/fanout-child.ts</code></td><td>fanout child 专用注册入口。</td><td>普通 child 不注册主入口；fanout child 用 WeakSet 防同一 API 重复注册，并禁止变更类管理动作。</td></tr>
+  </table>
+
+  <h2>4. 内部分层</h2>
+  <table>
+    <tr><th>层</th><th>代表对象</th><th>职责</th></tr>
+    <tr><td>宿主适配层</td><td><code>ExtensionAPI</code>、<code>ExtensionContext</code>、<code>ToolDefinition</code></td><td>把 Pi runtime 的工具、消息、事件、session 钩子变成 extension 可用接口。</td></tr>
+    <tr><td>注册编排层</td><td><code>registerSubagentExtension</code>、<code>registerFanoutChildSubagentExtension</code></td><td>决定当前进程该注册哪些能力，以及如何清理旧 runtime。</td></tr>
+    <tr><td>契约层</td><td><code>SubagentParams</code>、<code>WaitParams</code>、RPC envelope types</td><td>定义 tool/RPC 可接受的参数和 reply 形状。</td></tr>
+    <tr><td>桥接层</td><td>slash bridge、prompt template bridge、RPC bridge、native supervisor channel</td><td>把不同入口统一转换为 executor 调用或控制事件。</td></tr>
+    <tr><td>状态观测层</td><td>async tracker、result watcher、notify renderer、control notice renderer</td><td>恢复、刷新、通知并渲染后台/控制状态。</td></tr>
+    <tr><td>执行下沉层</td><td><code>createSubagentExecutor</code>、<code>discoverAgents</code>、background run modules</td><td>真正执行或管理 run；不属于 extension 入口层的核心算法。</td></tr>
+  </table>
+
+  <h2>5. 关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>在入口层的用途</th><th>来源</th></tr>
+    <tr><td><code>@earendil-works/pi-coding-agent</code></td><td><code>ExtensionAPI</code>、<code>ExtensionContext</code>、<code>ToolDefinition</code> 类型和宿主能力。</td><td><code>package.json</code> peer/dev dependency</td></tr>
+    <tr><td><code>@earendil-works/pi-agent-core</code></td><td><code>AgentToolResult</code> 类型。</td><td><code>package.json</code> peer/dev dependency</td></tr>
+    <tr><td><code>@earendil-works/pi-tui</code></td><td>渲染 <code>Text</code>、<code>Box</code>、<code>Container</code>、宽度裁剪和 ANSI wrap。</td><td><code>package.json</code> dependency</td></tr>
+    <tr><td><code>typebox</code> / <code>typebox/compile</code></td><td>定义 tool schema，并在 RPC 中验证 params。</td><td><code>package.json</code> dependency</td></tr>
+    <tr><td>Node built-ins</td><td><code>fs</code>、<code>path</code>、<code>os</code>、<code>crypto.randomUUID</code>。</td><td>runtime built-ins</td></tr>
+    <tr><td>内部模块</td><td><code>runs</code>、<code>slash</code>、<code>intercom</code>、<code>shared</code>、<code>agents</code>。</td><td><span class="mono">open-ai-agent/pi-subagents/src/</span></td></tr>
+  </table>
+
+  <h2>6. 简单调用与注册示例</h2>
+  <h3>Pi 加载主入口</h3>
+  <pre>{
+  "pi": {
+    "extensions": [
+      "./src/extension/index.ts"
+    ]
+  }
+}</pre>
+  <p>上面来自 <code>open-ai-agent/pi-subagents/package.json</code>，其中 <span class="mono">./src/extension/index.ts</span> 是 npm 包内部相对路径；在本工作区中对应的源码文件是 <code>open-ai-agent/pi-subagents/src/extension/index.ts</code>。Pi host 加载该文件后，默认导出的 <code>registerSubagentExtension(pi)</code> 才会注册工具和事件钩子。</p>
+
+  <h3>RPC spawn 请求</h3>
+  <pre><code>events.emit("subagents:rpc:v1:request", {
+  version: 1,
+  requestId: "spawn-1",
+  method: "spawn",
+  params: { agent: "worker", task: "Do work" }
+});</code></pre>
+  <p><code>rpc.ts</code> 会把它规范化为 <code>{ async: true, clarify: false }</code> 的 executor 调用；若显式传 <code>async: false</code> 或 <code>action</code>，会在 dispatch 前返回 <code>invalid_params</code>。</p>
+
+  <h2>7. 行为佐证</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖事实</th><th>对阅读的帮助</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/index-child-registration.test.ts</code></td><td>父入口会注册工具；普通 child 和 fanout child 下主入口早退；fanout child 不双注册；child-safe 模式阻止变更类管理动作；wait tool 可被配置禁用。</td><td>证明入口层确实有进程角色边界和注册保护。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/rpc.test.ts</code></td><td>ready/ping 元数据、status/interrupt 委托、spawn 强制 async、stop 写 timeout request、跨 session stop 被拒绝。</td><td>证明 RPC 是控制面桥，不是独立执行实现。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/schemas.test.ts</code></td><td>schema payload 小于阈值，移除嵌套 description，保留 TypeBox metadata，避免 provider-rejected shapes。</td><td>证明 schema 裁剪是兼容性设计，不是清理样式。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/doctor.test.ts</code></td><td>成功环境输出有界摘要；目录或 discovery 检查失败时继续报告其他部分。</td><td>证明 doctor 是诊断汇总器，不能假设所有依赖都健康。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/tool-description.test.ts</code></td><td>description mode、custom description、安全提示和注册时描述选择。</td><td>证明 tool 描述生成是可配置接口面的一部分。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/control-notices.test.ts</code></td><td>控制通知投递、去重、foreground 延迟确认。</td><td>证明控制通知不是简单 sendMessage，而是带状态判定的 runtime 行为。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/nested-control.test.ts</code></td><td>fanout child 的 nested control inbox 行为。</td><td>证明 child-safe fanout 仍有受控的嵌套控制通道。</td></tr>
+  </table>
+
+  <h2>8. 后续未深挖点</h2>
+  <table>
+    <tr><th>对象</th><th>本 L1 状态</th><th>后续建议</th></tr>
+    <tr><td><code>createSubagentExecutor</code></td><td>只作为执行下沉点引用。</td><td>L2 单次 foreground run 或 management action 课程。</td></tr>
+    <tr><td><code>createAsyncJobTracker</code>、<code>waitForSubagents</code></td><td>只列注册和 wait 工具关系。</td><td>L2 async lifecycle、status 与 wait。</td></tr>
+    <tr><td><code>registerSlashCommands</code></td><td>只列入口，不讲命令解析。</td><td>L2 slash 命令到 executor 桥接。</td></tr>
+    <tr><td><code>createNativeSupervisorChannel</code></td><td>只列注册和启动/关闭。</td><td>L2 native supervisor/intercom 协调。</td></tr>
+    <tr><td><code>buildDoctorReport</code></td><td>只讲报告边界。</td><td>L3 doctor 字段级参考。</td></tr>
+    <tr><td><code>buildSubagentToolDescription</code></td><td>只讲模式选择与安全提示。</td><td>L3 tool description custom template 规则。</td></tr>
+    <tr><td><code>startNestedControlInboxListener</code></td><td>只标记 fanout child 边界。</td><td>L3 nested control inbox 机制。</td></tr>
+  </table>
+</main>
+</body>
+</html>

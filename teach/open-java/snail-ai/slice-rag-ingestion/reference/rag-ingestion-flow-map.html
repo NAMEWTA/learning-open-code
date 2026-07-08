@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 文档上传摄入参考图谱</title>
+  <link rel="stylesheet" href="../assets/rag-ingestion.css" />
+</head>
+<body>
+  <h1>RAG 文档上传摄入参考图谱</h1>
+  <p class="summary"><strong>一句话：</strong>Snail AI 的 RAG 摄入链路先把上传或 URL 导入的文件落到资源表和文档表，状态置为 <code>PENDING</code>；定时任务再调用 <code>DocumentPipeline</code> 解析、切块、写 chunk、向量库和可选全文搜索索引，最后把文档改为 <code>SUCCESS</code> 或 <code>FAILED</code>。</p>
+  <p class="warn"><strong>源码优先：</strong><code>RagDocumentStatus</code> 有 <code>PARSING</code>，但当前主路径没有使用该状态；全文搜索写入失败是非致命 warning；删除和重处理清理路径中未看到 RAG 侧调用 <code>SearchEngine.delete</code>。</p>
+
+  <h2>入口 API</h2>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>入口方法</th><th>摄入行为</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/document/upload</code></td><td><code>RagDocumentController.upload</code></td><td>传统直传，走 <code>LocalFileImportStrategy</code> 读字节和 hash，再写正式资源和 <code>PENDING</code> 文档。</td></tr>
+      <tr><td>POST</td><td><code>/document/upload/preview</code></td><td><code>uploadPreview</code></td><td>批量上传预览，写 <code>DOCUMENT_PREVIEW</code> 临时资源，返回每个文件的去重决策。</td></tr>
+      <tr><td>POST</td><td><code>/document/upload/commit</code></td><td><code>uploadCommit</code></td><td>根据 token 回放预览状态，重新做冲突判定，再新建、跳过或覆盖旧文档。</td></tr>
+      <tr><td>DELETE</td><td><code>/document/upload/preview/{token}</code></td><td><code>cancelUploadPreview</code></td><td>删除预览阶段临时资源并失效 token。</td></tr>
+      <tr><td>POST</td><td><code>/document/import/url</code></td><td><code>importFromUrl</code></td><td>URL 导入，限制 http/https、拒绝 localhost 和私网地址，最大读取 50 MB。</td></tr>
+      <tr><td>POST</td><td><code>/document/{id}/reprocess</code></td><td><code>reprocess</code></td><td>把已有文档状态重置为 <code>PENDING</code>，等待定时任务重跑。</td></tr>
+      <tr><td>DELETE</td><td><code>/document/{id}</code></td><td><code>delete</code></td><td>清理资源、chunk、未被其他 chunk 引用的向量，然后删除文档行。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>端到端流程</h2>
+  <pre class="diagram">上传或 URL 导入
+  ↓
+DocumentImportFactory / preview token
+  ↓
+DocumentDedupChecker(name, contentHash)
+  ↓
+ResourceService.upload 或 updateBizType
+  ↓
+sai_resource + sai_rag_document(status=PENDING)
+  ↓
+DocumentProcessingTask fixedDelay=10s, LIMIT 5
+  ↓
+DocumentPipeline.claimPendingDocument
+  ↓
+ResourceService.load(resourceId)
+  ↓
+DocumentParserFactory(fileType)
+  ↓
+DocumentChunkingService(config.chunkParams)
+  ↓
+sai_rag_chunk(content, contentHash, tokenCount)
+  ↓
+VectorStoreFactory.create(RagPO)
+  ↓
+SnailAiVectorStore.add(indexName=rag_{ragId})
+  ↓
+SearchEngine.insert(indexName=rag_{ragId})，启用搜索时执行
+  ↓
+sai_rag_document(status=SUCCESS, chunkCount=N)</pre>
+
+  <h2>L2 调用时序</h2>
+  <pre class="diagram">sequenceDiagram
+  participant Admin as Admin
+  participant Ctrl as RagDocumentController
+  participant Service as RagDocumentService/PreviewService
+  participant Task as DocumentProcessingTask
+  participant Pipe as DocumentPipeline
+  participant Parser as parseContent + DocumentParser
+  participant Chunker as DocumentChunkingService
+  participant ChunkDB as RagChunkMapper
+  participant VecFactory as VectorStoreFactory
+  participant Dim as EmbeddingModelDimensionService
+  participant Model as ModelRuntimeHandler
+  participant Vector as 向量/搜索存储
+  participant DocDB as RagDocumentMapper
+
+  Admin->>Ctrl: upload / import / commit / reprocess
+  Ctrl->>Service: 校验请求并执行去重决策
+  Service->>DocDB: 新建或重置 status=PENDING
+  Task->>DocDB: select PENDING limit 5
+  Task->>Pipe: processDocument(documentId)
+  Pipe->>DocDB: claimPendingDocument 抢占为 PROCESSING
+  Pipe->>Parser: ResourceService.load(resourceId), parser.parse(inputStream)
+  alt parser 异常或解析内容为空
+    Pipe->>DocDB: update FAILED(errorMsg)
+    Note over Pipe,ChunkDB: cleanExistingData 尚未执行，旧 chunk 可能仍在
+  else 解析内容非空
+    Pipe->>Pipe: cleanExistingData(旧 chunk + 未共享向量)
+    Pipe->>Chunker: chunk(content, RagConfigDO.ChunkParams)
+    alt 没有生成 chunk
+      Pipe->>DocDB: update FAILED(No chunks generated)
+    else 生成 chunks
+      Pipe->>ChunkDB: 插入 sai_rag_chunk 行
+      Pipe->>VecFactory: create(RagPO)
+      opt dimensionOfVectorModel 为空
+        VecFactory->>Dim: getEmbeddingDimension(embeddingModelId)
+      end
+      VecFactory->>Model: buildEmbeddingModel(modelConfig)
+      Pipe->>Vector: SnailAiVectorStore.add(rag_{ragId})
+      opt searchEngineEnable=true
+        Pipe->>Vector: SearchEngine.insert(rag_{ragId})
+      end
+      Pipe->>DocDB: update SUCCESS(chunkCount=N)
+    end
+  end</pre>
+
+  <h2>核心 pipeline 与策略</h2>
+  <table>
+    <thead><tr><th>阶段</th><th>核心文件</th><th>判断点</th></tr></thead>
+    <tbody>
+      <tr><td>导入策略</td><td><span class="where">LocalFileImportStrategy.java</span>、<span class="where">UrlImportStrategy.java</span></td><td>直传读取 MultipartFile；URL 导入校验公网目标、状态码和大小限制。</td></tr>
+      <tr><td>去重决策</td><td><span class="where">DocumentDedupChecker.java</span></td><td>按知识库内文件名、内容 hash 或二者查询冲突，再映射为 reject、skip、overwrite。</td></tr>
+      <tr><td>文档调度</td><td><span class="where">DocumentProcessingTask.java</span></td><td>每 10 秒按创建时间取 5 条 <code>PENDING</code> 文档。</td></tr>
+      <tr><td>状态抢占</td><td><span class="where">DocumentPipeline.claimPendingDocument</span></td><td>条件更新要求当前仍是 <code>PENDING</code>，成功后进入 <code>PROCESSING</code>。</td></tr>
+      <tr><td>解析</td><td><span class="where">DocumentParserFactory.java</span></td><td>按 <code>fileType</code> 选择 PDF、DOCX、Excel、Markdown、HTML 或 TXT parser；不支持会抛异常并失败。</td></tr>
+      <tr><td>切块</td><td><span class="where">DocumentChunkingService.java</span></td><td>读取 <code>RagConfigDO.ChunkParams</code>，支持 <code>default</code>、<code>delimiter</code>、<code>regex</code>、<code>smart</code>。</td></tr>
+      <tr><td>智能切块</td><td><span class="where">SmartChunkStrategy.java</span></td><td><code>chunkModelId</code> 为空会回退为原文；模型配置不存在、非 <code>CHAT</code> 模型、API Key 不可用会直接抛异常并导致文档 <code>FAILED</code>；只有模型调用后返回空、JSON 解析失败或调用异常等场景会 fallback（回退）。</td></tr>
+      <tr><td>向量双写</td><td><span class="where">VectorStoreFactory.java</span>、<span class="where">ModelRuntimeHandler.java</span>、<span class="where">AbstractSnailAiVectorStore.java</span></td><td>根据知识库的向量库实例和 embedding 模型创建后端；<code>VectorStoreFactory</code> 通过 <code>ModelRuntimeHandler.buildEmbeddingModel(...)</code> 构建 embedding，<code>add</code> 委托 Spring AI 完成向量化和写入。</td></tr>
+      <tr><td>向量维度</td><td><span class="where">EmbeddingModelDimensionService.java</span></td><td><code>dimensionOfVectorModel</code> 为空时先读模型扩展配置，再尝试一次 embedding 探测维度，仍失败则使用默认维度并回写配置。</td></tr>
+      <tr><td>搜索双写</td><td><span class="where">SearchEngineFactory.java</span>、<span class="where">ElasticsearchSearchEngine.java</span></td><td>仅在 <code>searchEngineEnable=true</code> 时写全文索引，插入失败不阻断文档成功。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>状态字段</h2>
+  <table>
+    <thead><tr><th>对象</th><th>字段</th><th>意义</th><th>源码行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>RagDocumentStatus</code></td><td><code>PENDING=0</code></td><td>待处理</td><td>上传、URL 导入、commit 新建、reprocess 都会进入或回到该状态。</td></tr>
+      <tr><td><code>RagDocumentStatus</code></td><td><code>PARSING=1</code></td><td>解析中</td><td>枚举存在，主 pipeline 当前未设置。</td></tr>
+      <tr><td><code>RagDocumentStatus</code></td><td><code>PROCESSING=2</code></td><td>处理中</td><td><code>claimPendingDocument</code> 抢占成功后设置。</td></tr>
+      <tr><td><code>RagDocumentStatus</code></td><td><code>SUCCESS=3</code></td><td>完成</td><td>chunk 写入、向量写入完成后设置，同时写 <code>chunkCount</code> 并清空 <code>errorMsg</code>。</td></tr>
+      <tr><td><code>RagDocumentStatus</code></td><td><code>FAILED=4</code></td><td>失败</td><td>知识库缺失、解析空内容、无 chunk、parser 或向量链路异常会写入该状态和错误信息。</td></tr>
+      <tr><td><code>RagChunkPO</code></td><td><code>vectorId</code></td><td>向量库 ID</td><td>新 chunk 生成 UUID；同 RAG 内内容 hash 已存在时复用已有 <code>vectorId</code>。</td></tr>
+      <tr><td><code>RagChunkPO</code></td><td><code>contentHash</code></td><td>chunk 去重键</td><td>由 chunk 内容 SHA-256 生成，索引为 <code>(rag_id, content_hash)</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>表与索引</h2>
+  <table>
+    <thead><tr><th>存储</th><th>表或索引</th><th>关键字段</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>业务库</td><td><code>sai_rag</code></td><td><code>embedding_model_id</code>、<code>dimension_of_vector_model</code>、<code>vector_store_instance_id</code>、<code>search_engine_enable</code>、<code>search_engine_instance_id</code>、<code>config</code></td><td>知识库摄入配置来源。</td></tr>
+      <tr><td>业务库</td><td><code>sai_resource</code></td><td><code>storage_key</code>、<code>biz_type</code>、<code>biz_id</code>、<code>access_url</code></td><td>保存文件存储位置和业务归属；预览阶段使用 <code>DOCUMENT_PREVIEW</code>。</td></tr>
+      <tr><td>业务库</td><td><code>sai_rag_document</code></td><td><code>rag_id</code>、<code>resource_id</code>、<code>content_hash</code>、<code>status</code>、<code>error_msg</code>、<code>chunk_count</code></td><td>摄入状态和文档级去重记录；索引包含 <code>idx_rag_doc_rag</code>、<code>idx_rag_content_hash</code>、<code>idx_rag_name</code>。</td></tr>
+      <tr><td>业务库</td><td><code>sai_rag_chunk</code></td><td><code>document_id</code>、<code>paragraph_index</code>、<code>chunk_index</code>、<code>content</code>、<code>vector_id</code>、<code>content_hash</code></td><td>保存可检索文本片段和向量引用；索引包含 <code>idx_rag_chunk_document</code>、<code>idx_chunk_rag_hash</code>。</td></tr>
+      <tr><td>业务库</td><td><code>sai_store_instance</code></td><td><code>category</code>、<code>type</code>、<code>config</code></td><td>向量库和搜索引擎实例配置。</td></tr>
+      <tr><td>业务库</td><td><code>sai_model_config</code></td><td><code>model_type</code>、<code>adapter_key</code>、<code>api_endpoint</code>、<code>api_key</code>、<code>config_json</code></td><td>embedding 模型配置来源。</td></tr>
+      <tr><td>向量库</td><td><code>rag_{ragId}</code></td><td><code>id</code>、<code>content</code>、<code>metadata.ragId/documentId/chunkId</code></td><td>由 <code>IndexNameBuilder.KNOWLEDGE</code> 生成，供向量检索使用。</td></tr>
+      <tr><td>搜索库</td><td><code>rag_{ragId}</code></td><td><code>content</code>、<code>metadata</code></td><td>ES 全文索引，使用 <code>cjk_analyzer</code>，供 BM25 检索使用。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>异常补偿边界</h2>
+  <table>
+    <thead><tr><th>场景</th><th>当前行为</th><th>排查入口</th></tr></thead>
+    <tbody>
+      <tr><td>预览后用户关闭页面</td><td>token 30 分钟后失效；孤儿资源任务每小时清理超过 1 小时仍为 <code>DOCUMENT_PREVIEW</code> 的资源。</td><td><code>DocumentUploadPreviewService.cleanupExpiredTokens</code>、<code>OrphanPreviewResourceTask</code></td></tr>
+      <tr><td>commit 时冲突变化</td><td>重新判定冲突，返回 <code>CONFLICT_CHANGED</code>，不消费 token，允许用户重新确认。</td><td><code>isConflictChanged</code></td></tr>
+      <tr><td>覆盖旧文档</td><td>先清理旧文档资源、chunk 和未共享向量，再插入新文档。</td><td><code>cleanupDocumentInternal</code></td></tr>
+      <tr><td>解析异常或解析为空</td><td>文档进入 <code>FAILED</code>，写入错误信息；因为 <code>cleanExistingData</code> 在解析非空后才执行，重处理场景的旧 chunk 和旧向量可能仍在。</td><td><code>parseContent</code>、<code>processDocument</code></td></tr>
+      <tr><td>切块结果为空</td><td>解析已通过且旧数据已清理，但没有生成新 chunk；文档进入 <code>FAILED</code>。</td><td><code>DocumentChunkingService.chunk</code></td></tr>
+      <tr><td>向量库或 embedding 失败</td><td><code>sai_rag_chunk</code> 已先插入，异常再从 <code>dualWrite</code> 冒泡到 pipeline 外层；文档进入 <code>FAILED</code>，新 chunk 可能已留在业务库。</td><td><code>dualWrite</code>、<code>VectorStoreFactory</code>、<code>ModelRuntimeHandler</code></td></tr>
+      <tr><td>全文搜索写入失败</td><td>记录 warning，文档仍可成功；之后 BM25 可能缺失该文档。</td><td><code>DocumentPipeline.dualWrite</code></td></tr>
+      <tr><td>重处理已有文档</td><td><code>reprocess</code> 只把状态重置为 <code>PENDING</code>；真正重跑时先 <code>parseContent</code>，解析非空后才 <code>cleanExistingData</code>，再切块、插入新 chunk、向量/搜索双写。搜索索引清理未在 RAG 路径中看到。</td><td><code>RagDocumentService.reprocess</code>、<code>cleanExistingData</code></td></tr>
+      <tr><td>删除文档</td><td>资源删除和向量删除是 best effort，失败只记录 warning；最后删除 chunk 和文档行。</td><td><code>RagDocumentService.cleanupDocumentInternal</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>调试 checklist</h2>
+  <table>
+    <thead><tr><th>问题</th><th>检查点</th><th>对应文件</th></tr></thead>
+    <tbody>
+      <tr><td>上传接口返回成功但一直没解析</td><td><code>sai_rag_document.status</code> 是否为 0；定时任务是否启动；日志是否出现 pending 扫描。</td><td><code>DocumentProcessingTask.java</code></td></tr>
+      <tr><td>文档变成 <code>FAILED</code></td><td>先看 <code>error_msg</code>，再按资源读取、parser、chunker、向量库顺序排查。</td><td><code>DocumentPipeline.java</code></td></tr>
+      <tr><td>文件类型不支持</td><td>确认 <code>file_type</code> 是否被 parser 的 <code>supports</code> 接受。</td><td><code>DocumentParserFactory.java</code> 和各 parser</td></tr>
+      <tr><td>chunk 数为 0</td><td>检查解析后文本是否为空，或切块配置是否让所有段落为空。</td><td><code>DocumentChunkingService.java</code></td></tr>
+      <tr><td>smart 切块让文档失败</td><td>先区分“模型配置前置校验失败”和“模型调用后 fallback（回退）”：配置不存在、非 CHAT、API Key 不可用会失败；返回空、JSON 解析失败或调用异常通常回退。</td><td><code>SmartChunkStrategy.java</code></td></tr>
+      <tr><td>向量没有写入</td><td>检查 <code>vector_store_instance_id</code>、<code>embedding_model_id</code>、模型 API Key、维度和后端注册；维度为空时会走 <code>EmbeddingModelDimensionService</code>。</td><td><code>VectorStoreFactory.java</code>、<code>ModelRuntimeHandler.java</code>、<code>EmbeddingModelDimensionService.java</code></td></tr>
+      <tr><td>chunk 有 <code>vectorId</code> 但检索不到</td><td>确认向量索引名是 <code>rag_{ragId}</code>，再查具体 PgVector、Milvus 或 ES vector 后端。</td><td><code>IndexNameBuilder.java</code></td></tr>
+      <tr><td>BM25 查不到但向量能查到</td><td>确认 <code>search_engine_enable</code> 和 <code>search_engine_instance_id</code>，搜索写入失败可能只留下 warning。</td><td><code>SearchEngineFactory.java</code>、<code>ElasticsearchSearchEngine.java</code></td></tr>
+      <tr><td>重处理后全文索引疑似残留</td><td>RAG 清理路径未看到 search delete 调用，需直接核查搜索后端索引文档。</td><td><code>DocumentPipeline.cleanExistingData</code></td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

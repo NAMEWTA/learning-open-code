@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Android 原生提醒全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · android native reminder vertical slice</p>
+    <h1>Android 原生提醒调度、Receiver 与通知 action 参考</h1>
+    <p class="lead">本参考用于快速定位 AlarmManager 注册、闹钟触发、通知 action、重启恢复与跨设备抑制。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>；宿主边界见 <a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端宿主导览</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <div class="filetree">android/app/src/main/java/com/superproductivity/superproductivity/
+├── webview/
+│   └── JavaScriptInterface.kt          ← SUPAndroid 桥：schedule/cancel + 队列读取
+├── service/
+│   ├── ReminderNotificationHelper.kt   ← AlarmManager、通知渠道、action PendingIntent
+│   ├── ReminderAlarmStore.kt           ← 闹钟参数 SharedPreferences 持久化
+│   ├── SyncReminderScheduler.kt        ← WorkManager 周期任务注册
+│   ├── SyncReminderWorker.kt           ← 跨设备取消/补调度提醒
+│   └── BackgroundSyncProvider.kt       ← scheduleReminderFromSync 辅助
+├── receiver/
+│   ├── ReminderAlarmReceiver.kt        ← 闹钟触发 → 展示/抑制通知
+│   ├── ReminderActionReceiver.kt       ← Snooze / Done action 后台处理
+│   └── BootReceiver.kt                 ← 重启与包更新后重注册闹钟
+├── widget/
+│   ├── ReminderDoneQueue.kt
+│   ├── ReminderSnoozeQueue.kt
+│   └── ReminderTapQueue.kt
+├── CapacitorMainActivity.kt            ← 通知点击冷启动写 TapQueue
+└── AndroidManifest.xml                 ← 三个 receiver 注册
+
+src/app/
+├── features/mobile/store/
+│   └── mobile-notification.effects.ts  ← NgRx → 原生调度主 effect
+├── core/platform/
+│   ├── capacitor-reminder.service.ts   ← Android/iOS 平台分叉
+│   └── capacitor-notification.service.ts ← iOS action 注册（Android 非主路径）
+├── features/android/
+│   ├── android-interface.ts            ← SUPAndroid 类型与冷启动队列 drain
+│   ├── android-notification-id.util.ts   ← taskId → notificationId 哈希
+│   └── store/android.effects.ts        ← onResume 再 drain 提醒队列
+└── features/reminder/
+    └── reminder.module.ts              ← Tap/Done/Snooze 写回 NgRx</div>
+    <p>
+      <code>src/app/features/mobile/store/mobile-notification.effects.ts</code>
+      <code>src/app/core/platform/capacitor-reminder.service.ts</code>
+      <code>src/app/core/platform/capacitor-notification.service.ts</code>
+      <code>src/app/features/android/android-interface.ts</code>
+      <code>src/app/features/android/android-notification-id.util.ts</code>
+      <code>src/app/features/android/store/android.effects.ts</code>
+      <code>src/app/features/reminder/reminder.module.ts</code>
+      <code>src/app/features/tasks/store/task.selectors.ts</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/service/ReminderNotificationHelper.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/service/ReminderAlarmStore.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/service/SyncReminderScheduler.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/service/SyncReminderWorker.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/service/BackgroundSyncProvider.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/receiver/ReminderAlarmReceiver.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/receiver/ReminderActionReceiver.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/receiver/BootReceiver.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/ReminderDoneQueue.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/ReminderSnoozeQueue.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/ReminderTapQueue.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code>
+      <code>android/app/src/main/AndroidManifest.xml</code>
+    </p>
+
+    <h2>阶段速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>入口</th><th>输出</th><th>失败时表现</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>调度注册</td>
+            <td>`scheduleNotifications$` → `CapacitorReminderService.scheduleReminder` → `JavaScriptInterface.scheduleNativeReminder`</td>
+            <td>`AlarmManager` PendingIntent + `ReminderAlarmStore` 条目</td>
+            <td>无通知；日志见 `CapacitorReminderService` / `ReminderNotifHelper`</td>
+          </tr>
+          <tr>
+            <td>闹钟触发</td>
+            <td>`ReminderAlarmReceiver.onReceive(ACTION_SHOW_REMINDER)`</td>
+            <td>`ReminderNotificationHelper.showNotification` 或 stale 抑制</td>
+            <td>过期任务仍可能弹窗（fail-open）；stale 时主动 `cancelReminder`</td>
+          </tr>
+          <tr>
+            <td>通知 action</td>
+            <td>`ReminderActionReceiver`（Snooze 10m / 1h / Done）</td>
+            <td>重调度闹钟 + SharedPreferences 队列；Done 还 `ReminderAlarmStore.remove`</td>
+            <td>通知消失但 NgRx 未变 → 队列未被 Angular drain</td>
+          </tr>
+          <tr>
+            <td>Angular 回写</td>
+            <td>冷启动 `android-interface.ts` + `onResume` `android.effects.ts` + `reminder.module.ts`</td>
+            <td>`dismissReminderOnly` / `setDone` / snooze 更新 `remindAt`</td>
+            <td>hydration 前事件被 `_handleAfterDataLoaded` 推迟</td>
+          </tr>
+          <tr>
+            <td>重启恢复</td>
+            <td>`BootReceiver` on `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED`</td>
+            <td>遍历 `ReminderAlarmStore.getAll` 重注册未来闹钟</td>
+            <td>Play 自动更新后提醒静默失效直到用户打开应用</td>
+          </tr>
+          <tr>
+            <td>跨设备同步</td>
+            <td>`SyncReminderWorker` 每 15 分钟（需 SuperSync 凭证）</td>
+            <td>取消远端已完成任务闹钟；调度远端新增/改期提醒</td>
+            <td>仅影响后台增量；触发瞬间仍靠 `isTaskStale` 快速校验</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Intent / Action 常量</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>常量</th><th>定义位置</th><th>用途</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>`ACTION_SHOW_REMINDER`</td><td>`ReminderAlarmReceiver`</td><td>AlarmManager PendingIntent action；携带 notificationId、reminderId、relatedId、title、reminderType、triggerAtMs</td></tr>
+          <tr><td>`ACTION_SNOOZE` / `ACTION_SNOOZE_1H`</td><td>`ReminderActionReceiver`</td><td>通知 action；分别 +10 分钟 / +1 小时重调度</td></tr>
+          <tr><td>`ACTION_DONE`</td><td>`ReminderActionReceiver`</td><td>取消通知与闹钟；`ReminderDoneQueue.addTaskId`</td></tr>
+          <tr><td>`REMINDER_TASK_ID`</td><td>`CapacitorMainActivity` intent extra</td><td>用户点击通知正文打开应用；冷启动写入 `ReminderTapQueue`</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>通知 ID 与 PendingIntent 规则</h2>
+    <p><code>generateNotificationId(taskId)</code> 对字符串做 32 位哈希取正模，保证同一任务重复调度覆盖同一闹钟而非叠两条通知。</p>
+    <p><code>ReminderNotificationHelper</code> 中：内容点击 PendingIntent 用 <code>notificationId</code> 作 requestCode；Done/Snooze action 分别用 <code>notificationId xor 0x10000000</code>、<code>0x20000000</code>、<code>0x30000000</code>，避免 action 之间 requestCode 冲突。</p>
+    <p>闹钟注册使用 <code>PendingIntent.getBroadcast(..., notificationId, ...)</code>，与取消路径共用同一 requestCode，保证 `cancelReminder` 能精确撤销。</p>
+
+    <h2>AlarmManager 策略</h2>
+    <ul>
+      <li>默认：<code>setExactAndAllowWhileIdle(RTC_WAKEUP, triggerAtMs, pendingIntent)</code>，Doze 下仍尽量准时。</li>
+      <li>Android 12+ 无 <code>SCHEDULE_EXACT_ALARM</code> 时降级为 <code>setAndAllowWhileIdle</code>（非精确）。</li>
+      <li>每次成功注册后 <code>ReminderAlarmStore.save</code>；取消时 <code>remove</code> 并 <code>NotificationManagerCompat.cancel</code>。</li>
+      <li><code>useAlarmStyle</code>：非 <code>DUE_DATE</code> 且全局配置开启时使用 alarm 渠道与 <code>CATEGORY_ALARM</code>；同时 <code>isOngoing=true</code> 使通知持久。</li>
+    </ul>
+
+    <h2>队列与桥接消费顺序</h2>
+    <ol>
+      <li>WebView 初始化时 <code>android-interface.ts</code> 同步 pull：<code>getReminderTapQueue</code>、<code>getReminderDoneQueue</code>、<code>getReminderSnoozeQueue</code>。</li>
+      <li>事件推入 <code>onReminderTap$</code> / <code>onReminderDone$</code> / <code>onReminderSnooze$</code>（ReplaySubject，保留冷启动事件）。</li>
+      <li><code>reminder.module.ts</code> 通过 <code>_handleAfterDataLoaded</code> 等待 store hydrated 再 dispatch。</li>
+      <li>温启动：<code>android.effects.ts</code> 的 <code>checkReminderQueuesOnResume$</code> 在 <code>onResume$</code> 再次 get-and-clear 队列。</li>
+    </ol>
+
+    <h2>排障口令</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>现象</th><th>首查文件</th><th>关键日志 TAG</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>从未注册闹钟</td><td>`mobile-notification.effects.ts` → `capacitor-reminder.service.ts`</td><td>CapacitorReminderService / ReminderNotifHelper</td></tr>
+          <tr><td>注册成功但不响</td><td>系统精确闹钟权限、`ReminderAlarmStore`、`BootReceiver`</td><td>BootReceiver / ReminderNotifHelper</td></tr>
+          <tr><td>重复通知</td><td>`generateNotificationId` 是否对同一 task 产生不同 id</td><td>—</td></tr>
+          <tr><td>过期任务仍弹</td><td>`ReminderAlarmReceiver.isTaskStale`、SuperSync 凭证</td><td>ReminderAlarmReceiver</td></tr>
+          <tr><td>Done 未同步到任务</td><td>`ReminderDoneQueue` → `reminder.module.ts` hydration</td><td>ReminderActionReceiver / ReminderModule</td></tr>
+          <tr><td>Snooze 后 Angular 未更新</td><td>`ReminderSnoozeQueue` → `_handleSnoozeAction`</td><td>ReminderActionReceiver</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>与 iOS 路径对比</h2>
+    <p>同一 <code>CapacitorReminderService.scheduleReminder</code> 在 iOS 走 <code>LocalNotifications.schedule</code>，action 由 Capacitor 回调 <code>action$</code> 进入 <code>reminder.module.ts</code>。Android 的 Snooze/Done 在 <code>ReminderActionReceiver</code> 原生完成，只有状态回写才进入 Angular——这是两端架构的根本差异。</p>
+  </article>
+</main>
+</body>
+</html>

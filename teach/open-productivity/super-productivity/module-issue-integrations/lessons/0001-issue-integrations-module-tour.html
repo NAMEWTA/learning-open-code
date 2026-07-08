@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Issue Provider 模块导览</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 模块总览 · 预计 15 分钟 · 目标：能把外部工作项链路分到正确入口</p>
+    <h1>Issue Provider、日历集成与外部工作项</h1>
+    <p class="lead">一句话：这个模块把外部 issue、VTODO、iCal event 和插件工作项转换成本地任务，同时把“读远端”“导入任务”“刷新已有任务”“写回远端”和“日历 time block”拆成几条独立链路。</p>
+
+    <h2>1. 架构位置</h2>
+    <p>L0 已把 Jira、GitHub、GitLab、Gitea、OpenProject、Linear、ClickUp、Azure DevOps 等列为集成能力；当前源码中内置 provider 是 Jira、GitLab、CalDAV、Calendar、OpenProject、Redmine、Nextcloud Deck、Plainspace，GitHub、ClickUp、Gitea、Linear、Trello、Azure DevOps 已迁移到插件形态。外部工作项最终仍回到任务领域：创建出来的是带 <code>issueType</code>、<code>issueProviderId</code>、<code>issueId</code> 的 <code>Task</code>。</p>
+    <p>主入口从 <span class="where">src/app/features/issue/issue.service.ts</span> 读。它不会亲自访问每个远端 API，而是按 provider key 找到实现了 <code>IssueServiceInterface</code> 的服务或插件 adapter。</p>
+
+    <h2>2. 四条主链路</h2>
+    <pre class="diagram">provider 配置
+  → issueProvider store 保存 enabled、defaultProjectId、pollingMode、默认标签
+
+外部 issue → 本地任务
+  → provider.getAddTaskData() 映射字段
+  → IssueService.addTaskFromIssue() 决定项目、标签、backlog、due 字段
+
+轮询刷新
+  → PollToBacklogEffects 拉新 issue 进 backlog
+  → PollIssueUpdatesEffects 刷新已有 issue task
+
+写回与日历
+  → IssueTwoWaySyncEffects 用 adapter 推字段、创建/删除远端 issue
+  → CalendarIntegrationEffects 读日历事件并导入
+  → TimeBlockSyncEffects 把 scheduled task 写成插件日历 time block</pre>
+    <p>注意区分：provider 配置只是“能不能用、默认落到哪里、多久轮询”；issue-to-task 映射只发生在导入或刷新时；two-way-sync 监听本地任务 action 后写回远端；calendar/time-block 既可以读日历事件，也可以把本地 scheduled task 写成远端日历块。</p>
+
+    <h2>3. 阅读示例：新 issue 进 backlog</h2>
+    <p>从 <span class="where">src/app/features/issue/store/poll-to-backlog.effects.ts</span> 开始。它等待初始同步完成，然后按当前项目或 <code>pollingMode === 'always'</code> 找启用的 provider：必须有 <code>isAutoAddToBacklog</code>、<code>defaultProjectId</code> 和非零 poll interval。</p>
+    <p>命中后调用 <code>IssueService.checkAndImportNewIssuesToBacklogForProject()</code>，再由 provider 的 <code>getNewIssuesToAddToBacklog()</code> 拉远端候选项。真正创建任务时回到 <code>addTaskFromIssue()</code>：这里会去重、处理默认项目/标签、避免自动导入继承当前标签，并让 Calendar 与 Plainspace 使用确定性 task id。</p>
+    <p>如果是本地任务改动要推远端，不走这条链路；去 <span class="where">src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</span> 看 adapter、字段映射和 baseline 判断。Jira 在 Electron 下另有 <code>electron/jira.ts</code> 代发请求，解决桌面端 CORS、代理、自签名证书和附件认证 header 问题。</p>
+
+    <h2>4. 检索练习</h2>
+    <p>暂停 60 秒，凭记忆判断：用户把一个已导入的 Plainspace 任务重新排到明天 10:00。你应该先看 backlog 轮询、issue 更新轮询、two-way-sync，还是 calendar auto-import？为什么？</p>
+    <div class="answer">参考答案：先看 two-way-sync。这个场景是本地任务字段变化要推回远端，入口是 <code>IssueTwoWaySyncEffects</code>，Plainspace 通过 sync adapter 把 <code>dueWithTime</code> 映射到远端 <code>scheduledAt</code>。backlog 轮询只拉新 issue；issue 更新轮询负责从远端拉变化；calendar auto-import 只处理日历事件导入。</div>
+    <p>主要来源：<code>src/app/features/issue/issue.service.ts</code>、<code>src/app/features/issue/store/poll-to-backlog.effects.ts</code>、<code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code>。长 provider 清单见 <a href="../reference/issue-integrations-overview.html">参考文档</a>；不确定某个行为属于哪条链路时，直接向 agent 追问。</p>
+  </article>
+</main>
+</body>
+</html>

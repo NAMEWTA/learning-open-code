@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · promptSession 流程深度：12 步管线与 Prompt 冻结策略</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .arch { background: #f7f9fc; border: 1px solid #d6e4ff; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; text-align: center; font-size: 0.88rem; line-height: 2.2; }
+  .arch .layer { display: inline-block; background: #eef4ff; border: 1.5px solid #1d6fd6; border-radius: 6px; padding: 0.2rem 1rem; margin: 0.15rem; font-weight: 600; }
+  .arch .arrow { color: #1d6fd6; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · promptSession 流程深度：12 步管线与 Prompt 冻结策略 <span class="tag">核心管线</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能画出 promptSession 的 12 步完整管线，讲清 System Prompt 的 7 层组装过程，理解 ResourceLoader 代理机制和 Prompt 冻结保护 Prefix Cache 的设计意图。
+</div>
+
+<p><code>promptSession()</code> 位于 L2637-2695，方法体仅 58 行。但它编排了从"用户输入"到"LLM API 调用"的完整"最后一公里"管线。本课拆解其中每一步和背后的 prompt 组装机制。</p>
+
+<h2>一、12 步管线全景</h2>
+
+<div class="step"><span class="num">1</span><b>normalizeSessionTurnContext</b>：规范化 turn 上下文（subagent 返回结果、hook 注入等）。<br><span class="where">L2638</span></div>
+<div class="step"><span class="num">2</span><b>_assertActiveDesktopSessionPath</b>：校验 sessionPath 指向 agents/{id}/sessions/*.jsonl 的活跃路径。<br><span class="where">L2640</span></div>
+<div class="step"><span class="num">3</span><b>_getSessionEntryByPath / ensureSessionLoaded</b>：从 _sessions Map 查找 → 不在则从磁盘 restore。<br><span class="where">L2642</span></div>
+<div class="step"><span class="num">4</span><b>_reloadDirtyExtensionRunnerIfPossible</b>：检测 extension runner 是否需要重载（如 .claude/ 配置变更）。<br><span class="where">L2645</span></div>
+<div class="step"><span class="num">5</span><b>prepareVisionInputForTextOnlyModel</b>：检测目标模型是否纯文本；若是，通过 Vision Bridge 预处理图片。<br><span class="where">L2648 — 可被 AbortController 取消</span></div>
+<div class="step"><span class="num">6</span><b>prepareModelImageInputsForPrompt</b>：进一步处理图片输入（编码、尺寸调整、格式转换）。<br><span class="where">L2652</span></div>
+<div class="step"><span class="num">7</span><b>assertVideoInputSupported / assertAudioInputSupported</b>：校验目标模型的媒体格式支持。<br><span class="where">L2656</span></div>
+<div class="step"><span class="num">8</span><b>buildPromptMediaOptions</b>：聚合 images + videos + audios + attachmentPaths 为统一选项。<br><span class="where">L2660</span></div>
+<div class="step"><span class="num">9</span><b>engine.beginCurrentTurnNativeMedia</b>：开始本 turn 的原生媒体追踪（屏幕截图上下文等）。<br><span class="where">L2663</span></div>
+<div class="step"><span class="num">10</span><b>entry.session.prompt(text, promptOpts)</b>：核心调用——委托给 Pi SDK 的 AgentSession.prompt()。<br><span class="where">L2668 — 内部触发 agent.streamFn() → LLM API → 流式 token → tool_use 循环</span></div>
+<div class="step"><span class="num">11</span><b>finally 清理</b>：清理 turnContext → 结束原生媒体追踪 → 修剪内联媒体历史 → 投射 oversized JSONL 条目 → 调度内存压力检查。<br><span class="where">L2675-2688</span></div>
+<div class="step"><span class="num">12</span><b>agent._memoryTicker.notifyTurn</b>：通知 MemoryTicker 本轮对话已完成，触发记忆编译检查。<br><span class="where">L2692</span></div>
+
+<div class="danger">
+⚠️ <b>关键洞察：</b>promptSession 本身<b>不构建 system prompt、不处理工具定义、不管理上下文窗口</b>。这些工作在 createSession 时已通过 prompt 快照冻结完成。promptSession 只管"最后一公里"——视觉预处理、媒体校验、调用 session.prompt()、事后清理。
+</div>
+
+<h2>二、System Prompt 的 7 层组装管线（createSession 内）</h2>
+
+<table>
+<tr><th>步骤</th><th>来源</th><th>代码行</th><th>说明</th></tr>
+<tr><td>1. baseSystemPrompt</td><td><code>agent.buildSystemPrompt({...})</code></td><td>L1391</td><td>Agent 主 system prompt，含角色设定、知识约束、工具使用规则</td></tr>
+<tr><td>2. providerPromptPatches</td><td><code>getProviderPromptPatches(model)</code></td><td>L1272-1277</td><td>模型提供商特定补丁（如 DeepSeek 思维链格式）</td></tr>
+<tr><td>3. appendSystemPrompt</td><td><code>buildAppendSystemPromptSnapshot()</code></td><td>L1403-1410</td><td>组合：ResourceLoader 追加 prompt + provider 补丁 + 后台任务提示 + workspace scope</td></tr>
+<tr><td>4. skillsResult</td><td><code>skills.getSkillsForAgent(agent)</code></td><td>L1411-1419</td><td>Agent 专属 Skills 列表（freezeSkillsResult 保护 prefix cache）</td></tr>
+<tr><td>5. agentsFilesResult</td><td><code>resourceLoader.getAgentsFiles()</code></td><td>L1420-1421</td><td>Agent 目录下的上下文文件快照（CLAUDE.md 等）</td></tr>
+<tr><td>6. visionContextInjection</td><td><code>createVisionContextInjectionExtension()</code></td><td>L1443-1458</td><td>视觉辅助上下文注入扩展</td></tr>
+<tr><td>7. turnContextExtension</td><td><code>createSessionTurnContextExtension()</code></td><td>L1459-1465</td><td>Turn 上下文扩展（subagent 结果回传）</td></tr>
+</table>
+
+<h2>三、ResourceLoader 代理 —— Prompt 注入的机制</h2>
+
+<p>Coordinator 不直接写入 prompt 字符串。它使用 <code>Object.create(baseResourceLoader, props)</code> 创建<b>原型链代理</b>（L1491）：</p>
+
+<pre><code>const resourceLoader = Object.create(baseResourceLoader, {
+  getSystemPrompt:      { value: () => systemPromptSnapshot },
+  getExtensions:        { value: () => [turnCtx, visionAux, ...base] },
+  getAppendSystemPrompt:{ value: () => [...appendSystemPromptSnapshot] },
+  getSkills:            { value: () => resolveSessionSkillsForRuntime(...) },
+  getAgentsFiles:       { value: () => freezeAgentsFilesResult(...) },
+});</code></pre>
+
+<p>这个代理对象被传入 <code>createAgentSession({ resourceLoader })</code>。Pi SDK 在每次 LLM 请求中通过 <code>resourceLoader.getSystemPrompt()</code> 获取 prompt，实现了 <b>per-session prompt 隔离</b>——每个 session 读到的 prompt 是创建时冻结的版本。</p>
+
+<h2>四、Prompt 冻结策略 —— 保护 Prefix Cache</h2>
+
+<blockquote>
+<b>设计意图：</b>LLM API 的 prompt caching 是成本优化的关键。如果中间某次请求的 system prompt 发生任何变化，Anthropic/OpenAI 等提供商判定 cache miss，导致全量 token 计费。冻结 prompt snapshot 的目的就是让同一 session 的每次请求都能命中 cache prefix，每次节省数万 token 的处理费用。
+</blockquote>
+
+<p>冻结覆盖以下 4 项（统一存入 <code>promptSnapshot</code>）：</p>
+<ul>
+<li><code>systemPrompt</code> —— 主体 system prompt</li>
+<li><code>appendSystemPrompt</code> —— 追加 prompt 片段</li>
+<li><code>skillsResult</code> —— 技能列表</li>
+<li><code>agentsFilesResult</code> —— Agent 文件快照</li>
+</ul>
+
+<p>以上内容在 <code>restoredPromptSnapshot</code> 存在时直接复用，不重新计算（L1255-1260），确保同一 session 的 prefix cache 永远匹配。</p>
+
+<h2>五、扩展管线：视觉预处理与 AbortController</h2>
+
+<p>第 5 步 <code>prepareVisionInputForTextOnlyModel</code> 是 promptSession 中最容易被忽略但最脆弱的一环。当目标模型不支持图片输入时，Coordinator 需要将图片"翻译"为文本描述：</p>
+
+<pre><code>// 伪代码：视觉预处理流程
+async function prepareVisionInputForTextOnlyModel(opts) {
+  if (modelSupportsVision(targetModel)) return; // 直接支持 → 跳过
+
+  // 1. 调用 Vision Bridge（独立的视觉模型 API）
+  const descriptions = await visionBridge.describeImages({
+    images: opts.images,
+    signal: opts.abortSignal,  // ← 可被取消
+  });
+
+  // 2. 将文本描述注入到用户消息中
+  opts.text = `[用户发送了 ${images.length} 张图片]\n`
+    + descriptions.join('\n') + `\n\n用户消息：${opts.text}`;
+}</code></pre>
+
+<div class="danger">
+⚠️ <b>为什么这一步需要 AbortController？</b>视觉描述 API 可能因为图片过大、网络超时、模型限流等原因长时间卡住。没有取消机制，用户只能强制关闭应用。AbortController 允许用户在 promptSession 的第 5 步被阻塞时取消预处理，保留 session 状态不被破坏。
+</div>
+
+<p>第 11 步的 finally 清理块同样值得关注——它不仅是"打扫战场"，还承担了关键的数据完整性职责：</p>
+<ul>
+<li><b>投射 oversized JSONL 条目：</b>异常大的消息行会导致 JSONL 解析性能下降，需拆分为多行</li>
+<li><b>修剪内联媒体历史：</b>避免图片/视频的 base64 数据在 session 文件中无限累积</li>
+<li><b>调度内存压力检查：</b>通知 Coordinator 评估是否需要 hibernate 当前 session</li>
+</ul>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. promptSession 的 12 步管线中，哪一步是委托给 Pi SDK 的核心调用？</p>
+<span class="opt">A. 第 5 步 —— prepareVisionInputForTextOnlyModel</span>
+<span class="opt">B. 第 10 步 —— entry.session.prompt(text, promptOpts)，触发 agent.streamFn() → LLM API</span>
+<span class="opt">C. 第 11 步 —— finally 清理逻辑</span>
+<span class="opt">D. 第 12 步 —— agent._memoryTicker.notifyTurn</span>
+<details><summary>看答案</summary><b>B</b>。第 10 步是核心——将用户文本和组装好的选项传给 Pi SDK 的 AgentSession.prompt()，其内部触发 agent.streamFn() 调用 LLM API，并处理流式 token 回调和 tool_use → tool_result 循环。前 9 步都是预处理，后 2 步是清理。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 createSession 要冻结 prompt snapshot？</p>
+<span class="opt">A. 为了减少内存占用——冻结的对象可以被 GC 更高效回收</span>
+<span class="opt">B. 为了保护 LLM API 的 prompt prefix cache——同一 session 的 system prompt 不变，确保每次请求命中 cache，节省 token 费用</span>
+<span class="opt">C. 为了防止插件代码篡改 system prompt</span>
+<span class="opt">D. 为了支持 session 的序列化和反序列化</span>
+<details><summary>看答案</summary><b>B</b>。这是成本优化设计。LLM API 的 prompt caching 按 prefix 匹配——system prompt 是对话中最固定的部分。一旦冻结，同一 session 的所有后续请求共享相同的 system prompt prefix，命中 cache 时不计费或大幅折扣。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. ResourceLoader 代理使用什么机制实现 per-session prompt 隔离？</p>
+<span class="opt">A. 使用 ES6 Proxy 对象拦截所有属性访问</span>
+<span class="opt">B. 使用 Object.create() 原型链继承 + 属性描述符覆盖 getter</span>
+<span class="opt">C. 使用闭包捕获 sessionId 变量</span>
+<span class="opt">D. 使用 Symbol 作为私有属性键</span>
+<details><summary>看答案</summary><b>B</b>。Coordinator 使用 Object.create(baseResourceLoader, props) 创建原型链代理，通过属性描述符覆盖 getSystemPrompt、getExtensions 等 getter。Pi SDK 在每次 LLM 请求中调用这些 getter，读取到 Coordinator 注入的冻结 prompt 数据。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. finally 清理块中"投射 oversized JSONL 条目"的目的是什么？</p>
+<span class="opt">A. 压缩 JSONL 文件以节省磁盘空间</span>
+<span class="opt">B. 将异常大的消息行拆分为多行，避免 JSONL 单行解析性能下降和内存尖峰</span>
+<span class="opt">C. 删除所有 base64 编码的图片数据</span>
+<span class="opt">D. 将 JSONL 格式转换为二进制格式以提高读取速度</span>
+<details><summary>看答案</summary><b>B</b>。JSONL 是逐行解析的格式——如果某一行过大（例如包含大量 tool_result 数据），解析该行时会消耗大量内存和时间。投射（project）机制将超大行拆分为多行引用，主行只保留元数据指针。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：精读 <code>session-coordinator.ts</code> L1388-1491（createSession 的 prompt 冻结管线）和 L2637-2695（promptSession 方法体）。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「如果我想在 mid-session 切换 Agent，prompt snapshot 会如何处理？」「视觉预处理的 AbortController 在什么场景下被触发取消？」下一课聚焦 <strong>executeIsolated 隔离执行</strong>——子 Agent / Workflow / Cron 共用模型与 resume 机制。</div>
+
+<div class="nav">课程 0002 / SessionCoordinator 架构剖析 · 上一课：<a href="0001.html">0001 架构全景</a> · 下一课：<a href="0003.html">0003 executeIsolated 隔离执行</a></div>
+
+</body>
+</html>

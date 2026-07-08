@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Snail AI 记忆链路时序图</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#52616b; --line:#d8e1e8; --blue:#1f6feb; --green:#26734d; --amber:#9a6700; --bg:#f6f8fa; }
+    body { margin:0; font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:920px; margin:0 auto; padding:32px 20px 48px; }
+    nav { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:22px; }
+    nav a { color:var(--blue); text-decoration:none; border:1px solid var(--line); border-radius:6px; padding:5px 9px; }
+    h1 { font-size:30px; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:20px; margin:28px 0 10px; letter-spacing:0; }
+    p { margin:9px 0; }
+    code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:#eef2f6; border-radius:4px; padding:1px 4px; }
+    .lead { font-size:18px; color:var(--muted); }
+    .pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 9px; margin:2px 6px 2px 0; color:var(--muted); font-size:13px; }
+    .path { display:block; margin-top:6px; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+    pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px 16px; overflow:auto; line-height:1.5; }
+    pre code { background:transparent; padding:0; border-radius:0; }
+    .callout { border-left:4px solid var(--amber); background:#fff8dc; padding:10px 14px; border-radius:4px; }
+    .exercise { border:1px solid var(--line); border-radius:8px; padding:14px 16px; background:#fbfcfe; }
+    .ok { color:var(--green); font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../module-memory/lessons/0001-memory-module-tour.html">Memory L1</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 链 L1</a>
+    <a href="../../module-persistence/lessons/0001-persistence-module-tour.html">Persistence L1</a>
+    <a href="../reference/memory-flow-map.html">记忆链路速查</a>
+  </nav>
+
+  <h1>Snail AI 记忆链路时序图</h1>
+  <p class="lead">本课只完成一个目标：按真实源码顺序说清一次对话中短期历史如何写入和读取，长期记忆应在哪个位置注入，以及当前实现的缺口在哪里。</p>
+  <p><span class="pill">预计 12 分钟</span><span class="pill">主来源：<code>ContextCollectorHandler</code></span><span class="pill">输出：一张可复述时序图</span></p>
+
+  <h2>1. 先背主时序</h2>
+  <p>入口服务把 <code>AgentChatCommand</code> 转成 <code>AgentChatContext</code>，<code>AgentChatChainService</code> 逐个执行 Spring 已排序的 <code>AgentChatHandler</code>。记忆切片的关键不是“是否有 memory 模块”，而是这些写读点的先后关系。</p>
+  <pre><code>用户消息
+  └─ AgentChatService
+      └─ AgentChatChainService
+          ├─ @Order(10)  InitContextHandler
+          ├─ @Order(20)  ConversationHandler
+          │   └─ 写入 user 记录到 AgentConversationRecord
+          ├─ @Order(50)  SystemPromptHandler
+          ├─ @Order(60)  RagHandler 可能追加 systemPrompt
+          ├─ @Order(75)  ContextCollectorHandler
+          │   ├─ 选择 alive Client
+          │   ├─ shortTermMemoryStore.append(user)
+          │   └─ shortTermMemoryStore.loadHistory(...)
+          ├─ 长期召回插槽：当前源码未看到注入调用
+          └─ @Order(80)  LlmCallHandler
+              └─ ChatDispatchRequest → gRPC /chat/dispatch → Client LLM</code></pre>
+  <p><span class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ContextCollectorHandler.java</span></p>
+
+  <h2>2. 短期历史为什么不会重复当前消息</h2>
+  <p><code>ConversationHandler</code> 先把当前用户消息写入会话记录；随后 <code>ContextCollectorHandler</code> 如果 <code>memoryEnabled</code> 没有显式为 <code>false</code>，会把同一条用户消息追加到短期 store，再调用 <code>loadHistory</code>。两个 store 都会返回时间正序历史，并排除最后一条，因为当前用户消息稍后会由 <code>DefaultPromptFactory</code> 作为新的 <code>UserMessage</code> 追加。</p>
+  <p><code>DbShortTermMemoryStore</code> 的 <code>append</code> 是空操作，因为用户记录和 assistant 记录已经由会话记录表持久化；它每次从 DB 取最近窗口。<code>InMemoryShortTermMemoryStore</code> 则维护 JVM 内的有界队列，冷启动或 miss 时从 DB 回填。</p>
+
+  <h2>3. 长期记忆的真实边界</h2>
+  <p>架构文档描述的目标链路是：检索长期记忆、构造“用户历史记忆”、注入系统提示词，然后再调用 LLM。当前源码里只有 <code>AgentChatContext.memoryContext</code> 和 <code>ChatDispatchRequest.memoryContext</code> 字段，但没有看到 <code>MemoryInjectionAdvisor</code>、<code>setMemoryContext</code> 或长期检索服务被主链调用；Client 侧 <code>DefaultPromptFactory</code> 也没有读取 <code>memoryContext</code>。</p>
+  <div class="callout">
+    <p><span class="ok">排查结论：</span>当前可执行链路里，长期记忆召回注入不是已闭环能力。若用户说“开启 memory 后长期偏好没生效”，优先检查是否根本没有注入点，而不是先调向量阈值。</p>
+  </div>
+
+  <h2>4. completion 后才更新 assistant 侧记忆</h2>
+  <p>Client 完成模型调用后发送 <code>ChatStreamResponse.TYPE_COMPLETION</code>。Server 的 <code>ChatStreamObserver#handleCompletion</code> 调用 <code>ChatResultPersistService#persistAsync</code>，在虚拟线程里插入 assistant 会话记录、追加 assistant 到 <code>ShortTermMemoryStore</code>，再更新用量统计。因此“本轮 assistant 回复”只能影响下一次历史加载，且异步写入可能比前端流结束稍晚。</p>
+  <pre><code>Client completion
+  └─ ChatStreamObserver.handleCompletion
+      └─ ChatResultPersistService.persistAsync
+          ├─ insert assistant AgentConversationRecord
+          ├─ shortTermMemoryStore.append(assistant)
+          └─ update AgentUsageStat
+
+下一轮用户消息
+  └─ ContextCollectorHandler.loadHistory
+      └─ 读到上一轮 user + assistant，排除当前 user</code></pre>
+
+  <div class="exercise">
+    <p>检索练习：不看上文，回答两个判断题。第一，<code>ContextCollectorHandler(@Order 75)</code> 读取短期历史是在 <code>ConversationHandler</code> 保存用户消息之前还是之后？第二，当前源码里 <code>memoryContext</code> 会不会被 <code>DefaultPromptFactory</code> 注入 LLM Prompt？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>第一题：之后。用户消息先由 <code>ConversationHandler</code> 写入，<code>ContextCollectorHandler</code> 再追加短期 store 并读取历史，store 读取时排除最后一条当前用户消息。第二题：不会；当前 <code>DefaultPromptFactory</code> 只组装 <code>systemPrompt</code>、<code>historyMessages</code> 和当前 <code>userMessage</code>。继续排查时查 <a href="../reference/memory-flow-map.html">记忆链路速查</a>，也可以向 agent 追问某个字段的具体消费点。</p>
+    </details>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relay Reconnect 参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Relay Reconnect 与 Grace Socket 参考</h1>
+        <p class="meta">范围：部署复用、版本握手、socket ownership、grace timer、dispatcher stale request、main mux/session backoff 和测试护栏。</p>
+
+        <h2>故障分层速查</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层级</th>
+              <th>主要源码</th>
+              <th>判断问题</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>部署层</td>
+              <td><code>src/main/ssh/ssh-relay-deploy.ts</code></td>
+              <td>是否能找到 target-specific endpoint；是否复用旧 daemon；是否需要 fresh detached launch 或 Windows fallback pipe。</td>
+            </tr>
+            <tr>
+              <td>bridge ready 层</td>
+              <td><code>src/main/ssh/ssh-relay-deploy-helpers.ts</code>、<code>src/relay/relay-handshake.ts</code></td>
+              <td>ready sentinel 是否出现；handshake mismatch 是否在 sentinel 前变成 exit 42 和 typed terminal error。</td>
+            </tr>
+            <tr>
+              <td>daemon socket 层</td>
+              <td><code>src/relay/relay.ts</code></td>
+              <td>socket 是否由当前 relay 拥有；旧 socket 是否 stale；client accept 是否取消 grace；旧 stdin 是否被隔离。</td>
+            </tr>
+            <tr>
+              <td>dispatcher 层</td>
+              <td><code>src/relay/dispatcher.ts</code></td>
+              <td>primary/socket client 是否独立；旧 client 的 in-flight request 是否被 abort 或丢弃。</td>
+            </tr>
+            <tr>
+              <td>main mux/session 层</td>
+              <td><code>src/main/ssh/ssh-channel-multiplexer.ts</code>、<code>src/main/ssh/ssh-relay-session.ts</code>、<code>src/main/ipc/ssh.ts</code></td>
+              <td>transport close、write failure、timeout 是否变成 `connection_lost`；session 是否 bounded reconnect；terminal error 是否跳过 backoff。</td>
+            </tr>
+            <tr>
+              <td>PTY 恢复层</td>
+              <td><code>src/relay/pty-handler.ts</code>、<code>src/shared/ssh-types.ts</code></td>
+              <td>grace 是否还没过期；`pty.attach` 是否返回 replay；lease not found 是否被标记 expired。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>部署复用：旧 socket 优先，新 daemon 兜底</h2>
+        <p>
+          <code>deployAndLaunchRelay()</code> 先解析远端平台、版本目录和 node 路径，再进入 <code>launchRelay()</code>。
+          POSIX 路径用 <code>relaySocketNameForInstanceId()</code> 为 target id 生成 socket name，避免同一远端账号下不同 target 互相接上。
+          如果 <code>test -S</code> 返回 alive，主进程执行 <code>relay.js --connect --sock-path ...</code>。
+          如果这次 bridge 失败，部署层会把它当成可恢复 stale socket，尝试删除 socket 后 fresh launch。
+        </p>
+        <div class="flow">POSIX launchRelay()
+  ├─ probe socket
+  ├─ ALIVE -> exec "node relay.js --connect --sock-path ..."
+  ├─ bridge fail -> rm stale socket
+  └─ fresh launch -> nohup node relay.js --detached --grace-time N ...
+       └─ poll READY -> exec "--connect"</div>
+        <p>
+          Windows 路径使用 named pipe。因为 pipe 不能按 Unix socket 模型 unlink，<code>src/main/ssh/ssh-relay-endpoints.ts</code>
+          维护 active pipe marker；旧 pipe 连接失败时，<code>ssh-relay-deploy.ts</code> 会切到确定性的 fallback pipe relaunch，
+          并把 marker 写回，下一次连接优先读这个 active endpoint。socket 名称本身由
+          <code>src/main/ssh/ssh-relay-instance-id.ts</code> 派生，保证同一远端账号下不同 target 的 relay endpoint 隔离。
+        </p>
+
+        <h2>版本握手：sentinel 只代表安全接管</h2>
+        <p>
+          <code>src/relay/relay-handshake.ts</code> 在 daemon socket 交给 dispatcher 前读取一个 handshake frame。
+          bridge 端的 <code>runConnectHandshake()</code> 发送当前 package version；daemon 端的 <code>setupDaemonHandshake()</code>
+          只接受 <code>orca-relay-handshake</code> 且版本匹配的请求。匹配后返回 ok；不匹配则写 mismatch frame 并关闭 socket。
+        </p>
+        <p>
+          <code>src/main/ssh/ssh-relay-deploy-helpers.ts</code> 的 <code>waitForSentinel()</code> 在 sentinel 前把 stdout 当作 startup buffer。
+          如果 bridge 在 sentinel 前以 exit 42 关闭，helper 会用 <code>src/main/ssh/ssh-relay-handshake-mismatch.ts</code>
+          构造 <code>RelayVersionMismatchError</code>，错误类型定义在
+          <code>src/main/ssh/ssh-relay-version-mismatch-error.ts</code>。这个错误到达 <code>SshRelaySession</code> 后触发 terminal callback，
+          再由 <code>src/main/ipc/ssh.ts</code> 发布 error state，跳过普通 relay-lost backoff。
+        </p>
+        <p>
+          注意边界：已有 socket 的一次 <code>--connect</code> 失败不一定立刻 terminal error。POSIX deploy path 会先把它当 stale socket
+          恢复机会处理，fresh launch 后仍失败才会冒泡。Windows path 则可能先切 fallback pipe。
+        </p>
+
+        <h2>Leftover bytes：握手和业务帧可以同包到达</h2>
+        <p>
+          <code>src/relay/protocol.ts</code> 的 <code>FrameDecoder.drain()</code> 是 handshake 交接的关键。
+          TCP/pipe 可能把 handshake-ok 和第一个 JSON-RPC frame 合在一个 chunk 里。daemon 侧和 bridge 侧都在 handshake 接受后 drain leftover，
+          再交给后续 dispatcher 或 main mux。<code>src/relay/relay-handshake-roundtrip.test.ts</code>
+          分别覆盖 daemon side leftover 与 bridge side leftover。
+          main 侧的普通 frame 常量与 sentinel 常量在 <code>src/main/ssh/relay-protocol.ts</code>，handshake frame 的独立解析由
+          <code>src/relay/protocol-handshake.test.ts</code> 保护，覆盖编码、解析、mismatch message、未知 handshake type 拒绝，
+          以及 Handshake message type 与 Regular/KeepAlive 的区分。
+        </p>
+
+        <h2>Socket ownership：旧 relay 不能删除新 relay 的 socket</h2>
+        <p>
+          <code>src/relay/relay.ts</code> 记录当前进程 bind socket 时读到的 identity，包括 dev、ino、ctimeNs。
+          <code>ownsCurrentSocketPath()</code> 只在当前路径仍指向同一个 socket identity 时允许 cleanup。
+          这保护了一个常见竞态：旧 relay 正在 shutdown，而新 relay 已经在同一路径 bind 成功，旧进程不能执行 unlink 把新 socket 删掉。
+        </p>
+        <p>
+          处理 <code>EADDRINUSE</code> 时，relay 也不是直接删文件。它先记录 blocked identity，再用短 timeout 尝试 connect。
+          connect 成功说明另一个 live relay 在服务，当前进程应该失败退出；connect 拒绝或路径消失才按 stale socket 处理。
+        </p>
+
+        <h2>Grace timer：保 PTY，不保空 daemon</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>场景</th>
+              <th>行为</th>
+              <th>源码锚点</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>用户配置 grace</td>
+              <td><code>src/shared/ssh-types.ts</code> 定义 default/min/max 和 0 值语义；main deploy/session 路径把非 0 值 clamp 到合法范围。</td>
+              <td><code>normalizeRelayGracePeriodSeconds()</code>、<code>launchRelay()</code></td>
+            </tr>
+            <tr>
+              <td>detached startup</td>
+              <td>fresh daemon 没有 stdout client，启动后立即 enter grace；第一个 socket client 接入会 cancel grace。</td>
+              <td><code>src/relay/relay.ts</code></td>
+            </tr>
+            <tr>
+              <td>空 detached daemon</td>
+              <td>如果从未有 socket client 且没有 PTY，即使 grace 为 0，也使用短启动窗口，避免空 daemon 永久滞留。</td>
+              <td><code>EMPTY_DETACHED_STARTUP_GRACE_MS</code></td>
+            </tr>
+            <tr>
+              <td>系统睡眠</td>
+              <td><code>prepareForHostSleep()</code> 发送 <code>relay.configureGraceTime</code> 为 0，让睡眠时间不吃掉普通 grace。</td>
+              <td><code>src/main/ssh/ssh-relay-session.ts</code></td>
+            </tr>
+            <tr>
+              <td>client 全断开</td>
+              <td>没有 stdout primary、没有 socket client 时 start grace；到期调用 shutdown，dispose dispatcher、PTY、FS、hook server 并清理 socket。</td>
+              <td><code>src/relay/relay.ts</code>、<code>src/relay/pty-handler.ts</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Dispatcher：多 client 不是共享一个流</h2>
+        <p>
+          <code>src/relay/dispatcher.ts</code> 的 primary client 代表 relay 启动时的原始 stdin/stdout。
+          socket client 通过 <code>attachClient()</code> 加入，每个 client 拥有自己的 decoder、write、seq、ack、generation。
+          通知会广播给所有未关闭 client；relay-originated request 使用 <code>requestAnyClient()</code>，并优先选择真实 socket client，
+          避免把 <code>orca.cli</code> 等请求发给已经失效的 synthetic primary。
+        </p>
+        <p>
+          generation 是 stale work 的判据。请求 handler 开始时捕获 client generation；如果 handler 返回前 client 被 invalidate/detach，
+          response 被丢弃。对应 AbortSignal 也会被触发，长任务可以主动停下。<code>rpc.cancel</code> 通知则按 client/request id
+          取消指定请求。
+        </p>
+
+        <h2>Main mux 与 session backoff</h2>
+        <p>
+          <code>src/main/ssh/ssh-channel-multiplexer.ts</code> 把 relay frame 变成 JSON-RPC request/notification。
+          keepalive 每 5 秒发送；timeout 检查要求“长时间没有收到任何数据”和“最老未 ack 消息超时”同时成立，才 dispose 为
+          <code>connection_lost</code>。单个 request timeout 会拒绝 promise，并发送 <code>rpc.cancel</code>。
+        </p>
+        <p>
+          <code>SshRelaySession.watchMuxForRelayLoss()</code> 监听 mux dispose。如果 reason 是 <code>connection_lost</code>，
+          交给 <code>src/main/ipc/ssh.ts</code> 的 relay-lost backoff。该 backoff 最多 6 次，延迟从 500ms 指数增长到 15s；
+          ready 后还要稳定 5 秒才清零，避免一个刚 ready 又立刻断的 relay 把计数重置。
+        </p>
+
+        <h2>PTY lease 和 replay 的边界</h2>
+        <p>
+          main store 的 SSH remote PTY lease 是 durable 索引，真正 live PTY 在远端 <code>PtyHandler.ptys</code> map。
+          reconnect 时，<code>SshRelaySession.reattachKnownPtys()</code> 合并当前 ownership 与 durable lease，
+          调 <code>SshPtyProvider.attachForReconnect()</code>。relay 侧 <code>pty.attach</code> 返回最近 100KB replay buffer；
+          session 侧用 fingerprint 做 1 秒重复 replay 去重。
+        </p>
+        <p>
+          如果 attach 返回 not found，说明旧 relay 没保住该 PTY，session 会清 local ownership，把 lease 标为 expired，
+          并向 renderer 发送 <code>pty:exit</code>。这和 <code>PtyHandler.revive()</code> 不同：revive 只是在同一 relay
+          进程内根据序列化 PID 重新包装仍存活的 PTY，不能跨 relay 进程退出恢复。
+        </p>
+
+        <h2>测试护栏</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>测试文件</th>
+              <th>保护的不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-deploy.test.ts</code></td>
+              <td>fresh relay grace 默认值、0 值、7 天上限、content-hashed 版本目录、target-specific socket、Windows fallback pipe。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-deploy-helpers.test.ts</code></td>
+              <td><code>waitForSentinel()</code> 在 sentinel 前收集 startup stderr、处理超时，并把 exit 42 映射成 typed mismatch。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-cross-version-isolation.test.ts</code></td>
+              <td>新版本部署不能引用旧版本 install dir 或旧 socket，避免 stale daemon serving new client。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-session-terminal-error.test.ts</code></td>
+              <td>initial connect 和 reconnect 中的 <code>RelayVersionMismatchError</code> 都会触发 terminal relay error callback。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/relay-protocol.test.ts</code></td>
+              <td>main 侧 frame header、ack、keepalive 和 payload size 边界。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/relay-handshake-roundtrip.test.ts</code></td>
+              <td>匹配版本接受；handshake 与业务帧同包时 leftover 不丢；mismatch exit code 为 42。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/protocol-handshake.test.ts</code></td>
+              <td>handshake frame 编码、解析、mismatch message、未知 handshake type 拒绝，以及 Handshake/Regular/KeepAlive 类型区分。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/dispatcher.test.ts</code></td>
+              <td>socket owner 优先、socket client 独立 frame state、failed socket write 不影响其他 client、in-flight response 在 invalidation 后被丢弃。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-channel-multiplexer.test.ts</code></td>
+              <td>request timeout 发送 `rpc.cancel`；keepalive write failure 不从 timer 抛出，而是 dispose；transport close 触发 connection loss。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-session.test.ts</code></td>
+              <td>reconnect 重新注册 provider、reattach live PTY、转发 replay、过期 stale PTY、处理 transient attach failure 和 host sleep grace。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ipc/ssh.test.ts</code></td>
+              <td>relay-lost backoff 有上限；post-ready stabilization 后才清计数；系统 suspend 前把 relay grace 设为 unlimited。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/pty-handler.test.ts</code></td>
+              <td>grace timer 可缩短、0 值不自动过期、configured grace 生效，即使没有 PTY 也等待完整窗口。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/subprocess.test.ts</code></td>
+              <td>真实 relay 子进程下的 <code>relay.status</code>、socket/grace 诊断和 detached/grace 相关运行时行为。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>诊断问答</h2>
+        <p>
+          <span class="tag">问题</span> socket alive 但没有 sentinel，先看哪里？  
+          <span class="tag">答案</span> 先看 bridge handshake 和 exit code。sentinel 只在 handshake ok 后出现；mismatch 会在 sentinel 前关闭。
+        </p>
+        <p>
+          <span class="tag">问题</span> reconnect 成功但旧终端没有 replay，先看哪里？  
+          <span class="tag">答案</span> 看 lease 是否还存在、`pty.attach` 是否 not found、relay 是否 fresh launch 了新 daemon，以及 100KB replay buffer 是否为空。
+        </p>
+        <p>
+          <span class="tag">问题</span> 为什么旧 stdin 要在第一个 socket client 接入后暂停？  
+          <span class="tag">答案</span> 防止 SSH 旧 channel 的残留 data listener 继续向 dispatcher feed bytes，和新 socket client 的 frame 流交错。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

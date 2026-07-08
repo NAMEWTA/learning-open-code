@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Intercom 模块导览：三条协调通道的职责边界</title>
+	<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L1-intercom 短课 0001</p>
+		<h1>Intercom 模块导览：三条协调通道的职责边界</h1>
+		<p>学习目标：读完后能把父子进程消息、native supervisor 通道、结果回传三件事分开，不再把所有 intercom 行为都归因到同一个文件。</p>
+	</header>
+
+	<section>
+		<h2>先建立一个判断框架</h2>
+		<p>这个模块可以按“谁在协调什么”拆成三条通道。第一条是 <strong>bridge</strong>：父进程在启动子 agent 前，决定是否把协调提示和工具名注入到 agent 配置。第二条是 <strong>supervisor channel</strong>：子 agent 运行中遇到阻塞决策时，用文件通道向父进程发请求并等待回复。第三条是 <strong>result intercom</strong>：子 agent 完成后，把完整输出整理成 grouped payload，经事件总线送回父会话，同时让普通返回值保持简洁。</p>
+		<div class="grid">
+			<div class="panel"><strong>Bridge</strong><br>解决“子 agent 应不应该知道如何联系 supervisor”。核心在 <code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code>。</div>
+			<div class="panel"><strong>Supervisor Channel</strong><br>解决“运行中的子 agent 怎样请求决策或报告进度”。核心在 <code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code>。</div>
+			<div class="panel"><strong>Result Intercom</strong><br>解决“完成结果怎样回传，并且不污染普通结果”。核心在 <code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code>。</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>运行时顺序</h2>
+		<div class="flow">
+			<div class="step"><b>1. 启动前：</b>执行器解析 bridge 配置。若 active，就给 agent 追加 <code>intercom</code>、<code>contact_supervisor</code>，并追加带 marker 的系统提示。</div>
+			<div class="step"><b>2. 启动子进程：</b>参数构建层写入 run id、agent、child index、父 session id 和 supervisor channel 目录等环境变量。</div>
+			<div class="step"><b>3. 运行中：</b>子端注册 <code>contact_supervisor</code>。当 reason 是 <code>need_decision</code> 或 <code>interview_request</code> 时，请求文件写入后会等待 reply 文件；<code>progress_update</code> 只排队，不等待回复。</div>
+			<div class="step"><b>4. 父端：</b>父会话启动时开启 supervisor channel 轮询，只展示属于当前 session 的请求，并通过 <code>subagent_supervisor</code> 或 native <code>intercom</code> 回复。</div>
+			<div class="step"><b>5. 完成后：</b>foreground 或 async 路径把结果整理成 grouped payload。若 delivery 被确认，父侧看到 compact receipt；若未确认或 bridge 关闭，就回退到旧的普通输出。</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>边界判断口诀</h2>
+		<p>看到“工具和提示为什么存在”，看 bridge。看到“子 agent 还活着并等待 supervisor 决策”，看 native supervisor channel。看到“子 agent 已经完成，完整输出怎样送回父会话”，看 result intercom。</p>
+		<p>这三个文件之间不是互相替代关系。bridge 只注入能力，不传递请求；supervisor channel 只处理运行中请求，不格式化最终结果；result intercom 只处理完成后的 grouped payload，不替子 agent 做阻塞问答。</p>
+		<p>更长的消息类型、生命周期、调用方矩阵和测试证据见 <a href="../reference/intercom-overview.html">Intercom 总览参考页</a>。</p>
+	</section>
+
+	<section class="exercise">
+		<h2>检索练习</h2>
+		<p>不看上文，判断下面三个故障应该先读哪个文件：</p>
+		<ol>
+			<li>子 agent 没有拿到 <code>contact_supervisor</code> 工具。</li>
+			<li>子 agent 已发出 need_decision，但父会话没有看到待回复请求。</li>
+			<li>parallel run 已完成，父会话只看到简短 receipt，看不到完整输出。</li>
+		</ol>
+		<div class="answer">
+			<p>参考答案：</p>
+			<ol>
+				<li>先读 <code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code>，确认 bridge mode、orchestrator target 和工具注入。</li>
+				<li>先读 <code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code>，确认环境变量、channel 目录、session 过滤、请求生命周期。</li>
+				<li>先读 <code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code>，再看 foreground/async 调用方，因为完整输出应在 grouped payload 里，普通结果会被压缩。</li>
+			</ol>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>课程引用的源文件</h3>
+		<ul>
+			<li><code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/intercom/native-supervisor-channel.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/intercom/result-intercom.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/runs/shared/pi-args.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></li>
+			<li><code>open-ai-agent/pi-subagents/test/integration/intercom-result-delivery.test.ts</code></li>
+		</ul>
+		<p>主要来源建议：本节先读 <code>open-ai-agent/pi-subagents/src/intercom/intercom-bridge.ts</code>，因为它给后两条通道提供“子 agent 是否被授权协调”的入口判断。</p>
+		<p>如果任一边界仍不清楚，下一步可以让 agent 用一个具体故障场景带你沿调用方追踪。</p>
+	</section>
+</main>
+</body>
+</html>

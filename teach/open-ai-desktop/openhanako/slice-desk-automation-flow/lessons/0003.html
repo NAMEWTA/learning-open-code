@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 定时调度与执行：CronScheduler + Agent Session + 通知回传</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .state-diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 定时调度与执行：CronScheduler + Agent Session + 通知回传 <span class="tag">调度执行</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能讲清 CronScheduler 的 60 秒轮询机制、三层控制流（轮询/超时竞速/重启终检）、StudioCronService 的旧版迁移策略，以及 NotificationService 的双通道通知与幂等保护。
+</div>
+
+<p>前两课我们覆盖了存储架构和任务创建流程。本课聚焦<b>任务的定时触发与执行</b>——CronScheduler 如何发现到期任务、如何控制超时、如何与 engine 层协作完成 Agent Session 执行，最后如何将结果通知用户。</p>
+
+<h2>一、CronScheduler：调度核心</h2>
+
+<p><code>createCronScheduler()</code>（<span class="where">lib/desk/cron-scheduler.ts</span>）是调度层核心，<b>不涉及任何 LLM 调用</b>。核心机制：</p>
+
+<div class="step"><span class="num">1</span><b>轮询间隔</b>：固定 60 秒（<code>CHECK_INTERVAL</code>），通过 <code>setInterval</code> 驱动。定时器不调用 <code>unref()</code>，确保空闲时也能可靠触发。</div>
+
+<div class="step"><span class="num">2</span><b>防重入锁</b>：<code>_checking</code> 布尔标志。如果上一个 <code>checkJobs()</code> 还在执行（例如某个 job 跑了超过 60 秒），下一个轮询周期直接跳过，不会堆积。</div>
+
+<div class="step"><span class="num">3</span><b>超时竞速</b>：使用 <code>Promise.race([executeJob(job), timeout(timer)])</code>。默认超时 20 分钟（<code>DEFAULT_ACTIVITY_EXECUTION_TIMEOUT_MS</code>）。超时时调用 <code>abortJob(job.id)</code> 取消正在执行的任务。</div>
+
+<div class="step"><span class="num">4</span><b>优雅关闭</b>：<code>stop()</code> 清除 interval 后 <code>await _checkPromise</code>，确保正在执行的 check 完成后才返回。</div>
+
+<pre><code>// CronScheduler 核心控制流
+setInterval(checkJobs, 60_000)
+  ├── cronStore.listJobs()
+  ├── 过滤: job.enabled && job.nextRunAt <= now
+  └── 逐个 executeJob(job)     // 串行，非 Promise.all
+        │
+        ├── Promise.race([
+        │     executeJob(job),     // engine 层执行
+        │     timeout(20min)       // 超时 abort
+        │   ])
+        │
+        ├── 正常完成 → logRun("success") + markRun(true)
+        ├── 超时     → abortJob(id) + logRun("error")
+        └── skipped  → logRun("skipped")，不推进 nextRunAt</code></pre>
+
+<h2>二、三层控制流</h2>
+
+<p>自动化任务的触发和执行涉及三层调度，每层有各自的超时和重试策略：</p>
+
+<div class="state-diagram">第 1 层：CronScheduler 轮询（60 秒间隔）
+  setInterval(checkJobs, 60_000)  →  过滤到期 job  →  逐个 executeJob
+
+第 2 层：executeJob 超时竞速（默认 20 分钟）
+  Promise.race([executeJob(job), timeout(20min)])
+    正常完成 → success   |   超时 → abortJob   |   skipped → 重试
+
+第 3 层：ActivityStore 启动时终检（应用重启时）
+  finalizeRunningAsInterrupted() → 所有 running → interrupted
+  reconcileOverdueRunning()      → 超时的 running → timeout</div>
+
+<p><strong>控制流关键特性：</strong></p>
+<ul>
+  <li><strong>防重入：</strong><code>_checking</code> 标志位确保同一时间只有一个 <code>checkJobs()</code> 在执行。</li>
+  <li><strong>skipped 不退避：</strong>当 job 抛出 <code>{ skipped: true }</code> 时，不推进 <code>nextRunAt</code>，下一次轮询重试。</li>
+  <li><strong>真正失败有退避：</strong>通过 CronStore 内部的失败计数与指数退避（已在第 1 课详述）。</li>
+</ul>
+
+<h2>三、StudioCronService：多 Agent 统一管理</h2>
+
+<p><code>StudioCronService</code>（<span class="where">core/studio-cron-service.ts</span>）是对 <code>CronStore</code> 的 Studio 级包装，核心职责：</p>
+
+<div class="step"><span class="num">→</span><b>延迟初始化</b>：<code>_getStore()</code> 在首次访问时才创建 CronStore，路径为 <code>{hanakoHome}/studios/{studioId}/desk/</code>。studioId 变更时自动重建 store。</div>
+
+<div class="step"><span class="num">→</span><b>旧版迁移</b>（<code>_importLegacyJobs</code>）：扫描 agentsDir 下所有目录，读取每个 agent 的 <code>desk/cron-jobs.json</code>。通过 <code>studioCronMigration</code> marker 和 <code>legacyRef { agentId, jobId }</code> 机制避免重复迁移。</div>
+
+<div class="step"><span class="num">→</span><b>ExecutionContext 校验</b>：<code>normalizeExecutionContext()</code> 要求 cron job 的 executionContext 必须包含 <code>kind</code>（session_workspace / legacy_agent_home）、<code>cwd</code>、<code>workspaceFolders</code>。</div>
+
+<pre><code>// StudioCronService 旧版迁移流程
+_importLegacyJobs(store, studioId):
+  ├─ 扫描 agentsDir 下所有 agent 目录
+  ├─ 对每个 agent 读取 {agentDir}/desk/cron-jobs.json
+  ├─ 检查 studioCronMigration marker (version + status)
+  │   已标记 "imported" → 跳过
+  ├─ 对每个旧 job：
+  │   ├─ 通过 legacyRef { agentId, jobId } 查找是否已迁移
+  │   ├─ 未迁移 → _toStudioJob() → store.addImportedJob()
+  │   └─ _copyLegacyRunHistory() → 复制 .jsonl 执行历史
+  └─ 全部完成 → markLegacyCronStoreMigrated()
+       写入 studioCronMigration: { version: 1, status: "imported" }</code></pre>
+
+<h2>四、NotificationService：双通道通知与幂等保护</h2>
+
+<p><code>NotificationService</code>（<span class="where">lib/notifications/notification-service.ts</span>）支持两种投递通道：</p>
+
+<table>
+<tr><th>通道</th><th>方法</th><th>特性</th></tr>
+<tr><td>桌面</td><td><code>_emitDesktop()</code></td><td>title/body/agentId + desktopFocusPolicy（always/when_unfocused/when_session_unfocused）</td></tr>
+<tr><td>Bridge</td><td><code>_deliverBridge()</code></td><td>仅 audience="owner"，通过 BridgeManager.sendProactive() 发送文本</td></tr>
+</table>
+
+<p><strong>幂等保护：</strong>使用 <code>_idempotency</code> Map，key 为 <code>idempotencyKey</code>，TTL 10 分钟。发现重复 key 时返回 <code>{ skipped: true }</code> 而不重复发送。</p>
+
+<h2>五、ActivityStore 启动终检：崩溃恢复的第二道防线</h2>
+
+<p>除了 CronScheduler 的运行时超时控制，ActivityStore 在应用启动时执行<b>终检</b>，确保崩溃残留的 running 状态被正确清理：</p>
+
+<pre><code>// ActivityStore 构造函数中的双重终检
+new ActivityStore(path, dir, { finalizeOrphanedRunning: true })
+  │
+  ├── finalizeRunningAsInterrupted()
+  │     → 所有 status="running" → status="error", error="interrupted"
+  │     → 场景：应用崩溃时，正在执行的任务被标记为中断
+  │
+  └── reconcileOverdueRunning()
+        → 运行时间超过 timeoutMs → status="timeout"
+        → 场景：即使 Promise.race 没触发，下次启动时也会清理</code></pre>
+
+<p><strong>为什么需要终检？</strong>Promise.race 的超时检测依赖 JavaScript 事件循环正常运行。如果应用在超时触发前崩溃（OOM、SIGKILL、系统断电），timer 不会触发。下次启动时 ActivityStore 构造函数执行终检，确保所有残留的 running 状态被转换为 interrupted 或 timeout。</p>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. CronScheduler 的轮询间隔是多少？</p>
+<span class="opt">A. 10 秒</span>
+<span class="opt">B. 30 秒</span>
+<span class="opt">C. 60 秒</span>
+<span class="opt">D. 120 秒</span>
+<details><summary>看答案</summary><b>C</b>。CHECK_INTERVAL 固定为 60 秒，通过 setInterval 驱动。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. CronScheduler 如何防止并发 check？</p>
+<span class="opt">A. 使用数据库事务锁</span>
+<span class="opt">B. 使用 _checking 布尔标志作为防重入锁</span>
+<span class="opt">C. 使用 Redis 分布式锁</span>
+<span class="opt">D. 每次 check 前重启进程</span>
+<details><summary>看答案</summary><b>B</b>。_checking 标志确保同一时间只有一个 checkJobs() 在执行。如果上一个 check 超过 60 秒，下一个轮询直接跳过。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. StudioCronService 如何避免重复迁移旧版 cron job？</p>
+<span class="opt">A. 每次迁移前删除所有旧数据</span>
+<span class="opt">B. 使用 legacyRef { agentId, jobId } 查找 + studioCronMigration marker</span>
+<span class="opt">C. 通过文件修改时间判断</span>
+<span class="opt">D. 依赖用户手动确认</span>
+<details><summary>看答案</summary><b>B</b>。legacyRef 追踪从 Agent 个人 cron 到 Studio cron 的对应关系；studioCronMigration marker（version + status）标记整个 agent 目录是否已完成迁移。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. NotificationService 的幂等保护 TTL 是多长？</p>
+<span class="opt">A. 1 分钟</span>
+<span class="opt">B. 5 分钟</span>
+<span class="opt">C. 10 分钟</span>
+<span class="opt">D. 60 分钟</span>
+<details><summary>看答案</summary><b>C</b>。idempotencyKey 在 _idempotency Map 中的 TTL 为 10 分钟。重复 key 返回 { skipped: true }。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>lib/desk/cron-scheduler.ts</code>，重点看 checkJobs() 中的 Promise.race 超时逻辑和 _checking 防重入机制；再打开 <code>core/studio-cron-service.ts</code> 的 _importLegacyJobs 方法。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「为什么调度器选择串行执行 job 而不是 Promise.all 并行？」「如果系统在 Promise.race 超时触发前恰好完成执行，会发生什么？」下一课是<b>异常路径全解与综合测验</b>——文件监听失效、Cron 错过触发、Agent 超时的完整处理链路，以及历史污染修复。</div>
+
+<div class="nav"><a href="0002.html">上一课：任务创建流程</a> · 课程 0003 / 书桌自动化流程 · <a href="0004.html">下一课：异常路径全解与综合测验</a></div>
+
+</body>
+</html>

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟串起 skill slash 激活与递进加载</title>
+  <link rel="stylesheet" href="../assets/slice-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>15 分钟串起 skill slash 激活与递进加载</h1>
+    <p class="lead">
+      学习目标：用户输入 <code>/chart-visualization 画折线图</code> 或 agent 自行 <code>read_file</code> 读 SKILL.md 时，你能指出正文落在哪条 middleware 链、checkpoint 里又存了什么。
+      失败分支与密钥绑定表见
+      <a href="../reference/skill-activation-flow-map.html">skill-activation-flow-map 参考页</a>。
+    </p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">入口：用户消息 <code>/skill-name</code></span>
+      <span class="pill">关联：<a href="../../module-skills/lessons/0001-skills-module-tour.html">module-skills</a> · <a href="../../module-lead-agent/lessons/0001-lead-agent-module-tour.html">lead-agent</a></span>
+    </div>
+
+    <h2>1. 两条路径：显式仪式 vs 工具递进</h2>
+    <p>
+      DeerFlow 不把全部 SKILL.md 塞进系统提示词。<strong>Slash 激活</strong>是用户显式仪式：
+      <span class="where">skills/slash.py</span> 解析严格语法 <code>/name 任务</code>，
+      <span class="where">skill_activation_middleware.py</span> 在当次 model call 前插入隐藏的完整正文。
+      <strong>递进加载</strong>是 agent 用 <code>read_file</code> 读
+      <code>skills/public/&lt;name&gt;/SKILL.md</code>（或 custom 目录）；
+      <span class="where">skill_context.py</span> 只把 name、path、description 写入
+      <code>ThreadState.skill_context</code>，正文不进 checkpoint。
+    </p>
+    <div class="filetree">deer-flow/
+├── skills/
+│   ├── public/chart-visualization/SKILL.md   ← 仓库内示例 skill
+│   └── custom/…                              ← 用户安装，gitignore
+└── backend/packages/harness/deerflow/skills/
+    ├── slash.py          ← 解析 /name
+    └── storage/          ← load_skills + enabled 状态</div>
+
+    <h2>2. Slash 激活主链（happy path）</h2>
+    <p>
+      <code>SkillActivationMiddleware</code> 挂在 lead middleware 链第 13 位（在 DynamicContext 之后）。
+      每次 <code>wrap_model_call</code> 从最新消息向前找真实用户 HumanMessage，用
+      <code>get_original_user_content_text</code> 读原文（InputSanitization 已保留）。
+      解析成功则 <code>_read_skill_content</code> 读磁盘，生成带 <code>hide_from_ui</code> 的激活提醒，插在用户消息之前。
+    </p>
+    <pre>/chart-visualization 画月度趋势
+  → parse_slash_skill_reference
+  → storage.load_skills → enabled + allowlist
+  → 读 SKILL.md 全文 → 隐藏 HumanMessage
+  → handler(model) 模型本轮看到完整 skill</pre>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant U as 用户
+    participant SAM as SkillActivationMiddleware
+    participant ST as SkillStorage
+    participant M as LLM
+
+    U->>SAM: HumanMessage "/chart-visualization 任务"
+    SAM->>SAM: parse_slash_skill_reference
+    SAM->>ST: load_skills + resolve_slash_skill
+    ST-->>SAM: Skill + container path
+    SAM->>SAM: read SKILL.md + build_activation_reminder
+    SAM->>M: messages 插入隐藏激活块 + 原用户消息
+    M-->>U: 按 skill 指令执行（工具环多轮 model call）</pre>
+    </div>
+    <p>
+      同一用户消息不会重复激活：<code>_has_existing_activation_for_target</code> 检查前一条是否已是激活提醒。
+      Slash 还会在 run context 记下容器路径，供后续 tool loop 的 request-scoped secrets 绑定（整 run 有效）。
+    </p>
+
+    <h2>3. 递进加载：read_file → durable 提醒</h2>
+    <p>
+      当模型自己 <code>read_file</code> 读取 skills 根下的 <code>SKILL.md</code> 时，
+      <code>ToolErrorHandlingMiddleware</code> 在 ToolMessage 上打 <code>skill_context_entry</code> 元数据。
+      <code>DurableContextMiddleware</code> 在 <code>before_model</code> 用
+      <code>extract_skills</code> 枚举 AI 调用与 ToolMessage 配对，合并进
+      <code>ThreadState.skill_context</code>（按 path 去重，保留最近读取）。
+      之后每轮 model call 注入的是 <code>render_skill_context</code> 生成的紧凑列表——提醒「已加载过，必要时重读文件」，而不是再次嵌入正文。
+    </p>
+    <pre>read_file(/mnt/skills/public/foo/SKILL.md)
+  → ToolMessage + skill_context_entry
+  → DurableContextMiddleware → state.skill_context[]
+  → 下轮 &lt;durable_context_data&gt; 仅 name/path/description</pre>
+
+    <h2>4. 异常路径与检索练习</h2>
+    <p>
+      解析失败时 middleware 直接返回 <code>AIMessage</code> 错误文案，不调用模型：未安装、已禁用、不在 agent allowlist、路径不安全、保留命令（<code>/new</code>、<code>/goal</code> 等）。
+      密钥侧：registry 读取失败时 fail closed，当次不注入 secrets。
+      完整错误表见 <a href="../reference/skill-activation-flow-map.html#errors">参考页 · 异常</a>。
+    </p>
+    <div class="callout">
+      <p><strong>判断题：</strong>agent 在三轮前用 <code>read_file</code> 加载过 <code>data-analysis</code>，本轮用户未打 slash，summarization 已压缩旧 tool 消息。下列哪项<strong>仍可能</strong>出现在下轮 model 请求里？</p>
+      <p>A. 完整 SKILL.md 正文 &nbsp; B. <code>skill_context</code> 中的 path 提醒 &nbsp; C. 新的 slash 激活块 &nbsp; D. 以上都不会</p>
+    </div>
+    <div class="answer">
+      <p><strong>参考答案：B。</strong>正文只在 slash 当轮或当次 read 的 tool 结果里出现；checkpoint 的 <code>skill_context</code> 经 DurableContextMiddleware 投影为紧凑提醒。C 仅当用户本轮发送 <code>/skill</code>。A 不会因 summarization 自动回放全文。</p>
+    </div>
+
+    <p class="note">
+      主要来源：<code>backend/AGENTS.md</code> Middleware 链与 Skills System 节。
+      想继续下钻「secrets 双来源 union」或 <code>deferred_discovery</code>，向 agent 追问即可。
+    </p>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 响应清洗与流式分片发送</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 响应清洗与流式分片发送 <span class="tag">出站处理</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能列举需清洗的内部标签类型及保护规则，理解 UTF-8 字节分片的必要性，说清 6 种流式投递模式的区别和适用平台。覆盖从 Agent 执行到平台发送的最后 4 层。
+</div>
+
+<p>前几课我们追踪了消息从平台到 LLM 的完整路径。本课聚焦<strong>回程</strong>——LLM 的输出如何被捕获、清洗、分片，最终以合适的格式发送回各个 IM 平台。共覆盖链路的后 4 层（L6-L9）。</p>
+
+<h2>一、Pi SDK Agent 会话启动与执行</h2>
+
+<p>BridgeSessionManager 构建好 Prompt 后，通过 Pi SDK 启动 Agent 会话：</p>
+
+<pre><code>// 1. 创建 Agent 会话
+const { session } = await createAgentSession({
+  cwd: homeCwd,
+  sessionManager: mgr,            // 已有 SessionManager（含历史上下文）
+  authStorage: mm.authStorage,    // API Key 等凭证
+  modelRegistry: mm.modelRegistry,
+  model: ownerModel,
+  thinkingLevel: resolvedThinkingLevel,
+  resourceLoader: visionResourceLoader,
+  tools: ownerTools,
+  customTools: ownerCustomTools,
+});
+
+// 2. 设置活跃工具白名单
+session.setActiveToolsByName(activeToolNames);
+
+// 3. 订阅事件流
+const unsub = session.subscribe((event) => { /* 事件处理 */ });
+
+// 4. Vision 预处理 + 发送 Prompt
+({ text: promptText } = await prepareVisionInputForTextOnlyModel({ ... }));
+await session.prompt(promptText, promptOpts);</code></pre>
+
+<h2>二、事件驱动的响应捕获：4 种关键事件</h2>
+
+<p><code>session.subscribe()</code> 的回调处理 4 种事件类型，这是流式输出的核心机制：</p>
+
+<table>
+<thead><tr><th>事件类型</th><th>触发时机</th><th>处理逻辑</th></tr></thead>
+<tbody>
+<tr><td><code>text_delta</code></td><td>每次 LLM 输出 token 块</td><td><code>capturedText += delta</code>；调用 <code>onDelta(delta, capturedText)</code> 回传给 BridgeManager 做流式投递</td></tr>
+<tr><td><code>tool_execution_end</code></td><td>Agent 调用工具完成</td><td>提取 <code>details.media</code>（生成的图片/视频）；格式化 <code>automationSuggestion</code> 和 <code>settingsUpdate</code></td></tr>
+<tr><td><code>message_end</code></td><td>LLM 输出完成</td><td>检查 <code>stopReason === "error"</code> → 记录 <code>providerErrorMessage</code>；用量统计写入 ledger</td></tr>
+<tr><td><code>usage</code></td><td>每次 token 消耗更新</td><td>通过 <code>recordBridgeAssistantUsage()</code> 写入用量账本（source.subsystem = "phone"）</td></tr>
+</tbody>
+</table>
+
+<div class="side">
+💡 <b>设计亮点：三者正交（#1607）</b><br>
+返回结果为 <b>正文 / 错误 / 截断 三者正交</b>：<code>text</code>（可见正文）、<code>error</code>（provider/transport 错误）、<code>truncated</code>（正文是否因错误不完整）。错误发生时已生成的 partial text 不丢弃，与错误信息分开返回。发送侧根据三个字段独立决策——有 partial text 则发送 + 中断说明，无 text 则发送失败提示。
+</div>
+
+<h2>三、出站清洗：保护 code fence，绝不"吃"正文</h2>
+
+<p>LLM 输出含大量内部结构化标签（用于内省、思考、工具调用等），需在发送前清洗。核心纪律：<strong>保护 code fence 和行内 backtick 中的内容，绝不误删正文</strong>。</p>
+
+<pre><code>// 成对删除（连内容一起删）的标签：
+//   &lt;mood&gt;...&lt;/mood&gt;       — Agent 内省情绪
+//   &lt;pulse&gt;...&lt;/pulse&gt;     — Agent 内心状态
+//   &lt;reflect&gt;...&lt;/reflect&gt; — Agent 反思
+//   &lt;think&gt;...&lt;/think&gt;     — Agent 思考过程
+//   &lt;tool_code&gt;...&lt;/tool_code&gt; — 工具调用代码
+
+// 单标签删除（token-only，无配对内容）：
+//   &lt;/think&gt;               — 裸闭合标签
+//   &lt;t&gt;07-07 14:30&lt;/t&gt;     — 内部时间戳
+//   &lt;|channel-marker|&gt;     — 频道标记
+
+// 保护规则：```...``` 和 `...` 内的标签不删</code></pre>
+
+<div class="danger">
+⚠️ <b>为什么必须保护 code fence？</b><br>
+用户可能正在让 Agent 写 HTML/XML 代码，其中包含 <code>&lt;think&gt;</code>、<code>&lt;/reflect&gt;</code> 等标签。如果不保护 code fence，这些代码中的标签也会被删除，导致用户收到的代码不完整。清洗逻辑必须先识别 code fence 区域，只清洗区域外的标签。
+</div>
+
+<h2>四、流式投递策略矩阵：6 种模式</h2>
+
+<p>不同平台的 API 能力差异巨大，因此 Bridge 支持 6 种投递模式：</p>
+
+<table>
+<thead><tr><th>投递模式</th><th>适用平台</th><th>工作原理</th><th>用户感知</th></tr></thead>
+<tbody>
+<tr><td><code>batch</code></td><td>钉钉、QQ、微信</td><td>累积全部输出后一次性发送</td><td>等待后一次性收到完整回复</td></tr>
+<tr><td><code>block</code></td><td>Telegram</td><td>BlockChunker 按段落/列表/表格分块发送</td><td>逐段收到，像打字机效果</td></tr>
+<tr><td><code>draft</code></td><td>Telegram</td><td>每 500ms 发送 draft 草稿预览，最终发正式消息</td><td>实时看到草稿更新</td></tr>
+<tr><td><code>edit_message</code></td><td>Telegram</td><td>先发空消息占位 → 持续 editMessageText 更新</td><td>看到消息逐渐变长</td></tr>
+<tr><td><code>rich_draft</code></td><td>飞书</td><td>类似 draft + rich 消息格式（支持 Markdown）</td><td>实时看到富文本草稿</td></tr>
+<tr><td><code>cardkit_stream</code></td><td>飞书</td><td>飞书卡片消息流式更新（start → update → finish）</td><td>卡片内容逐步填充</td></tr>
+</tbody>
+</table>
+
+<p>注意：钉钉、QQ、微信三个平台只能使用 <code>batch</code> 模式——它们的 API 不支持消息编辑或流式更新。Telegram 的 Bot API 最为灵活，支持 3 种流式模式。</p>
+
+<h2>五、钉钉发送：UTF-8 字节安全分片</h2>
+
+<p>钉钉消息按 <strong>UTF-8 字节数</strong>（非字符数）分片，限制单条 12000 字节。中文每字 3 字节，约 4000 字即需分片：</p>
+
+<pre><code>async sendReply(chatId, text, options = {}) {
+  const scope = dingTalkTargetScope(options);  // dm 或 group
+  const chunks = splitTextByUtf8Bytes(text, 12000);  // 按 12KB 分批
+
+  for (let i = 0; i < chunks.length; i++) {
+    const msgParam = JSON.stringify({
+      title: chunks.length > 1 ? `Hana ${i+1}/${chunks.length}` : "Hana",
+      text: chunks[i],
+    });
+    if (scope === "group") {
+      await requestRobotApi("send_group", groupUrl, {
+        robotCode, openConversationId: chatId,
+        msgKey: "sampleMarkdown", msgParam,
+      });
+    } else {
+      await requestRobotApi("send_dm", dmUrl, {
+        robotCode, userIds: [chatId],
+        msgKey: "sampleMarkdown", msgParam,
+      });
+    }
+  }
+}</code></pre>
+
+<div class="step"><span class="num">→</span><b>关键细节</b>：<code>splitTextByUtf8Bytes()</code> 不是简单的 <code>text.slice(0, 12000)</code>——它确保不会从多字节字符（如中文、emoji）的中间切割，避免产生乱码。<br>
+<span class="where">lib/bridge/dingtalk-adapter.ts · sendReply()</span></div>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 响应清洗时，为什么要保护 code fence（```...```）内的内容？</p>
+<span class="opt">A. 因为 code fence 内的代码可能包含类似内部标签的字符串（如 &lt;think&gt;），误删会导致用户收到的代码不完整</span>
+<span class="opt">B. 因为 code fence 是 HTML 标签，不能删除</span>
+<span class="opt">C. 因为删除 code fence 会被钉钉 API 拒绝</span>
+<span class="opt">D. 因为 code fence 内的内容更耗时，不需要清洗</span>
+<details><summary>看答案</summary><b>A</b>。用户可能让 Agent 写 HTML/XML/JSX 代码，其中包含 <code>&lt;think&gt;</code>、<code>&lt;/mood&gt;</code> 等字符串。如果不保护 code fence，这些代码也会被当作内部标签删除。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. "三者正交"设计中的三者指什么？为什么这样设计？</p>
+<span class="opt">A. 请求、响应、错误——API 设计的三要素</span>
+<span class="opt">B. 正文（text）、错误（error）、截断（truncated）——错误发生时已生成的 partial text 不丢弃，与错误信息分开返回</span>
+<span class="opt">C. 文本、图片、视频——多模态输出的三种格式</span>
+<span class="opt">D. 同步、异步、流式——三种通信模式</span>
+<details><summary>看答案</summary><b>B</b>。错误发生时已生成的 partial text 保留在 <code>text</code> 字段中，与 <code>error</code> 信息分开。发送侧根据三个字段独立决策：有 partial text 则发送 + 中断说明，无 text 则发送失败提示。这保证了用户不会完全收不到任何回复。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么钉钉只能用 batch 模式，而 Telegram 可以用 edit_message 流式模式？</p>
+<span class="opt">A. 因为 Telegram 的网络延迟更低</span>
+<span class="opt">B. 因为钉钉的消息 API 不支持编辑已发送的消息，Telegram 的 Bot API 提供了 editMessageText 接口</span>
+<span class="opt">C. 因为钉钉的开发文档规定必须用 batch</span>
+<span class="opt">D. 因为 Telegram 使用 HTTP/2，钉钉使用 HTTP/1.1</span>
+<details><summary>看答案</summary><b>B</b>。这是平台 API 能力的差异。Telegram Bot API 提供了 <code>editMessageText</code> 方法，允许在发送后修改消息内容，因此可以实现 draft / edit_message 等流式模式。钉钉的机器人消息 API 不支持修改已发送的消息。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. splitTextByUtf8Bytes 为什么不能简单用 text.slice(0, 12000)？</p>
+<span class="opt">A. 因为 slice 是 JavaScript 的字符级操作，12000 字符不等于 12000 字节（中文每字 3 字节）</span>
+<span class="opt">B. 因为 slice 会改变文本的编码格式</span>
+<span class="opt">C. 因为 slice 不支持 Unicode 字符</span>
+<span class="opt">D. 因为 12000 不是 2 的幂</span>
+<details><summary>看答案</summary><b>A</b>。JavaScript 的 <code>slice</code> 按字符数切割，但钉钉限制的是 UTF-8 字节数（12000 字节）。中文每字 3 字节，emoji 可能 4 字节，直接按字符数切割会导致超出字节限制或被平台拒绝。且必须在字符边界切割，避免截断多字节字符产生乱码。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>lib/bridge/bridge-manager.ts</code>，搜索 <code>_cleanReplyForPlatform</code> 和 <code>stripInternalTags</code> 理解清洗逻辑。然后打开 <code>lib/bridge/dingtalk-adapter.ts</code>，搜索 <code>sendReply</code> 和 <code>splitTextByUtf8Bytes</code>。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「StreamCleaner 和 BlockChunker 的状态机是怎么实现的？」「如果分片发送中途失败，钉钉用户会看到什么？」最后一课我们聚焦 <strong>异常路径全解与综合测验</strong>——5 种异常场景的完整链路表现。</div>
+
+<div class="nav">课程 0004 / 桥接消息流全链路 · <a href="0003.html">← 上一课：Hub 路由</a> · 下一课预告：异常路径全解与综合测验——5 种异常 + 完整时序图</div>
+
+</body>
+</html>

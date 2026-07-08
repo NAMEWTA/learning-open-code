@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenAPI chat 流程速查</title>
+  <link rel="stylesheet" href="../assets/openapi-chat.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-server-entry/reference/server-entry-overview.html">Server 入口参考</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">Agent 链参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client 参考</a>
+    <a href="../../module-commons-grpc/reference/commons-grpc-overview.html">Commons gRPC 参考</a>
+  </nav>
+
+  <h1>OpenAPI chat 流程速查</h1>
+  <p class="lead">这份 reference 用于排查 OpenAPI chat：端点、认证头、DTO 字段去向、writer 行为、同步/流式差异、错误码和 usage 边界都放在这里。</p>
+
+  <h2>1. 端点与认证</h2>
+  <table>
+    <thead>
+      <tr><th>项</th><th>当前源码事实</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>默认外部 base</td>
+        <td><code>application.yml</code> 配置 <code>server.port=8900</code>、<code>server.servlet.context-path=/snail-ai</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-starter/src/main/resources/application.yml</span></td>
+      </tr>
+      <tr>
+        <td>流式 chat</td>
+        <td><code>POST /openapi/v1/agent/chat</code>，默认部署下通常是 <code>POST /snail-ai/openapi/v1/agent/chat</code>，produces <code>text/event-stream</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/controller/OpenApiChatController.java</span></td>
+      </tr>
+      <tr>
+        <td>同步 chat</td>
+        <td><code>POST /openapi/v1/agent/chat/sync</code>，返回 <code>Result&lt;OpenApiChatSyncResponse&gt;</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/constants/OpenApiPathConstants.java</span></td>
+      </tr>
+      <tr>
+        <td>必需 Header</td>
+        <td><code>Snail-Ai-App-Id</code> 与 <code>Snail-Ai-Token</code>。OpenAPI 不使用 Admin 的 <code>Snail-Ai-Auth</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/interceptor/OpenApiAuthInterceptor.java</span></td>
+      </tr>
+      <tr>
+        <td>认证流程</td>
+        <td>读取 header，按 <code>appId</code> 查 <code>AppPO</code> 并缓存 5 分钟，要求 <code>status=1</code>，用 <code>MessageDigest.isEqual</code> 比较 token，写入 <code>OpenApiSessionUtils</code>，请求结束后清理。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/config/OpenApiWebMvcConfiguration.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <pre>curl -N -X POST http://localhost:8900/snail-ai/openapi/v1/agent/chat \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -H "Snail-Ai-App-Id: your-app-id" \
+  -H "Snail-Ai-Token: your-token" \
+  -d '{"agentId":1,"openId":"u-001","conversationId":"c-001","content":"你好"}'</pre>
+
+  <h3 id="controller-snippet">真实源码片段：Controller 路由与返回类型</h3>
+  <p>入口层只做路由、校验和返回类型转换；流式接口返回 SSE Flux，同步接口包一层 <code>Result.ok(...)</code>。</p>
+  <pre><code>@PostMapping(value = OpenApiPathConstants.OPEN_API_AGENT_CHAT, produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public Flux&lt;ServerSentEvent&lt;String&gt;&gt; chat(@RequestBody @Validated OpenApiChatRequest request) {
+    return openApiChatService.chatStream(request)
+            .map(this::toServerSentEvent);
+}
+
+@PostMapping(OpenApiPathConstants.OPEN_API_AGENT_CHAT_SYNC)
+public Result&lt;OpenApiChatSyncResponse&gt; chatSync(@RequestBody @Validated OpenApiChatRequest request) {
+    return Result.ok(openApiChatService.chatSync(request));
+}</code></pre>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/controller/OpenApiChatController.java</span></p>
+
+  <h2>2. 请求 DTO 字段去向</h2>
+  <table>
+    <thead>
+      <tr><th>OpenApiChatRequest 字段</th><th>校验</th><th>当前去向</th><th>排查含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>agentId</code></td><td><code>@NotNull</code></td><td><code>AgentChatCommand.agentId</code>，后续 <code>InitContextHandler</code> 加载 Agent。</td><td>Agent 不存在会在责任链早期写错误并终止。</td></tr>
+      <tr><td><code>openId</code></td><td><code>@NotBlank</code></td><td><code>OpenApiUserResolver</code> 用 <code>appId + openId</code> 解析平台 <code>UserPO</code>，同时写入 <code>AgentChatCommand.openId</code>。</td><td><code>OpenId 无效</code> 属于认证类异常，返回 <code>status=5001</code>。</td></tr>
+      <tr><td><code>conversationId</code></td><td><code>@NotBlank</code></td><td><code>AgentChatCommand.conversationId</code>，用于会话记录、短期历史、路由选择和最终 <code>done</code>。</td><td>同一会话复用会影响短期历史。</td></tr>
+      <tr><td><code>content</code></td><td><code>@NotBlank</code></td><td><code>AgentChatCommand.content</code>，最终成为 <code>ChatDispatchRequest.userMessage</code>。</td><td>Client <code>DefaultPromptFactory</code> 会把它追加为最后一个 <code>UserMessage</code>。</td></tr>
+      <tr><td><code>disabledMcpServerIds</code></td><td>无</td><td><code>McpHandler</code> 过滤 MCP server 后生成 <code>mcpServers</code> descriptor。</td><td>仅当 Agent 启用 MCP 且绑定 server 时可见效果。</td></tr>
+      <tr><td><code>disabledSkillIds</code></td><td>无</td><td><code>SkillAgentChatHandler</code> 过滤 skill 后生成 <code>skills</code> descriptor。</td><td>仅当 Agent 启用 Skill 且有 skill 内容时可见效果。</td></tr>
+      <tr><td><code>sid</code></td><td>无</td><td>为空时服务端生成 UUID，进入 <code>AgentChatCommand.sid</code>、<code>ChatDispatchRequest.sid</code>、回流 <code>ChatStreamResponse.sid</code>。</td><td>用于区分同一用户同一会话下的并发提交。</td></tr>
+      <tr><td><code>deepPlanEnabled</code></td><td>无</td><td>当前 <code>OpenApiChatService</code> 未消费。</td><td>传入不会影响当前 chat 链路。</td></tr>
+      <tr><td><code>webSearchEnabled</code></td><td>无</td><td>当前 <code>OpenApiChatService</code> 未消费；<code>WebSearchHandler</code> 在当前源码中也未注册 <code>@Component</code>。</td><td>传入不会启用 web search。</td></tr>
+      <tr><td><code>timeout</code></td><td>无</td><td>当前 <code>OpenApiChatService</code> 未消费；同步等待固定 <code>300_000ms</code>。</td><td>同步超时不能通过请求体字段调整。</td></tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/openapi/dto/OpenApiChatRequest.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/service/OpenApiChatService.java</span></p>
+
+  <h2>3. 内部转换与 Agent 链</h2>
+  <pre class="flow">OpenApiChatRequest
+  └─ OpenApiChatService
+      ├─ resolveRequestUser(openId)
+      │   └─ OpenApiSessionUtils.current().appId + openId → UserPO
+      └─ AgentChatCommand
+          └─ AgentChatService.chat
+              └─ AgentChatContext
+                  ├─ requestUser / openId / sid
+                  ├─ disabledMcpServerIds / disabledSkillIds
+                  └─ streamWriter</pre>
+  <h3 id="service-command-snippet">真实源码片段：OpenApiChatService 字段转换</h3>
+  <p>同步路径和流式路径写入的核心字段一致；差异主要是 <code>streamWriter</code> 使用收集器还是 Flux bridge。</p>
+  <pre><code>CollectingChatStreamWriter collector = new CollectingChatStreamWriter();
+UserPO requestUser = resolveRequestUser(request.getOpenId());
+
+String sid = StringUtils.hasText(request.getSid())
+        ? request.getSid()
+        : UUID.randomUUID().toString();
+
+agentChatService.chat(AgentChatCommand.builder()
+        .agentId(request.getAgentId())
+        .conversationId(request.getConversationId())
+        .content(request.getContent())
+        .disabledMcpServerIds(request.getDisabledMcpServerIds())
+        .disabledSkillIds(request.getDisabledSkillIds())
+        .streamWriter(collector)
+        .requestUser(requestUser)
+        .openId(request.getOpenId())
+        .sid(sid)
+        .build());</code></pre>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/service/OpenApiChatService.java</span></p>
+  <table>
+    <thead>
+      <tr><th>责任链阶段</th><th>顺序</th><th>对 OpenAPI chat 的影响</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>InitContextHandler</code></td><td>10</td><td>优先使用 <code>ctx.requestUser</code>，OpenAPI 场景不依赖 Admin <code>UserSessionUtils</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/InitContextHandler.java</span></td></tr>
+      <tr><td><code>ConversationHandler</code></td><td>20</td><td>创建或复用会话，插入用户消息记录。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ConversationHandler.java</span></td></tr>
+      <tr><td><code>ModelResolveHandler</code></td><td>30</td><td>准备 <code>ChatDispatchRequest.ModelConfig</code>；缺默认模型或配置失败时写错误并终止。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ModelResolveHandler.java</span></td></tr>
+      <tr><td><code>McpHandler</code></td><td>40</td><td>把可用 MCP server 转为 <code>McpServerDescriptor</code>，应用 disabled IDs。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/McpHandler.java</span></td></tr>
+      <tr><td><code>SystemPromptHandler</code></td><td>50</td><td>把 Agent instruction 变为 system prompt。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/SystemPromptHandler.java</span></td></tr>
+      <tr><td><code>RagHandler</code></td><td>60</td><td>根据 Agent RAG 配置追加强制检索结果或可用知识库提示。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/RagHandler.java</span></td></tr>
+      <tr><td><code>SkillAgentChatHandler</code></td><td>70</td><td>把可用 skill 转为 <code>SkillDescriptor</code>，应用 disabled IDs。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/SkillAgentChatHandler.java</span></td></tr>
+      <tr><td><code>ContextCollectorHandler</code></td><td>75</td><td>校验 Agent appId、选择 alive Client、加载短期历史。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ContextCollectorHandler.java</span></td></tr>
+      <tr><td><code>LlmCallHandler</code></td><td>80</td><td>组装 <code>ChatDispatchRequest</code>，通过 gRPC server-streaming 调用 <code>/chat/dispatch</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/LlmCallHandler.java</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. ChatDispatchRequest 与 Client 执行</h2>
+  <table>
+    <thead>
+      <tr><th>分发字段</th><th>写入方</th><th>Client 消费点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>requestId</code></td><td><code>LlmCallHandler</code> 生成 UUID。</td><td><code>ChatDispatchStreamingHandler</code> 只用于日志。</td></tr>
+      <tr><td><code>sid</code></td><td><code>OpenApiChatService</code> 透传或生成。</td><td>每个 <code>ChatStreamResponse</code> text/thinking/completion/error 回带。</td></tr>
+      <tr><td><code>agentConfig</code></td><td><code>LlmCallHandler</code> 从 <code>AgentPO</code> 构造。</td><td>工具解析、Prompt 和上下文使用。</td></tr>
+      <tr><td><code>conversationId</code></td><td>OpenAPI 请求透传。</td><td>Prompt 上下文、工具隔离目录、回传持久化使用。</td></tr>
+      <tr><td><code>userMessage</code></td><td><code>ctx.content</code>。</td><td><code>DefaultPromptFactory</code> 转为最后一个 <code>UserMessage</code>。</td></tr>
+      <tr><td><code>modelConfig</code></td><td><code>DispatchModelConfigAssembler</code> 解密并组装。</td><td><code>ClientModelConfigValidator</code> 要求 <code>apiEndpoint</code>、<code>apiKey</code>、<code>modelKey</code> 非空。</td></tr>
+      <tr><td><code>mcpServers</code> / <code>skills</code></td><td><code>McpHandler</code>、<code>SkillAgentChatHandler</code>。</td><td><code>ToolRuntime</code> 解析为 Client 工具。</td></tr>
+      <tr><td><code>historyMessages</code></td><td><code>ContextCollectorHandler</code> 从短期记忆加载。</td><td><code>DefaultPromptFactory</code> 转为 history messages。</td></tr>
+      <tr><td><code>systemPrompt</code></td><td><code>SystemPromptHandler</code>，可能被 RAG 扩展。</td><td><code>DefaultPromptFactory</code> 转为 <code>SystemMessage</code>。</td></tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/dto/agent/ChatDispatchRequest.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/grpc/handler/ChatDispatchStreamingHandler.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/ClientChatExecutor.java</span></p>
+
+  <h2>5. Writer 行为与响应差异</h2>
+  <table>
+    <thead>
+      <tr><th>场景</th><th>writer</th><th>转发内容</th><th>完成条件</th><th>边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>OpenAPI 流式</td>
+        <td><code>FluxBridgeChatStreamWriter</code>，<code>OpenApiChatService</code> 内部类。</td>
+        <td>能解析为 <code>ChatStreamResponse</code> 的 <code>text</code> 会累积 <code>content</code> 并发 <code>event: text</code>；<code>thinking</code> 发 <code>event: thinking</code>；其他已知/未知类型按原 type 发出。</td>
+        <td><code>complete()</code> 时发一次 <code>event: done</code>，data 为 <code>{"conversationId": "...", "fullText": "..."}</code>，然后 complete Flux。</td>
+        <td>parse 失败的非 JSON chunk 被忽略；completion chunk 不直接发给 OpenAPI，而是触发 Server 侧持久化后由 gRPC completion 转成 done。</td>
+      </tr>
+      <tr>
+        <td>OpenAPI 同步</td>
+        <td><code>CollectingChatStreamWriter</code>。</td>
+        <td>能解析为 text 的 chunk 追加 <code>content</code>；无法解析的非 JSON data 原样追加；thinking 和 completion 不追加。</td>
+        <td><code>complete()</code> 或 <code>completeWithError()</code> 释放 latch；等待超过 300 秒抛 <code>SnailAiException("对话响应超时")</code>。</td>
+        <td>同步响应只有 <code>conversationId</code>、<code>content</code>、<code>durationMs</code>，不返回 token usage、thinking 或 cacheTokens。</td>
+      </tr>
+      <tr>
+        <td>Client gRPC 回流</td>
+        <td><code>ChatStreamObserver</code>。</td>
+        <td>text/thinking 转成 JSON 后写入上游 writer；completion 用于持久化；error 写纯文本 <code>[ERROR] ...</code>。</td>
+        <td>Client <code>observer.onCompleted()</code> 后触发 writer.complete。</td>
+        <td>error chunk 不是 OpenAPI JSON error event；流式侧可能只在服务层 catch 异常时看到 <code>event: error</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/stream/CollectingChatStreamWriter.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ChatStreamObserver.java</span></p>
+
+  <h2>6. SSE 事件与同步响应</h2>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>OpenAPI 事件 / 响应</th><th>data 结构</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>文本增量</td><td><code>event: text</code></td><td><code>ChatStreamResponse</code> JSON 字符串，包含 <code>type=text</code>、<code>sid</code>、<code>content</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/dto/agent/ChatStreamResponse.java</span></td></tr>
+      <tr><td>思考增量</td><td><code>event: thinking</code></td><td><code>ChatStreamResponse</code> JSON 字符串，包含 <code>type=thinking</code>、<code>sid</code>、<code>content</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/openapi/dto/OpenApiChatStreamEvent.java</span></td></tr>
+      <tr><td>流结束</td><td><code>event: done</code></td><td><code>{"conversationId":"...","fullText":"..."}</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/service/OpenApiChatService.java</span></td></tr>
+      <tr><td>服务层错误</td><td><code>event: error</code></td><td><code>{"message":"..."}</code>。由 <code>OpenApiChatService#emitError</code> 产生。</td><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/openapi/dto/OpenApiChatStreamEvent.java</span></td></tr>
+      <tr><td>同步成功</td><td><code>Result.ok(OpenApiChatSyncResponse)</code></td><td><code>status=1</code>、<code>message=success</code>、<code>data.conversationId/content/durationMs</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/openapi/dto/OpenApiChatSyncResponse.java</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 错误码和异常边界</h2>
+  <table>
+    <thead>
+      <tr><th>问题</th><th>当前返回 / 行为</th><th>优先查哪里</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>缺少认证头</td><td><code>SnailAiAuthenticationException</code>，OpenAPI exception handler 返回 <code>Result.fail(5001, message)</code>。</td><td><code>OpenApiAuthInterceptor#preHandle</code>、<code>OpenApiExceptionHandler#onAuthException</code>。</td></tr>
+      <tr><td>App 不存在、禁用、token 错误</td><td>同为 <code>status=5001</code>，message 分别说明应用认证失败、应用已禁用或 token 验证失败。</td><td><code>AppPO.status</code>、缓存过期时间、header 是否写反。</td></tr>
+      <tr><td>openId 无效</td><td><code>OpenApiUserResolver</code> 抛认证异常，返回 <code>status=5001</code>。</td><td><code>open_api_user</code> 映射和 <code>platformUserId</code>。</td></tr>
+      <tr><td>参数缺失</td><td><code>MethodArgumentNotValidException</code> 或 <code>BindException</code>，返回 <code>Result.fail("字段 message")</code>，默认 <code>status=0</code>。</td><td><code>OpenApiChatRequest</code> 上的 <code>@NotNull</code>、<code>@NotBlank</code>。</td></tr>
+      <tr><td>没有可用 Client</td><td><code>ContextCollectorHandler</code> 写纯文本 <code>[ERROR] 没有可用的客户端实例...</code> 并 complete；流式 OpenAPI bridge 不会把非 JSON chunk 转为 error event。</td><td>Agent 的 <code>appId</code>、Client 心跳、<code>ClientInstanceManager#getAliveInstances</code>。</td></tr>
+      <tr><td>Client 模型执行失败</td><td>Client 发送 <code>ChatStreamResponse.error(sid, "LLM_FAILED", message)</code>；Server <code>ChatStreamObserver</code> 记录并写纯文本 <code>[ERROR] ...</code>。</td><td><code>ChatDispatchStreamingHandler#handleError</code>、<code>ChatStreamObserver#handleError</code>。</td></tr>
+      <tr><td>同步等待超时</td><td><code>CollectingChatStreamWriter#awaitAndGetFullText</code> 超时，服务层抛 <code>SnailAiException("对话响应超时")</code>。</td><td>Client 是否 <code>onCompleted</code>、模型是否一直无 completion、同步固定 300 秒。</td></tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/execption/SnailAiAuthenticationException.java</span></p>
+  <p><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/model/Result.java</span></p>
+
+  <h2>8. Usage 边界</h2>
+  <pre class="flow">模型流最终 chunk
+  └─ TokenUsageCollectorAdvisor
+      ├─ Usage.promptTokens / completionTokens
+      ├─ TokenUsageCollectorAdvisor#extractCacheTokens(Usage)
+      │   └─ 反射读取 nativeUsage.promptTokensDetails.cachedTokens
+      └─ 写入 ClientStreamExecutionContext
+          └─ ChatCompletionResult
+              └─ ChatDispatchStreamingHandler completion
+                  └─ ChatStreamResponse.completion
+                      └─ ChatStreamObserver.handleCompletion
+                          └─ ChatResultPersistService.persistAsync</pre>
+  <table>
+    <thead>
+      <tr><th>观察点</th><th>判断</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>OpenAPI SSE 是否返回 usage</td><td>当前不会直接返回。completion chunk 在 Server 侧用于持久化，OpenAPI 侧最终发 <code>done</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ChatStreamObserver.java</span></td></tr>
+      <tr><td>同步响应是否返回 usage</td><td>不会。<code>OpenApiChatSyncResponse</code> 只有 <code>conversationId</code>、<code>content</code>、<code>durationMs</code>。</td><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/openapi/dto/OpenApiChatSyncResponse.java</span></td></tr>
+      <tr><td>usage 为什么是 0</td><td><code>TokenUsageCollectorAdvisor</code> 只有在 <code>Usage</code> 存在且 <code>totalTokens > 0</code> 时写入；否则保持默认 0。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/advisor/TokenUsageCollectorAdvisor.java</span></td></tr>
+      <tr><td>cacheTokens 为什么是 0</td><td><code>TokenUsageCollectorAdvisor#extractCacheTokens</code> 通过反射读取 OpenAI 兼容 nativeUsage 的 <code>promptTokensDetails.cachedTokens</code>；非兼容模型或字段不存在时返回 0。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/advisor/TokenUsageCollectorAdvisor.java</span></td></tr>
+      <tr><td><code>ClientStreamExecutionContext</code> 的角色</td><td>只保存 Advisor 写入的 <code>promptTokens</code>、<code>completionTokens</code>、<code>cacheTokens</code>，并在完成时转为 <code>ChatCompletionResult</code>；不负责反射读取。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/advisor/ClientStreamExecutionContext.java</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>9. 调试 checklist</h2>
+  <table>
+    <thead>
+      <tr><th>症状</th><th>检查顺序</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>HTTP 直接失败</td><td>确认 URL 是否包含 <code>/snail-ai</code> context path；确认两个 OpenAPI header；看 <code>OpenApiExceptionHandler</code> 返回的 <code>status/message</code>。</td></tr>
+      <tr><td>认证通过但用户失败</td><td>确认 <code>OpenApiSessionUtils.current().appId</code> 对应的 <code>openId</code> 映射存在，且 <code>platformUserId</code> 指向真实 <code>UserPO</code>。</td></tr>
+      <tr><td>Agent 链没有输出</td><td>按 Handler 顺序查 <code>terminated</code>：Agent 是否存在、模型配置是否可组装、Agent 是否配置 appId、是否有 alive Client。</td></tr>
+      <tr><td>SSE 有 text 但没有最终内容</td><td>看 Client 是否发送 completion 并 <code>observer.onCompleted()</code>；OpenAPI <code>done</code> 来自 writer.complete，不来自 completion event。</td></tr>
+      <tr><td>SSE 只看到 done 或空 fullText</td><td>排查上游是否写了纯文本 <code>Error:</code> 或 <code>[ERROR]</code>；流式 bridge parse 失败会忽略非 JSON chunk。</td></tr>
+      <tr><td>同步一直等待</td><td>确认 <code>CollectingChatStreamWriter.complete()</code> 是否被调用；同步接口不使用请求体 <code>timeout</code>，固定 300 秒。</td></tr>
+      <tr><td>usage 没有记录</td><td>看模型最终流式 chunk 是否包含 Spring AI <code>Usage</code>，再看 <code>TokenUsageCollectorAdvisor</code> 日志和 <code>ChatStreamObserver#handleCompletion</code>。</td></tr>
+      <tr><td>SDK 调用异常</td><td>SDK 的 <code>OpenApiHttpInvokeHandler</code> 会自动加认证头；普通 HTTP status >= 400 抛异常，SSE status >= 400 会发 <code>OpenApiChatStreamEvent.error("HTTP ...")</code>。</td></tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-openapi/snail-ai-openapi-core/src/main/java/com/aizuda/snail/ai/openapi/client/core/rpc/OpenApiHttpInvokeHandler.java</span></p>
+</main>
+</body>
+</html>

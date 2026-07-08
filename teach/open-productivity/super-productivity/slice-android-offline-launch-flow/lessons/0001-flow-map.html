@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Android 离线启动全链路路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断冷启动时走 legacy 在线 WebView 还是 Capacitor 离线宿主，并跟到 Angular bootstrap</p>
+    <h1>Android 离线启动、legacy 迁移与 Activity 切换</h1>
+    <p class="lead">Manifest 把 <code>FullscreenActivity</code> 注册为 LAUNCHER，但 <code>LaunchDecider</code> 会在 <code>onCreate</code> 首段把新装/离线用户切到 <code>CapacitorMainActivity</code>，由 Capacitor 加载打包进 APK 的离线 bundle；legacy 升级用户（存在 <code>databases/SupKeyValStore</code>）仍留在在线 WebView，通过 <code>window.SUPAndroid</code> 与 Angular 通信。完整索引见 <a href="../reference/android-offline-startup-flow-reference.html">参考文档</a>；父模块见 <a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端宿主导览</a>。</p>
+
+    <h2>1. Mermaid 时序图</h2>
+    <pre class="mermaid">sequenceDiagram
+  participant User as 用户
+  participant Manifest as AndroidManifest
+  participant FS as FullscreenActivity
+  participant LD as LaunchDecider
+  participant Cap as CapacitorMainActivity
+  participant WV as WebViewCompatibilityChecker
+  participant JS as JavaScriptInterface
+  participant Ang as Angular bootstrap
+
+  User->>Manifest: 点击 LAUNCHER 图标
+  Manifest->>FS: MAIN intent
+  FS->>WV: evaluate() 预检 WebView
+  alt WebView 被阻断
+    WV-->>FS: isBlocked
+    FS->>FS: WebViewBlockActivity + finish
+  else 应走离线 Capacitor
+    FS->>LD: shouldSwitchToNewActivity()
+    LD-->>FS: MODE_OFFLINE (2)
+    FS->>Cap: startActivity + finish
+    Cap->>WV: load() 再次预检
+    Cap->>Cap: registerPlugin + super.onCreate
+    Cap->>JS: addJavascriptInterface(SUPAndroid)
+    Cap->>Ang: BridgeActivity 加载 www bundle
+    Ang->>JS: android-interface 冷启动 drain 队列
+    Ang->>Cap: StartupOverlayService.processAndDismiss
+  else legacy 在线 WebView
+    LD-->>FS: MODE_ONLINE (1)
+    FS->>FS: initWebView + loadUrl(online host)
+    FS->>JS: JavaScriptInterface 注入
+    FS->>Ang: 在线 SPA bootstrap
+  end</pre>
+    <p>路由首查 <span class="where">android/.../FullscreenActivity.kt</span> 第 94–101 行；模式判定在 <span class="where">android/.../app/LaunchDecider.kt</span>；离线宿主装配在 <span class="where">android/.../CapacitorMainActivity.kt</span> 的 <code>onCreate</code> 与 <code>load()</code>。</p>
+
+    <h2>2. 三层边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层</th><th>关键组件</th><th>负责什么</th><th>不要误判</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Activity 路由</td><td><code>LaunchDecider</code> + Manifest LAUNCHER</td><td>新装 → <code>MODE_OFFLINE</code>；有 <code>SupKeyValStore</code> 的升级 → <code>MODE_ONLINE</code>；结果写入 SharedPreferences</td><td>分享/OAuth intent 直达 <code>CapacitorMainActivity</code>，不经过 <code>FullscreenActivity</code>。</td></tr>
+          <tr><td>WebView 宿主</td><td><code>CapacitorMainActivity</code> vs <code>FullscreenActivity</code></td><td>离线加载 APK 内 <code>www</code>；legacy 加载 <code>BuildConfig.ONLINE_SERVICE_HOST</code> 在线 URL</td><td>两代都注入 <code>SUPAndroid</code>，但仅 Capacitor 侧 <code>Capacitor.isNativePlatform()</code> 为 true。</td></tr>
+          <tr><td>Angular 桥接</td><td><code>android-interface.ts</code> + <code>StartupOverlayService</code></td><td>冷启动拉取分享/提醒/Widget 队列；overlay 文案交给 Web 添加任务条</td><td><code>android.effects.ts</code> 的 <code>onResume$</code> 只覆盖温启动，冷启动队列必须在 <code>android-interface</code> 模块初始化时 drain。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>升级后仍打开在线页，查 <code>LaunchDecider.hasLegacyData()</code> 是否发现 <code>databases/SupKeyValStore</code>，或 SharedPreferences 中 <code>launch_mode</code> 是否已被写成 <code>1</code>。强制离线可在构建配置设 <code>LAUNCH_MODE=2</code>（见 <span class="where">android/README_OFFLINE.md</span>）。</p>
+    <p><strong>判断二：</strong>启动闪一下又重开，查 <span class="where">WebViewRecovery.scheduleRelaunch</span>：瞬态 WebView 初始化失败会延迟 2.5s 经 <code>FullscreenActivity</code> 自动重开一次；预算耗尽才进 <code>WebViewBlockActivity</code> 终端阻断屏。</p>
+    <p><strong>判断三：</strong>分享/Widget 冷启动丢事件，查 <span class="where">CapacitorMainActivity.handleIntent</span> 是否因 <code>savedInstanceState != null</code> 跳过（配置变更重建），以及 <code>flushPendingShareIntent</code> 是否在 Angular ready 后才推送 <code>onShareWithAttachment$</code>。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：用户从 Play 升级安装（非全新安装），本地仍有旧版 <code>SupKeyValStore</code> 数据库，但构建时 <code>LAUNCH_MODE=2</code>。冷启动后应用加载的是离线 Capacitor bundle 还是在线 WebView？若 WebView 初始化失败触发自动重开，第二次启动走哪条 Activity 路径？</p>
+    <div class="answer">参考答案：<code>BuildConfig.LAUNCH_MODE=2</code> 时 <code>getLaunchMode()</code> 直接返回 <code>MODE_OFFLINE</code>，忽略 legacy 数据与 SharedPreferences，因此加载离线 Capacitor bundle。自动重开由 <code>WebViewRecovery.relaunchNow</code> 显式启动 <code>FullscreenActivity</code>，再次经 <code>LaunchDecider</code> 路由——在 <code>LAUNCH_MODE=2</code> 下仍会切到 <code>CapacitorMainActivity</code>，不会退回 legacy 在线页。</div>
+    <p>主要来源：<a href="../reference/android-offline-startup-flow-reference.html">Android 离线启动速查</a>。相邻主题：<a href="../../slice-android-share-widget-flow/lessons/0001-flow-map.html">分享与 Widget 链路</a>、<a href="../../slice-app-startup-flow/lessons/0001-flow-map.html">应用数据初始化</a>。若某一步不清楚，可以向 agent 追问：“请从 <code>LaunchDecider.resolveDefaultLaunchMode</code> 列出三种输入组合的输出”。</p>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟读懂 goal 自动续跑主链路</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5d6b78; --line:#d9e1e8; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 10px; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟读懂 goal 自动续跑主链路</h1>
+  <p class="lede">学习目标：读完后，你能把「一次可见 run 结束」到「worker 是否再跑隐藏续跑回合」串成一条链。blocker 表、并发守卫与熔断细节见 <a href="../reference/goal-continuation-flow-map.html">参考页</a>。</p>
+
+  <h2>1. 三类状态各管什么</h2>
+  <p>续跑不是前端轮询，而是 <span class="where">runtime/runs/worker.py</span> 在 <code>run_agent</code> 里包住 LangGraph 流式执行。<code>GoalState</code> 与 <code>GoalEvaluation</code> 的类型在 <span class="where">agents/goal_state.py</span>；读写 checkpoint、调 evaluator、判断 <code>should_continue_goal</code> 在 <span class="where">runtime/goal.py</span>。活跃 goal 存在 checkpointer 的 <code>channel_values.goal</code>，对用户可见对话在 <code>messages</code>。</p>
+
+  <h2>2. worker 里的 while 续跑环</h2>
+  <p>可见回合先走一次 <code>_stream_once(graph_input)</code>。只要 run 未 abort、无 LLM fallback，就进入 while，调用 <code>_prepare_goal_continuation_input</code>。若返回隐藏输入，再 <code>_stream_once(continuation_input)</code>，用户界面看不到这条 <code>hide_from_ui</code> 的 HumanMessage。</p>
+  <div class="diagram">run_agent()
+  │
+  ├── _stream_once(用户可见输入)     ← 正常 SSE 回合
+  │
+  └── while 未 abort 且无 LLM 错误:
+        _prepare_goal_continuation_input()
+          ├── read_thread_goal()
+          ├── _has_durable_goal_turn_receipt()  ← 末条可见消息是 AI 且无 pending_writes
+          ├── evaluate_goal_completion()        ← 非 thinking 小模型
+          ├── should_continue_goal()            ← 仅 goal_not_met_yet 可续
+          └── make_goal_continuation_message()  ← 隐藏 HumanMessage
+        └── _stream_once(续跑输入)   ← 同一 run_id 内继续</div>
+
+  <h2>3. 两道熔断与 stand down</h2>
+  <p>续跑不是无限循环。<code>continuation_count</code> 硬上限 8；<code>no_progress_count</code> 在可见 assistant 证据签名未变时累加，默认连续 2 次无新输出就停。evaluator 若判 <code>satisfied</code>，worker 会清空 goal；其他 blocker（如 <code>needs_user_input</code>）只写 <code>last_evaluation</code> 并 stand down，不注入续跑消息。</p>
+
+  <h2>4. 并发：为何 evaluator 前后要重读</h2>
+  <p>评估 LLM 调用期间，用户可能发新消息或 <code>/goal clear</code>。<code>_prepare_goal_continuation_input</code> 在评估前后比对 goal 实例与可见对话签名；checkpoint 或对话变了就记录 <code>stand_down_reason</code> 并放弃续跑。写 goal 时用 <code>goal_thread_lock</code> 与 <code>expected_checkpoint_id</code>，避免陈旧 evaluator 结果覆盖新 goal。</p>
+
+  <div class="exercise">
+    <strong>检索练习：</strong>evaluator 返回 <code>blocker=needs_user_input</code> 且 <code>satisfied=false</code> 时，下面哪项<strong>一定</strong>会发生？ A. <code>continuation_count</code> 加 1 B. 注入 <code>&lt;goal_continuation&gt;</code> 隐藏消息 C. 写回 <code>last_evaluation</code> D. 清空 <code>channel_values.goal</code>
+    <div class="answer">参考答案：C。该 blocker 不在 <code>CONTINUABLE_GOAL_BLOCKERS</code>（只有 <code>goal_not_met_yet</code>），故不会续跑（B、A 不发生），也不会因未满足而清空 goal（D 仅在 satisfied 时发生）。评估结果仍会持久化供观测。</div>
+  </div>
+
+  <p class="note">主要来源：<code>worker.py</code> 第 7 步流式循环与 <code>_prepare_goal_continuation_input</code>，<code>goal.py</code> 的 <code>should_continue_goal</code>。想沿某段继续展开（例如 durable receipt 或 progress_key），向 agent 追问即可。</p>
+</main>
+</body>
+</html>

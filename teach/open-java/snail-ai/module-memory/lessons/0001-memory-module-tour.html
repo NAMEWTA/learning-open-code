@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>记忆功能模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    nav{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+    nav a{border:1px solid #d1d5db;border-radius:999px;padding:4px 10px;font-size:13px;background:#fafafa}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+    <a href="../reference/memory-overview.html">记忆速查</a>
+  </nav>
+
+  <h1>记忆功能模块导览</h1>
+  <p class="lead">这一课只做一件事：建立 memory 模块边界。学完后，你应该能判断一段代码是在维护短期对话窗口，还是在表达长期记忆的公共契约。</p>
+  <div class="meta">
+    <span class="pill">学习目标：定位记忆模块边界</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<span class="where">open-java/snail-ai/docs/architecture/memory-architecture.md</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-memory/src/main/java/com/aizuda/snail/ai/memory/store/ShortTermMemoryStore.java</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ContextCollectorHandler.java</span></span>
+  </div>
+
+  <h2>1. 职责：给下一轮对话补上下文</h2>
+  <p>在 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 里，记忆和 RAG 一样属于 Server 侧上下文能力，不是模型适配层。它的目标是让 Agent 在当前请求里拿到“之前说过什么”和“长期应该记住什么”。当前源码最明确落地的是短期记忆：按会话保存最近 N 条消息，并在下一次分发给 Client 前写入 <code>ChatDispatchRequest.historyMessages</code>。</p>
+  <p>长期记忆在官方架构文档和公共 DTO/枚举中已经有完整设计，包括记忆类型、状态、抽取事件、召回请求和 <code>memoryContext</code> 字段。但源码检索没有找到文档里提到的 <code>MemoryInjectionAdvisor</code> 实现，变更记录也写过移除。因此本课把长期记忆视为“契约和后续切片入口”，不把它讲成当前已跑通的主链路。</p>
+
+  <h2>2. 位置：feature-memory 被 Agent 链消费</h2>
+  <div class="filetree">snail-ai-server/
+├── snail-ai-server-features/                 ← Server 侧业务能力聚合
+│   ├── snail-ai-feature-memory/              ← 记忆 DTO、指标、短期 store
+│   └── snail-ai-feature-agent/               ← Agent Handler Chain 消费记忆能力
+└── snail-ai-server-persistence/              ← 对话记录表与 Mapper
+
+snail-ai-commons/
+└── snail-ai-commons-core/                    ← 公共记忆 DTO 与枚举契约</div>
+  <p><code>snail-ai-feature-memory</code> 的公共类不直接处理 HTTP 入口；它更像一个被 Agent 链和 Admin VO 复用的能力包。模块内部分成三层：<code>dto</code> 表达记忆数据和指标，<code>store</code> 定义短期记忆端口，两个 store 实现负责 JVM 内存或数据库读取。完整类表见 <a href="../reference/memory-overview.html">记忆速查</a>。</p>
+
+  <h2>3. 分层：短期窗口是运行路径</h2>
+  <pre class="diagram">Agent 请求进入
+  ↓
+McpHandler(@Order 40) / RagHandler(@Order 60) / SkillAgentChatHandler(@Order 70)
+  ↓ MCP、RAG、Skill 上下文就绪
+ContextCollectorHandler(@Order 75)
+  ↓ 接口层 append(user) + loadHistory(...)
+ShortTermMemoryStore
+  ├─ InMemoryShortTermMemoryStore  ← 单机高性能，cache miss 回落 DB
+  └─ DbShortTermMemoryStore        ← 从对话记录表读取，append 为空实现
+  ↓
+ChatDispatchRequest.historyMessages
+  ↓
+LlmCallHandler(@Order 80) → Agent Client</pre>
+  <p><code>ContextCollectorHandler(@Order 75)</code> 位于 <code>SkillAgentChatHandler(@Order 70)</code> 之后、<code>LlmCallHandler(@Order 80)</code> 之前运行。也就是说，RAG、Skill、MCP 等上下文已经由前序 Handler 放入 <code>AgentChatContext</code>，它再在真正分发前收集目标 Client 和短期历史。</p>
+  <p>关键依赖有三类：配置来自 <code>snail-ai.memory.short-term.store-type</code>；历史数据来自 <code>AgentConversationRecordMapper</code>；消费方来自 Agent 责任链。<code>InMemoryShortTermMemoryStore</code> 用 <code>ConcurrentHashMap</code> 维护滑动窗口，重启后可从 DB 回填；<code>DbShortTermMemoryStore</code> 每次查询对话记录表，更适合多实例，但它的 <code>append</code> 当前为空实现。</p>
+
+  <h2>4. 调用示例：接口先 append，再读历史</h2>
+  <p><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ContextCollectorHandler.java</span></p>
+  <pre><code class="language-java">int shortTermWindow = agent.getShortTermMemorySize() != null &amp;&amp; agent.getShortTermMemorySize() &gt; 0
+        ? agent.getShortTermMemorySize()
+        : DEFAULT_SHORT_TERM_WINDOW;
+boolean shortTermEnabled = !Boolean.FALSE.equals(agent.getMemoryEnabled());
+if (shortTermEnabled) {
+    shortTermMemoryStore.append(ctx.getConversationId(), "user", ctx.getContent(), shortTermWindow);
+    ctx.setHistoryMessages(loadHistoryMessages(ctx, shortTermWindow));
+} else {
+    ctx.setHistoryMessages(List.of());
+}</code></pre>
+  <p>这个片段说明的是接口层调用顺序：<code>ContextCollectorHandler</code> 先调用 <code>append(user)</code>，再调用 <code>loadHistory</code>。在 <code>memory</code> 模式下，<code>InMemoryShortTermMemoryStore.append</code> 会把当前用户消息写入 JVM 队列；在 <code>db</code> 模式下，<code>ConversationHandler(@Order 20)</code> 已经更早把当前用户消息写入对话记录表，<code>DbShortTermMemoryStore.append</code> 当前为空实现。</p>
+  <p>因此，DB store 的“先 append”不是再写一次数据库，而是保持同一个接口调用形态；真正的历史来源是 <code>AgentConversationRecordMapper</code> 读取的对话记录。store 的 <code>loadHistory</code> 会排除最后一条消息，因为当前用户消息已经在本次 Prompt 中，重复注入会让模型看到两遍同一句话。模型完成后，<code>ChatStreamObserver</code> 触发 <code>ChatResultPersistService</code> 持久化 assistant 回答，并在 memory 模式追加到短期窗口，供下一轮使用。</p>
+  <div class="practice"><strong>暂停回忆：</strong>如果一次对话的 <code>memoryEnabled=false</code>，当前源码会影响哪一个字段：<code>historyMessages</code>、<code>modelConfig</code> 还是 <code>mcpServers</code>？<br><strong>参考答案：</strong>影响 <code>historyMessages</code>，它会被设置为空列表；模型配置和 MCP 描述符由其他 Handler 填充。若你选择了 <code>memoryContext</code>，要注意当前 L1 只确认它是分发请求字段，未确认有长期记忆实现写入它。</div>
+  <p>主要推荐来源：先读 <code>docs/architecture/memory-architecture.md</code> 建立设计图，再用 <a href="../reference/memory-overview.html">记忆速查</a> 对照当前源码。遇到短期窗口、长期契约或文档差异不清楚的地方，可以继续向 agent 追问具体调用栈。</p>
+</body>
+</html>

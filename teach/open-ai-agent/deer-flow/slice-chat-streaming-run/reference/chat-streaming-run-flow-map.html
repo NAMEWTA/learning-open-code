@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>聊天流式执行 — 链路速查</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; font-size:.84rem; background:#fbfcfd; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <h1>聊天流式执行 — 链路速查</h1>
+  <p class="lead">
+    L2 垂直切片参考页。短课入口：
+    <a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。
+    横切模块：
+    <a href="../../module-frontend-workspace/reference/frontend-workspace-overview.html">workspace</a> ·
+    <a href="../../module-frontend-core/reference/frontend-core-overview.html">frontend-core</a> ·
+    <a href="../../module-gateway/reference/gateway-overview.html">gateway</a> ·
+    <a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">runtime-persistence</a> ·
+    <a href="../../module-lead-agent/reference/lead-agent-overview.html">lead-agent</a>
+  </p>
+
+  <h2>端到端分层</h2>
+  <table>
+    <tr><th>层</th><th>职责</th><th>关键文件</th></tr>
+    <tr><td>L0 入口 UI</td><td>聊天布局、输入框、消息列表、停止按钮</td><td><code>frontend/src/app/workspace/chats/[thread_id]/page.tsx</code></td></tr>
+    <tr><td>L1 线程流 hook</td><td>乐观消息、上传预处理、<code>useStream</code> 状态、缓存失效</td><td><code>frontend/src/core/threads/hooks.ts</code></td></tr>
+    <tr><td>L2 SDK 适配</td><td>LangGraph Client 单例、CSRF、stream/cancel/joinStream 补丁</td><td><code>frontend/src/core/api/api-client.ts</code></td></tr>
+    <tr><td>L3 HTTP 路由</td><td>LangGraph 兼容 runs API、SSE 响应头</td><td><code>backend/app/gateway/routers/thread_runs.py</code></td></tr>
+    <tr><td>L4 编排服务</td><td>权限、run 创建、config 合并、启动 worker</td><td><code>backend/app/gateway/services.py</code>（<code>start_run</code>、<code>sse_consumer</code>）</td></tr>
+    <tr><td>L5 运行时</td><td>RunManager、StreamBridge、checkpointer、事件日志</td><td><code>backend/packages/harness/deerflow/runtime/runs/</code></td></tr>
+    <tr><td>L6 Agent</td><td>构图、middleware 链、LLM + tools</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td></tr>
+  </table>
+
+  <div class="diagram">用户 Enter
+  → ChatPage.handleSubmit
+  → useThreadStream.sendMessage → thread.submit
+  → getAPIClient().runs.stream
+  → nginx /api/langgraph/* → Gateway POST /api/threads/{id}/runs/stream
+  → start_run → RunManager + asyncio.Task(run_agent)
+  → sse_consumer ← StreamBridge.subscribe
+  → worker.run_agent → make_lead_agent → graph.astream
+  → bridge.publish → SSE → useStream → MessageList</div>
+
+  <h2>主路径 HTTP 与 SSE</h2>
+  <table>
+    <tr><th>步骤</th><th>方法 / 事件</th><th>说明</th></tr>
+    <tr><td>创建并流式执行</td><td><code>POST /api/threads/{thread_id}/runs/stream</code></td><td><code>stream_run</code>；响应头 <code>Content-Location</code> 含 run_id</td></tr>
+    <tr><td>首包</td><td>SSE <code>metadata</code></td><td><code>run_id</code> + <code>thread_id</code>，供 SDK <code>onCreated</code></td></tr>
+    <tr><td>状态快照</td><td>SSE <code>values</code></td><td>messages、todos、goal、artifacts 等 ThreadState</td></tr>
+    <tr><td>增量文本</td><td>SSE <code>messages-tuple</code></td><td>AI token 增量；前端按 message id 拼接</td></tr>
+    <tr><td>自定义</td><td>SSE <code>custom</code></td><td>subagent <code>task_*</code> 等</td></tr>
+    <tr><td>结束</td><td>SSE <code>end</code></td><td>bridge 发布 <code>END_SENTINEL</code>；worker finally 收尾</td></tr>
+    <tr><td>停止</td><td><code>POST .../runs/{run_id}/stream?action=interrupt</code></td><td>SDK cancel；先 cancel 再刷剩余缓冲事件</td></tr>
+    <tr><td>重连</td><td><code>joinStream</code> / GET join</td><td><code>Last-Event-ID</code> 续传；终端状态由 api-client 预检跳过</td></tr>
+  </table>
+  <p class="note">无状态入口 <code>backend/app/gateway/routers/runs.py</code> 的 <code>POST /api/runs/stream</code> 复用同一 <code>start_run</code> + <code>sse_consumer</code>，仅 thread_id 来自 body 或随机 UUID。</p>
+
+  <h2>时序图（含断开取消）</h2>
+  <pre class="mermaid">sequenceDiagram
+    participant C as Browser
+    participant G as Gateway stream_run
+    participant B as StreamBridge
+    participant W as run_agent
+    participant L as lead_agent graph
+
+    C->>G: POST /runs/stream
+    G->>G: start_run → Task(W)
+    G->>B: subscribe(run_id)
+    W->>B: publish(metadata)
+    W->>L: astream(values, messages, custom)
+    L-->>W: chunks
+    W->>B: publish(events)
+    B-->>G: entries
+    G-->>C: SSE frames
+
+    alt 客户端断开且 on_disconnect=cancel
+        C-xG: TCP close
+        G->>G: sse_consumer finally
+        G->>W: RunManager.cancel
+        W->>B: publish_end
+    else 同线程已有活跃 run (reject)
+        C->>G: POST /runs/stream
+        G-->>C: 409 Conflict
+    end</pre>
+
+  <h2 id="errors">异常与边界路径</h2>
+  <table>
+    <tr><th>场景</th><th>HTTP / 状态</th><th>产生位置</th><th>前端表现</th></tr>
+    <tr><td>线程忙（默认 reject）</td><td>409</td><td><code>RunManager.create_or_reject</code> → <code>start_run</code></td><td>提交失败，需等待或停止当前 run</td></tr>
+    <tr><td>非法 model_name</td><td>400</td><td><code>start_run</code> allowlist 校验</td><td>toast / stream error</td></tr>
+    <tr><td>无权限 thread</td><td>404</td><td><code>thread_store.check_access</code></td><td>请求被拒（反枚举）</td></tr>
+    <tr><td>取消已结束 run</td><td>409 <code>is not cancellable</code></td><td><code>_cancel_conflict_detail</code></td><td>api-client 吞掉视为 no-op</td></tr>
+    <tr><td>join 非本 worker 的 store-only run</td><td>409 <code>cannot be streamed</code></td><td><code>stream_existing_run</code></td><td>清除 sessionStorage 重连键</td></tr>
+    <tr><td>SSE 断开 + cancel</td><td>run → interrupted</td><td><code>sse_consumer</code> finally</td><td>checkpoint 保留；重发需新 submit</td></tr>
+    <tr><td>上传失败</td><td>—</td><td><code>sendMessage</code> 内 <code>uploadFiles</code></td><td>清空乐观消息，不调用 stream</td></tr>
+  </table>
+
+  <h2>源码索引（本切片）</h2>
+  <table>
+    <tr><th>文件</th><th>函数 / 符号</th><th>本切片关注点</th></tr>
+    <tr><td><code>page.tsx</code></td><td><code>handleSubmit</code>, <code>useThreadStream</code></td><td>入口接线、streaming status</td></tr>
+    <tr><td><code>hooks.ts</code></td><td><code>useThreadStream</code>, <code>sendMessage</code>, <code>useStream</code></td><td>submit payload、context 模式位</td></tr>
+    <tr><td><code>api-client.ts</code></td><td><code>getAPIClient</code>, <code>joinStream</code> 包装</td><td>终端 run、409 处理</td></tr>
+    <tr><td><code>thread_runs.py</code></td><td><code>stream_run</code>, <code>stream_existing_run</code></td><td>SSE 路由、Content-Location</td></tr>
+    <tr><td><code>runs.py</code></td><td><code>stateless_stream</code></td><td>无 thread 先验的同类路径</td></tr>
+    <tr><td><code>services.py</code></td><td><code>start_run</code>, <code>sse_consumer</code></td><td>任务创建、断开语义</td></tr>
+    <tr><td><code>worker.py</code></td><td><code>run_agent</code></td><td>astream、bridge、journal</td></tr>
+    <tr><td><code>agent.py</code></td><td><code>make_lead_agent</code></td><td>图工厂与 middleware</td></tr>
+  </table>
+
+  <h2>stream_mode 映射</h2>
+  <table>
+    <tr><th>SDK / 请求</th><th>LangGraph <code>astream</code></th><th>用途</th></tr>
+    <tr><td><code>values</code></td><td><code>values</code></td><td>全量 ThreadState 快照</td></tr>
+    <tr><td><code>messages-tuple</code></td><td><code>messages</code></td><td>增量 token / tool 消息</td></tr>
+    <tr><td><code>updates</code></td><td><code>updates</code></td><td>节点级写入（子图开启时）</td></tr>
+    <tr><td><code>custom</code></td><td><code>custom</code></td><td>StreamWriter / subagent 事件</td></tr>
+    <tr><td><code>events</code></td><td>（跳过）</td><td>Gateway 不支持，worker 打日志跳过</td></tr>
+  </table>
+</main>
+</body>
+</html>

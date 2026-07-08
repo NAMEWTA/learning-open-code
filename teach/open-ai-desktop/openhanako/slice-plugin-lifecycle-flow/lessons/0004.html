@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · EventBus 通信与 Agent 调用：四级权限矩阵 + executePluginTool 全链路</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · EventBus 通信与 Agent 调用：四级权限矩阵 + executePluginTool 全链路 <span class="tag">EventBus & Agent</span></h1>
+
+<div class="mission">
+  <b>本节目标：</b>学完你能画出 PluginBusProxy 的四级权限矩阵，能追踪 <code>executePluginTool()</code> 从 Agent 决策到结果返回的完整链路，理解 dev 循环与生产安装路径的关键差异。
+</div>
+
+<p>上一课我们了解了 PluginContext 的构建和工具注册。这一课聚焦插件如何与系统通信（EventBus），以及 Agent 如何调用插件工具——从工具列表获取到结果返回的每个环节。</p>
+
+<h2>一、PluginBusProxy：四级权限矩阵</h2>
+
+<p><code>createPluginBusProxy()</code> 在全局 EventBus 和插件之间建立<strong>权限化代理层</strong>，支持 4 种通信模式 + 2 种查询模式：</p>
+
+<pre><code>function createPluginBusProxy(bus, { ownerContext, grantedPermissions, allowHandle }) {
+  const fullAccess = allowHandle === true;
+  const canReadUsage = fullAccess || hasPermission(grantedPermissions, "usage.read");
+
+  const proxy = {
+    // 1. 发布事件 — restricted 插件不能 emit llm_usage
+    emit(event, sessionPath) {
+      if (!fullAccess && event?.type === "llm_usage") {
+        throw forbiddenBusError("llm_usage", "emit", "usage.read");
+      }
+      return bus.emit(event, sessionPath);
+    },
+
+    // 2. 订阅事件 — restricted 静默过滤 llm_usage
+    subscribe(callback, filter = {}) {
+      const wrapped = (event, sessionPath) => {
+        if (!fullAccess && !canReadUsage && event?.type === "llm_usage") return;
+        return callback(event, sessionPath);
+      };
+      return bus.subscribe(wrapped, filter);
+    },
+
+    // 3. 请求-响应 — 校验 usage.read permission
+    async request(type, payload, options) {
+      assertUsagePermission(type, "request");
+      return bus.request(type, payload, { ...options, caller: ownerContext });
+    },
+
+    // 4. 能力查询 — 无限制
+    hasHandler: bus.hasHandler?.bind(bus) || (() => false),
+    listCapabilities: bus.listCapabilities?.bind(bus) || (() => []),
+    getCapability,
+  };
+
+  // 5. 注册处理器 — 仅 full-access
+  if (allowHandle && typeof bus.handle === "function") {
+    proxy.handle = bus.handle.bind(bus);
+  }
+
+  return Object.freeze(proxy);
+}</code></pre>
+
+<table>
+<tr><th>模式</th><th>Restricted 插件</th><th>Full-Access 插件</th><th>说明</th></tr>
+<tr><td><code>emit(event, sessionPath)</code></td><td>允许（不能 emit llm_usage）</td><td>允许全部</td><td>向全局 EventBus 发布事件</td></tr>
+<tr><td><code>subscribe(cb, filter)</code></td><td>允许（llm_usage 被静默过滤）</td><td>允许全部</td><td>按 sessionPath + types 订阅</td></tr>
+<tr><td><code>request(type, payload)</code></td><td>允许（受 capability 声明限制）</td><td>允许全部</td><td>请求-响应模式，默认 30s 超时</td></tr>
+<tr><td><code>handle(type, handler)</code></td><td><b>禁止</b></td><td>允许</td><td>注册请求处理器——最危险的权限</td></tr>
+<tr><td><code>getCapability(type)</code></td><td>允许</td><td>允许</td><td>查询能力详情（schema/permission/stability）</td></tr>
+<tr><td><code>listCapabilities()</code></td><td>允许</td><td>允许</td><td>列出所有已注册能力</td></tr>
+</table>
+
+<div class="side">
+  <b>关键设计：为什么 handle 是最危险的？</b><br>
+  <code>emit</code> 是"往外说"、<code>subscribe</code> 是"听别人说"、<code>request</code> 是"问别人"。但 <code>handle</code> 是"替别人做事"——注册一个处理器意味着任何组件都可以通过 bus.request 触发插件的代码。这相当于在系统中开放了一个新的 API 端点，所以只有 full-access 插件才能注册 handler。
+</div>
+
+<h2>二、Agent 调用全链路：从工具列表到结果返回</h2>
+
+<p>当 Agent 决定调用某个插件工具时，完整链路如下：</p>
+
+<div class="step"><span class="num">1</span><b>获取工具列表：</b>Agent 调用 <code>PluginManager.getAllTools()</code>，返回所有活跃插件（未被 shadow）的工具列表。默认过滤被 shadow 插件的工具。<br><span class="where">core/plugin-manager.ts:942-948</span></div>
+
+<div class="step"><span class="num">2</span><b>选择工具并传参：</b>Agent 选择工具并传入参数 → <code>executePluginTool(tool, { input, toolCallId })</code>。<br><span class="where">core/plugin-manager.ts:933-938</span></div>
+
+<div class="step"><span class="num">3</span><b>执行包装层展开：</b>工具的执行函数是包装过的（见第 3 课），在这一步展开：
+  <ul>
+    <li><code>activatePlugin(pluginId, { event: "onToolCall:toolName" })</code> — 懒激活</li>
+    <li><code>normalizeToolRuntimeContext()</code> — 解析 signal/piCtx 双参数签名</li>
+    <li><code>normalizeToolSessionRef()</code> — 提取 session 信息</li>
+    <li><code>{ ...ctx, ...runtimeCtx, ...sessionCtx, ...helperCtx }</code> — 合并上下文</li>
+    <li><code>origExecute(params, mergedCtx)</code> — 调用原始函数</li>
+  </ul>
+</div>
+
+<div class="step"><span class="num">4</span><b>结果标准化：</b><code>normalizePluginToolResult(raw, pluginId)</code> 将字符串、对象等转为统一格式 <code>{ content: [{ type: "text", text }] }</code>。<br><span class="where">core/plugin-manager.ts:948</span></div>
+
+<div class="step"><span class="num">5</span><b>Agent 消费结果：</b>Agent 读取标准化后的 content 数组，继续推理或展示给用户。</div>
+
+<pre><code>async executePluginTool(tool, { toolCallId, input = {}, runtimeCtx = {} } = {}) {
+  if (!tool || typeof tool.execute !== "function") {
+    throw new Error("plugin tool is not executable");
+  }
+  const callId = toolCallId || `plugin-tool-${Date.now()}`;
+  const raw = await tool.execute(callId, input, runtimeCtx);
+  return normalizePluginToolResult(raw, tool._pluginId);
+}</code></pre>
+
+<h2>三、工具可见性过滤：shadow 机制</h2>
+
+<p><code>getAllTools()</code> 默认不返回被 shadow 插件的工具：</p>
+
+<pre><code>getAllTools(options: any = {}) {
+  this.reconcileMissingPluginDirectories();
+  const includeShadowed = options.includeShadowed === true;
+  return this._tools.filter((tool) => (
+    includeShadowed || !tool._pluginKey ||
+    this._isPluginKeyRuntimeActive(tool._pluginKey) // 被 shadow 的插件工具不可见
+  ));
+}</code></pre>
+
+<p>优先级规则：dev (0) > community (1) > builtin (2)。同 id 插件，低优先级者被 shadow，其贡献点默认不可见。只有传入 <code>includeShadowed: true</code> 才返回全部（用于诊断场景）。</p>
+
+<h2>四、开发循环：PluginDevService 的独立路径</h2>
+
+<p>与生产安装路径不同，dev 循环通过独立的 <code>PluginDevService</code> 管理，不写入用户偏好、不污染社区插件目录：</p>
+
+<pre><code>// Dev 循环的 6 个核心操作
+installFromSource({ sourcePath })   // 校验 → 复制到 plugins-dev/ → installPlugin(source:"dev")
+reloadPlugin(pluginId, { devRunId }) // 从记忆的 source slot 重新复制源码 → 重装
+enablePlugin() / disablePlugin()    // persist: false，不写入用户偏好
+invokeTool({ pluginId, toolName })  // 直接执行工具，不经过 Agent（用于 smoke test）
+runScenario({ pluginId, id })       // 执行 manifest.dev.scenarios 中的声明式测试
+uninstallPlugin(pluginId)           // 删除 plugins-dev/ 目录并移除注册</code></pre>
+
+<div class="step"><span class="num">1</span><b>安全约束：</b>源码路径必须在 <code>allowedSourceRoots</code> 内（realpath 防符号链接绕过）；复制时跳过 <code>node_modules</code>、<code>.git</code>、<code>.DS_Store</code>、<code>.cache</code>。<br><span class="where">core/plugin-dev-service.ts</span></div>
+
+<div class="step"><span class="num">2</span><b>devRunId 护栏：</b>enable/disable/reset/uninstall 时校验 id 匹配，防止旧上下文误操作。<br><span class="where">类似 _loadToken 取消令牌的机制</span></div>
+
+<div class="step"><span class="num">3</span><b>full-access 隔离：</b>dev 插件的 full-access 需要显式传 <code>allowFullAccess: true</code>，不受全局社区插件开关影响——开发者的选择独立于用户偏好。<br><span class="where">_isFullAccessAllowed() 的 source === "dev" 分支</span></div>
+
+<h2>五、路由代理：外部请求如何到达插件</h2>
+
+<p>外部 HTTP 请求通过 <code>proxyToPlugin()</code>（<code>server/routes/plugins.ts:66-95</code>）转发到插件子应用。代理时剥离安全凭证（iframe ticket/surface session query params），通过 Hono env 的 <code>pluginRouteRequest</code> 传入请求级身份上下文：</p>
+
+<pre><code>// 插件路由的错误隔离：区分 bus 能力拒绝（403）和内部错误（500）
+app.onError((err, c) => {
+  if (isPluginBusCapabilityError(err)) {
+    return c.json({ error: err.code, detail: err.message,
+      capability: err.capability, permission: err.permission,
+      pluginId: err.pluginId, declared: err.declared, granted: err.granted }, 403);
+  }
+  return c.json({ error: "Plugin internal error", plugin: entry.id }, 500);
+});
+
+// 请求级中间件：注入 pluginCtx + agentId + pluginRequestContext
+app.use("*", async (c, next) => {
+  c.set("pluginCtx", ctx);
+  c.set("agentId", c.req.header("X-Hana-Agent-Id") || null);
+  c.set("pluginRequestContext", createPluginRouteRequestContext({ ... }));
+  await next();
+});</code></pre>
+
+<div class="danger">
+  <b>注意：PluginBusCapabilityError 和内部错误的区分。</b><br>
+  能力拒绝返回 403 + 完整的拒绝上下文（code / capability / permission / declared / granted），帮助插件开发者诊断权限问题。内部错误返回 500 且不泄露内部细节，仅包含 plugin id。
+</div>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. PluginBusProxy 中，restricted 插件不能使用哪种通信模式？</p>
+<span class="opt">A. emit — 完全禁止发布事件</span>
+<span class="opt">B. handle — 注册请求处理器。emit 可以用但不能发 llm_usage；subscribe 可以用但 llm_usage 被静默过滤</span>
+<span class="opt">C. request — 完全禁止请求-响应</span>
+<span class="opt">D. listCapabilities — 完全禁止查询能力</span>
+<details><summary>看答案</summary><b>B</b>。restricted 插件可以使用 emit（不能发 llm_usage）、subscribe（llm_usage 静默过滤）、request（受 capability 声明限制）、getCapability、listCapabilities。唯独 handle（注册请求处理器）被完全禁止——这是最危险的权限，相当于在系统中开放新的 API 端点。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. executePluginTool() 中，工具执行包装层合并了哪些上下文？</p>
+<span class="opt">A. 只合并了 pluginId 和 toolName</span>
+<span class="opt">B. runtimeCtx（signal/session/agent）+ sessionCtx（sessionPath/sessionId）+ helperCtx（registerSessionFile/stageFile）+ 原始 ctx</span>
+<span class="opt">C. 只合并了 session 信息</span>
+<span class="opt">D. 不需要合并上下文，工具直接使用全局状态</span>
+<details><summary>看答案</summary><b>B</b>。工具执行时合并了四层上下文：原始 ctx（插件自己的 context）、runtimeCtx（包含 signal、session、agent 引用）、sessionCtx（sessionPath、sessionId）、helperCtx（registerSessionFile、stageFile 等辅助函数）。这确保工具能访问当前会话的完整上下文。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. dev 插件的 full-access 权限与社区插件有什么不同？</p>
+<span class="opt">A. 完全相同，没有任何区别</span>
+<span class="opt">B. dev 插件需要显式传 allowFullAccess: true，不受全局社区插件开关影响——开发者选择和应用用户偏好是独立的两个维度</span>
+<span class="opt">C. dev 插件永远没有 full-access 权限</span>
+<span class="opt">D. dev 插件自动获得 full-access 权限</span>
+<details><summary>看答案</summary><b>B</b>。在 <code>_isFullAccessAllowed()</code> 中，<code>source === "dev"</code> 走独立分支：如果 <code>options.allowFullAccess === true</code> 则返回 true，否则返回 false。这不受全局 <code>getAllowFullAccessPlugins()</code> 偏好影响——开发者在自己的开发环境中可以独立控制权限。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. getAllTools() 默认不返回被 shadow 插件的工具，shadow 优先级是什么？</p>
+<span class="opt">A. builtin > community > dev</span>
+<span class="opt">B. community > dev > builtin</span>
+<span class="opt">C. dev (0) > community (1) > builtin (2) — 数字越小优先级越高</span>
+<span class="opt">D. 随机选择</span>
+<details><summary>看答案</summary><b>C</b>。优先级由数字表示：dev=0（最高）、community=1、builtin=2（最低）。当同一 id 的插件出现在多个 source 中时，高优先级者生效，低优先级者的贡献点被过滤。只有传入 <code>includeShadowed: true</code> 才返回全部工具（用于诊断）。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>core/plugin-context.ts</code> 第 178-229 行的 <code>createPluginBusProxy()</code>，注意 4 种通信模式的权限检查逻辑。然后打开 <code>core/plugin-manager.ts</code> 第 933-948 行的 <code>executePluginTool()</code>，对比它与 <code>_loadTools()</code> 中执行包装层的关系。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：如果两个插件同时 handle 了同一个 bus 请求类型，哪个会生效？bus.request 的 30 秒超时是在哪一层实现的？下一课是终章——<strong>异常路径全景 + 综合测验</strong>，覆盖权限拒绝、manifest 错误、环境不兼容等所有异常场景。</div>
+
+<div class="nav">课程 0004 / 插件安装与加载全链路 · <a href="0003.html">← 上一课：PluginContext 注入与工具注册</a> · <a href="0005.html">下一课：异常路径全景 + 综合测验 →</a></div>
+
+</body>
+</html>

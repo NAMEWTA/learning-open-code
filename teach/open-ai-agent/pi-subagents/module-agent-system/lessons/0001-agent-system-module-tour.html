@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Agent 发现、配置与内置角色模块</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <h1>Agent 发现、配置与内置角色模块</h1>
+  <p class="meta">学习目标：15 分钟内能判断一个 subagent 名称最终会解析成哪个运行时 <code>AgentConfig</code>。</p>
+
+  <h2>1. 模块位置</h2>
+  <p>一句话：agents 模块是 <code>pi-subagents</code> 的角色配置解析层，把 builtin、package、user、project 四类角色定义，加上 user/project settings，合成 executor 可直接消费的运行时角色。L0 已讲过 executor 不负责猜角色从哪里来；它拿到的应当已经是解析好的 <code>AgentConfig</code>。本课只看这条边界：<code>open-ai-agent/pi-subagents/src/agents/agents.ts</code> 负责发现、解析、覆盖和禁用；<code>open-ai-agent/pi-subagents/src/agents/agent-selection.ts</code> 负责最终合并优先级；管理动作则通过 <code>open-ai-agent/pi-subagents/src/agents/agent-management.ts</code> 暴露给 <code>subagent</code> 工具。</p>
+  <div class="diagram">parent Pi session
+  ↓
+subagent tool / slash / RPC
+  ↓
+agents discovery: builtin + package + user + project + settings
+  ↓
+executor receives AgentConfig and runs the child Pi session</div>
+
+  <h2>2. 有效配置怎么产生</h2>
+  <p>先记住来源优先级：在 <code>scope: "both"</code> 下，后写入 map 的来源覆盖前面的同名角色，因此顺序是 builtin &lt; package &lt; user &lt; project。若 scope 是 <code>"user"</code>，project 来源不会参与；若 scope 是 <code>"project"</code>，user 来源不会参与。package 的位置很关键：它可以覆盖同名 builtin，但不能覆盖用户或项目自定义角色。</p>
+  <pre><code class="language-ts">export function mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents = [], packageAgents = []) {
+  const agentMap = new Map();
+
+  for (const agent of builtinAgents) agentMap.set(agent.name, agent);
+  for (const agent of packageAgents) agentMap.set(agent.name, agent);
+
+  if (scope === "both") {
+    for (const agent of userAgents) agentMap.set(agent.name, agent);
+    for (const agent of projectAgents) agentMap.set(agent.name, agent);
+  } else if (scope === "user") {
+    for (const agent of userAgents) agentMap.set(agent.name, agent);
+  } else {
+    for (const agent of projectAgents) agentMap.set(agent.name, agent);
+  }
+
+  return Array.from(agentMap.values());
+}</code></pre>
+  <p>settings 是另一层覆盖。<code>subagents.defaultModel</code> 先填补没有 model 的 agent，project settings 优先于 user settings。<code>subagents.agentOverrides</code> 可以改 model、thinking、tools、skills、context、toolBudget、disabled 等字段。对 builtin 来说，override 是直接覆盖；对 custom agent 来说，override 只填没有在 frontmatter 里显式写出的字段，所以自定义 agent 的 frontmatter 是每个字段的第一手事实。</p>
+
+  <h2>3. 管理面与配置例子</h2>
+  <p>管理面提供两类能力：读取类动作 <code>list</code>、<code>get</code>、<code>models</code>；变更类动作 <code>create</code>、<code>update</code>、<code>delete</code>、<code>eject</code>、<code>disable</code>、<code>enable</code>、<code>reset</code>。可写来源只有 user 和 project；builtin/package 是只读定义。想改 builtin，通常写 settings override；想完整接管一个 builtin/package 角色，用 <code>eject</code> 复制到 user 或 project，再由同名自定义文件遮蔽原定义。</p>
+  <pre><code class="language-json">{
+  "subagents": {
+    "defaultModel": "openai/gpt-5-mini",
+    "agentOverrides": {
+      "reviewer": {
+        "model": "anthropic/claude-sonnet-4",
+        "thinking": "high"
+      }
+    }
+  }
+}</code></pre>
+  <p>这个配置放在项目 <span class="mono">.pi/settings.json</span> 时，会优先于用户级 settings。若项目里还有 <span class="mono">.pi/agents/reviewer.md</span>，同名 project agent 会成为最终来源；其中显式写出的 frontmatter 字段继续压过 settings override。完整字段、内置角色和管理动作清单见 <a href="../reference/agent-system-overview.html">Agent 系统参考</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>当前 scope 是 <code>"both"</code>。builtin 有 <code>reviewer</code>；user settings 把 <code>reviewer.model</code> 设为 <code>openai/gpt-5.4</code>；project settings 把它设为 <code>anthropic/claude-sonnet-4</code>；项目还存在 <span class="mono">.pi/agents/reviewer.md</span>，frontmatter 里写了 <code>model: google/gemini-3-pro</code>。最终角色来源和 model 分别是什么？</p>
+    <p><strong>参考答案：</strong>来源是 project custom agent，model 是 <code>google/gemini-3-pro</code>。原因是同名 project agent 在 <code>both</code> 下覆盖 user/package/builtin；对 custom agent，frontmatter 的显式字段又会阻止 settings override 填写同一字段。相关单元测试验证了 project 覆盖 user、frontmatter 逐字段优先、package 只读和管理动作边界。</p>
+  </div>
+  <p class="source">主要来源：<a href="../reference/agent-system-overview.html">本课参考页</a>；继续追问时，可以让 agent 按“来源优先级”“settings 覆盖”“管理动作”任选一个方向展开。</p>
+</main>
+</body>
+</html>

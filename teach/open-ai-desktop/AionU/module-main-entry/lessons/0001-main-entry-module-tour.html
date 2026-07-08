@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 主入口模块短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Electron 主入口：先看它如何决定应用活成哪一种形态</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU 的 Electron 主入口如何把同一份桌面壳分流为版本输出、桌面窗口、WebUI 和重置密码四种运行形态。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">源码 3 个</span>
+    </div>
+  </section>
+
+  <h2>1. 模块职责与架构位置</h2>
+  <p><code>packages/desktop/src/index.ts</code> 不是“什么都做一点”的杂糅入口，它更像一个总调度器：先完成 Chromium、Sentry、单实例锁、PATH 修复这些启动前置条件，再等待 <code>app.whenReady()</code> 进入真正的生命周期；真正的业务细节则下沉到 <code>process/startup</code> 和 <code>process/utils</code>。因此读这个模块时，重点不是记住所有 import，而是抓住三类决策：什么时候允许 app 继续初始化，什么时候必须先把 aioncore backend 拉起来，什么时候不创建窗口而改走无头模式。</p>
+  <div class="callout">
+    <p><strong>在整体架构中的位置：</strong>它站在 Electron main process 的最外层，上游接收命令行参数、协议唤醒和系统事件，下游调用 backend manager、BrowserWindow、托盘、WebHost 与退出清理器。若你还没复习全局地图，先回到 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览课</a> 或 <a href="../../00-overview/reference/00-overview.html">L0 架构参考页</a> 再看这里，会更容易把主入口放回整体系统。</p>
+  </div>
+
+  <h2>2. 启动主线：先处理 <code>--version</code>，再初始化 backend 相关链路</h2>
+  <p>真正的主线从 <code>handleAppReady()</code> 开始，但第一个分流不是 backend，而是 CLI 版本输出。源码先判断 <code>isVersionMode</code>；如果命中 <code>--version</code> 或 <code>-v</code>，就直接打印版本并 <code>app.exit(0)</code> 返回，整个函数不会进入 <code>initializeProcess()</code>。只有不是版本模式时，才会继续初始化主进程基础设施，再启动 backend。</p>
+  <pre><code class="language-typescript">if (isVersionMode) {
+  console.log(app.getVersion());
+  app.exit(0);
+  return;
+}
+
+await initializeProcess();
+
+const backendStartup = await startBackendOrExit({
+  startBackend: async () => backendManager.start(...),
+  onStarted: (backendPort) => exposeBackendPort(backendPort),
+  exitOnFailure: isWebUIMode || isResetPasswordMode,
+});</code></pre>
+  <p>后半段的顺序仍然很关键：<code>initializeProcess()</code> 先把存储、bridge、i18n 等 main 基础设施准备好；之后才调用 <code>startBackendOrExit()</code>。注释已经说明，初始化阶段可能暂时打开旧版 SQLite 目录做迁移，如果 backend 提前摸到同一份数据文件，就会和主进程发生竞争。也就是说，主入口先处理“纯 CLI 输出”这种零状态路径，再保证“数据面”可安全接管，最后才让 backend 进入健康检查。</p>
+  <p><code>startBackendOrExit()</code> 本身很薄：成功时回传端口并执行 <code>onStarted</code>，失败时记录、捕获并按配置决定是否退出。它把“启动策略”留在入口，把“成功 / 失败 / 取消”的统一语义提炼进 <code>backendStartup.ts</code>，因此这个 helper 既可复用，也容易被单元测试锁死。</p>
+
+  <h2>3. 模式分流：同一入口，四种落点</h2>
+  <p>这四种落点并不在同一个阶段发生。<code>--version</code> 是最早的短路分支：<code>app.whenReady()</code> 之后立刻退出，不触发任何 process 初始化或 backend 启动。其余三种则共享同一条主线：先 <code>initializeProcess()</code>，再 <code>startBackendOrExit()</code>；然后 <code>--resetpass</code> 走 CLI 重置密码，不创建窗口；<code>--webui</code> 调用 <code>startWebHost()</code>，复用前面已经启动的 backend 端口，避免再起第二个进程碰撞 SQLite；默认桌面模式才会读“关闭到托盘”设置、创建主窗口、异步恢复 WebUI 偏好，并在窗口 ready 后触发延迟迁移。</p>
+  <pre><code class="language-typescript">if (isResetPasswordMode) {
+  await resetPasswordCLI(username);
+} else if (isWebUIMode) {
+  await startWebHost({ backend: { kind: 'useExistingBackend', port } });
+} else {
+  createWindow({ showOnReady });
+}</code></pre>
+  <p>这里最值得记住的判断是：AionU 把“桌面壳”和“backend 运行时”解耦了。窗口只是默认表现层，不是启动链路的中心；真正先被保证可用的是 backend 和数据目录，然后才决定要不要把 UI 露出来。</p>
+
+  <h2>4. 退出收尾与检索练习</h2>
+  <p>退出阶段也延续同样思路：<code>index.ts</code> 只安装 <code>installQuitCleanup()</code>，把 <code>before-quit</code> 接到一个统一收尾器；具体实现位于 <code>quitCleanup.ts</code>，其中会设置 quitting 标记、销毁托盘、停止 cron resume 监听、停止 backend，并在 10 秒超时后强制放行退出。这样主入口仍然只表达“何时收尾”，而不在文件末尾堆一长串清理细节。</p>
+  <pre><code class="language-typescript">installQuitCleanup({
+  onBeforeQuit: (handler) => app.on('before-quit', (event) => handler(event)),
+  stopBackend: () => backendManager.stop(),
+  destroyPetWindow: async () => { ... },
+});</code></pre>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>请按顺序复述主入口的前四步：<code>app.whenReady()</code> 之后，哪个分支会在 <code>initializeProcess()</code> 之前直接退出？剩下的模式为什么必须等 backend 启动完成后再继续？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>正确顺序是：<code>app.whenReady()</code> 进入 <code>handleAppReady()</code> 后，先检查 <code>isVersionMode</code>；若命中就打印版本并 <code>app.exit(0)</code>。只有非版本模式，才会执行 <code>initializeProcess()</code>，然后通过 <code>startBackendOrExit()</code> 启动或确认 backend。原因有两层：一是初始化阶段要先接管数据目录、日志目录和配置恢复；二是 WebUI 与 resetpass 都依赖同一份 backend 运行时，不能各自再起一套进程去碰同一份 SQLite 数据。</p>
+    </details>
+  </div>
+  <p class="muted">继续阅读：先看 <a href="../reference/main-entry-overview.html">本模块参考文档</a> 的接口清单；若要继续展开，可把 <code>desktop-startup-dispatch</code> 与 <code>webui-headless-branch</code> 视为后续候选主题。</p>
+</main>
+</body>
+</html>

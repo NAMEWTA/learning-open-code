@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 桥接架构总览：Adapter 注册表与消息规范化</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · 桥接架构总览：Adapter 注册表与消息规范化 <span class="tag">架构全景</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能画出五平台 Adapter 矩阵，理解 <code>sessionKey</code> 的编码规则，追踪钉钉 WebSocket 消息从到达 → 解析 → 规范化的完整流程。这是理解整个 Bridge 链路的起点。
+</div>
+
+<p>HanaAgent 的 Bridge 子系统连接了 5 个外部 IM 平台（钉钉 / 飞书 / Telegram / QQ / 微信），将用户消息桥接到 Agent 的 LLM 对话引擎。整个链路共 <strong>10 层穿透</strong>，涉及 <code>lib/bridge/</code> 下 26 个源文件。本课聚焦前两层：平台消息如何到达，以及 Adapter 如何将其规范化。</p>
+
+<h2>一、架构全景：10 层调用链</h2>
+
+<p>从外部平台消息到 Agent 响应回传，每条消息都经过如下调用链：</p>
+
+<pre><code>外部平台（钉钉/飞书/Telegram/QQ/微信）
+    │  WebSocket / Webhook
+    ▼
+L1  DingTalkAdapter / FeishuAdapter / TelegramAdapter  ...
+    │  消息解析 · 连接维护 · ACK 应答
+    ▼
+L2  BridgeManager._handleMessage()
+    │  ID 重映射 · owner/guest 判定 · 消息缓冲/去重
+    ▼
+L3  BridgeManager._flushPending()
+    │  附件下载 · 媒体注入 · LLM 等待回执
+    ▼
+L4  Hub.send() — 消息路由中枢
+    │  规则路由：owner / guest / ephemeral / 桌面端
+    ▼
+L5  BridgeSessionManager.executeExternalMessage()
+    │  会话索引查找 · Session 创建/恢复 · Prompt 构建 · 工具过滤
+    ▼
+L6  Pi SDK — Agent 执行 + LLM 推理
+    │  工具调用 · 多轮对话 · 流式输出
+    ▼
+L7  BridgeSessionManager 响应捕获
+    │  capturedText 累加 · toolMedia · providerErrorMessage
+    ▼
+L8  BridgeManager 响应清洗与发送
+    │  stripInternalTags() · StreamCleaner / BlockChunker
+    ▼
+L9  平台 API 发送
+    │  sendReply / sendBlockReply / sendDraft
+    ▼
+外部平台（用户看到回复）</code></pre>
+
+<h2>二、五平台 Adapter 矩阵</h2>
+
+<p>每个平台有独立的 Adapter 实现，通过 <code>ADAPTER_REGISTRY</code> 统一注册。新增平台只需添加条目 + 实现 Adapter 接口，不改 BridgeManager 核心逻辑。</p>
+
+<table>
+<thead><tr><th>平台</th><th>Adapter 文件</th><th>协议</th><th>连接方式</th><th>sessionKey 前缀</th><th>流式</th></tr></thead>
+<tbody>
+<tr><td>Telegram</td><td><code>telegram-adapter.ts</code></td><td>Bot API</td><td>同步</td><td><code>tg_dm_{userId}</code></td><td>draft / edit</td></tr>
+<tr><td>飞书</td><td><code>feishu-adapter.ts</code></td><td>开放平台 SDK</td><td>异步</td><td><code>fs_dm_{userId}</code></td><td>cardkit / rich</td></tr>
+<tr><td>钉钉</td><td><code>dingtalk-adapter.ts</code></td><td>Stream (WS)</td><td>异步</td><td><code>dt_dm_{userId}</code></td><td>batch</td></tr>
+<tr><td>QQ</td><td><code>qq-adapter.ts</code></td><td>Bot API</td><td>同步</td><td><code>qq_dm_{userId}</code></td><td>batch</td></tr>
+<tr><td>微信</td><td><code>wechat-adapter.ts</code></td><td>Wechaty</td><td>异步</td><td><code>wx_dm_{userId}</code></td><td>batch</td></tr>
+</tbody>
+</table>
+
+<div class="side">
+💡 <b>关键洞察：Adapter 模式 + 注册表</b><br>
+5 个平台各有独立 Adapter，通过 <code>ADAPTER_REGISTRY</code> 统一注册（含 create / getCredentials / ownerSessionKey）。新增平台只需添加条目 + 实现 Adapter 接口，不改 BridgeManager 核心逻辑。这是经典的<b>开闭原则</b>实践。
+</div>
+
+<h2>三、核心数据结构：sessionKey</h2>
+
+<p><code>sessionKey</code> 是贯穿整个链路的"身份证"，格式为 <code>{platformPrefix}_dm_{userId}@{agentId}</code>，同时编码了平台、用户和 Agent 三者信息。</p>
+
+<div class="step"><span class="num">→</span><b>解析规则：</b><code>parseSessionKey()</code>（位于 <code>lib/bridge/session-key.ts</code>）可反向解析出 platform / chatId / agentId<br>
+<span class="where">示例：dt_dm_zhangsan123@hanako → platform=dingtalk, chatId=zhangsan123, agentId=hanako</span></div>
+
+<pre><code>// Adapter 构造 sessionKey 的三种场景
+dt_dm_zhangsan123@hanako      // 钉钉用户 zhangsan123 与 Agent hanako 的私聊
+fs_dm_ou_abc456@butter        // 飞书用户 ou_abc456 与 Agent butter 的私聊
+dt_group_conv789@hanako       // 钉钉群 conv789 → hanako（群聊）</code></pre>
+
+<h2>四、钉钉 Stream 连接（代表案例）</h2>
+
+<p>以钉钉 Adapter 为例，它是一个<strong>异步 WebSocket Stream 长连接</strong>。启动流程分三步：</p>
+
+<div class="step"><span class="num">1</span><b>注册 Stream 连接</b> — POST <code>https://api.dingtalk.com/v1.0/gateway/connections/open</code> 获取 endpoint + ticket<br>
+<span class="where">dingtalk-adapter.ts · openStreamRegistration()</span></div>
+
+<div class="step"><span class="num">2</span><b>建立 WebSocket</b> — <code>new WebSocket(appendTicket(endpoint, ticket))</code> 将 ticket 拼入 URL 鉴权<br>
+<span class="where">dingtalk-adapter.ts · connect()</span></div>
+
+<div class="step"><span class="num">3</span><b>监听消息</b> — <code>ws.on("message", handleStreamMessage)</code> 处理每条推送<br>
+<span class="where">dingtalk-adapter.ts · handleStreamMessage()</span></div>
+
+<pre><code>// 钉钉 Stream 连接核心代码
+const { endpoint, ticket } = await openStreamRegistration();
+ws = new WebSocket(appendTicket(endpoint, ticket));
+ws.on("message", handleStreamMessage);</code></pre>
+
+<h2>五、消息规范化：handleStreamMessage 的 5 步处理</h2>
+
+<p>收到 WebSocket 消息后，<code>handleStreamMessage()</code> 执行以下处理流程：</p>
+
+<div class="step"><span class="num">1</span><b>解析信封</b> — <code>safeJsonParse(raw)</code> 将 Buffer/ArrayBuffer 转为 JSON envelope</div>
+<div class="step"><span class="num">2</span><b>Topic 过滤</b> — 仅处理 <code>CALLBACK</code> 类型 + <code>/v1.0/im/bot/messages/get</code> topic</div>
+<div class="step"><span class="num">3</span><b>ACK 应答</b> — <code>acknowledge(envelope)</code> 回传 <code>{"code":200,"message":"OK"}</code>，防止平台重复推送</div>
+<div class="step"><span class="num">4</span><b>机器人过滤</b> — payload 的 <code>robotCode</code> 与配置不符则丢弃</div>
+<div class="step"><span class="num">5</span><b>消息规范化</b> — <code>normalizeDingTalkInboundMessage()</code> 转为统一结构</div>
+
+<h2>六、normalizeDingTalkInboundMessage 详解</h2>
+
+<p>这是关键的"翻译层"，将钉钉原生消息格式转为 bridge 统一消息契约：</p>
+
+<pre><code>function normalizeDingTalkInboundMessage(payload, agentId, profileCache) {
+  // 1) 提取身份
+  const userId = cleanString(payload.senderStaffId)
+    || cleanString(payload.senderId)
+    || cleanString(payload.senderUnionId);
+  const isGroup = payload.conversationType !== "1";
+
+  // 2) 提取文本内容（兼容 text / audio / richText）
+  let text = extractDingTalkText(payload);
+
+  // 3) 构造统一 sessionKey
+  const sessionKey = isGroup
+    ? `dt_group_${chatId}@${agentId}`
+    : `dt_dm_${userId}@${agentId}`;
+
+  // 4) 提取头像与昵称（含 profileCache 去重）
+  const profile = resolveDingTalkProfile(payload, profileCache.get(userId));
+
+  // 5) 返回统一消息结构
+  return {
+    platform: "dingtalk", agentId, chatId, userId,
+    sessionKey, text, senderName, displayName,
+    avatarUrl, principalId: userId, isGroup,
+    _msgId: cleanString(payload.msgId),
+  };
+}</code></pre>
+
+<div class="danger">
+⚠️ <b>注意文本提取的三种格式兼容：</b><br>
+• <b>text 型</b>：<code>payload.text.content</code> — 普通文本消息<br>
+• <b>audio 型</b>：<code>payload.content.recognition</code> — 钉钉语音识别文本<br>
+• <b>richText 型</b>：拼接 <code>payload.content.richText[].text</code> — 富文本消息<br>
+如果只处理 text 型，语音消息和富文本消息将丢失内容。
+</div>
+
+<h2>七、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. sessionKey 的格式编码了哪三部分信息？</p>
+<span class="opt">A. 消息ID、用户ID、平台类型</span>
+<span class="opt">B. 平台前缀、用户/群ID、Agent ID</span>
+<span class="opt">C. 时间戳、消息类型、会话状态</span>
+<span class="opt">D. AppKey、AppSecret、机器人编码</span>
+<details><summary>看答案</summary><b>B</b>。sessionKey = {platformPrefix}_dm_{userId}@{agentId}，编码了平台（如 dt=dingtalk）、用户/群ID、以及目标 Agent ID。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 钉钉 Adapter 收到 WebSocket 消息后，为什么必须发 ACK 应答？</p>
+<span class="opt">A. 为了告知用户消息已被阅读</span>
+<span class="opt">B. 为了防止钉钉平台因未收到确认而重复推送同一条消息</span>
+<span class="opt">C. 为了激活 WebSocket 长连接的心跳机制</span>
+<span class="opt">D. 为了在钉钉后台记录消息处理日志</span>
+<details><summary>看答案</summary><b>B</b>。ACK 应答是钉钉 Stream 模式的协议要求——如果未在规定时间内回传 <code>{"code":200}</code>，钉钉会认为消息投递失败并重复推送，导致同一条消息被处理多次。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. normalizeDingTalkInboundMessage 处理了哪三种消息格式？</p>
+<span class="opt">A. 文本、图片、视频</span>
+<span class="opt">B. text 型、audio 型（语音识别）、richText 型（富文本）</span>
+<span class="opt">C. Markdown、HTML、纯文本</span>
+<span class="opt">D. 单聊、群聊、机器人指令</span>
+<details><summary>看答案</summary><b>B</b>。text 型取 <code>payload.text.content</code>，audio 型取 <code>payload.content.recognition</code>（钉钉的语音转文字结果），richText 型拼接多个 <code>richText[].text</code> 段落。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 为什么五平台 Adapter 各自独立实现，而不是用一个通用的"消息解析器"？</p>
+<span class="opt">A. 因为各平台的 API 协议、消息格式、连接方式差异太大，通用解析器会变成难以维护的 if-else 地狱</span>
+<span class="opt">B. 因为代码作者喜欢写重复代码</span>
+<span class="opt">C. 因为每个 Adapter 需要独立的数据库连接</span>
+<span class="opt">D. 因为它们运行在不同的进程中</span>
+<details><summary>看答案</summary><b>A</b>。五个平台的协议完全不同（Telegram 用 Bot API 轮询、钉钉用 WebSocket Stream、飞书用 SDK 异步回调），消息格式也各不一样。Adapter 模式让每个平台的差异被封装在各自的 Adapter 中，BridgeManager 只依赖统一的消息契约。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>lib/bridge/dingtalk-adapter.ts</code>，从 <code>handleStreamMessage()</code> 开始逐行阅读。然后对比 <code>lib/bridge/telegram-adapter.ts</code> 的 <code>poll()</code> 方法，感受两种不同连接模式的设计差异。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果钉钉 WebSocket 断开，消息会丢失吗？」「为什么 Telegram 用同步轮询而不是 WebSocket？」下一课我们聚焦 <strong>BridgeManager 的防抖聚合与命令拦截</strong>——消息进入 BridgeManager 后经历了哪些检查与缓冲。</div>
+
+<div class="nav">课程 0001 / 桥接消息流全链路 · 下一课预告：BridgeManager 与防抖聚合——debounce + abort + Slash 命令拦截</div>
+
+</body>
+</html>

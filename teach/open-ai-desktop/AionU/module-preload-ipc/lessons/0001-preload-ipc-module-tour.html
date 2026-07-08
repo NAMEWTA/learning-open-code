@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU Preload 与 IPC 安全边界短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Preload 与 IPC：renderer 只能碰到被点名开放的能力</h1>
+    <p class="subtitle">学习目标：15 分钟内看清 AionU 如何用 preload 把 renderer 限制在“受控桥接”里，而不是直接给它 Electron/Node 权限。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：preload/main.ts</span>
+    </div>
+  </section>
+  <p class="muted">L0 回链：先补整体地图可看 <a href="../../00-overview/lessons/0001-project-map.html">00-overview / 0001-project-map</a>，再回到本课聚焦 preload 这条安全边界。</p>
+
+  <h2>1. 模块职责：把“能做什么”改写成白名单</h2>
+  <p>AionU 的 renderer 不是直接拿到 <code>ipcRenderer</code> 或 Node API，而是先经过 preload。主窗口入口 <span class="where">packages/desktop/src/preload/main.ts</span> 用 <code>contextBridge.exposeInMainWorld</code> 只公开收口后的 <code>electronAPI</code>，再额外注入 backend 端口、初始语言和启动失败状态。这样 renderer 能做的是“调用白名单方法”和“读取启动快照”，而不是自由触达 main。</p>
+  <pre><code class="language-typescript">contextBridge.exposeInMainWorld('electronAPI', {
+  emit: (name, data) => ipcRenderer.invoke(ADAPTER_BRIDGE_EVENT_KEY, JSON.stringify({ name, data })),
+  on: (callback) => { /* 订阅统一桥接事件 */ },
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  collectFeedbackLogs: () => ipcRenderer.invoke('feedback:collect-logs'),
+  captureFeedbackScreenshot: () => ipcRenderer.invoke('feedback:capture-screenshot'),
+});</code></pre>
+  <p>这里的边界很明确：跨域业务通信不开放裸 <code>ipcRenderer</code>，只允许经过 <code>emit/on</code> 进入统一桥；少数 Electron 专属能力，例如拖拽文件绝对路径、反馈截图、数据库恢复，则被列成显式独立方法，方便审计特权来源。</p>
+
+  <h2>2. 在整体架构里的位置：preload 只负责转译，不负责业务</h2>
+  <div class="filetree">packages/desktop/src/
+├── preload/                     ← renderer 可见能力的最窄入口
+│   ├── main.ts                  ← 主窗口 bridge 与启动快照
+│   ├── petPreload.ts            ← pet 展示窗口只收事件
+│   ├── petHitPreload.ts         ← pet 命中层只发拖拽/点击
+│   └── petConfirmPreload.ts     ← pet 确认窗收确认事件并回传响应
+├── common/
+│   └── adapter/
+│       └── main.ts              ← main 侧统一桥接与窗口广播
+└── process/
+    └── bridge/                  ← 各能力域的 provider 注册</div>
+  <p>preload 不实现窗口控制、主题切换或 WebUI 启动，它只把 renderer 请求安全地转译给 main。真正的统一接线点在 <span class="where">packages/desktop/src/common/adapter/main.ts</span>：它接收 renderer 传来的事件名，把请求交给 main 侧 bridge emitter，再把结果广播回窗口。</p>
+  <pre><code class="language-typescript">ipcMain.handle(ADAPTER_BRIDGE_EVENT_KEY, (_event, info) => {
+  const { name, data } = JSON.parse(info);
+  return Promise.resolve(emitter.emit(name, data));
+});</code></pre>
+  <p>所以这条链可以记成三段：renderer 只能调用 preload 白名单；preload 只把命名好的事件交给 adapter；adapter 再分发给 main 已注册的 provider。权限口子不在 React 组件里，而在 preload 暴露面。</p>
+
+  <h2>3. 对外接口与内部分层：主窗口是通用桥，pet 窗口是专用桥</h2>
+  <p>主窗口 preload 对外接口分三类：通用业务桥 <code>electronAPI.emit/on</code>；少数原生特权，如 <code>getPathForFile</code>、反馈截图、数据库恢复；启动只读状态，如 <code>__backendPort</code>。而 pet 三个 preload 明显更窄：展示窗只订阅状态，命中层只发拖拽和点击，确认窗只处理确认事件与 respond 回传。AionU 没复用一个“大而全”的 preload，而是按窗口职责切成更小的表面。</p>
+  <p>这节课只保留理解边界所需的摘要；按窗口对象展开的完整暴露清单、只读全局和 channel 名，请直接看 <a href="../reference/preload-ipc-overview.html#entries">reference 的接口总表</a>。</p>
+  <p>这正是安全边界的关键启发：窗口越专用，暴露面越该变窄。</p>
+
+  <h2>4. 阅读示例与检索练习</h2>
+  <p>一个好用的阅读切口是“反馈截图”链路：renderer 在反馈上下文里调用 <code>window.electronAPI.captureFeedbackScreenshot()</code>，preload 把它收口成 <code>ipcRenderer.invoke('feedback:capture-screenshot')</code>，main 再定位当前窗口并抓图。测试文件 <span class="where">tests/unit/feedback/feedbackBridge.test.ts</span> 进一步证明：没有所属窗口、窗口已销毁、截图为空时都返回 <code>null</code>，说明这条桥不仅有限权，还把失败语义固定了。</p>
+  <pre><code class="language-typescript">const result = await handler({ sender: {} });
+expect(result).toBeNull();
+expect(currentWindow.webContents.capturePage).not.toHaveBeenCalled();</code></pre>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果某个 renderer 页面想“直接”最小化窗口，它真正能接触到的最近一层代码应该是哪一层？为什么不是 <code>BrowserWindow</code>？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>最近一层是 preload 暴露的 <code>electronAPI.emit</code> 或经其封装后的 <code>ipcBridge.windowControls.minimize</code> 调用，而不是 <code>BrowserWindow</code>。因为窗口对象只存在 main 进程，renderer 只能通过 preload 白名单跨边界发请求；真正调用 <code>window.minimize()</code> 的代码在 main 侧 provider 里。</p>
+    </details>
+  </div>
+  <p class="muted">继续学习建议：先看 <a href="../reference/preload-ipc-overview.html">本主题参考清单</a> 的 channel 表，再追问 agent“带我从一个具体 channel 走完整条 renderer → preload → provider → 广播回推链路”。</p>
+</main>
+</body>
+</html>

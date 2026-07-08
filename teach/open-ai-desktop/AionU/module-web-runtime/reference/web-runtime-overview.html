@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebHost 与 WebCLI 运行时参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>WebHost 与 WebCLI 运行时参考</h1>
+    <p class="subtitle">L1 速查文档：模块职责、架构位置、对外接口、内部分层、关键依赖、测试证据与推荐阅读路径。</p>
+    <div class="meta">
+      <span class="pill">主题：module-web-runtime</span>
+      <span class="pill">核心入口：web-host / web-cli</span>
+      <span class="pill">辅助证据：tests / docs/guides/webui.md</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#position">1. 模块定位</a>
+    <a href="#entries">2. 对外接口清单</a>
+    <a href="#layers">3. 内部分层</a>
+    <a href="#flow">4. 启动与调用链</a>
+    <a href="#deps">5. 关键依赖</a>
+    <a href="#evidence">6. 测试与阅读示例</a>
+  </nav>
+
+  <h2 id="position">1. 模块定位</h2>
+  <p>Web 运行时位于 AionU 的“非 Electron 窗口宿主”层：向下继续复用同一个 backend 与 renderer 静态资源，向上则提供可以独立执行的 CLI 入口。它与 <a href="../../00-overview/reference/00-overview.html">L0 总览</a> 中的桌面壳并列，是应用的第二种宿主形态；与 <a href="../../module-main-entry/lessons/0001-main-entry-module-tour.html">main-entry</a> 的关系是“桌面入口决定是否切到 WebUI”，与 renderer 的关系则是“只负责把打包后的静态资源和 API 代理暴露给浏览器”。</p>
+  <table>
+    <thead>
+      <tr><th>能力面</th><th>主文件</th><th>职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>运行时组合器</td><td><code>packages/web-host/src/index.ts</code></td><td>组合 backend 与静态服务器，返回统一的 <code>WebHostHandle</code>。</td></tr>
+      <tr><td>backend 生命周期</td><td><code>packages/web-host/src/backend-launcher.ts</code></td><td>解析 backend 二进制、选择端口、spawn、健康检查、停止与诊断。</td></tr>
+      <tr><td>静态与代理宿主</td><td><code>packages/web-host/src/static-server.ts</code></td><td>提供 SPA 静态服务、API 代理、登录路径转发、WebSocket/TCP splice。</td></tr>
+      <tr><td>agent 清理</td><td><code>packages/web-host/src/agent-process-registry.ts</code></td><td>在 backend 停止前清理历史登记的 agent 进程树。</td></tr>
+      <tr><td>CLI 启动入口</td><td><code>packages/web-cli/src/index.ts</code></td><td>解析命令、定位资源目录、启动 WebHost、处理自动开浏览器与优雅退出。</td></tr>
+      <tr><td>浏览器策略</td><td><code>packages/web-cli/src/browser.ts</code></td><td>决定默认是否自动打开浏览器，并按平台生成 opener 命令。</td></tr>
+      <tr><td>首启密码自举</td><td><code>packages/web-cli/src/ensureAdminPassword.ts</code></td><td>轮询认证状态，必要时调用 <code>/api/webui/reset-password</code> 生成初始密码。</td></tr>
+      <tr><td>用户操作文档</td><td><code>docs/guides/webui.md</code></td><td>从最终用户视角说明跨平台启动、远程访问和排障。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="entries">2. 对外接口清单</h2>
+  <table>
+    <thead>
+      <tr><th>入口 / 接口</th><th>形式</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>startWebHost(opts)</code></td><td>库函数</td><td>WebHost 主入口。接收已解析好的 app / staticDir / backend 选项，返回统一 handle。</td></tr>
+      <tr><td><code>startStaticServer(opts)</code></td><td>库函数</td><td>单独启动静态服务门面，供 WebHost 组合器或 frontend-only 模式使用。</td></tr>
+      <tr><td><code>stopStaticServer(handle)</code></td><td>库函数</td><td>关闭 TCP listener 与内部 HTTP server。</td></tr>
+      <tr><td><code>startBackend(opts)</code></td><td>库函数</td><td>独立 backend 启动函数，包装 <code>BackendLifecycleManager</code>。</td></tr>
+      <tr><td><code>stopBackend(handle)</code></td><td>库函数</td><td>停止 backend 句柄。</td></tr>
+      <tr><td><code>BackendLifecycleManager</code></td><td>类</td><td>长期持有 backend 进程、端口、状态与重启窗口。</td></tr>
+      <tr><td><code>buildSpawnArgs()</code> / <code>buildSpawnEnv()</code></td><td>纯函数</td><td>把 app metadata、目录配置和运行标志转换成 backend 启动参数。</td></tr>
+      <tr><td><code>findAvailablePort()</code></td><td>纯函数</td><td>寻找浏览器 fetch 兼容端口，跳过被浏览器禁用的端口号。</td></tr>
+      <tr><td><code>aionui-web start</code></td><td>CLI 命令</td><td>独立启动 WebUI，支持本地或远程访问。</td></tr>
+      <tr><td><code>aionui-web resetpass</code></td><td>CLI 命令</td><td>临时拉起 backend，重置管理员密码后立即关闭。</td></tr>
+      <tr><td><code>shouldAutoOpenBrowser()</code></td><td>纯函数</td><td>本地模式默认自动打开浏览器，远程模式默认关闭，可被 flag/env 覆盖。</td></tr>
+      <tr><td><code>ensureAdminPassword()</code></td><td>服务函数</td><td>确保首启时能给用户一组可登录的管理员凭据。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">3. 内部分层</h2>
+  <div class="filetree">packages/web-host/src/
+├── index.ts                        ← WebHost 组合器与公共导出
+├── backend-launcher.ts             ← backend 生命周期、健康检查、端口与诊断
+├── static-server.ts                ← 静态服务、API 代理、TCP splice
+├── agent-process-registry.ts       ← agent 进程树清理
+└── types.ts                        ← AppMetadata / WebHostOptions / Handle 契约
+
+packages/web-cli/src/
+├── index.ts                        ← CLI 命令分发、资源解析、启动/停止
+├── browser.ts                      ← 自动开浏览器策略与平台 opener
+└── ensureAdminPassword.ts          ← 首启密码自举与提示文案
+
+packages/web-host/tests/
+├── start-web-host.test.ts          ← 组合器边界测试
+├── equivalence.test.ts             ← 旧等价测试占位说明
+└── fixtures/
+    ├── mock-backend.ts             ← 测试辅助 backend
+    └── renderer/
+        └── index.html              ← 静态资源夹具
+
+tests/unit/web-cli/
+├── browser.test.ts                 ← 自动开浏览器规则
+└── ensureAdminPassword.test.ts     ← 首启密码轮询与失败分支</div>
+  <table>
+    <thead>
+      <tr><th>层次</th><th>输入</th><th>输出</th><th>边界判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>CLI 决策层</td><td>命令行参数、环境变量、打包目录结构</td><td><code>WebHostOptions</code>、日志提示、退出码</td><td>负责“怎么启动”和“给用户看什么”，不直接实现网络转发。</td></tr>
+      <tr><td>WebHost 组合层</td><td><code>WebHostOptions</code></td><td><code>WebHostHandle</code></td><td>只组合 backend 与 static server，不管理持久配置。</td></tr>
+      <tr><td>backend 生命周期层</td><td>app metadata、binary resolver、dirs、端口偏好</td><td><code>BackendHandle</code>、诊断错误</td><td>负责 “aioncore 是否起来了”。</td></tr>
+      <tr><td>静态宿主层</td><td>静态目录、backendPort、监听地址</td><td>浏览器可访问 URL、API 代理与 WS 路由</td><td>负责 “浏览器怎么接入 backend”。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="flow">4. 启动与调用链</h2>
+  <table>
+    <thead>
+      <tr><th>场景</th><th>主链</th><th>你该先读什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>正常独立启动</td><td><code>main()</code> → <code>runStart()</code> → <code>startWebHost()</code> → <code>startBackend()</code> + <code>startStaticServer()</code></td><td>先读 <code>packages/web-cli/src/index.ts</code>，再下钻到 WebHost。</td></tr>
+      <tr><td>frontend-only 降级</td><td><code>runStart()</code> 发现 backend bin 缺失 → 直接 <code>startStaticServer()</code></td><td>先读 CLI 的 <code>backendAvailable</code> 判断，再看 static-server 的 502 行为。</td></tr>
+      <tr><td>远程访问模式</td><td><code>--remote</code> / env → <code>allowRemote=true</code> → static-server 绑定 <code>0.0.0.0</code> 并计算 <code>networkUrl</code></td><td>先读 <code>resolveAllowRemote()</code> 与 <code>startStaticServer()</code> 的 host 选择。</td></tr>
+      <tr><td>首启密码生成</td><td><code>runStart()</code> 成功后 → <code>ensureAdminPassword()</code> → <code>/api/auth/status</code> → <code>/api/webui/reset-password</code></td><td>先读 <code>ensureAdminPassword.ts</code> 与单元测试。</td></tr>
+      <tr><td>resetpass</td><td><code>main()</code> → <code>runResetPassword()</code> → 临时 <code>startWebHost()</code> → POST reset-password → stop</td><td>先读 CLI 的 <code>runResetPassword()</code>，不要从 WebHost 组合器开始猜。</td></tr>
+      <tr><td>页面能开但 API 失败</td><td>前端请求到 static-server，若 backend 不通则得到 502 / ECONNREFUSED</td><td>先判断是否 frontend-only 或 backend 未就绪，再看 <code>forwardToBackend()</code>。</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <p><strong>推荐阅读顺序：</strong>先读 <code>packages/web-cli/src/index.ts</code> 的 <code>runStart()</code> 和 <code>runResetPassword()</code>，再看 <code>packages/web-host/src/index.ts</code> 的组合器，最后分支阅读 <code>backend-launcher.ts</code> 与 <code>static-server.ts</code>。如果你是从桌面入口跳过来的，先回看 <a href="../../module-main-entry/lessons/0001-main-entry-module-tour.html">main-entry 短课</a>，确认 WebUI 模式是在哪里被选中的。</p>
+  </div>
+
+  <h2 id="deps">5. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>用途</th><th>在本模块的体现</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Node.js `child_process`</td><td>启动与停止 backend 子进程</td><td><code>backend-launcher.ts</code> 的 <code>spawn()</code>、Windows 下 <code>taskkill</code>。</td></tr>
+      <tr><td>Node.js `http` / `net`</td><td>静态服务、反代与 TCP splice</td><td><code>static-server.ts</code> 同时维护内部 HTTP server 与用户侧 TCP listener。</td></tr>
+      <tr><td>`serve-handler`</td><td>静态资源与 SPA fallback</td><td>把 <code>staticDir</code> 暴露为浏览器入口，并将未知路径重写到 <code>index.html</code>。</td></tr>
+      <tr><td>浏览器 fetch 端口规则</td><td>避免 backend 选到被浏览器禁止的端口</td><td><code>findAvailablePort()</code> 会跳过例如 6000、6667 之类 fetch-blocked 端口。</td></tr>
+      <tr><td>打包目录约定</td><td>让独立 CLI 能找到静态资源与 bundled backend</td><td><code>resolveCliRoot()</code>、<code>resolveBackendBinary()</code>、<code>resolveStaticDir()</code> 共同依赖 tarball 布局。</td></tr>
+      <tr><td>后端认证接口</td><td>首启密码与 resetpass</td><td><code>/api/auth/status</code>、<code>/api/webui/reset-password</code>、<code>/api/auth/internal/users/system</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">6. 测试与阅读示例</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>组合器边界</h3>
+      <p><code>packages/web-host/tests/start-web-host.test.ts</code> 证明 <code>startWebHost()</code> 的职责被刻意压薄，不再携带初始密码等业务语义。</p>
+    </section>
+    <section class="panel">
+      <h3>静态与代理行为</h3>
+      <p><code>packages/web-host/src/static-server.unit.test.ts</code> 覆盖 <code>/login</code>、<code>/logout</code>、<code>/api/*</code>、SPA fallback、<code>/ws</code> 和 <code>/api/stt/stream</code> 的实际网络行为。</p>
+    </section>
+    <section class="panel">
+      <h3>CLI 用户体验</h3>
+      <p><code>tests/unit/web-cli/browser.test.ts</code> 与 <code>ensureAdminPassword.test.ts</code> 分别锁定自动开浏览器策略和首次密码自举的提示契约。</p>
+    </section>
+  </div>
+  <table>
+    <thead>
+      <tr><th>阅读目标</th><th>起点文件</th><th>跟进文件</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>确认 CLI 如何推断路径</td><td><code>packages/web-cli/src/index.ts</code></td><td><code>docs/guides/webui.md</code></td></tr>
+      <tr><td>看 backend 为什么有详细诊断</td><td><code>packages/web-host/src/backend-launcher.ts</code></td><td><code>packages/web-host/src/backend-launcher.test.ts</code></td></tr>
+      <tr><td>看浏览器请求如何转到 backend</td><td><code>packages/web-host/src/static-server.ts</code></td><td><code>packages/web-host/src/static-server.unit.test.ts</code></td></tr>
+      <tr><td>看首启密码怎样保证不阻断启动</td><td><code>packages/web-cli/src/ensureAdminPassword.ts</code></td><td><code>tests/unit/web-cli/ensureAdminPassword.test.ts</code></td></tr>
+      <tr><td>看停止时为什么会清理 agent 进程</td><td><code>packages/web-host/src/agent-process-registry.ts</code></td><td><code>packages/web-host/src/agent-process-registry.test.ts</code></td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

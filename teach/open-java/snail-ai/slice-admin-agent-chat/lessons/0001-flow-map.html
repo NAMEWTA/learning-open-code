@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin 智能体流式对话流程图</title>
+  <link rel="stylesheet" href="../assets/admin-agent-chat.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>
+    <a href="../../module-server-entry/lessons/0001-server-entry-module-tour.html">Server 入口 L1</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">责任链 L1</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Client L1</a>
+    <a href="../reference/admin-agent-chat-flow-map.html">本切片参考</a>
+  </nav>
+
+  <h1>Admin 智能体流式对话流程图</h1>
+  <p class="lead">本课只完成一个目标：把 Admin 端一次智能体流式对话从 HTTP/SSE 入口追到 Agent Client 执行，再追回应答回写和持久化边界。</p>
+  <div class="meta">
+    <span class="pill">层级：L2 垂直切片</span>
+    <span class="pill">预计 15 分钟</span>
+    <span class="pill">主来源：<span class="where">AgentController.java</span></span>
+    <span class="pill"><span class="where">LlmCallHandler.java</span></span>
+    <span class="pill"><span class="where">ChatDispatchStreamingHandler.java</span></span>
+  </div>
+
+  <h2>1. 请求先变成一条可写的流</h2>
+  <p>Admin 对话入口是 <code>POST /agent/{id}/chat</code>，方法带 <code>@LoginRequired(role = USER)</code>，因此请求先经过 Admin 认证拦截器：读取 <code>Snail-Ai-Auth</code>，校验 JWT 和角色，把用户放进 <code>UserSessionUtils</code>。Controller 返回 <code>Flux&lt;String&gt;</code>，并用内部类 <code>FluxBridgeChatStreamWriter</code> 把责任链的 <code>send/complete</code> 适配成 SSE 输出。</p>
+  <p>请求体只要求 <code>conversationId</code> 和 <code>content</code>，可选禁用 MCP Server 和 Skill。Controller 不自己调用模型，只创建 <code>AgentChatCommand</code>，把 <code>agentId</code>、会话、内容、禁用项和 stream writer 交给 <code>AgentChatService</code>。</p>
+
+  <h2>2. Server 责任链补齐分发上下文</h2>
+  <p><code>AgentChatService</code> 创建 <code>AgentChatContext</code> 后，<code>AgentChatChainService</code> 顺序调用 Spring 注入的 Handler。关键顺序是：10 初始化用户和 Agent，20 创建会话并保存用户消息，30 解析模型配置，40 装配 MCP，50 初始化 system prompt，60 处理 RAG，70 装配 Skill，75 选择目标 Client 并加载短期历史，80 组装 <code>ChatDispatchRequest</code> 并通过 gRPC 发往 Client。</p>
+  <pre class="flow">Admin HTTP/SSE
+  └─ AgentController.chat
+      └─ AgentChatService.chat
+          └─ AgentChatChainService.proceed
+              ├─ InitContextHandler
+              ├─ ConversationHandler
+              ├─ ModelResolveHandler
+              ├─ McpHandler / SystemPromptHandler / RagHandler / SkillAgentChatHandler
+              ├─ ContextCollectorHandler
+              └─ LlmCallHandler
+                  └─ gRPC server streaming: /chat/dispatch</pre>
+  <p>注意短路规则：循环本身不会停，失败的 Handler 会设置 <code>ctx.terminated=true</code>，后续 Handler 需要自己先检查。找不到 Agent、模型配置、app 或可用 Client 时，会直接向 stream writer 写错误并完成，不会进入 Client 执行，也不会产生 completion 持久化。</p>
+
+  <h2>3. Client 执行后把 chunk 带回 Server</h2>
+  <p><code>LlmCallHandler</code> 使用 <code>UriConstants.CHAT_DISPATCH</code>，也就是 <code>/chat/dispatch</code>。Client 端本地 gRPC server 收到请求后，<code>ClientRequestDispatcher</code> 交给 <code>ChatDispatchStreamingHandler</code>。它解析 <code>ChatDispatchRequest</code>，调用 <code>ChatSessionRuntime</code>；运行时增加活跃计数，解析 MCP/RAG/Skill/基础/自定义工具，再让 <code>ClientChatExecutor</code> 构建 Prompt 和 Spring AI <code>ChatClient</code>。</p>
+  <p>流式模型响应中，<code>StreamChunkForwarderAdvisor</code> 回传文本 chunk，<code>ThinkingCollectorAdvisor</code> 回传 thinking，<code>TokenUsageCollectorAdvisor</code> 在最终 chunk 采集 usage。Client 发回 <code>ChatStreamResponse</code>：<code>text</code> 和 <code>thinking</code> 被 <code>ChatStreamObserver</code> 写回 SSE；<code>completion</code> 触发异步持久化，保存助手消息、thinking、token、短期记忆和每日统计。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：如果 Admin 页面已经连上 SSE，但只有用户消息入库，没有助手消息和 usage，你优先查哪三个点？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先查 <code>ContextCollectorHandler</code> 是否选到可用 Client，再查 <code>LlmCallHandler</code> 是否成功发出 <code>/chat/dispatch</code>，最后查 Client 端 <code>ChatDispatchStreamingHandler</code> 是否返回 <code>completion</code>。用户消息在 <code>ConversationHandler</code> 已提前持久化；助手消息和 usage 只有 <code>ChatStreamObserver.handleCompletion</code> 收到 completion 后才会提交给 <code>ChatResultPersistService</code>。</p>
+    </details>
+  </div>
+
+  <p class="note">主要推荐来源：先读本课对应的三个源文件，再打开 <a href="../reference/admin-agent-chat-flow-map.html">切片参考</a>核对入口端点、DTO、Handler 顺序、gRPC URI、失败/取消/usage/持久化边界。遇到“到底该改 Server 还是 Client”的问题，可以继续向 agent 追问具体调用栈。</p>
+</main>
+</body>
+</html>

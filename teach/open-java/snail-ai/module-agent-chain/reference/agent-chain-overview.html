@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 责任链模块速查</title>
+  <link rel="stylesheet" href="../assets/agent-chain.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-agent-chain-module-tour.html">返回短课</a>
+    <a href="agent-chain-api.html">边缘 Handler API L3</a>
+    <a href="../../slice-agent-chain-grpc/reference/agent-chain-grpc-flow-map.html">gRPC 切片 L2</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+  </nav>
+
+  <h1>Agent 责任链模块速查</h1>
+  <p class="lead">Server 端 `snail-ai-feature-agent` 的 Handler、上下文、回调、持久化和 gRPC 分发边界。</p>
+
+  <h2>模块职责与边界</h2>
+  <div class="grid">
+    <div class="panel">
+      <strong>负责什么</strong>
+      加载 Agent 配置、写入会话记录、解析模型、装配 MCP/Skill/RAG、收集短期历史、选择目标 Client、发起 gRPC 流式分发。
+    </div>
+    <div class="panel">
+      <strong>不负责什么</strong>
+      不在 Server 端直接调用大模型，不展开 Client Advisor 的 Token 统计、工具循环或模型执行细节。
+    </div>
+    <div class="panel">
+      <strong>主要数据流</strong>
+      REST/SSE 入口 → `AgentChatContext` → 有序 Handler → `ChatDispatchRequest` → gRPC Client → `ChatStreamObserver` → `ChatStreamWriter`。
+    </div>
+  </div>
+
+  <h2>当前源码 Handler 顺序</h2>
+  <p class="note warn">官方文档 `docs/architecture/agent-chain.md` 说明了 10 个阶段的概念顺序；当前源码以 Spring `@Order` 为准。`WebSearchHandler` 的 `@Component` 与 `@Order` 被注释，默认不会进入 Spring 注入的 Handler 列表。</p>
+  <table>
+    <thead>
+      <tr>
+        <th>源码 order</th>
+        <th>Handler</th>
+        <th>职责</th>
+        <th>主要写入</th>
+        <th>源码</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>10</td>
+        <td><code>InitContextHandler</code></td>
+        <td>从请求用户或会话中取得用户，按 `agentId` 加载智能体；找不到 Agent 时写错误并终止。</td>
+        <td>`user`、`agent`、`terminated`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/InitContextHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>20</td>
+        <td><code>ConversationHandler</code></td>
+        <td>创建或复用会话，并立即持久化当前用户消息。</td>
+        <td>数据库会话、用户消息记录</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ConversationHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>30</td>
+        <td><code>ModelResolveHandler</code></td>
+        <td>选择 Agent 绑定模型或默认 chat 模型，组装远程分发需要的模型配置。</td>
+        <td>`modelId`、`modelConfig`、`terminated`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ModelResolveHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>40</td>
+        <td><code>McpHandler</code></td>
+        <td>读取 Agent 绑定的 MCP Server，过滤用户禁用项，生成 Client 可消费的描述符。</td>
+        <td>`mcpServers`、`mcpServerDescriptors`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/McpHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>50</td>
+        <td><code>SystemPromptHandler</code></td>
+        <td>以 Agent instruction 初始化 `systemPrompt`，为空时使用默认助手提示。</td>
+        <td>`systemPrompt`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/SystemPromptHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>60</td>
+        <td><code>RagHandler</code></td>
+        <td>按 RAG 调用模式处理知识库：强制模式在 Server 并行检索并追加结果；智能模式只追加可用知识库说明。</td>
+        <td>`systemPrompt`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/RagHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>70</td>
+        <td><code>SkillAgentChatHandler</code></td>
+        <td>加载 Agent 绑定的 Skill 内容，过滤禁用项，生成远程分发的 Skill 描述符。</td>
+        <td>`skillDescriptors`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/SkillAgentChatHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>75</td>
+        <td><code>ContextCollectorHandler</code></td>
+        <td>校验 app，选择存活 Client，写入短期记忆并加载历史消息。</td>
+        <td>`targetClient`、`historyMessages`、`terminated`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ContextCollectorHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>80</td>
+        <td><code>LlmCallHandler</code></td>
+        <td>把上下文组装为 `ChatDispatchRequest`，通过 gRPC 流式发送到目标 Client。</td>
+        <td>`streamDispatchStarted`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/LlmCallHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>注释中 65</td>
+        <td><code>WebSearchHandler</code></td>
+        <td>设计上为联网搜索注入工具回调；当前未注册为组件，默认不参与链路。</td>
+        <td>`toolCallbacks`</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/WebSearchHandler.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>公共类与协作边界</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>职责</th>
+        <th>源码</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AgentChatHandler</code></td>
+        <td>所有 Server 端 Handler 的最小接口；约定失败时可设置上下文终止。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/AgentChatHandler.java</span></td>
+      </tr>
+      <tr>
+        <td><code>AgentChatContext</code></td>
+        <td>链路上下文；封装输入、用户/Agent、模型、MCP、Skill、历史、目标 Client 与流输出口。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/AgentChatContext.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ChatStreamWriter</code></td>
+        <td>Server 端流式输出端口；Controller 用 `FluxBridgeChatStreamWriter` 适配成 SSE。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/stream/ChatStreamWriter.java</span></td>
+      </tr>
+      <tr>
+        <td><code>AgentChatService</code></td>
+        <td>从 `AgentChatCommand` 创建上下文，复制禁用 MCP/Skill、`sid` 等请求参数，启动责任链。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentChatService.java</span></td>
+      </tr>
+      <tr>
+        <td><code>AgentChatChainService</code></td>
+        <td>持有 Spring 注入的 Handler 列表并逐个调用；实际短路由 Handler 自己遵守 `ctx.isTerminated()`。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentChatChainService.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ChatStreamObserver</code></td>
+        <td>接收 Client gRPC 流式结果，转写为 `ChatStreamWriter` 输出，并在 completion 时提交持久化命令。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/ChatStreamObserver.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ChatResultPersistService</code></td>
+        <td>异步保存助手消息、更新短期记忆和用量统计。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/persist/ChatResultPersistService.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ConversationCreateCallbackHandler</code></td>
+        <td>处理 Client 回调的会话创建和用户消息保存，走 gRPC callback URI。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/callback/ConversationCreateCallbackHandler.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ConversationRecordCallbackHandler</code></td>
+        <td>处理 Client 回调的单条对话记录保存。</td>
+        <td><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/callback/ConversationRecordCallbackHandler.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>内部分层结构</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>层</th>
+        <th>类或包</th>
+        <th>判断边界</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP/SSE 入口</td>
+        <td>`AgentController`、`FluxBridgeChatStreamWriter`</td>
+        <td>把 Web 请求转为 `AgentChatCommand`，并把 Server 输出写回 Flux。</td>
+      </tr>
+      <tr>
+        <td>应用编排</td>
+        <td>`AgentChatService`、`AgentChatChainService`</td>
+        <td>创建上下文并调用 Handler 列表；不直接读写模型响应。</td>
+      </tr>
+      <tr>
+        <td>链路核心</td>
+        <td>`chain/*Handler.java`、`AgentChatContext`</td>
+        <td>以 `@Order` 串联能力阶段，使用 `terminated` 表示失败短路。</td>
+      </tr>
+      <tr>
+        <td>能力依赖</td>
+        <td>Model、MCP、RAG、Skill、Memory、Route 相关服务</td>
+        <td>Handler 只装配描述符或上下文，具体执行大多交给 Client 或下游服务。</td>
+      </tr>
+      <tr>
+        <td>远程分发</td>
+        <td>`LlmCallHandler`、`ChatDispatchRequest`、`GrpcChannelUtil`</td>
+        <td>Server/Client 分界线；请求离开 Server 端责任链。</td>
+      </tr>
+      <tr>
+        <td>流式回写与持久化</td>
+        <td>`ChatStreamObserver`、`ChatResultPersistService`、callback handlers</td>
+        <td>模型返回后转写 SSE，并保存助手消息、短期记忆和用量统计。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>关键依赖</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>依赖</th>
+        <th>用在何处</th>
+        <th>读源码时看什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Spring `@Component` / `@Order` / `List&lt;AgentChatHandler&gt;`</td>
+        <td>注册并排序 Handler</td>
+        <td>源码 order 与文档 order 是否一致；未注册 Handler 不会进入链路。</td>
+      </tr>
+      <tr>
+        <td>MyBatis Mapper</td>
+        <td>`InitContextHandler`、`ConversationHandler`、callback、persist</td>
+        <td>哪些阶段同步写数据库，哪些阶段异步写。</td>
+      </tr>
+      <tr>
+        <td>`DispatchModelConfigAssembler`</td>
+        <td>`ModelResolveHandler`</td>
+        <td>Server 分发前需要完整模型配置，而不是只传模型 ID。</td>
+      </tr>
+      <tr>
+        <td>`McpToolService`、`SkillHandler`</td>
+        <td>MCP/Skill Handler</td>
+        <td>Server 传描述符和 skill prompt，具体调用交给 Client。</td>
+      </tr>
+      <tr>
+        <td>`RagSearchService`</td>
+        <td>`RagHandler` 强制模式</td>
+        <td>强制模式在 Server 端直接检索并追加 prompt；智能模式只给 Client 工具使用提示。</td>
+      </tr>
+      <tr>
+        <td>`ShortTermMemoryStore`</td>
+        <td>`ContextCollectorHandler`、`ChatResultPersistService`</td>
+        <td>用户消息先写入历史，助手消息在 completion 后写入。</td>
+      </tr>
+      <tr>
+        <td>`ClientInstanceManager`、`ClientRouteStrategyManager`</td>
+        <td>`ContextCollectorHandler`</td>
+        <td>Client 选择失败是 gRPC 分发前的主要短路点。</td>
+      </tr>
+      <tr>
+        <td>`GrpcChannelUtil`、`UriConstants.CHAT_DISPATCH`</td>
+        <td>`LlmCallHandler`</td>
+        <td>责任链终点的网络协议和目标 URI。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>后续 L2 切片入口</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>切片建议</th>
+        <th>起点</th>
+        <th>终点</th>
+        <th>为什么值得拆</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>一次对话从 REST 到 gRPC</td>
+        <td>`AgentController.chat`</td>
+        <td>`GrpcChannelUtil.sendServerStreaming`</td>
+        <td>覆盖最核心的 Server 端执行链路和短路点。</td>
+      </tr>
+      <tr>
+        <td>RAG 强制/智能注入</td>
+        <td>`RagHandler.handle`</td>
+        <td>`systemPrompt` 或 Client `rag_search` 工具提示</td>
+        <td>解释同一个开关如何形成两种执行语义。</td>
+      </tr>
+      <tr>
+        <td>短期记忆与对话持久化</td>
+        <td>`ConversationHandler`</td>
+        <td>`ChatResultPersistService.persistAll`</td>
+        <td>区分用户消息、助手消息、历史窗口和用量统计的写入时机。</td>
+      </tr>
+      <tr>
+        <td>MCP 与 Skill 描述符下发</td>
+        <td>`McpHandler` / `SkillAgentChatHandler`</td>
+        <td>`ChatDispatchRequest`</td>
+        <td>讲清 Server 端只装配能力声明，执行期能力留给 Client。</td>
+      </tr>
+      <tr>
+        <td>流式响应桥接</td>
+        <td>`ChatStreamObserver.onNext`</td>
+        <td>`ChatStreamWriter.send` / `persistAsync`</td>
+        <td>理解 gRPC chunk、SSE 输出和 completion 持久化的边界。</td>
+      </tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

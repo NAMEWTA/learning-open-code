@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Snail AI 文档与部署模块导览</title>
+  <link rel="stylesheet" href="../assets/docs-deploy.css" />
+</head>
+<body>
+  <h1>Snail AI 文档与部署模块导览</h1>
+  <p class="lead">这一课只做一件事：学会从文档站、部署脚本、SQL 初始化和 CI workflow 还原 Snail AI 的“如何运行”。学完后，你应该能判断一个启动问题该先看文档、Compose、SQL、运行配置还是发布流水线。</p>
+  <p><strong>L1 架构位置：</strong>该模块位于运行支撑层，连接 <a href="../../00-overview/lessons/0001-project-map.html">L0 的 Server-Agent 架构</a>、数据库/向量/对象存储依赖和发布产物。</p>
+  <div class="meta">
+    <span class="pill">学习目标：还原运行支撑链路</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<code>docs/.vitepress/config.mts</code></span>
+    <span class="pill"><code>docs/docker/docker-compose.yaml</code></span>
+    <span class="pill"><code>snail-ai-starter/src/main/resources/application.yml</code></span>
+  </div>
+
+  <h2>1. 文档站是入口地图</h2>
+  <p>Snail AI 的文档站在 <code>docs/</code> 下，<code>package.json</code> 用 <code>vitepress dev/build/preview</code> 管理本地预览和构建。<code>.vitepress/config.mts</code> 使用 VitePress 并套上 Mermaid 插件；<code>nav.ts</code> 决定顶部导航，<code>sidebar.ts</code> 把部署页集中到 <code>/deploy/</code> 分组。读部署前先看这三处，可以快速知道“官方希望你按什么路径学习”。</p>
+  <div class="filetree">docs/
+├── package.json                    ← VitePress 脚本和依赖
+├── .vitepress/
+│   ├── config.mts                  ← 站点主配置、Mermaid、搜索、主题挂载
+│   └── config/
+│       ├── nav.ts                  ← 顶部导航
+│       └── sidebar.ts              ← 部署指南侧边栏
+└── deploy/                         ← Docker、生产、配置、升级、故障排除</div>
+
+  <h2>2. 启动顺序从依赖开始</h2>
+  <p>本地学习常见路径是：准备数据库和依赖组件，导入 SQL，再启动 Server。当前 <code>docs/docker/docker-compose.yaml</code> 实际包含 <code>snail-ai</code>、<code>mysql</code>、<code>pgvector</code>、<code>elasticsearch</code>、<code>etcd</code>、<code>minio</code>、<code>milvus</code>。其中 <code>snail-ai</code> 依赖 MySQL 健康检查，暴露 <code>8900</code> 和 <code>18888</code>；MySQL 会把 <code>docs/sql/snail_ai_schema.sql</code> 挂进初始化目录。</p>
+  <pre class="diagram">MySQL / PostgreSQL 初始化
+  -> 导入 docs/sql 下匹配数据库的 schema
+  -> 启动向量、搜索、对象存储依赖
+  -> 启动 Snail AI Server
+  -> 访问 http://localhost:8900/snail-ai
+  -> Agent Client 连接 Server gRPC 18888</pre>
+  <p class="warn"><strong>关键差异：</strong><code>docs/deploy/docker.md</code> 和 <code>guide/quick-start.md</code> 仍说 Compose 不包含 Server，但当前 YAML 已包含 <code>snail-ai</code> 服务。排查时以实际执行的 YAML 和 <code>application.yml</code> 为准。还要注意部署路径漂移：当前 checkout 以 <code>docs/docker/docker-compose.yaml</code> 和 <code>docs/sql/</code> 为准，源文档中根目录 <code>script/</code> 的旧说法不要作为当前文件位置依据。</p>
+
+  <h2>3. 配置决定运行边界</h2>
+  <p><code>application.yml</code> 给出默认运行契约：HTTP 端口 <code>8900</code>，上下文路径 <code>/snail-ai</code>，gRPC 端口 <code>18888</code>，默认 MySQL 地址是本机 <code>snail_ai</code> 库。Compose 会通过环境变量覆盖数据库地址，把 Server 连到容器内 <code>mysql:3306</code>，并把上传目录和日志目录挂到 volume。SQL 初始化要按数据库匹配：MySQL 用 <code>snail_ai_schema.sql</code>，PostgreSQL 用 <code>snail_ai_schema_pgsql.sql</code>，不要混用。</p>
+  <table>
+    <thead><tr><th>边界</th><th>默认值或来源</th><th>排查意义</th></tr></thead>
+    <tbody>
+      <tr><td>HTTP</td><td><code>8900</code> + <code>/snail-ai</code></td><td>后台、Admin API、OpenAPI、健康检查入口。</td></tr>
+      <tr><td>gRPC</td><td><code>18888</code></td><td>Agent Client 注册、心跳和任务分发入口。</td></tr>
+      <tr><td>数据库</td><td>MySQL 默认；PostgreSQL 可切换</td><td>启动报连接或表缺失时先查这里。</td></tr>
+      <tr><td>资源</td><td><code>LOCAL</code> 或 MinIO</td><td>上传文件、Skill 和多节点部署的持久化边界。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. CI 把源码变成产物</h2>
+  <p>两个 workflow 都由 <code>v*</code> tag 推送触发。<code>docker-image.yml</code> 在 JDK 21 上执行 Maven package，随后用 <code>snail-ai-starter/</code> 作为 Docker build context，推送 <code>latest</code> 和项目版本号镜像。<code>maven-publish.yml</code> 同样先构建，再用 GPG 和 Maven Central 凭据执行 <code>mvn deploy -P release</code>。所以发布链路的关键前提是：根 Maven 构建能产出 <code>snail-ai-starter/target/snail-ai-server-exec.jar</code>，而 Dockerfile 会把它放进镜像内的 <code>app.jar</code>。</p>
+  <div class="practice"><strong>检索练习：</strong>不看正文回答三个判断：数据库表缺失时先看 workflow 还是 SQL？Agent Client 连不上时先看 HTTP 端口还是 gRPC 端口？Docker 文档和 Compose 不一致时，以哪个文件为执行事实？<br><strong>参考答案：</strong>表缺失先看对应数据库的 SQL 初始化脚本；Agent Client 先看 gRPC <code>18888</code>；实际执行事实优先看 <code>docs/docker/docker-compose.yaml</code>，再用部署文档解释意图。更多端口、环境变量和风险清单见 <a href="../reference/docs-deploy-overview.html">文档与部署速查</a>。</div>
+  <p>主要推荐来源：先读 <code>docs/docker/docker-compose.yaml</code>，再对照 <code>docs/deploy/configuration.md</code> 和 <code>snail-ai-starter/src/main/resources/application.yml</code>。遇到启动失败，可以继续向 agent 追问“这个错误属于依赖组件、SQL 初始化、Server 配置还是发布产物”。</p>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型运行时垂直切片流程图</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:980px;margin:36px auto;padding:0 24px;color:#1f2937;background:#fff}
+    main{display:block}
+    nav{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:22px}
+    nav a{color:#2563eb;text-decoration:none;border-bottom:1px solid #bfdbfe}
+    h1{font-size:30px;line-height:1.25;margin:0 0 10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    p{margin:12px 0}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:11px 14px;margin:16px 0}
+    .pill{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa;margin:3px 4px 3px 0}
+    .where{font-size:.92rem;color:#374151}
+    .flow{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.58;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .note{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px}
+    .exercise{border-left:4px solid #16a34a;background:#f0fdf4;padding:12px 14px;margin-top:18px}
+    summary{cursor:pointer;font-weight:600}
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../module-models/lessons/0001-models-module-tour.html">模型 L1</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Client L1</a>
+    <a href="../../module-rag/lessons/0001-rag-module-tour.html">RAG L1</a>
+    <a href="../reference/model-runtime-flow-map.html">模型运行时速查</a>
+  </nav>
+
+  <h1>模型运行时垂直切片流程图</h1>
+  <p class="lead">本课只完成一个目标：能从模型配置追到三类运行时调用，并判断错误或 usage 会在哪个出口出现。</p>
+  <p><span class="pill">预计 15 分钟</span><span class="pill">层级：L2 垂直切片</span><span class="pill">主来源：<code>ModelRuntimeHandler</code> 与 <code>ModelResolveHandler</code></span></p>
+
+  <h2>1. 两条主路径</h2>
+  <p>Snail AI 的模型运行不是单一路径。Agent 对话先在 Server 解析 <code>CHAT</code> 配置，再把已解密的 <code>apiKey</code> 下发给 Client；RAG QA、向量库和重排则大多留在 Server 本地，通过 <code>ModelRuntimeHandler</code> 构建 runtime。</p>
+  <pre class="flow"><code>Agent Chat 路径
+AgentChatContext
+  -> ModelResolveHandler
+  -> ModelConfigHandler.getDefaultModelByType(CHAT) 或 agent.chatModelId
+  -> DispatchModelConfigAssembler
+  -> ChatDispatchRequest.ModelConfig(apiEndpoint, apiKey, modelKey, adapterKey)
+  -> LlmCallHandler
+  -> Client DefaultChatClientFactory
+  -> ClientChatModelSpecFactory
+  -> ChatModelRuntime
+  -> ChatClient.stream()</code></pre>
+  <pre class="flow"><code>Server Runtime 路径
+RagQAService.qaStream -> doQaStream -> ModelRuntimeHandler.chatStream
+VectorStoreFactory / DefaultRerankService
+  -> ModelRuntimeHandler
+  -> ModelConfigHandler.getConfigInfo(modelConfigId)
+  -> ModelConfigHandler.decryptApiKey(encryptedApiKey)
+  -> ChatClientBuilder / EmbeddingClientBuilder / RerankClientBuilder
+  -> ServerModelFacade
+  -> ChatModelRuntime / EmbeddingModelRuntime / RerankModelRuntime
+  -> provider adapter 调用</code></pre>
+
+  <h2>2. 配置先变成 spec</h2>
+  <p>真正决定 provider 实现的不是 <code>providerKey</code>，而是 <code>adapterKey</code>。如果配置没有填，<code>ModelAdapterDefaults.resolve</code> 会让 <code>CHAT</code> 和 <code>EMBEDDING</code> 默认走 <code>openai-compatible</code>，让 <code>RERANKER</code> 默认走 <code>qwen-rerank</code>。进入 runtime 前，<code>ServerModelSpecFactory</code> 会校验 <code>providerKey</code>、<code>apiEndpoint</code>、<code>modelKey</code> 和解密后的 <code>apiKey</code>。</p>
+  <pre class="flow"><code>ModelConfigInfoDTO
+  providerKey + adapterKey + apiEndpoint + modelKey + encryptedApiKey + configJson
+        |
+        | decryptApiKey()
+        v
+ChatModelSpec / EmbeddingModelSpec / RerankModelSpec
+  adapterKey + providerKey + baseUrl + apiKey + modelKey + configJson
+        |
+        v
+Runtime.validate()
+        |
+        v
+Adapter.create(spec)</code></pre>
+  <p class="note">排查第一问：如果报“找不到 adapter”，优先查 <code>adapterKey</code> 和对应 starter 是否注册了同名 adapter bean；如果报“模型配置加载失败”，优先查 Server 侧配置字段和 API Key 解密。</p>
+
+  <h2>3. 三类模型的出口不同</h2>
+  <p><code>ChatModelRuntime</code> 最终产出 <code>ChatModel</code>，再被 <code>ChatClient</code> 调用。Client 流式路径中，<code>TokenUsageCollectorAdvisor</code> 从最终 chunk 提取 <code>promptTokens</code>、<code>completionTokens</code> 和 <code>cacheTokens</code>，completion 回到 Server 后由 <code>ChatStreamObserver</code> 持久化。</p>
+  <p><code>EmbeddingModelRuntime</code> 产出 <code>EmbeddingModel</code>。<code>ModelRuntimeHandler.embedBatch</code> 调用后把 Spring AI 响应转换为 <code>SnailEmbeddingResponse</code>，当前主要填 <code>vectors</code>、<code>dimensions</code> 和 <code>costTimeMs</code>。RAG 维度探测失败时，<code>EmbeddingModelDimensionService</code> 会使用默认维度 <code>1024</code>。</p>
+  <p><code>RerankModelRuntime</code> 产出 <code>RerankApiClient</code>。<code>QwenRerankModelAdapter</code> 通过 HTTP 返回 <code>index</code> 与 <code>score</code>；响应为空、含 <code>error</code> 或无结果时返回空列表，<code>DefaultRerankService</code> 会降级为按原 score 排序。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：不看上文，判断三个说法是否正确。</p>
+    <p>1. Client 侧会再次调用 <code>decryptApiKey</code>。2. <code>providerKey</code> 是当前内置 runtime 选择 adapter 的主键。3. RAG rerank 调用失败后会直接中断搜索。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>三个都不正确。Client 消费的是 Server 下发的 <code>apiKey</code>；adapter 选择依据是 <code>adapterKey</code>；RAG rerank 对空结果和异常都会降级为按原 score 排序。主要阅读来源是 <code>ModelResolveHandler.java</code>、<code>DispatchModelConfigAssembler.java</code>、<code>ModelRuntimeHandler.java</code> 和 <code>DefaultRerankService.java</code>。下一步可打开 <a href="../reference/model-runtime-flow-map.html">速查参考</a>，按字段表和 checklist 复盘一次真实配置。</p>
+    </details>
+  </div>
+  <p>遇到不清楚的错误栈，可以继续向 agent 追问：“这个 <code>modelConfigId</code> 最后进入了哪一个 runtime？”</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · SessionCoordinator 架构全景：5220 行功能域分解与双模型设计</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .arch { background: #f7f9fc; border: 1px solid #d6e4ff; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; text-align: center; font-size: 0.88rem; line-height: 2.2; }
+  .arch .layer { display: inline-block; background: #eef4ff; border: 1.5px solid #1d6fd6; border-radius: 6px; padding: 0.2rem 1rem; margin: 0.15rem; font-weight: 600; }
+  .arch .arrow { color: #1d6fd6; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 1 课 · SessionCoordinator 架构全景：5220 行功能域分解与双模型 <span class="tag">全景地图</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能讲清 SessionCoordinator 的 8 大职责域、18 个私有字段的分组逻辑、16 个注入依赖的名称与作用，以及 promptSession 与 executeIsolated 两种模型的核心区别。
+</div>
+
+<p><code>core/session-coordinator.ts</code> 是整个 HanaAgent 中最大的单文件——217KB / 5220 行。但它不是上帝对象反模式，而是<b>聚合根 (Aggregate Root)</b>：通过构造器注入 16 个外部能力切片，内部管理 8 个紧密耦合的职责域，所有域共享同一份 session 运行时缓存 <code>_sessions</code> Map。</p>
+
+<h2>一、为什么这么大？—— 8 个逻辑 Manager 的聚合</h2>
+
+<table>
+<tr><th>职责域</th><th>代码段锚点</th><th>大致行数</th><th>核心方法</th></tr>
+<tr><td><b>Lifecycle</b> 会话生命周期</td><td><code>// Session 创建/切换</code> (L1187)</td><td>~1300</td><td><code>createSession</code>、<code>switchSession</code>、<code>closeSession</code></td></tr>
+<tr><td><b>Prompt</b> Prompt 管线</td><td><code>createSession</code> + Path API 区</td><td>~400</td><td><code>promptSession</code>、<code>steerSession</code></td></tr>
+<tr><td><b>Tool</b> 工具快照与漂移</td><td><code>// Session 查询</code> (L3593)</td><td>~200</td><td><code>_computeLiveToolSnapshotForEntry</code>、<code>markCapabilitySnapshotsStale</code></td></tr>
+<tr><td><b>Compact</b> 上下文压缩</td><td><code>// Mid-session model switch</code> (L2821)</td><td>~180</td><td><code>switchSessionModel</code>、<code>_compactWithModel</code></td></tr>
+<tr><td><b>State</b> Snapshot 冻结态</td><td>散布 + 独立方法</td><td>~300</td><td><code>_readSessionPromptSnapshot</code>、<code>_applyFinalPromptSnapshot</code></td></tr>
+<tr><td><b>Meta</b> 元数据持久化</td><td>L4410 之后</td><td>~250</td><td><code>writeSessionMeta</code>、<code>_compactOversizedSessionMeta</code></td></tr>
+<tr><td><b>Model</b> 模型/权限/Thinking</td><td><code>// Mid-session model switch</code> (L2821)</td><td>~200</td><td><code>setPendingModel</code>、权限 11 个方法</td></tr>
+<tr><td><b>Isolated</b> 隔离执行</td><td><code>// Isolated Execution</code> (L4799)</td><td>~400</td><td><code>executeIsolated</code></td></tr>
+</table>
+
+<div class="side">
+💡 <b>为什么不拆？</b>拆分会引入 5 个现实问题：(1) 16 个外部依赖需要在子 Manager 间传递；(2) createSession 的 ~700 行中子步骤有严格数据依赖顺序；(3) _sessions Map 是唯一数据源，拆分需要跨 Manager 缓存共享；(4) Path 感知 API (Phase 2) 重构尚未完成；(5) 当前测试覆盖依赖整体行为。
+</div>
+
+<h2>二、16 个构造器注入依赖</h2>
+
+<p>构造器（L678-698）通过 <code>_d</code> 对象接收 16 个外部能力：</p>
+
+<table>
+<tr><th>依赖</th><th>来源</th><th>作用</th></tr>
+<tr><td><code>getAgent</code> / <code>getAgentById</code> / <code>getAgents</code></td><td>Engine / AgentManager</td><td>获取 Agent 实例，调用 buildSystemPrompt()</td></tr>
+<tr><td><code>getModels</code></td><td>ProviderRegistry</td><td>获取模型列表、当前模型、Thinking Level 默认值</td></tr>
+<tr><td><code>getResourceLoader</code></td><td>Engine</td><td>获取基础 resourceLoader，构建代理层</td></tr>
+<tr><td><code>getSkills</code> / <code>buildTools</code></td><td>PluginManager</td><td>获取 Skills 列表、构建 session 工具快照</td></tr>
+<tr><td><code>getConfig</code> / <code>getPrefs</code></td><td>Config / Prefs</td><td>读取配置和用户偏好</td></tr>
+<tr><td><code>emitEvent</code></td><td>Engine</td><td>向 IPC 总线发射事件（UI 更新）</td></tr>
+<tr><td><code>agentsDir</code> / <code>getHomeCwd</code></td><td>Paths</td><td>Agent 目录和用户 home 路径</td></tr>
+<tr><td><code>getUsageLedger</code></td><td>UsageLedger</td><td>Token 用量账本</td></tr>
+<tr><td><code>onBeforeSessionCreate</code> / <code>onSessionRuntimeDiscarded</code></td><td>Engine hooks</td><td>生命周期钩子</td></tr>
+</table>
+
+<p><strong>设计洞察：</strong>这不是"依赖注入容器"模式，而是<b>依赖倒置</b>。Coordinator 不持有 Engine 实例，只持有 <code>getAgent()</code> 等 injectable 函数——它是外部模块的"切片视图"。这让 Coordinator 可以独立于 Engine 进行测试。</p>
+
+<h2>三、两种执行模型的对比</h2>
+
+<table>
+<tr><th>维度</th><th>promptSession</th><th>executeIsolated</th></tr>
+<tr><td><b>用途</b></td><td>用户主动对话——"发送消息"</td><td>后台子任务——子 Agent / Workflow / Cron</td></tr>
+<tr><td><b>session</b></td><td>复用主 session（agents/{id}/sessions/*.jsonl）</td><td>创建独立 session 目录</td></tr>
+<tr><td><b>prompt 快照</b></td><td>使用 createSession 时冻结的快照</td><td>每次独立构建 prompt</td></tr>
+<tr><td><b>工具集</b></td><td>主 session 的工具快照</td><td>可指定子集或独立工具</td></tr>
+<tr><td><b>并发</b></td><td>同一 session 串行（一次只能一个 turn）</td><td>多个 isolate 可并行（不同 session 目录）</td></tr>
+<tr><td><b>结果回传</b></td><td>直接流式返回给 UI</td><td>通过 turnContext 回传到主 session</td></tr>
+<tr><td><b>resume</b></td><td>不支持（session 是连续的）</td><td>支持——通过独立 session 目录持久化，中断后可恢复</td></tr>
+</table>
+
+<blockquote>
+<b>核心判断：</b>promptSession 是"在线"模式——用户在等回复；executeIsolated 是"离线"模式——后台执行，结果通过 turnContext 注入主对话。两者共享同一套 Pi SDK 管道但 session 隔离策略完全不同。
+</blockquote>
+
+<h2>四、依赖方向：Coordinator 是下游消费者</h2>
+
+<div class="arch">
+<span class="layer">Engine（顶层编排）</span><br>
+<span class="arrow">↓ 构造器注入 16 个依赖</span><br>
+<span class="layer">SessionCoordinator</span><br>
+<span class="arrow">↓ 调用 agent.buildSystemPrompt() / buildTools() / getSkills()</span><br>
+<span class="layer" style="display:inline-block;">Agent</span>
+<span class="layer" style="display:inline-block;margin-left:0.5rem;">PluginManager</span>
+<span class="layer" style="display:inline-block;margin-left:0.5rem;">ProviderRegistry</span><br>
+<span class="arrow">↓ 创建 Pi SDK AgentSession</span><br>
+<span class="layer">Pi SDK → LLMClient → LLM API</span>
+</div>
+
+<p><b>Engine</b> 是顶层所有者，持有 Coordinator 实例。<b>Agent</b> 通过 <code>_d.getAgent()</code> 动态获取（不持有实例）。<b>Pi SDK</b> 的 <code>createAgentSession()</code> 接收 Coordinator 构建的 resourceLoader 代理和 session 配置。Coordinator 不直接调用 LLM API——所有 LLM 调用通过 Pi SDK 的 <code>agent.streamFn()</code> 完成。</p>
+
+<h2>五、18 个私有字段按职责分组</h2>
+
+<table>
+<tr><th>分组</th><th>字段</th><th>数量</th><th>说明</th></tr>
+<tr><td><b>依赖容器</b></td><td><code>_d</code></td><td>1</td><td>持有 16 个 injectable 函数/对象</td></tr>
+<tr><td><b>当前会话</b></td><td><code>_session</code>、<code>_currentSessionPath</code></td><td>2</td><td>当前焦点 session 对象及其 JSONL 路径</td></tr>
+<tr><td><b>会话注册表</b></td><td><code>_sessions</code>（Map，LRU 上限 20）</td><td>1</td><td>所有已加载 session 的运行时缓存</td></tr>
+<tr><td><b>状态标志</b></td><td><code>_sessionStarted</code></td><td>1</td><td>是否已发送首条消息</td></tr>
+<tr><td><b>模型/权限</b></td><td><code>_pendingModel</code>、<code>_pendingPermissionMode</code>、<code>_runtimePermissionModeDefault</code></td><td>3</td><td>下一次 createSession 的模型和权限预设</td></tr>
+<tr><td><b>休眠/缓存</b></td><td><code>_hibernatedSessionMeta</code>、<code>_titlesCache</code>、<code>_metaCache</code>、<code>_sessionListProjectionCache</code></td><td>4</td><td>元数据/标题/列表投影缓存，避免重复读盘</td></tr>
+<tr><td><b>写队列</b></td><td><code>_metaWriteQueue</code></td><td>1</td><td>Promise 链串行化写入，防 RMW 竞态</td></tr>
+<tr><td><b>内存压力</b></td><td><code>_runtimePressureTimers</code>、<code>_memoryPressure</code></td><td>2</td><td>per-session 定时器 + 阈值配置（RSS 1.5G 等）</td></tr>
+<tr><td><b>操作/Prompt</b></td><td><code>_headlessOps</code>、<code>_prePromptAbortControllers</code>、<code>_turnContextBySession</code>、<code>_sessionManifestStore</code></td><td>4</td><td>操作追踪、预处理取消、turn 上下文、清单存储</td></tr>
+</table>
+
+<p><strong>关键观察：</strong>18 个字段中 Map 占了 <b>9 个</b>。Coordinator 本质上是多个 per-session 键值存储的组合——它把本该是独立数据结构的职责揉进了同一个类。这也是其庞大的另一个结构性原因。</p>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. SessionCoordinator 是上帝对象反模式吗？</p>
+<span class="opt">A. 是——5220 行单文件违反了单一职责原则</span>
+<span class="opt">B. 不是——它是聚合根，把 8 个共享同一份 session 缓存的紧密耦合域聚合在一起，拆分会导致跨 Manager 协调开销和缓存一致性问题</span>
+<span class="opt">C. 是——但因为时间不够才没拆分</span>
+<span class="opt">D. 不是——它实际上只有 200 行业务逻辑，其他都是注释</span>
+<details><summary>看答案</summary><b>B</b>。它是聚合根，不是上帝对象。8 个职责域共享 _sessions Map 和 16 个注入依赖，createSession 的子步骤有严格的数据依赖顺序，拆分会增加跨类传参复杂度。这是在"简单"和"解耦"之间的务实折中。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 构造器注入的 16 个依赖中，哪个用于获取模型列表？</p>
+<span class="opt">A. getConfig</span>
+<span class="opt">B. getSkills</span>
+<span class="opt">C. getModels —— 通过 ProviderRegistry 获取</span>
+<span class="opt">D. getResourceLoader</span>
+<details><summary>看答案</summary><b>C</b>。getModels 来自 ProviderRegistry，返回模型列表、当前模型、Thinking Level 默认值等。Coordinator 不直接持有 ProviderRegistry 实例，通过 injectable 函数解耦。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. promptSession 和 executeIsolated 的核心区别是什么？</p>
+<span class="opt">A. 没有区别，executeIsolated 是 promptSession 的别名</span>
+<span class="opt">B. promptSession 是 HTTP API，executeIsolated 是 WebSocket 连接</span>
+<span class="opt">C. promptSession 复用主 session 的冻结快照，串行执行；executeIsolated 创建独立 session 目录，支持并行和 resume</span>
+<span class="opt">D. promptSession 用于测试，executeIsolated 用于生产</span>
+<details><summary>看答案</summary><b>C</b>。promptSession 在用户主动对话时使用，复用 createSession 时冻结的 prompt 快照（保护 prefix cache）；executeIsolated 用于后台子任务，每次独立构建 prompt，使用独立 session 目录支持并行执行和中断恢复。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 18 个私有字段中，Map 类型占了几个？这说明了什么？</p>
+<span class="opt">A. 2 个——只用于 session 和 meta 的简单缓存</span>
+<span class="opt">B. 5 个——均匀分布在各个职责域</span>
+<span class="opt">C. 9 个——Coordinator 本质上是多个 per-session 键值存储的组合，暴露出数据结构未充分封装</span>
+<span class="opt">D. 18 个——所有字段都是 Map 类型</span>
+<details><summary>看答案</summary><b>C</b>。18 个字段中 Map 占 9 个：_sessions、_hibernatedSessionMeta、_titlesCache、_metaCache、_runtimePressureTimers、_prePromptAbortControllers、_turnContextBySession、_headlessOps（Set）、_sessionManifestStore。这些本应是独立数据结构的封装，目前直接以原生 Map 形式存在于 Coordinator 中。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>core/session-coordinator.ts</code> 第 657-698 行，阅读构造器的 16 个 JSDoc 注入参数注释 + 第 4799 行 executeIsolated 的方法签名。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「如果我想给 SessionCoordinator 新增第 9 个职责域，应该放在文件的哪个位置？」「为什么 createSession 要 ~700 行而不是拆成多个小方法？」下一课聚焦 <strong>promptSession 流程</strong>——12 步管线从上下文组装到 Pi SDK 调用的完整链路。</div>
+
+<div class="nav">课程 0001 / SessionCoordinator 架构剖析 · 下一课：<a href="0002.html">0002 promptSession 流程深度</a></div>
+
+</body>
+</html>

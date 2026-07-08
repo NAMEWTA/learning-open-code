@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>REST/WS adapter：provider-like invoke</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>HTTP helper 怎样伪装成 bridge provider</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 <code>httpGet/httpPost/withResponseMap</code> 如何保持旧 renderer 调用形状。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：httpBridge.ts / ipcBridge.ts</span>
+    </div>
+  </section>
+
+  <p class="muted">上一课：<a href="./0001-problem-frame.html">问题框架</a>。下一课：<a href="./0003-error-events-e2e.html">错误、事件与 E2E</a>。速查：<a href="../reference/adapter-rest-ws-notes.html#provider">provider-like invoke</a>。</p>
+
+  <h2>1. 兼容点是对象形状</h2>
+  <p><code>@office-ai/platform</code> 的旧 bridge provider 给 renderer 一个稳定对象：<code>provider()</code> 用于注册处理器，<code>invoke()</code> 用于发起调用。AionU 的 <code>httpBridge.ts</code> 没有要求调用方知道 fetch、method、URL、JSON 解包；它直接生产同形对象。这里的 <code>provider</code> 是空函数，因为 HTTP 路由处理器已经在 aioncore，不再由 renderer/main 侧注册。真正工作的部分是 <code>invoke</code>：解析路径、映射 body、调用 <code>httpRequest</code>，最后返回泛型结果。</p>
+  <p>这个设计的微妙点是：它兼容的是“调用协议”，不是“执行位置”。旧 IPC provider 的执行位置通常在 Electron main；HTTP provider 的执行位置在 backend；但 renderer 看到的 TypeScript 形状保持一致。这样一来，页面组件不需要知道某个能力是否完成迁移，类型签名也能继续表达参数和返回值。</p>
+
+  <pre><code class="language-typescript">type ProviderLike&lt;Data, Params&gt; = {
+  provider: (handler: (params: Params) =&gt; Promise&lt;Data&gt;) =&gt; void;
+  invoke: Params extends undefined ? () =&gt; Promise&lt;Data&gt; : (params: Params) =&gt; Promise&lt;Data&gt;;
+};</code></pre>
+  <pre><code class="language-typescript">export function httpPost&lt;Data, Params = undefined&gt;(
+  path: string | ((params: Params) =&gt; string),
+  mapBody?: (params: Params) =&gt; unknown
+): ProviderLike&lt;Data, Params&gt; {
+  return {
+    provider: () =&gt; {},
+    invoke: (async (params?: Params) =&gt; {
+      const resolvedPath = typeof path === 'function' ? path(params!) : path;
+      const body = mapBody ? mapBody(params!) : params;
+      return httpRequest&lt;Data&gt;('POST', resolvedPath, body);
+    }) as ProviderLike&lt;Data, Params&gt;['invoke'],
+  };
+}</code></pre>
+
+  <h2>2. URL 和 body 映射保留旧参数语义</h2>
+  <p>renderer 仍可以传旧的前端参数名，例如发送消息时传 <code>input</code>、<code>loading_id</code>、<code>inject_skills</code>。adapter 负责把它变成 backend REST body：<code>input</code> 改为 <code>content</code>，路径从 <code>conversation_id</code> 拼到 URL。这个位置很关键：如果把映射散落到页面组件，后续每个 UI 调用点都会被 backend DTO 污染；如果放进 backend，则旧 renderer 语义无法显式保留。adapter 正好是 contract 翻译层。</p>
+  <p>读这种映射时要同时看“路径”和“body”。路径里的字段通常是资源定位，比如 <code>conversation_id</code>、<code>team_id</code>、<code>job_id</code>；body 里的字段才是命令参数。把二者分清，能避免把同一个 id 同时塞进 URL 和 body，或遗漏 backend 需要的 snake_case 字段。</p>
+
+  <pre><code class="language-typescript">sendMessage: httpPost&lt;ISendMessageResult, ISendMessageParams&gt;(
+  (p) =&gt; `/api/conversations/${p.conversation_id}/messages`,
+  (p) =&gt; ({
+    content: p.input,
+    files: p.files,
+    loading_id: p.loading_id,
+    inject_skills: p.inject_skills,
+  })
+),</code></pre>
+
+  <h2>3. response mapper 是 contract 保险丝</h2>
+  <p><code>httpRequest</code> 会统一解开后端的 <code>{ success, data }</code> 包装；但解包不等于完成兼容。前端常依赖 camelCase、旧枚举或组合字段，后端 wire contract 可能是 snake_case 或另一套默认语义。<code>withResponseMap</code> 把“调用传输”和“返回值修正”串起来，例如 conversation 创建后再走 <code>fromApiConversation</code>，team 列表走 <code>fromBackendTeamList</code>，文件快照把 <code>relative_path</code> 修成 <code>relativePath</code>。维护者看到新 REST 能力返回结构和旧前端类型不一致时，应优先补 mapper，而不是让 UI 兼容两种形状。</p>
+  <p>mapper 还有一个测试价值：它把兼容规则集中在 adapter 附近，E2E helper 或 feature test 可以针对最终前端形状断言。否则每个测试都要知道 backend 的 wire DTO，测试会从“用户行为验证”滑向“后端字段实现细节验证”。</p>
+
+  <div class="callout">
+    <p><strong>边界提醒：</strong><code>common/api/*</code> 不是这里的 REST route adapter。它处理多 provider client、协议转换和 key 轮转；<code>common/adapter/*</code> 才是 renderer 调用面到 IPC/REST/WS 的 contract 层。</p>
+  </div>
+
+  <h2>4. 读代码时的三步法</h2>
+  <p>追一个 adapter provider 时，先看 <code>ipcBridge.ts</code> 的导出：它是 <code>bridge.buildProvider</code>、<code>httpPost</code>，还是手写 provider-like 对象。再看路径函数和 <code>mapBody</code>，确认旧参数如何变成 backend DTO。最后看是否包了 <code>withResponseMap</code> 或领域 mapper；若没有 mapper，说明后端返回已经满足旧前端语义，或这里存在潜在兼容风险。</p>
+  <p>做维护评审时，尤其要警惕“为了省代码删除 mapper”的改动。只要 renderer 仍以旧类型为 contract，mapper 就是兼容边界；删除它等于把迁移成本推给所有调用方和测试。</p>
+
+  <div class="quiz">
+    <p><strong>判断题：</strong>看到 <code>provider: () =&gt; {}</code> 就说明这个能力还没实现。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>错误。对 HTTP provider 来说，空 <code>provider</code> 是兼容旧 bridge 形状；真实处理器在 backend REST route。只有 <code>stubProvider</code> 这类显式返回默认值并打印 warning 的能力，才表示 backend 尚未实现。</p>
+    </details>
+  </div>
+
+  <p class="muted">推荐主来源：<code>packages/desktop/src/common/adapter/httpBridge.ts</code> 的 Provider factories 段。继续追问 agent：请拿一个 team 或 skill provider，按三步法逐行解释它的 contract 映射。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 检索与注入：快照读写、状态管理与 System Prompt 注入</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  pre.mermaid { background: #fafbfc; color: #333; font-size: 0.78rem; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 检索与注入：快照读写、状态管理与 System Prompt 注入 <span class="tag">检索链路</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能画出从 memory.md 到 System Prompt 的完整检索注入链路，理解 compiled-memory-snapshot 的四大记忆块读写门面、compiled-memory-state 的内容规范化与重置机制、config-loader 的三通道模型解耦，以及 buildSystemPrompt 的缓存前缀优化策略。
+</div>
+
+<p>前两课我们走完了编译流水线——从对话到 memory.md。这一课聚焦<strong>记忆的消费端</strong>：编译产物如何被读取、规范化、加载配置、最终注入 System Prompt 让 Agent 在下一次对话中"记住"用户。</p>
+
+<h2>一、compiled-memory-snapshot：四大记忆块的读写门面</h2>
+
+<p><code>lib/memory/compiled-memory-snapshot.ts</code> 定义了四大记忆块的<strong>统一读写接口</strong>，是外部代码操作编译产物的唯一入口。</p>
+
+<table>
+<tr><th>key</th><th>fileName</th><th>label（中文）</th><th>label（英文）</th></tr>
+<tr><td><code>facts</code></td><td><code>facts.md</code></td><td>重要事实</td><td>Key facts</td></tr>
+<tr><td><code>today</code></td><td><code>today.md</code></td><td>今天</td><td>Today</td></tr>
+<tr><td><code>week</code></td><td><code>week.md</code></td><td>本周早些时候</td><td>Earlier this week</td></tr>
+<tr><td><code>longterm</code></td><td><code>longterm.md</code></td><td>长期情况</td><td>Long-term context</td></tr>
+</table>
+
+<pre><code>// 读：优先从四个分文件读取，fallback 到 memory.md 解析
+export function readCompiledMemorySnapshot(memoryDir)
+  → { facts, today, week, longterm }
+//   解析 memory.md 时通过标题匹配（"重要事实"/"Key facts" 等）
+//   将四个段分别映射到对应 key，过滤占位符"（暂无）"/"(none)"
+
+// 写：写入四个分文件 + 调用 assemble() 重新装配 memory.md
+export function writeCompiledMemorySnapshot(memoryDir, compiled, opts)
+  → boolean
+//   先写 facts.md / today.md / week.md / longterm.md
+//   再调用 assemble() 刷新 memory.md
+
+// 判空：四块中是否有任一非空
+export function hasCompiledMemory(compiled) → boolean
+
+// 标准化：四个字段统一经过 normalizeCompiledSectionBody 处理
+export function normalizeCompiledMemory(value)
+  → { facts, today, week, longterm }
+
+// 压缩：去掉空值字段
+export function compactCompiledMemory(compiled)
+  → { key: value, ... }  // 仅非空字段</code></pre>
+
+<div class="side">
+💡 <b>读优先策略：</b><code>readCompiledMemorySnapshot</code> 优先读四个分文件（facts.md / today.md / week.md / longterm.md），如果分文件不存在才 fallback 到解析 memory.md。分文件是编译的直接产物，memory.md 是 assemble 的聚合输出——分文件更可靠。
+</div>
+
+<h2>二、compiled-memory-state：内容规范化与重置</h2>
+
+<p><code>lib/memory/compiled-memory-state.ts</code> 负责编译产物的<strong>内容清洗</strong>和<strong>重置管理</strong>。每一步编译的输入和输出都经过它处理。</p>
+
+<h3>核心规范化函数</h3>
+
+<pre><code>// 每一步编译的输入和输出都经过它处理
+export function normalizeCompiledSectionBody(value) → string
+// 处理步骤：
+//   1. stripThinkTagBlocks(): 剥离 &lt;think&gt;...&lt;/think&gt; 标签
+//   2. parseStringArray(): JSON 字符串数组 → "- item" 格式
+//   3. 过滤 markdown 标题行（/^#{1,6}\s+\S/）
+//   4. 合并 3 个以上的连续空行为 2 个
+//   5. trim</code></pre>
+
+<pre><code>// LLM 结果规范化：额外检测未闭合的 think 标签
+export function normalizeCompiledLLMResult(value, source) → string
+//   如果 stripped 后为空 + 存在未闭合的 &lt;think&gt;
+//   → 抛出异常 "compileToday returned an unterminated thinking block"
+//   防止半截思考污染记忆</code></pre>
+
+<h3>重置机制</h3>
+
+<table>
+<tr><th>函数</th><th>作用</th></tr>
+<tr><td><code>readCompiledResetAt(memoryDir)</code></td><td>读取 reset.json 中的 compiledResetAt 时间戳</td></tr>
+<tr><td><code>writeCompiledResetMarker(memoryDir, resetAt)</code></td><td>写入 reset.json，reject 非 ISO 时间戳</td></tr>
+<tr><td><code>clearCompiledMemoryArtifacts(memoryDir)</code></td><td>清空 memory.md / facts.md / today.md / week.md / longterm.md 及对应 .fingerprint 文件</td></tr>
+<tr><td><code>clearCompiledSummarySources(summariesDir, summaryManager)</code></td><td>删除 summaries/ 下所有 .json 文件 + 清理内存缓存</td></tr>
+</table>
+
+<h2>三、config-loader：三通道模型解耦</h2>
+
+<p><code>lib/memory/config-loader.ts</code> 职责单一：读写 agent 的 <code>config.yaml</code>，提供缓存和原子写入。关键设计是<strong>记忆编译使用独立的模型通道</strong>。</p>
+
+<table>
+<tr><th>通道</th><th>YAML key</th><th>用途</th></tr>
+<tr><td>主通道</td><td><code>api</code></td><td>对话模型（chat model）</td></tr>
+<tr><td>Embedding 通道</td><td><code>embedding_api</code></td><td>向量嵌入（可选）</td></tr>
+<tr><td><b>工具模型通道</b></td><td><code><b>utility_api</b></code></td><td><b>记忆编译使用此通道</b>——compileToday/Daily/Longterm/Facts 都通过 <code>getResolvedMemoryModel()</code> 获取凭证和模型名</td></tr>
+</table>
+
+<div class="side">
+💡 <b>模型解耦的价值：</b>对话可能使用旗舰模型（如 Claude Opus），记忆编译使用更便宜的模型（如 GPT-4o-mini）。每天编译消耗约 1000+ tokens——如果全用旗舰模型，日积月累成本可观。所有 LLM 调用通过 <code>_compactLLM()</code> 统一包装：cacheGroup prompt layout、60 秒超时、temperature=0.3。
+</div>
+
+<h2>四、buildSystemPrompt：检索的终点</h2>
+
+<p>记忆的<strong>检索方式</strong>不是 RAG、不是向量搜索、不是按需查询——而是直接把整个 memory.md（≤2000 token）注入到 System Prompt。这是整个记忆链路<strong>最终的目的地</strong>。</p>
+
+<h3>System Prompt 结构与缓存前缀优化</h3>
+
+<pre class="mermaid">
+System Prompt 结构（按顺序）：
+┌──────────────────────────────────────────────────────┐
+│  1. 平台标识（HanaAgent 平台）                       │ ← 缓存前缀
+│  2. 执行环境（平台提示）                              │   （跨 session 不变的
+│  3. 输出约束（每次回复必须有正文）                     │    静态内容，可被 LLM
+│  4. 工具使用纪律                                      │    服务端 KV cache /
+│  5. 桌面应用控制规范                                  │    prompt cache 命中）
+│  6. 失败处理策略                                      │
+│  7. 操作安全（可逆性判断）                             │
+│  8. 网页工具优先级                                    │
+│  9. 主动技能获取（条件性）                             │
+│ 10. 团队协作（条件性）                                │
+│ ───────────── 缓存分界线 ─────────────                │
+│ 11. 用户档案（user.md + userName）                    │ ← 动态内容
+│ 12. ishiki（identity + yuan + 人格模板）              │   （session 相关，
+│ 13. 外观 summary（条件性）                             │    放在缓存前缀之后）
+│ 14. 工作台（cwd 路径）                                │
+│ 15. 工作区说明文件                                    │
+│ 16. 文件与命令工具使用                                 │
+│ 17. 记忆使用规则 + 置顶记忆 + memory.md 内容 ← 记忆层  │
+│ 18. 当前日期时间                                      │
+└──────────────────────────────────────────────────────┘
+</pre>
+
+<h3>记忆使用规则（注入在 memory.md 之前）</h3>
+
+<blockquote>
+记忆和用户档案是你内化的背景知识。你和{userName}是认识很久的人，这些事你本来就知道。你对{userName}的了解应该像空气一样，在场但不可见。记忆的存在感应该是零，它的作用应该是满的。<br><br>
+- 只有当{userName}提到了相关内容，记忆才参与进来。<br>
+- 永远不要让{userName}感觉到"记忆"这个东西的存在。禁止使用"我记得""你之前说过""根据记忆"这类表述。<br>
+- 记忆可能过时，当前对话永远优先。信息冲突时以对话为准。
+</blockquote>
+
+<h3>Session 级别快照隔离</h3>
+
+<p>每个 session 在<strong>创建时</strong>冻结一份 memory.md 的快照（存储在 <code>agent._systemPrompt</code> 中）。后续对话过程中 memory.md 被后台 compile 更新时，<strong>不影响已经开始的 session</strong>。只在切换 session 或开启新对话时才读到最新版记忆。<code>onCompiled</code> 回调通知 agent 刷新 <code>_systemPrompt</code>，但只在下次新 session 创建时生效。</p>
+
+<h2>五、全链路时序图（Mermaid）</h2>
+
+<pre class="mermaid">
+sequenceDiagram
+    participant User as 用户
+    participant Engine as HanaEngine
+    participant Ticker as MemoryTicker
+    participant Summary as SessionSummaryManager
+    participant Compile as compile.ts
+    participant LLM as LLM (callText)
+    participant Agent as Agent
+
+    Note over User,Agent: === 阶段 1: 对话积累 ===
+    User->>Engine: 发送消息
+    Engine->>Ticker: notifyTurn(sessionPath)
+    alt 每 10 轮对话
+        Ticker->>Summary: rollingSummary()
+        Summary->>LLM: 结构化摘要生成
+        LLM-->>Summary: facts + timeline
+        Ticker->>Compile: compileToday()
+        Compile->>LLM: 增量续写（450 tokens）
+        LLM-->>Compile: today.md 草稿
+        Ticker->>Compile: assemble() → memory.md
+        Ticker->>Agent: onCompiled() 回调
+    end
+
+    Note over User,Agent: === 阶段 2: 每日任务 ===
+    alt 逻辑日切换
+        Ticker->>Compile: compileDaily() → daily/{date}.md
+        Compile->>LLM: 日记蒸馏（100 tokens）
+        Ticker->>Compile: compileToday()（新一天）
+        Ticker->>Compile: rollDailyWindow() → longterm.md
+        Ticker->>Compile: compileEditableFacts() → facts.md
+        Ticker->>Compile: assembleWeekFromDaily() → week.md
+        Ticker->>Compile: assemble() → memory.md
+    end
+
+    Note over User,Agent: === 阶段 3: 检索命中 ===
+    User->>Engine: 创建新 session
+    Engine->>Agent: buildSystemPrompt()
+    Agent->>Agent: readCompiledMemorySnapshot(memoryDir)
+    Agent->>Agent: 注入 memory.md → System Prompt 尾部
+    Agent-->>Engine: 完整 System Prompt（含记忆）
+</pre>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. readCompiledMemorySnapshot 的读取策略是什么？</p>
+<span class="opt">A. 始终解析 memory.md</span>
+<span class="opt">B. 优先读四个分文件（facts/today/week/longterm.md），分文件不存在时才 fallback 解析 memory.md</span>
+<span class="opt">C. 从向量数据库检索</span>
+<span class="opt">D. 从 summaries/ 目录读取摘要文件</span>
+<details><summary>看答案</summary><b>B</b>。分文件是编译的直接产物，memory.md 是 assemble 的聚合输出。优先读分文件更可靠（避免聚合过程中的中间状态），fallback 到 memory.md 解析保证了向后兼容。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 记忆编译为什么使用独立的 utility_api 通道而非对话的 api 通道？</p>
+<span class="opt">A. 因为 utility_api 速度更快</span>
+<span class="opt">B. 为了模型解耦——对话用旗舰模型，记忆编译用便宜的小模型，大幅降低每日编译的 token 成本</span>
+<span class="opt">C. 因为对话模型不支持编译功能</span>
+<span class="opt">D. 因为 embedding 通道不可用时的回退方案</span>
+<details><summary>看答案</summary><b>B</b>。config-loader 定义了三通道：api（对话）、embedding_api（向量嵌入）、utility_api（工具调用，含记忆编译）。通过 <code>getResolvedMemoryModel()</code> 获取 utility 通道的凭证和模型名，允许用户配置独立的低成本模型处理每天约 1000+ tokens 的编译任务。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. buildSystemPrompt 中缓存前缀的作用是什么？</p>
+<span class="opt">A. 让前端渲染更快</span>
+<span class="opt">B. 将跨 session 不变的静态内容（平台标识、工具纪律、安全策略等）放在前面，让 LLM 服务端的 KV cache / prompt cache 命中，减少每次调用的 token 消耗</span>
+<span class="opt">C. 减少网络传输量</span>
+<span class="opt">D. 避免 System Prompt 被用户看到</span>
+<details><summary>看答案</summary><b>B</b>。System Prompt 的前 10 项是跨 session 不变的静态内容，构成缓存前缀。LLM 服务端（如 Anthropic 的 prompt cache）可以缓存这部分内容，后续调用只需发送变化的后半段（用户档案、记忆内容等），大幅降低 token 消耗。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 为什么每个 session 要冻结一份 memory.md 快照？</p>
+<span class="opt">A. 为了节省磁盘空间</span>
+<span class="opt">B. 为了避免 session 进行中记忆被后台编译更新导致 System Prompt 不一致——session 创建时冻结快照，整个会话期间记忆内容保持不变</span>
+<span class="opt">C. 为了实现多用户并发</span>
+<span class="opt">D. 为了支持离线模式</span>
+<details><summary>看答案</summary><b>B</b>。<code>agent._systemPrompt</code> 在 session 创建/切换时重建，注入当时的 memory.md 快照。后续后台 compile 更新 memory.md 不影响已有 session——避免对话进行到一半时记忆突然变化导致上下文不一致。下次新 session 创建时才会读到最新记忆。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>openhanako/lib/memory/compiled-memory-snapshot.ts</code> 查看 COMPILED_MEMORY_BLOCKS 定义和 readCompiledMemorySnapshot；打开 <code>core/agent.ts</code> 搜索 <code>buildSystemPrompt</code> 查看注入位置；打开 <code>lib/memory/config-loader.ts</code> 查看 getResolvedMemoryModel。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「如果 memory.md 超过 2000 token 怎么办？」「缓存前缀的命中率在什么情况下会下降？」下一课是<strong>最后一课：异常路径全解与综合测验</strong>——未闭合 think 标签、凭证过期、fold 失败不丢数据、断点续跑、并发竞态保护。</div>
+
+<div class="nav"><a href="0003.html">← 上一课：编译流水线（下）</a> · 课程 0004 / 记忆编译与检索全链路 · 下一课预告：异常路径全解与综合测验</div>
+
+</body>
+</html>

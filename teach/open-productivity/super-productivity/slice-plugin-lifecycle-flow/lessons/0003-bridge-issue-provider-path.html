@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件 Bridge 与 issue provider 调用时序</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="lesson">
+      <p class="eyebrow">L2 垂直切片 · 15 分钟</p>
+      <h1>Bridge、OAuth、Node executor 与 issue provider 边界</h1>
+      <p class="lede">
+        本课把运行期调用拆成三条线：iframe/postMessage 只是一种 UI 调用通道；OAuth 与 Node executor 要过 Electron 边界；issue provider 注册和 sync adapter 懒创建不是同一个条件。
+      </p>
+
+      <div class="source-rail">
+        相关课程：<a href="./0001-flow-map.html">生命周期地图</a> /
+        <a href="./0002-startup-init-path.html">启动初始化</a>。
+        相邻主题：<a href="../../slice-issue-import-sync-flow/">Issue 导入与双向同步</a>。
+      </div>
+
+      <h2>调用时序图</h2>
+      <pre class="sequence">plugin.js / iframe PluginAPI
+  -> PluginBridgeService.createBoundMethods(pluginId)
+     -> app state / task / config / persistence APIs
+     -> startOAuthFlow()
+        -> PluginOAuthBridgeService
+        -> electron/plugin-oauth.ts loopback + system browser
+     -> executeNodeScript()
+        -> renderer grant check
+        -> electron/plugin-node-executor.ts token + webContents check
+     -> registerIssueProvider()
+        -> PluginIssueProviderRegistryService.register()
+        -> maybe immediate IssueSyncAdapterRegistryService.register()
+
+later, issue two-way sync
+  -> IssueSyncAdapterResolverService.getAdapter(issueType)
+     -> existing adapter OR plugin registry definition
+     -> createPluginSyncAdapter() when createIssue/deleteIssue/updateIssue exists</pre>
+
+      <h2>sync adapter 条件必须分两层</h2>
+      <table>
+        <thead>
+          <tr><th>层级</th><th>源码</th><th>条件</th><th>含义</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Bridge 注册时立即注册</td>
+            <td><span class="where">src/app/plugins/plugin-bridge.service.ts</span></td>
+            <td><code>createIssue</code> 或 <code>deleteIssue</code> 或 <code>fieldMappings.length && updateIssue</code></td>
+            <td>注册 provider 的同时把 sync adapter 放进 registry；普通字段 push 仍需要 fieldMappings 和 updateIssue。</td>
+          </tr>
+          <tr>
+            <td>运行期懒创建</td>
+            <td><span class="where">src/app/features/issue/two-way-sync/issue-sync-adapter-resolver.service.ts</span></td>
+            <td><code>createIssue</code> 或 <code>deleteIssue</code> 或 <code>updateIssue</code></td>
+            <td><code>updateIssue</code>-only provider 也可创建 adapter；源码注释说明这是为了支持没有 task field mappings 的直接事件变更。</td>
+          </tr>
+          <tr>
+            <td>实际字段 push</td>
+            <td><span class="where">src/app/plugins/issue-provider/plugin-sync-adapter.service.ts</span></td>
+            <td><code>updateIssue</code> 加可 push 的 field mappings</td>
+            <td>adapter 存在不代表每个 task 字段都能 push；字段方向由 mapping 决定。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>最小源码锚点</h2>
+      <pre class="language-ts"><code>// Bridge immediate registration
+if (
+  definition.createIssue ||
+  definition.deleteIssue ||
+  (definition.fieldMappings?.length && definition.updateIssue)
+) {
+  this._syncAdapterRegistry.register(registeredKey, adapter);
+}
+
+// Resolver lazy creation
+if (!definition.createIssue && !definition.deleteIssue && !definition.updateIssue) {
+  return undefined;
+}</code></pre>
+
+      <h3>异常路径</h3>
+      <table>
+        <thead>
+          <tr><th>失败点</th><th>表现</th><th>先查</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>iframe API 调用失败</td>
+            <td>postMessage 没回或返回 unsupported</td>
+            <td>bridge token、generation、iframe allowlist、host-only API。</td>
+          </tr>
+          <tr>
+            <td>OAuth 失败</td>
+            <td>无 token、state mismatch、loopback 错误</td>
+            <td>OAuth config、platform client id、Electron loopback server。</td>
+          </tr>
+          <tr>
+            <td>Node script 拒绝执行</td>
+            <td>permission denied 或 grant missing</td>
+            <td>manifest <code>nodeExecution</code>、用户 consent、grant token、webContents 是否还活着。</td>
+          </tr>
+          <tr>
+            <td>provider 能搜索但不能同步</td>
+            <td>搜索 issue 可用，push/delete/create 不触发</td>
+            <td>adapter 是否存在；再看 capability 与 fieldMappings，而不是只看 provider 是否注册。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          一个插件只实现了 <code>updateIssue</code>，没有 <code>fieldMappings</code>、<code>createIssue</code>、<code>deleteIssue</code>。Bridge 注册时会立即注册 sync adapter 吗？后续 resolver 有没有可能懒创建 adapter？
+        </p>
+        <details>
+          <summary>参考答案与反馈</summary>
+          <p>
+            Bridge 不会立即注册，因为它要求 create/delete 或 fieldMappings+updateIssue。resolver 可以懒创建，因为它的条件是 create/delete/updateIssue 任一存在；这用于没有 task field mappings 但需要直接推送事件变更的 provider。
+          </p>
+        </details>
+      </div>
+    </main>
+  </body>
+</html>

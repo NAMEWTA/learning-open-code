@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>0002 status、wait 与完成通知</title>
+	<link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-async-lifecycle 短课 0002</p>
+		<h1>status、wait 与完成通知</h1>
+		<p>学习目标：能判断该用 <code>status</code>、<code>wait</code> 还是等 completion notification，并说出 <code>needs_attention</code> 时为什么 <code>wait</code> 会提前返回。</p>
+	</header>
+
+	<section>
+		<h2>1. 三种观测方式</h2>
+		<table>
+			<tr><th>方式</th><th>是否阻塞 turn</th><th>典型场景</th><th>核心文件</th></tr>
+			<tr><td><code>subagent({ action: "status", id })</code></td><td>否</td><td>巡检进度、看 transcript、排查 stale run</td><td><code>run-status.ts</code></td></tr>
+			<tr><td><code>wait({ id?, all?, timeoutMs? })</code></td><td>是</td><td>skill 必须跑完、<code>pi -p</code> 单 turn、fleet 滚动替换</td><td><code>wait.ts</code></td></tr>
+			<tr><td>completion notification</td><td>否（下一 turn）</td><td>交互式会话，父 agent 还有独立工作可做</td><td><code>result-watcher.ts</code> + extension 事件</td></tr>
+		</table>
+		<p><code>run-status.ts</code> 的 <code>inspectSubagentStatus</code> 会先 <code>reconcileAsyncRun</code>，再读 <code>status.json</code> 或回退到 result 文件；无 id 时列出当前 session 的 active runs。<code>wait.ts</code> 则循环调用 <code>listAsyncRuns</code>，并订阅 complete/control 事件提前唤醒。</p>
+	</section>
+
+	<section>
+		<h2>2. wait 的两种完成模式</h2>
+		<pre>// 默认：第一个 run 离开 active 集就返回（fleet 滚动替换）
+wait({ })
+
+// 全部终态才返回
+wait({ all: true })
+
+// 指定单个 run（忽略 all）
+wait({ id: "abc123" })</pre>
+		<p>无论哪种模式，只要 run 的 <code>activityState === "needs_attention"</code>，<code>wait</code> 都会<strong>立即结束</strong>并提示你去 <code>status</code> 后 nudge/resume/interrupt。这是因为 skill 或单 turn 场景下没有“下一 turn”来接收 control notice。</p>
+		<div class="note">
+			<p><code>async-job-tracker</code> 在轮询时也会读 <code>events.jsonl</code>，把 <code>subagent.control</code> 行转成 <code>SUBAGENT_CONTROL_EVENT</code>，让 UI 与 <code>wait</code> 同步感知 attention 信号。</p>
+		</div>
+	</section>
+
+	<section>
+		<h2>3. 完成通知的最后一跳</h2>
+		<p>runner 结束时把摘要写入 <code>RESULTS_DIR/&lt;runId&gt;.json</code>。<code>result-watcher.ts</code> 用 <code>fs.watch</code>（失败则降级轮询）捕获新文件，校验 <code>sessionId</code> 后：</p>
+		<ol>
+			<li>去重（<code>completion-dedupe</code>）避免重复处理；</li>
+			<li>可选走 intercom grouped delivery；</li>
+			<li>发出 <code>SUBAGENT_ASYNC_COMPLETE_EVENT</code>，由 <code>async-job-tracker.handleComplete</code> 把 job 标为 complete/failed 并安排清理。</li>
+		</ol>
+		<p>若 result 文件已存在但 <code>status.json</code> 仍显示 running，<code>stale-run-reconciler</code>（被 status 与 tracker 共用）会尝试修正——这是 status 与 wait 轮询兜底的共同依赖。</p>
+	</section>
+
+	<section class="quiz">
+		<h2>判断练习</h2>
+		<p>子 agent 进入 <code>needs_attention</code>，你在交互式 Pi 里本来打算继续写别的代码，稍后再看结果。此时最稳妥的做法是？</p>
+		<ol>
+			<li>调用 <code>wait({ all: true, timeoutMs: 3600000 })</code> 一直等到 complete。</li>
+			<li>调用 <code>subagent({ action: "status", id })</code> 看清阻塞点，再 resume/interrupt/steer。</li>
+			<li>忽略 attention，依赖 completion notification 自动处理决策。</li>
+		</ol>
+		<div class="answer">
+			<p><strong>参考答案：2。</strong>attention 表示子 agent 需要父会话介入；<code>wait</code> 会为此提前返回 precisely 是为了让你行动。选项 1 在 attention 场景下会立刻结束而非傻等；选项 3 可能永远等不到自动决策。</p>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>测试佐证</h3>
+		<ul>
+			<li><code>open-ai-agent/pi-subagents/test/integration/async-execution.test.ts</code> — launch message、status 读写、result 文件</li>
+			<li><code>open-ai-agent/pi-subagents/test/integration/async-job-tracker.test.ts</code> — started/complete、control event 转发</li>
+		</ul>
+		<p>主要来源：<code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code> 文件头注释与 <code>waitForSubagents</code> 实现。</p>
+		<p>上一节：<a href="0001-flow-map.html">0001 全链路流程图</a>。长表见 <a href="../reference/async-lifecycle-flow-map.html">参考页</a>。</p>
+	</section>
+
+	<nav class="lesson-nav">
+		<p>课程导航 · <a href="0001-flow-map.html">0001 流程图</a> · <a href="../reference/async-lifecycle-flow-map.html">参考：流程图谱</a></p>
+	</nav>
+</main>
+</body>
+</html>

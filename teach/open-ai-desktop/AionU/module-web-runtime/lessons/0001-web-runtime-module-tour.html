@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebHost 与 WebCLI 运行时导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>WebHost 怎样拼 backend，WebCLI 怎样独立拉起 WebUI</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU 的 Web 运行时主链，知道 WebHost 只做运行时编排，WebCLI 则负责把独立启动、浏览器打开和首启密码补齐成可执行入口。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：web-host/index.ts / static-server.ts / web-cli/index.ts</span>
+    </div>
+  </section>
+
+  <h2 id="position">1. 先放到全局图上：它是桌面壳旁边的第二条启动面</h2>
+  <p>如果你刚读完 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 和 <a href="../../module-main-entry/lessons/0001-main-entry-module-tour.html">main-entry 短课</a>，现在可以把 Web 运行时理解成“脱离 Electron 窗口后，仍能启动同一套 backend 与 renderer 静态资源”的独立宿主。<code>@aionui/web-host</code> 不解析命令行、不决定数据目录，也不管理登录提示；它只接收上层算好的 <code>WebHostOptions</code>，再把 backend 生命周期和静态服务器拼在一起。</p>
+  <pre><code class="language-ts">export async function startWebHost(opts: WebHostOptions): Promise&lt;WebHostHandle&gt; {
+  const { startBackend } = await import('./backend-launcher.js');
+  const { startStaticServer } = await import('./static-server.js');
+
+  const backendHandle =
+    opts.backend.kind === 'ownBackend'
+      ? await startBackend({ app: opts.app, resolveBackend: opts.backend.resolveBackend, dataDir: opts.dataDir, logDir: opts.logDir, dirs: opts.dirs })
+      : { port: opts.backend.port, stop: async () =&gt; {} };
+
+  let staticHandle;
+  try {
+    staticHandle = await startStaticServer({
+      staticDir: opts.staticDir,
+      backendPort: backendHandle.port,
+      port: opts.port,
+      allowRemote: opts.allowRemote ?? false,
+    });
+  } catch (err) {
+    await backendHandle.stop();
+    throw err;
+  }
+
+  return { ...staticHandle, backendPort: backendHandle.port, stop: async () =&gt; { await staticHandle.stop(); await backendHandle.stop(); } };
+}</code></pre>
+  <p>读到这里先记一句话：<strong>WebHost 负责拼装，不负责决策</strong>。完整接口表和调用边界见 <a href="../reference/web-runtime-overview.html#entries">reference</a>。</p>
+
+  <h2 id="host">2. WebHost 的核心价值，是把 backend 生命周期和静态入口缝成一个句柄</h2>
+  <p><code>backend-launcher.ts</code> 负责选一个浏览器可访问的 backend 端口、spawn <code>aioncore</code>、等待 <code>/health</code> 成功，并在停止时顺手清理注册过的 agent 进程；<code>static-server.ts</code> 则做三件事：静态资源服务、<code>/api/*</code> 与登录路径反代、以及把 <code>/ws</code> / <code>/api/stt/stream</code> 升级请求直接 splice 到 backend。于是 WebHost 返回的 handle 其实是两层运行时的合成视图。</p>
+  <pre><code class="language-ts">if (req.url.startsWith('/api/') || req.url === '/login' || req.url === '/logout') {
+  forwardToBackend(req, res, opts.backendPort);
+  return;
+}
+
+await serveHandler(req, res, {
+  public: opts.staticDir,
+  rewrites: [{ source: '**', destination: '/index.html' }],
+});</code></pre>
+  <p>这里最值得记的是分层边界：HTTP 请求大多先到静态服务器，再由它转发给 backend；但 WebSocket 和 STT stream 为了避开 Bun 的 upgrade 兼容坑，直接走外层 TCP 监听。也就是说，WebHost 不是“一个 Express 应用”，而是“一个有 backend handle 的宿主进程 + 一个对浏览器友好的门面”。更完整的内部分层和测试证据在 <a href="../reference/web-runtime-overview.html#layers">参考页</a>。</p>
+
+  <h2 id="cli">3. WebCLI 再往上补一层：资源定位、独立启动、首启自举</h2>
+  <p><code>packages/web-cli/src/index.ts</code> 才是用户真正执行的独立入口。它先从 <code>process.execPath</code> 或 <code>import.meta.url</code> 推断 CLI 根目录，再解析 <code>--port</code>、<code>--remote</code>、<code>--data-dir</code>、<code>--backend-bin</code> 等参数，随后调用 <code>startWebHost()</code>。如果 backend 二进制缺失，它会退化成 frontend-only 模式，只起静态服务器；如果 backend 正常可用，则在打印访问地址后调用 <code>ensureAdminPassword()</code>，检查是否需要为首次安装生成管理员密码。</p>
+  <pre><code class="language-ts">const handle = await startWebHost({
+  app: { version, isPackaged: true, resourcesPath: cliRoot, userDataPath: dataDir },
+  staticDir,
+  port,
+  allowRemote,
+  dataDir,
+  logDir,
+  dirs: { cacheDir: dataDir, workDir: dataDir, logDir },
+  backend: { kind: 'ownBackend', resolveBackend: () =&gt; backendBin },
+});
+
+await ensureAdminPassword({ backendPort: handle.backendPort, resetCommand: RESET_COMMAND }, deps);</code></pre>
+  <p>因此阅读顺序可以很稳定：先看 WebCLI 决策什么，再看 WebHost 如何执行，再下钻到 backend / static-server 的实现。跨平台启动命令和远程访问说明可对照 <a href="../../../../../open-ai-desktop/AionU/docs/guides/webui.md">webui 指南</a>。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果你看到“页面能打开，但所有 API 都失败”，第一反应应该先查 <code>web-cli/index.ts</code> 还是 <code>static-server.ts</code>？为什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>优先查 <code>web-cli/index.ts</code>，因为它决定当前是不是进入了 frontend-only 降级模式，以及 backend 二进制路径、数据目录、端口这些前置条件是否正确。若 CLI 明确已拿到正常 backend handle，再回到 <code>static-server.ts</code> 看代理和 TCP splice。若你直接跳到代理层，说明你已经想到“请求是怎么走的”，但还没先确认“backend 有没有真正启动起来”。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先完整读 <code>packages/web-cli/src/index.ts</code>，再回看 <a href="../reference/web-runtime-overview.html">web-runtime reference</a> 的接口表。随后可以追问 agent：请按“CLI 参数 → WebHost 选项 → backend/static handle → 浏览器可见结果”带我走一遍真实调用链。</p>
+</main>
+</body>
+</html>

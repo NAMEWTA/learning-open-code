@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>新增任务与短语法解析参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 参考文档 · 新增任务、短语法、归属、计划/提醒、op-log 边界</p>
+    <h1>新增任务链路速查</h1>
+    <p class="lead">本页是 `lessons/0001-flow-map.html` 的长清单版。遇到“任务为什么出现在这里”“短语法为什么没生效”“为什么同步里有多条 op”时，从这里定位。</p>
+
+    <h2>1. 入口清单</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>入口</th><th>源码位置</th><th>职责</th><th>落点</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>桌面顶部加号</td><td><span class="where">src/app/core-ui/main-header/main-header.component.html</span></td><td>点击调用 `layoutService.showAddTaskBar()`。</td><td>显示全局 add-task-bar。</td></tr>
+          <tr><td>移动底部 FAB</td><td><span class="where">src/app/core-ui/mobile-bottom-nav/mobile-bottom-nav.component.html</span></td><td>移动端点击创建任务。</td><td>显示全局 add-task-bar。</td></tr>
+          <tr><td>键盘快捷键</td><td><span class="where">src/app/core-ui/shortcut/shortcut.service.ts</span></td><td>匹配 `cfg.keyboard.addNewTask` 后阻止默认事件。</td><td>显示全局 add-task-bar。</td></tr>
+          <tr><td>Electron IPC</td><td><span class="where">src/app/core-ui/shortcut/shortcut.service.ts</span></td><td>监听 `IPC.SHOW_ADD_TASK_BAR`。</td><td>显示全局 add-task-bar。</td></tr>
+          <tr><td>Android 启动覆盖层</td><td><span class="where">src/app/core/startup-overlay/startup-overlay.service.ts</span></td><td>把原生层暂存文本写入 `SS.ADD_TASK_BAR_TXT`。</td><td>挂载后恢复输入和光标。</td></tr>
+          <tr><td>计划页内联添加</td><td><span class="where">src/app/features/planner/add-task-inline/add-task-inline.component.html</span></td><td>传入 `planForDay`、`additionalFields`、`tagsToRemove`。</td><td>生成指定天的任务。</td></tr>
+          <tr><td>明日计划页</td><td><span class="where">src/app/pages/daily-summary/plan-tasks-tomorrow/plan-tasks-tomorrow.component.html</span></td><td>把 `tomorrow.dayDate` 传入 `planForDay`。</td><td>默认计划到明天。</td></tr>
+          <tr><td>输入条自身</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.html</span></td><td>输入、提交按钮、搜索模式、note、动作按钮。</td><td>调用组件提交逻辑。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>2. 数据模型与字段映射</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>输入/状态字段</th><th>来源</th><th>最终字段</th><th>规则</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>`inputTxt` / `cleanText`</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-state.service.ts</span></td><td>`Task.title`</td><td>短语法解析后优先用 `cleanText`，否则用原始输入。</td></tr>
+          <tr><td>`projectId`</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts</span></td><td>`Task.projectId`</td><td>`+project` 可覆盖自动检测项目；无匹配时使用 active project、默认项目或 Inbox。</td></tr>
+          <tr><td>`tagIds` + `tagIdsFromTxt`</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>`Task.tagIds`</td><td>手选标签和 `#tag` 合并；`TODAY` 不应进入 `task.tagIds`。</td></tr>
+          <tr><td>`newTagTitles`</td><td><span class="where">src/app/features/tag/tag.service.ts</span></td><td>`Tag` + `Task.tagIds`</td><td>UI 提交前确认并创建 tag；store effect 路径会在后处理中确认。</td></tr>
+          <tr><td>`date` + `time`</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.ts</span></td><td>`dueDay` 或 `dueWithTime`</td><td>有时间写 `dueWithTime` 和 `hasPlannedTime`；无时间写 `dueDay`。</td></tr>
+          <tr><td>`remindOption`</td><td><span class="where">src/app/features/tasks/task.service.ts</span></td><td>`remindAt`</td><td>timed due 通过 `scheduleTaskWithTime` 转成绝对提醒时间。</td></tr>
+          <tr><td>`deadlineDate` + `deadlineTime`</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts</span></td><td>`deadlineDay` 或 `deadlineWithTime`</td><td>有 deadline time 写 timestamp；否则写日期字符串。</td></tr>
+          <tr><td>`deadlineRemindOption`</td><td><span class="where">src/app/features/tasks/util/remind-option-to-milliseconds.ts</span></td><td>`deadlineRemindAt`</td><td>仅在有 timed deadline 且不是 DoNotRemind 时写入。</td></tr>
+          <tr><td>`estimate`</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>`timeEstimate`</td><td>`30m`、`1h` 等转毫秒；无估时写 0。</td></tr>
+          <tr><td>`spent`</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>`timeSpentOnDay` / `timeSpent`</td><td>`spent/estimate` 形式把今日已耗时写入 map，reducer 计算总耗时。</td></tr>
+          <tr><td>`attachments`</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>`Task.attachments`</td><td>按 URL 配置决定保留文本、抽取附件或两者兼有。</td></tr>
+          <tr><td>`repeatQuickSetting`</td><td><span class="where">src/app/features/task-repeat-cfg/task-repeat-cfg.service.ts</span></td><td>`TaskRepeatCfg` + task link</td><td>预设重复直接创建 cfg；CUSTOM 打开重复配置对话框。</td></tr>
+          <tr><td>`noteTxt`</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-state.service.ts</span></td><td>`Task.notes`</td><td>Ctrl/Cmd+Enter 可展开 note；提交后清空草稿。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. Action、effects、reducer、service 边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层</th><th>源码位置</th><th>负责什么</th><th>不负责什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>UI 组件</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.ts</span></td><td>读临时状态，组装 `taskData`，调用 `TaskService.add()`，补调 schedule/repeat。</td><td>不直接写 NgRx entity。</td></tr>
+          <tr><td>UI 解析适配</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts</span></td><td>调用 `shortSyntax`，把解析结果写进 `AddTaskBarStateService`。</td><td>不创建任务，不写 op-log。</td></tr>
+          <tr><td>纯解析</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>解析 `+`、`#`、`@`、`!`、估时、已耗时、URL。</td><td>不读 store，不弹窗。</td></tr>
+          <tr><td>Service 门面</td><td><span class="where">src/app/features/tasks/task.service.ts</span></td><td>创建默认 `Task`，派发 `TaskSharedActions.addTask` 或 schedule action。</td><td>不直接维护 project/tag 双向列表。</td></tr>
+          <tr><td>共享 action</td><td><span class="where">src/app/root-store/meta/task-shared.actions.ts</span></td><td>声明持久化元数据：entityType、entityId、opType。</td><td>不执行状态变更。</td></tr>
+          <tr><td>新增 CRUD meta-reducer</td><td><span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span></td><td>新增 task，更新 project/tag/Today/planner 归属。</td><td>不处理 timed scheduling 的提醒。</td></tr>
+          <tr><td>短语法 effect</td><td><span class="where">src/app/features/tasks/store/short-syntax.effects.ts</span></td><td>监听 add/update/subtask，对非 UI 或残留短语法派发 `applyShortSyntax`。</td><td>不在 UI 输入阶段运行。</td></tr>
+          <tr><td>短语法 meta-reducer</td><td><span class="where">src/app/root-store/meta/task-shared-meta-reducers/short-syntax-shared.reducer.ts</span></td><td>一次性更新 task 字段、project move、plan/schedule、`Task.tagIds`；Today 例外会写 `TODAY_TAG.taskIds` 保序。</td><td>不处理新 tag 弹窗，也不维护普通 `tag.taskIds` 反向列表。</td></tr>
+          <tr><td>提醒 effect</td><td><span class="where">src/app/features/tasks/store/task-reminder.effects.ts</span></td><td>响应 `scheduleTaskWithTime`，处理通知侧效果。</td><td>不决定 task 是否属于 Today。</td></tr>
+          <tr><td>op-log 捕获</td><td><span class="where">src/app/op-log/capture/operation-log.effects.ts</span></td><td>把本地 persistent action 转成 operation 写入 `SUP_OPS`。</td><td>不捕获输入框临时状态或 remote replay。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>4. 归属规则</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Project</h3>
+        <p>创建默认值来自 active project、全局默认项目或 Inbox。新增主任务时，<span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span> 根据 `isAddToBacklog` 和项目是否启用 backlog 写入 `taskIds` 或 `backlogTaskIds`。</p>
+      </div>
+      <div class="card">
+        <h3>普通 Tag</h3>
+        <p>`#tag` 匹配已有 tag 时会写入 `Task.tagIds`。`addTask`/`updateTask` 走 <span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span>，新增路径和 `handleTagUpdates()` 会维护普通 `tag.taskIds`；`applyShortSyntax` 走 <span class="where">src/app/root-store/meta/task-shared-meta-reducers/short-syntax-shared.reducer.ts</span>，只改 `Task.tagIds`，普通 tag 视图成员再由 selector 从 task 侧推导。Today 是例外：它不会进入 `Task.tagIds`，只用 `TODAY_TAG.taskIds` 存排序。</p>
+      </div>
+      <div class="card">
+        <h3>Today</h3>
+        <p>`TODAY_TAG` 是虚拟标签。成员由 <span class="where">src/app/features/work-context/store/work-context.selectors.ts</span> 判断：先看今天的 `dueWithTime`，没有 timed due 时才看 `dueDay === todayStr`。</p>
+      </div>
+      <div class="card">
+        <h3>Planner</h3>
+        <p>未来 `dueDay` 会进入 planner day；Today 使用 `TODAY_TAG.taskIds` 保序。`scheduleTaskWithTime` 会清 `dueDay`，写 `dueWithTime` 和 `remindAt`。</p>
+      </div>
+    </div>
+
+    <h2>5. op-log 持久化边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>动作</th><th>action</th><th>op 类型</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>创建任务</td><td><span class="where">src/app/root-store/meta/task-shared.actions.ts</span></td><td>Create TASK</td><td>`TaskSharedActions.addTask` 带 `meta.isPersistent`。</td></tr>
+          <tr><td>短语法后处理</td><td><span class="where">src/app/root-store/meta/task-shared.actions.ts</span></td><td>Update TASK</td><td>`TaskSharedActions.applyShortSyntax` 把多步变更压成一个 operation。</td></tr>
+          <tr><td>timed due / remind</td><td><span class="where">src/app/root-store/meta/task-shared.actions.ts</span></td><td>Update TASK</td><td>`scheduleTaskWithTime` 写 `dueWithTime`、清 `dueDay`、写 `remindAt`。</td></tr>
+          <tr><td>创建新 tag</td><td><span class="where">src/app/features/tag/store/tag.actions.ts</span></td><td>Create TAG</td><td>新 tag 本身是独立 operation。</td></tr>
+          <tr><td>创建重复配置</td><td><span class="where">src/app/features/task-repeat-cfg/store/task-repeat-cfg.actions.ts</span></td><td>Create TASK_REPEAT_CFG</td><td>repeat cfg 与 task 创建分开持久化。</td></tr>
+          <tr><td>输入、解析、草稿</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-state.service.ts</span></td><td>不持久化到 op-log</td><td>只写 signal/sessionStorage，不是 sync operation。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>最终写入由 <span class="where">src/app/op-log/persistence/operation-log-store.service.ts</span> 的 `appendWithVectorClockUpdate` 完成：operation 进入 `ops` store，并在同一事务更新 vector clock。</p>
+
+    <h2>6. 故障排查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>现象</th><th>优先检查</th><th>常见原因</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>输入 `@tomorrow` 后仍出现在 Today</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts</span> 和 <span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span></td><td>默认 Today date 未被短语法覆盖，或 timed due 后未走 schedule/update Today 顺序。</td></tr>
+          <tr><td>`+project` 没有移动项目</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>项目被 archived/hidden、名称前缀未匹配、或任务是 repeatable task 导致 effect 拒绝移动。</td></tr>
+          <tr><td>`#123` 被当作 tag 或未当作 tag</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>数字 tag 在开头、issue task、空格边界规则影响解析。</td></tr>
+          <tr><td>deadline 被清掉</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts</span></td><td>解析器区分“短语法拥有的 deadline”和“用户手动选择的 deadline”；移除 `!` 语法会清短语法拥有的值。</td></tr>
+          <tr><td>创建任务后同步没有这条 op</td><td><span class="where">src/app/op-log/core/persistent-action.interface.ts</span> 和 <span class="where">src/app/op-log/capture/operation-log.effects.ts</span></td><td>action 未带 `meta.isPersistent`、entityId 无效、remote/deferred 路径被过滤，或 op payload 校验失败。</td></tr>
+          <tr><td>重复任务创建后提醒重复</td><td><span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.ts</span></td><td>timed repeat 有专门路径，组件会跳过普通 `scheduleTask`，避免双重 scheduling。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </article>
+</main>
+</body>
+</html>

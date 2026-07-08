@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Electron 桌面宿主边界导览</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 模块总览 · 预计 15 分钟 · 目标：能区分主进程、preload bridge、renderer IPC 与系统能力边界</p>
+    <h1>Electron 桌面宿主、窗口与 IPC 边界</h1>
+    <p class="lead">一句话：Electron 宿主把 <a href="../../00-overview/lessons/0001-project-map.html">L0 地图</a>里的 Angular renderer 放进桌面窗口，并独占托盘、idle、协议、本地文件、插件 Node/OAuth、本地 REST API 等系统能力。</p>
+
+    <h2>1. 先分清四个位置</h2>
+    <p>读 Electron 代码时，先不要追完整启动/退出链路，只判断“这段代码在哪个权限层”。主进程拥有 Electron 和 Node 权限；preload bridge 在隔离上下文里把受控 API 暴露给页面；renderer 仍是 Angular 应用；系统能力只能由主进程模块执行。</p>
+    <pre class="diagram">Electron main process
+  → BrowserWindow + ipcMain handlers + desktop modules
+preload bridge
+  → contextBridge exposes window.ea
+Angular renderer
+  → calls window.ea methods, receives IPC events
+system capability
+  → tray / idle / protocol / local file / plugin / local REST</pre>
+
+    <h2>2. 宿主从单实例入口开始</h2>
+    <p><span class="where">electron/main.ts</span> 很薄：非 macOS 先申请单实例锁；如果没拿到锁，即使命令行带 <code>superproductivity://</code> URL，这个第二进程也会退出。protocol URL 在这里的唯一差异是：普通重复实例会打印日志，带 URL 的重复实例不打印这条普通日志。</p>
+    <pre class="diagram">const isLockObtained = app.requestSingleInstanceLock();
+if (!isLockObtained) {
+  const hasProtocolUrl = process.argv.some((arg) => arg.startsWith(PROTOCOL_PREFIX));
+  if (!hasProtocolUrl) {
+    console.log('Another instance is already running. Exiting.');
+  }
+  process.exit(0);
+} else {
+  startApp();
+}</pre>
+    <p>protocol URL 的处理依赖已运行主实例在 <code>initializeProtocolHandling()</code> 注册的 <code>second-instance</code>（Windows/Linux）、<code>open-url</code>（macOS）和命令行 cold-start 扫描。定位启动问题时，先问“进程是否拿到单实例锁”；若是 protocol URL，再去 <span class="where">electron/protocol-handler.ts</span> 看转发链路，而不是期待第二进程进入 <code>startApp()</code>。</p>
+
+    <h2>3. 窗口不是 renderer 本身</h2>
+    <p><span class="where">electron/main-window.ts</span> 创建 <code>BrowserWindow</code>，并用 <code>webSecurity: true</code>、<code>preload</code>、<code>nodeIntegration: false</code>、<code>contextIsolation: true</code> 建出第一层安全边界。Angular 页面没有直接 Node 权限；它只能通过 <span class="where">electron/preload.ts</span> 暴露的 <code>window.ea</code> 调主进程。</p>
+    <pre class="diagram">webPreferences: {
+  webSecurity: true,
+  preload: path.join(__dirname, 'preload.js'),
+  nodeIntegration: false,
+  contextIsolation: true,
+}
+
+contextBridge.exposeInMainWorld('ea', ea);</pre>
+    <p>第二层边界在 session、权限和导航钩子：<code>onBeforeSendHeaders</code> 剥离 <code>Origin</code>、<code>Referer</code>、<code>Cookie</code> 等请求头；<code>onHeadersReceived</code> 注入 CORS 响应头并把 <code>OPTIONS</code> 强制成 200；权限只允许 <code>notifications</code>。新窗口由 <code>setWindowOpenHandler</code> 拒绝，再交给带 scheme guard 的外链打开路径；<code>file:</code> 链接还会进入本地文件 guard。<span class="where">electron/start-app.ts</span> 全局放行自签证书是兼容自托管服务的取舍，不是安全加强。</p>
+    <p>这也是阅读 IPC 的诀窍：看到 renderer 侧 <code>window.ea.openExternalUrl()</code>、<code>fileSyncSave()</code> 或 <code>consumePluginNodeExecutionApi()</code>，先回到 preload 的 API 名，再按 IPC channel 找主进程 handler。</p>
+
+    <h2>4. 检索练习</h2>
+    <p>暂停 60 秒回答：如果一个功能需要读取本地同步文件，应该放在 Angular service、preload bridge，还是 Electron 主进程模块？renderer 能不能直接拿绝对路径自己读写？</p>
+    <div class="answer">参考答案：文件读写属于系统能力，应落在 Electron 主进程模块；renderer 只通过 <code>window.ea</code> 发起受控 IPC。preload bridge 负责暴露 typed 方法，不承载业务状态，也不应该把不受限文件系统能力直接交给页面。完整入口清单见 <a href="../reference/electron-host-overview.html">Electron 宿主参考</a>。</div>
+    <p>主要来源：<code>electron/main-window.ts</code> 与 <a href="https://www.electronjs.org/docs/latest/tutorial/security">Electron Security 官方教程</a>。如果主进程、preload 或 renderer 的边界仍不清楚，可以直接向 agent 追问下一跳源码。</p>
+  </article>
+</main>
+</body>
+</html>

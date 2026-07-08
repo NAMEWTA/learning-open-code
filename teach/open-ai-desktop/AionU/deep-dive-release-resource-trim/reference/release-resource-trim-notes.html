@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 发布资源裁剪与校验参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .warn {
+      border-left: 4px solid #b45309;
+      background: #fff8ed;
+      padding: 0.85rem 1rem;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>发布资源裁剪与校验参考</h1>
+    <p class="subtitle">速查：资源分类、保留/排除边界、bundled-aioncore 不变量、release-assets 校验、测试证据和缺口。</p>
+    <div class="meta">
+      <span class="pill">主题：deep-dive-release-resource-trim</span>
+      <span class="pill">源项目：AionU</span>
+      <span class="pill">关联：L1-build-release</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#map">1. 资源地图</a>
+    <a href="#builder">2. electron-builder 边界</a>
+    <a href="#aioncore">3. bundled-aioncore 不变量</a>
+    <a href="#release">4. release-assets 校验</a>
+    <a href="#tests">5. 测试证据</a>
+    <a href="#gaps">6. 新发现缺口</a>
+  </nav>
+
+  <h2 id="map">1. 资源地图</h2>
+  <div class="filetree">AionU 发布资源链路
+├── out/                                      ← electron-vite 编译输出
+│   ├── main/                                 ← 主进程 bundle
+│   ├── preload/                              ← preload bundle
+│   └── renderer/                             ← renderer 静态页面
+├── resources/
+│   ├── app.png                               ← Linux icon 与外层资源
+│   ├── bundled-aioncore/                     ← 后端 runtime bundle
+│   └── hub/                                  ← Hub 离线资源
+├── packages/
+│   ├── desktop/electron-builder.yml          ← 打包资源边界
+│   └── shared-scripts/src/
+│       ├── prepare-aioncore.js               ← bundled-aioncore 来源解析与准备
+│       └── verify-bundled-aioncore-resources.js ← 后端资源校验
+├── scripts/
+│   ├── afterPack.js                          ← 打包后 resources 校验 hook
+│   ├── prepare-release-assets.sh             ← 发布资产整理
+│   └── verify-release-assets.sh              ← 发布资产校验入口
+└── tests/
+    └── unit/
+        ├── assets/                           ← bundled-aioncore 资源单测
+        └── releasePackagingConfig.test.ts    ← 发布配置与脚本单测</div>
+
+  <h2 id="builder">2. electron-builder 边界</h2>
+  <table>
+    <thead>
+      <tr><th>配置</th><th>保留内容</th><th>裁剪内容</th><th>风险</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span> 的 <code>files</code></td><td><code>out/main</code>、<code>out/preload</code>、<code>out/renderer</code>、<code>public</code>、<code>package.json</code>、必要 runtime deps。</td><td>workspace sibling packages 源码、desktop src、source map、node_modules 文档/测试、部分大包、JAR/JNI、tree-sitter native binaries。</td><td>漏掉 runtime dep 会运行时报错；误包含 unsigned native/vendor 会影响签名或包体。</td></tr>
+      <tr><td><code>extraResources</code></td><td><code>public</code>、<code>app.png</code>、<code>bundled-aioncore</code>、<code>hub</code>。</td><td>不在此处做裁剪，依赖上游准备目录本身正确。</td><td>删掉 bundled-aioncore 或 hub 会造成后端启动/离线资源缺失。</td></tr>
+      <tr><td><code>asarUnpack</code></td><td>native modules、tree-sitter WASM、内置 MCP server 脚本。</td><td>不是任意资源都应解包。</td><td>需要外部进程执行或原生加载的文件若留在 asar 内，可能无法被运行时读取。</td></tr>
+      <tr><td><code>afterPack</code></td><td>打包后检查 resources 目录，并执行 bundled-aioncore 校验。</td><td>不负责生成资源。</td><td>这是发现 electron-builder 复制后缺失的最后一层本地闸门。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="aioncore">3. bundled-aioncore 不变量</h2>
+  <table>
+    <thead>
+      <tr><th>不变量</th><th>来源</th><th>校验方式</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>目录名必须是 <code>&lt;electronPlatformName&gt;-&lt;targetArch&gt;</code>。</td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/verify-bundled-aioncore-resources.js</span></td><td>用入参组合 runtimeKey，然后在 resources 下查找。</td></tr>
+      <tr><td>后端 binary 必须存在。Windows 为 <code>aioncore.exe</code>，其他平台为 <code>aioncore</code>。</td><td>同上</td><td><code>requireRelativePath</code> 加 <code>isFile</code>。</td></tr>
+      <tr><td>来源优先级：完整本地 bundle 先短路；否则依次尝试 Actions artifact、release asset、本地 binary。</td><td><span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span></td><td>完整 bundle 必须同时有目标 binary 与 <code>managed-resources</code>；只给 binary 时仍会重新生成 managed resources。</td></tr>
+      <tr><td><code>manifest.json</code> 必须是有效 JSON，且 platform/arch 匹配目标。</td><td>同上</td><td>不匹配时把 <code>&lt;platform:...&gt;</code> 或 <code>&lt;arch:...&gt;</code> 放入 missing。</td></tr>
+      <tr><td>managed Node runtime 必须存在。</td><td>同上</td><td>Windows 查 <code>node.exe</code>；非 Windows 查 <code>bin/node</code>。</td></tr>
+      <tr><td><code>codex-acp</code> 与 <code>claude-agent-acp</code> 必须有 manifest、entrypoint、package、lockfile、node_modules。</td><td>同上</td><td>枚举版本目录和 runtimeKey 子目录逐项检查。</td></tr>
+      <tr><td>Windows ACP 平台可执行文件必须存在。</td><td>同上</td><td>codex-acp 查 <code>bin/codex-acp.exe</code>，claude-agent-acp 查 <code>claude.exe</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="release">4. release-assets 校验</h2>
+  <table>
+    <thead>
+      <tr><th>脚本</th><th>当前硬校验</th><th>注意事项</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="where">open-ai-desktop/AionU/scripts/prepare-release-assets.sh</span></td><td>去重 distributable basename；写 canonical updater metadata；要求 <code>latest.yml</code>、<code>latest-mac.yml</code>、<code>latest-linux.yml</code>、<code>latest-linux-arm64.yml</code>；要求 mac x64/arm64 的 dmg+zip；要求五个平台 WebCLI tarball 和 sha256；要求 <code>install-web.sh</code>。</td><td>使用 package version 或 <code>MOCK_VERSION</code>；不动态逐项检查 Windows exe 和 Linux deb，只通过 metadata 与后续脚本间接覆盖。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/scripts/verify-release-assets.sh</span></td><td>metadata 指向文件必须存在；架构 metadata 必须存在；固定检查 1.0.0 的 Windows、macOS、Linux、WebCLI mock 文件。</td><td>适合 PR 的 mock release test；不是任意真实版本 release 目录的通用校验器。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="tests">5. 测试证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试文件</th><th>证明范围</th><th>没有证明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/assets/verifyBundledAioncoreResources.test.ts</span></td><td>缺 managed node、manifest platform/arch mismatch、非 Windows node 布局、ACP manifest 和 entrypoint 缺失会被报告。</td><td>不证明 binary 可执行权限、checksum、真实压缩包完整性。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/assets/prepareAioncoreActionsArtifact.test.ts</span></td><td>AionCore Actions artifact 名称映射与缺 artifact 错误信息被锁定。</td><td>不下载真实 Actions artifact。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/tests/unit/releasePackagingConfig.test.ts</span></td><td>mac zip 目标开启、Windows zip 未开启、workflow 上传 mac zip、prepackaged retry 包含 dmg+zip、缺 mac arm64 zip 时 prepare 失败。</td><td>不验证真实 release 的所有平台文件内容。</td></tr>
+      <tr><td><span class="where">open-ai-desktop/AionU/scripts/smoke-test-web-cli.sh</span></td><td>WebCLI tarball 解压后有 static、bundled-aioncore、package.json、可执行文件和后端 binary，且可启动 HTTP root。</td><td>不是 Vitest 单测；依赖真实 tarball 和目标平台运行环境。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="gaps">6. 新发现缺口</h2>
+  <section class="warn">
+    <p><strong>版本假设不一致：</strong>当前 <span class="where">open-ai-desktop/AionU/package.json</span> 版本为 <code>2.1.30</code>，但 <span class="where">open-ai-desktop/AionU/scripts/verify-release-assets.sh</span> 固定检查 <code>1.0.0</code> 文件名。它符合 mock release test，但不能直接作为真实版本目录的通用校验。</p>
+  </section>
+  <table>
+    <thead>
+      <tr><th>缺口</th><th>影响</th><th>对应源码行 / 脚本段</th><th>可能的后续补强</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>verify-release-assets.sh</code> 未读取 package version 或 metadata version。</td><td>真实发布版本变化时，脚本只能在 mock 资产语境下稳定运行。</td><td>固定 <code>1.0.0</code> 的 expected file name 段。</td><td>增加 VERSION 参数或从 metadata/package.json 解析版本。</td></tr>
+      <tr><td><code>prepare-release-assets.sh</code> 动态硬校验 mac 和 WebCLI，但 Windows/Linux 桌面包主要靠 metadata/后续 verify 间接覆盖。</td><td>某些桌面资产缺失可能要到上传或用户下载链路才暴露。</td><td>canonical metadata 检查与 mac/WebCLI assert 段。</td><td>按 platform/arch 动态补齐 exe/deb 预期清单。</td></tr>
+      <tr><td>bundled-aioncore 校验关注存在性与 manifest 匹配。</td><td>文件存在但不可执行、内容损坏或 checksum 不匹配时，afterPack 可能无法提前发现。</td><td><code>verify-bundled-aioncore-resources.js</code> 的 <code>requireRelativePath</code> / manifest 检查。</td><td>对 binary 增加可执行位/最小运行检查，或在 smoke test 中固定覆盖。</td></tr>
+      <tr><td>checksum 文件只检查存在。</td><td>checksum 内容格式或 tarball hash 不匹配可能未在 prepare/verify 阶段被发现。</td><td>WebCLI sha256 expected file 检查段。</td><td>在 verify 脚本中执行 sha256 校验。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

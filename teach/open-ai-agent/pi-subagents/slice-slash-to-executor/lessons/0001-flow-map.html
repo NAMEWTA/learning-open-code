@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Slash 到 executor 链路图</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+  <h1>Slash 命令到 executor 桥接链路图</h1>
+  <p class="lead">学习目标：15 分钟内能按顺序说出用户输入 <code>/run reviewer "task"</code> 后，从命令解析到 <code>executor.execute</code> 分流点的八个跳点。</p>
+  <p class="meta">
+    <span class="pill">L2 垂直切片</span>
+    <span class="pill">前置：<a href="../../module-slash-workflows/lessons/0001-slash-workflows-module-tour.html">slash-workflows 模块</a></span>
+    <span class="pill">速查：<a href="../reference/slash-to-executor-flow-map.html">参考图谱</a></span>
+  </p>
+
+  <h2>1. 两条入口，一个 executor</h2>
+  <p>扩展启动时（<span class="where">extension/index.ts</span>）先注册两个桥，再注册 slash 命令。二者最终都调用 <code>executeSubagentCollapsed</code> → <code>executor.execute</code>：</p>
+  <pre>registerSlashSubagentBridge        ← subagent:slash:* 事件
+registerPromptTemplateDelegationBridge ← prompt-template:subagent:*
+createSubagentExecutor → executor
+registerSlashCommands(pi, state)   ← /run、/chain、/parallel …</pre>
+  <p>本课主路径是 slash 命令；Pi prompt 模板委派走第二条桥，参数形态不同，但 executor 分流逻辑相同。</p>
+
+  <h2>2. 八跳全链路（以 /run 为例）</h2>
+  <ol class="steps">
+    <li><strong>命令解析</strong> — <span class="where">slash-commands.ts</span> 的 <code>/run</code> handler 解析 agent token、inline config、<code>--bg</code>/<code>--fork</code>，组装 <code>SubagentParamsLike</code>（<code>clarify: false</code>、<code>agentScope: "both"</code>）。</li>
+    <li><strong>发起 live card</strong> — <code>runSlashSubagent</code> 生成 <code>requestId</code>，<code>buildSlashInitialResult</code> 创建 placeholder，<code>pi.sendMessage</code> 发出 <code>subagent-slash-result</code> 初始消息并折叠工具面板。</li>
+    <li><strong>事件请求</strong> — <code>requestSlashRun</code> 订阅 <code>started</code>/<code>update</code>/<code>response</code>，向事件总线 emit <code>subagent:slash:request</code>（携带 <code>params</code> 与当前 <code>ctx</code>）。</li>
+    <li><strong>Bridge 接收</strong> — <span class="where">slash-bridge.ts</span> 优先用 request 里的 <code>ctx</code>，否则回退 <code>state.lastUiContext</code>；无 ctx 则立即 error response。建立 <code>AbortController</code> 后同步 emit <code>started</code>。</li>
+    <li><strong>调用 executor</strong> — bridge 的 <code>execute</code> 回调即 <code>executeSubagentCollapsed</code>，进入 <span class="where">subagent-executor.ts</span> 的 <code>execute</code>。</li>
+    <li><strong>门卫与分流</strong> — 有 <code>action</code> 走管理路径（doctor/status 等）；否则检查嵌套深度、normalize params，再按 <code>chain</code> / <code>tasks</code> / <code>agent</code> 与 <code>effectiveAsync</code> 分到 <code>runChainPath</code>、<code>runParallelPath</code>、<code>runSinglePath</code> 或 <code>runAsyncPath</code>。</li>
+    <li><strong>进度回流</strong> — executor <code>onUpdate</code> → bridge emit <code>subagent:slash:update</code> → <code>applySlashUpdate</code> 写 live-state；有 UI 时更新 status 行与 Esc 取消。</li>
+    <li><strong>收尾展示</strong> — bridge emit <code>response</code> → <code>finalizeSlashResult</code> → 最终 <code>sendMessage</code>（UI 下隐藏正文、保留 details snapshot）。</li>
+  </ol>
+  <div class="callout">
+    <p>记忆口诀：<strong>解析 → live card → request 事件 → bridge → executor → 分流 → update 回流 → finalize</strong>。第 3 步若 bridge 未同步 emit <code>started</code>，<code>requestSlashRun</code> 会立刻报「No slash subagent bridge responded」。</p>
+  </div>
+
+  <h2>3. 三个关键文件分工</h2>
+  <pre>src/
+├── slash/
+│   ├── slash-commands.ts       ← 命令注册、params 组装、requestSlashRun
+│   └── slash-bridge.ts         ← 事件桥：request → execute → response
+├── extension/index.ts          ← 注册 bridge 与 executor 接缝
+└── runs/foreground/
+    └── subagent-executor.ts    ← execute 分流与 run*Path</pre>
+  <p><code>slash-commands.ts</code> 不 spawn 子进程；<code>slash-bridge.ts</code> 不解析 <code>/run</code> 参数；<code>subagent-executor.ts</code> 不知道 slash 语法。边界清楚后，可先判断卡在「命令没发出 request」还是「bridge 没接到」还是「executor 内分流」。</p>
+
+  <h2>4. 测试与练习</h2>
+  <p><span class="where">test/integration/slash-commands.test.ts</span> 用 mock 事件总线模拟 bridge：验证 <code>/run</code> 可无 task、<code>/parallel</code> 转发 inline output config、9 任务不被命令层硬拦截，以及 UI 下初始消息可见、最终消息隐藏。完整断言表见 <a href="../reference/slash-to-executor-flow-map.html#tests">参考页测试索引</a>。</p>
+  <div class="quiz">
+    <p><strong>检索练习：</strong>用户输入 <code>/run reviewer "fix bug" --bg</code>，八跳链路在第几步离开前台 <code>runSinglePath</code>？</p>
+    <p><strong>参考答案：</strong>第 6 步。命令层把 <code>--bg</code> 映射为 <code>params.async = true</code>；executor 算出 <code>effectiveAsync === true</code> 后走 <code>runAsyncPath</code>，不会进入 <code>runSinglePath</code>。</p>
+  </div>
+  <p class="source">主要来源：<code>slash-commands.ts</code>（<code>runSlashSubagent</code>、<code>requestSlashRun</code>）、<code>slash-bridge.ts</code>、<code>extension/index.ts</code>（bridge 注册）、<code>subagent-executor.ts</code>（<code>execute</code> 分流）。spawn 与 JSONL 细节见 <a href="../../slice-single-foreground-run/lessons/0001-flow-map.html">单次前台 run</a>。有不清楚的地方，可以继续向 agent 追问。</p>
+</main>
+</body>
+</html>

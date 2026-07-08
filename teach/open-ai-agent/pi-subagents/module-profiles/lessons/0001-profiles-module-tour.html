@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 profiles 模块导览</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; --warn:#b45309; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:900px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:1.95rem; margin:0 0 .45rem; letter-spacing:0; }
+    h2 { font-size:1.14rem; margin:1.8rem 0 .55rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    p, li { font-size:1rem; }
+    .meta, .source { color:var(--muted); font-size:.94rem; }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.9em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.84rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .callout { border-left:4px solid var(--accent); background:var(--soft); padding:.85rem 1rem; margin:1rem 0; }
+    .quiz { border-left:4px solid var(--warn); background:#fff8ed; padding:.85rem 1rem; margin:1rem 0; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>profiles 模块导览</h1>
+  <p class="meta">学习目标：15 分钟内能判断 profile 如何给模型选择、fallback 与能力边界提供事实来源。</p>
+
+  <h2>1. profile 不是运行器</h2>
+  <p><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code> 的职责是把“供应商有哪些模型、这些模型是否可用、适合哪类子 agent”固化成本地 JSON。它不直接执行任务，也不决定失败后怎么重试；它生成的是事实来源：provider catalog、quota profile、quality profile。profile 文件最终写入 <code>subagents.agentOverrides</code>，让内置角色获得明确的 <code>model</code>。</p>
+  <pre>provider registry + live probe
+  ↓
+provider catalog: observed + derived + warnings
+  ↓
+quota / quality profiles
+  ↓
+settings.subagents.agentOverrides
+  ↓
+agent discovery → runtime model candidates</pre>
+
+  <h2>2. 从 registry 到三档模型</h2>
+  <p>刷新 catalog 时，模块读取 <code>ctx.modelRegistry.getAvailable()</code> 中同一 provider 的模型，并用 <code>pi -p --model ... --no-tools</code> 做轻量探测。探测结果会归为 <code>ok</code>、<code>auth</code>、<code>unavailable</code>、<code>timeout</code>、<code>error</code> 或 <code>skipped</code>。随后分类器混合官方 metadata 与名称启发式：成本、上下文、输出 token、reasoning、flash/mini/pro/opus 等词都会影响 cost、quality、latency 与 profileRank。没有官方 metadata 时，它会保留 warning，说明分类退回名称启发式。</p>
+
+  <h2>3. 它怎样影响 fallback 与边界</h2>
+  <p><code>applySubagentProfile</code> 只替换 settings 里的 <code>subagents</code> 字段；真正消费它的是 <code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>，那里把 <code>agentOverrides</code> 应用到 builtin agent。执行阶段再由 <code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code> 把 primary model 与 <code>fallbackModels</code> 合成候选列表，并在 retryable 模型失败时继续尝试。边界检查来自 <code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code>：显式越界是 error，继承配置越界是 warn。完整字段与证据见 <a href="../reference/profiles-overview.html">profiles 参考页</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>判断题：</strong>如果一个 generated quality profile 把 <code>reviewer</code> 指向 <code>provider/strong</code>，但运行时 <code>provider/strong</code> 返回 “model unavailable”，profile 模块会自己切到便宜模型吗？</p>
+    <p><strong>参考答案：</strong>不会。profile 只负责生成和检查事实；运行时是否继续尝试，要看该 agent 是否配置了 <code>fallbackModels</code>，以及 <code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code> 是否把失败识别为 retryable，再按 <code>buildModelCandidates</code> 的顺序尝试下一个模型。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code>。不清楚某个字段时，继续让 agent 按参考页中的 L2 候选展开。</p>
+</main>
+</body>
+</html>

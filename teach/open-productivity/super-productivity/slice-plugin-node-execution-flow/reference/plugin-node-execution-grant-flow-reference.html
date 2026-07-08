@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件 Node execution grant 全链路参考</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">参考文档</p>
+      <h1>插件 Node execution grant 全链路参考</h1>
+      <p class="lede">
+        这份文档用于复查 Super Productivity 从 manifest 声明 `nodeExecution` 到 native consent、session grant、IPC 校验与脚本执行的完整边界。
+        短课入口见
+        <a href="../lessons/0001-flow-map.html">grant 路径图</a>；
+        父模块见
+        <a href="../../module-plugin-system/lessons/0001-plugin-system-module-tour.html">插件系统 L1</a>、
+        <a href="../../slice-plugin-lifecycle-flow/lessons/0001-flow-map.html">插件生命周期 L2</a>。
+      </p>
+
+      <h2>1. 源码入口索引</h2>
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>关键源码</th><th>读法</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>manifest 权限</td>
+            <td><span class="where">packages/plugin-api/src/types.ts</span><br /><span class="where">src/app/plugins/util/validate-manifest.util.ts</span></td>
+            <td>`permissions` 含 `nodeExecution` 才允许调用 `executeNodeScript()`；web 环境直接不可用。</td>
+          </tr>
+          <tr>
+            <td>交互式启用</td>
+            <td><span class="where">src/app/plugins/ui/plugin-management/plugin-management.component.ts</span><br /><span class="where">src/app/plugins/plugin.service.ts</span></td>
+            <td>用户点启用时走 `checkNodeExecutionPermission()`，会清本会话 denial 并重新弹 native 对话框。</td>
+          </tr>
+          <tr>
+            <td>onReady 前 grant</td>
+            <td><span class="where">src/app/plugins/plugin.service.ts</span></td>
+            <td>`_fireOnReady()` 对 node 插件先 `_ensureNodeExecutionGrant()`，再 `pingNodeBridge()`，最后 `triggerReady()`。</td>
+          </tr>
+          <tr>
+            <td>renderer bridge</td>
+            <td><span class="where">src/app/plugins/plugin-bridge.service.ts</span></td>
+            <td>维护 `#nodeExecutionGrantTokens`；构造时 one-shot 消费 preload handoff。</td>
+          </tr>
+          <tr>
+            <td>preload IPC</td>
+            <td><span class="where">electron/preload.ts</span></td>
+            <td>`consumePluginNodeExecutionApi()` 返回 requestGrant / executeScript / revokeGrant / clearConsent。</td>
+          </tr>
+          <tr>
+            <td>main executor</td>
+            <td><span class="where">electron/plugin-node-executor.ts</span></td>
+            <td>native dialog、session grant Map、webContents 清理、脚本 vm/spawn 执行。</td>
+          </tr>
+          <tr>
+            <td>持久 consent</td>
+            <td><span class="where">electron/plugin-node-consent-store.ts</span></td>
+            <td>uploaded 插件 ask-once；不参与 pfapi 同步；renderer 只能 clear。</td>
+          </tr>
+          <tr>
+            <td>iframe 代理</td>
+            <td><span class="where">src/app/plugins/util/plugin-iframe.util.ts</span></td>
+            <td>iframe 内 `executeNodeScript` 经 postMessage 到宿主，仍受同一 grant 链约束。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>2. Grant 申请决策树</h2>
+      <table>
+        <thead>
+          <tr><th>条件</th><th>main 行为</th><th>用户看到</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>非 Electron / 无 nodeExecution 权限</td>
+            <td>renderer 直接拒绝，不发起 IPC</td>
+            <td>web 提示仅桌面可用；或 API 返回 permission denied</td>
+          </tr>
+          <tr>
+            <td>renderer 已有 token</td>
+            <td>`_ensureNodeExecutionGrant()` 短路返回 true</td>
+            <td>通常无新对话框</td>
+          </tr>
+          <tr>
+            <td>本会话已 Deny</td>
+            <td>不再弹窗，直到用户重新启用</td>
+            <td>插件 tile 显示 permission denied</td>
+          </tr>
+          <tr>
+            <td>同 webContents 已有 session grant</td>
+            <td>复用 token</td>
+            <td>无对话框</td>
+          </tr>
+          <tr>
+            <td>uploaded + persisted consent 命中</td>
+            <td>跳过对话框，直接 mintGrant</td>
+            <td>无对话框（仍新建 session token）</td>
+          </tr>
+          <tr>
+            <td>built-in manifest 磁盘校验通过</td>
+            <td>verified built-in dialog（每会话）</td>
+            <td>显示磁盘读取的 name/version</td>
+          </tr>
+          <tr>
+            <td>uploaded 或无 verified manifest</td>
+            <td>unverified uploaded dialog；Allow 后写 consent</td>
+            <td>强调第三方不可验证身份</td>
+          </tr>
+          <tr>
+            <td>对话框 Deny / 导航 / destroyed sender</td>
+            <td>返回 null，清理 grant cleanup</td>
+            <td>onReady 失败；Deny 记入 `_nodeExecutionDeniedThisSession`</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>3. IPC 与安全不变量</h2>
+      <div class="twocol">
+        <div class="panel">
+          <h3>IPC 通道</h3>
+          <table>
+            <thead>
+              <tr><th>事件</th><th>方向</th><th>作用</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>PLUGIN_REQUEST_NODE_EXECUTION_GRANT</code></td>
+                <td>renderer → main</td>
+                <td>申请 session grant；可能弹 native dialog</td>
+              </tr>
+              <tr>
+                <td><code>PLUGIN_EXEC_NODE_SCRIPT</code></td>
+                <td>renderer → main</td>
+                <td>携带 grantToken 执行脚本</td>
+              </tr>
+              <tr>
+                <td><code>PLUGIN_REVOKE_NODE_EXECUTION_GRANT</code></td>
+                <td>renderer → main</td>
+                <td>按 pluginId + webContents 撤销 session grant</td>
+              </tr>
+              <tr>
+                <td><code>PLUGIN_CLEAR_NODE_EXECUTION_CONSENT</code></td>
+                <td>renderer → main</td>
+                <td>清 session grant + persisted consent</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h3>安全不变量</h3>
+          <ul>
+            <li>renderer 没有 `setConsent` IPC；只有 main Allow 可写持久 consent。</li>
+            <li>grant 绑定 issuing `webContentsId`；跨窗口 token 无效。</li>
+            <li>`assertSafePluginId()` 消毒 pluginId，防对话框注入与路径逃逸。</li>
+            <li>`consumePluginNodeExecutionApi()` one-shot；PluginBridgeService 必须早于插件代码实例化。</li>
+            <li>navigation / destroyed 会清 session grant；generic teardown 不清 persisted consent。</li>
+            <li>main 从不信任 renderer 提供的 manifest 来升级 built-in 信任级别。</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2>4. 脚本执行边界</h2>
+      <table>
+        <thead>
+          <tr><th>路径</th><th>触发条件</th><th>限制</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>direct vm</td>
+            <td>脚本不含 child_process / eval / 非白名单 require</td>
+            <td>仅允许 fs、path、os；5s vm timeout</td>
+          </tr>
+          <tr>
+            <td>spawn</td>
+            <td>检测到危险模式</td>
+            <td>`process.execPath` + `ELECTRON_RUN_AS_NODE=1`；默认 30s，上限 5min；脚本 max 100KB</td>
+          </tr>
+          <tr>
+            <td>ping</td>
+            <td>`onReady` 前健康检查</td>
+            <td>脚本 `return true`；1.5s timeout；最多 3 次重试</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="callout">
+        spawn 路径仍在本机以 Node 权限运行，consent 对话框已明确警告“full access to files and system”。不要把 vm 路径误解为完整沙箱。
+      </p>
+
+      <h2>5. Consent 生命周期</h2>
+      <table>
+        <thead>
+          <tr><th>事件</th><th>session grant</th><th>persisted consent</th><th>源码</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Allow（uploaded）</td>
+            <td>mint</td>
+            <td>写入 name/version/grantedAt</td>
+            <td><span class="where">electron/plugin-node-executor.ts</span></td>
+          </tr>
+          <tr>
+            <td>Allow（built-in）</td>
+            <td>mint</td>
+            <td>不持久化</td>
+            <td>同上</td>
+          </tr>
+          <tr>
+            <td>disablePlugin</td>
+            <td>revoke + clear token</td>
+            <td>clear</td>
+            <td><span class="where">src/app/plugins/plugin.service.ts</span></td>
+          </tr>
+          <tr>
+            <td>uninstall / re-upload</td>
+            <td>revoke</td>
+            <td>clear（re-upload 失败则中止加载）</td>
+            <td><span class="where">plugin.service.ts</span> loadPluginFromZip 路径</td>
+          </tr>
+          <tr>
+            <td>app shutdown / navigation teardown</td>
+            <td>webContents cleanup 删除</td>
+            <td>保留</td>
+            <td><span class="where">electron/plugin-node-executor.ts</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>6. 失败症状表</h2>
+      <table>
+        <thead>
+          <tr><th>现象</th><th>先判断</th><th>下一步源码</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>web 版无法启用 node 插件</td>
+            <td>平台限制，非 grant 问题</td>
+            <td>`IS_ELECTRON` 检查；管理页提示</td>
+          </tr>
+          <tr>
+            <td>首次启用无对话框且立即失败</td>
+            <td>IPC/bridge 不可用或本会话已 Deny</td>
+            <td>`PluginBridgeService._consumeNodeExecutionApi()`</td>
+          </tr>
+          <tr>
+            <td>Allow 后 onReady 仍报 bridge unavailable</td>
+            <td>ping 失败，grant 已有但 exec 不通</td>
+            <td>`pingNodeBridge()` 与 `PLUGIN_EXEC_NODE_SCRIPT`</td>
+          </tr>
+          <tr>
+            <td>脚本报 unauthorized</td>
+            <td>token 丢失、webContents 不匹配或导航清 grant</td>
+            <td>main `PLUGIN_EXEC_NODE_SCRIPT` 校验分支</td>
+          </tr>
+          <tr>
+            <td>re-upload 后仍像旧插件</td>
+            <td>consent/grant 未清干净</td>
+            <td>`clearNodeExecutionConsent()` 返回值检查</td>
+          </tr>
+          <tr>
+            <td>iframe 插件 node 调用失败</td>
+            <td>宿主 grant 未就绪或 postMessage 代理失败</td>
+            <td><span class="where">plugin-iframe.util.ts</span> executeNodeScript 代理</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>7. 相关测试与样例</h2>
+      <table>
+        <thead>
+          <tr><th>资源</th><th>用途</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="where">electron/plugin-node-executor.test.cjs</span></td>
+            <td>grant 绑定、跨 webContents 拒绝、persisted consent、pluginId 注入防护</td>
+          </tr>
+          <tr>
+            <td><span class="where">src/app/plugins/plugin.service.spec.ts</span></td>
+            <td>Deny 后会话内不重复弹窗；Deny 不持久 isEnabled=false</td>
+          </tr>
+          <tr>
+            <td><span class="where">src/app/plugins/plugin-bridge.service.spec.ts</span></td>
+            <td>token 存取、clearConsent、executeScript IPC 参数</td>
+          </tr>
+          <tr>
+            <td><span class="where">packages/plugin-dev/sync-md/src/manifest.json</span></td>
+            <td>内置 nodeExecution 插件 manifest 样例</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

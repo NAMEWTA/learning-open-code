@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 MCP 延迟工具发现的设计权衡</title>
+  <link rel="stylesheet" href="../assets/deep-dive-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>15 分钟理解 MCP 延迟工具发现的设计权衡</h1>
+    <p class="lead">
+      学习目标：当 <code>tool_search.enabled</code> 打开、MCP 工具数量暴涨时，你能解释 DeerFlow 为何只把<strong>工具名</strong>放进 prompt、如何用 <code>tool_search</code> promote schema，以及 fail-closed 与 catalog hash 各自防什么。
+      查询语法与 reducer 细节见
+      <a href="../reference/deferred-tool-search-notes.html">deferred-tool-search-notes 参考页</a>。
+    </p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">配置：<code>tool_search.enabled</code></span>
+      <span class="pill">关联：<a href="../../module-tools-mcp/lessons/0001-tools-mcp-module-tour.html">module-tools-mcp</a></span>
+    </div>
+
+    <h2>1. 问题：MCP 工具爆炸</h2>
+    <p>
+      每个 MCP 工具携带完整 OpenAI function schema（参数类型、描述、嵌套字段）。十几个 server × 数十工具，会在<strong>每一轮</strong> <code>bind_tools</code> 时重复占用 prompt token，且多数工具当轮根本不会被调用。
+      DeerFlow 的应对是<strong>延迟发现</strong>：仅对带 <code>deerflow_mcp</code> 元数据的工具 defer；内置工具与已通过 policy 的非 MCP 工具仍直接绑定。
+    </p>
+    <div class="filetree">config.yaml → tool_search.enabled
+  ↓
+get_available_tools() + skill policy 过滤
+  ↓
+assemble_deferred_tools()  ← fail-closed 闸门
+  ├── 关闭：MCP schema 直接 bind
+  └── 开启：prompt 只列 &lt;available-deferred-tools&gt; 名称
+              + 追加 tool_search 工具</div>
+
+    <h2>2. 设计权衡：全量 schema vs 两阶段发现</h2>
+    <p>
+      <strong>全量绑定</strong>优点是可发现性最高——模型一眼看见所有参数；代价是 token 线性膨胀、前缀缓存友好度差。
+      <strong>延迟发现</strong>把成本移到「真正要用时」：模型先见名字，调用 <code>tool_search</code> 才拿到 schema 并写入 <code>state["promoted"]</code>；
+      <span class="where">DeferredToolFilterMiddleware</span> 在下一轮 <code>wrap_model_call</code> 才把这些 schema 放进 bind 列表。
+      ToolNode 仍持有全部工具以便执行——只是 LLM 在 promote 前「看不见、调不通」未暴露的 MCP 工具。
+    </p>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant M as LLM
+    participant MW as DeferredToolFilterMiddleware
+    participant TS as tool_search
+    participant ST as ThreadState.promoted
+
+    M->>MW: turn 1 bind（隐藏 MCP schema）
+    M->>TS: tool_search("select:foo")
+    TS->>ST: Command update catalog_hash + names
+    M->>MW: turn 2 bind（foo 已 promote）
+    MW->>M: 仅暴露 foo + 仍隐藏的其他 deferred</pre>
+    </div>
+
+    <h2>3. fail-closed：宁可报错也不静默泄漏</h2>
+    <p>
+      最坏情况不是「搜不到工具」，而是 MCP 本应 defer 却因装配 bug 把完整 schema 直接 bind 给模型。
+      <span class="where">assemble_deferred_tools</span> 在 <code>enabled</code> 且 policy 过滤后仍有 MCP 工具、却得不到 deferred set 时<strong>抛 RuntimeError</strong>，拒绝继续装配。
+      这与「policy 已剔除全部 MCP」不同——后者合法地返回空 setup，不触发 fail-closed。
+      未 promote 就硬调 deferred 工具时，middleware 返回 error ToolMessage，提示先 <code>tool_search</code>。
+    </p>
+    <pre><code>if enabled and not deferred_setup.deferred_names
+   and any(is_mcp_tool(t) for t in filtered_tools):
+    raise RuntimeError("... refusing to bind MCP schemas (fail-closed)")</code></pre>
+
+    <h2>4. catalog hash：让 promotion 跟得上 catalog 漂移</h2>
+    <p>
+      deferred 集合在 agent build 时固化为不可变 <code>DeferredToolCatalog</code>；其 <code>hash</code> 来自排序后的 name+schema 摘要（SHA-256 前 16 位）。
+      每次 <code>tool_search</code> 成功都把 <code>{catalog_hash, names}</code> 写入图状态；
+      <span class="where">merge_promoted</span> 在 hash 变化时<strong>整包替换</strong>旧 names，避免 checkpoint 里残留的 bare name 在工具改名/换 schema 后误暴露错误工具。
+      Middleware 只认「当前 build 的 hash === state 里的 hash」的 promotion。
+    </p>
+
+    <div class="callout">
+      <p><strong>判断题：</strong>thread checkpoint 里已有 <code>promoted.names=["old_mcp"]</code>，但本轮 agent 重建后 catalog hash 因 MCP schema 更新而改变。下一轮模型能否直接调用 <code>old_mcp</code>？</p>
+      <p>A. 能，names 仍在 state 里 &nbsp; B. 不能，hash 不匹配视为未 promote &nbsp; C. 能，但仅限 ToolNode 执行 &nbsp; D. 取决于 tool_search 是否关闭</p>
+    </div>
+    <div class="answer">
+      <p><strong>参考答案：B。</strong><code>_promoted()</code> 要求 <code>catalog_hash</code> 一致；hash 漂移后旧 promotion 失效，模型须重新 <code>tool_search</code>。C 错在 middleware 会在 <code>wrap_tool_call</code> 拦截未 promote 的调用。</p>
+    </div>
+
+    <p class="note">
+      主要来源：<code>tool_search.py</code>、<code>deferred_tool_filter_middleware.py</code>、<code>thread_state.py::merge_promoted</code>。
+      想继续下钻 query 语法（<code>select:</code> / <code>+prefix</code>）或 subagent 隔离，向 agent 追问即可。
+    </p>
+  </article>
+</main>
+</body>
+</html>

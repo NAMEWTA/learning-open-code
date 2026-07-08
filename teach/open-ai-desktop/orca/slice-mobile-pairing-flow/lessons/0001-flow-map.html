@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>移动端配对与会话恢复导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Mobile Pairing Flow：手机如何拿到桌面 runtime 会话</h1>
+        <p class="meta">目标：15 分钟内把二维码、E2EE 握手、host 保存和 Resume 串成一条链路。</p>
+
+        <h2>先抓一条主路径</h2>
+        <p>
+          Orca mobile pairing 从桌面 Settings 开始。renderer 调 <code>mobile:getPairingQR</code>，
+          main 进程选一个可达地址，再让 runtime 生成 mobile scope 的 pairing offer。二维码和复制码都是同一个
+          <code>orca://pair?code=...</code> URL；桌面/shared payload 包含 endpoint、deviceToken、publicKeyB64 和 optional scope。
+        </p>
+        <div class="filetree">desktop Settings
+  -> src/main/ipc/mobile.ts                    mobile:getPairingQR(scope: "mobile")
+  -> src/main/runtime/runtime-rpc.ts           createPairingOffer()
+  -> src/main/runtime/device-registry.ts       pending device token
+  -> src/shared/pairing.ts                     orca://pair?code=...</div>
+
+        <h2>手机端：三种入口收敛到同一个 offer</h2>
+        <p>
+          手机端入口有 QR scan、deep link 和 paste。<code>mobile/app/pair-scan.tsx</code>
+          直接从相机或输入框解析；<code>mobile/app/_layout.tsx</code> 和 <code>mobile/app/pair.tsx</code>
+          把 <code>orca://pair</code> deep link 重定向到 <code>/pair-confirm</code>。
+          这些路径最终都调用 <code>mobile/src/transport/pairing.ts</code>，得到 mobile 本地 <code>PairingOffer</code>。
+          注意这个 mobile schema 当前不暴露 scope，授权仍由 token registry 和 <code>status.get</code> 的 <code>deviceScope</code> 证明。
+        </p>
+        <p>
+          解析成功还不是配对成功。确认页和扫码页都会创建临时 <code>RpcClient</code>，
+          用 offer 里的 public key 先走 E2EE 握手，再用 deviceToken 认证，最后请求 <code>status.get</code>。
+          只有这个请求成功，手机才认为桌面 runtime 可达且 token 有效。
+        </p>
+
+        <h2>保存和恢复是第二条链</h2>
+        <p>
+          <code>status.get</code> 成功后，手机创建 host id/name，并调用 <code>saveHost()</code>。
+          <code>mobile/src/transport/host-store.ts</code> 把 endpoint、publicKeyB64、lastConnected 作为 metadata
+          写入 AsyncStorage；deviceToken 在 native 上写入 Expo SecureStore。保存失败会显示
+          <code>Pairing succeeded but couldn't save the host</code>，
+          因为这已经不是网络或认证错误。
+        </p>
+        <pre><code class="language-text">PairingOffer
+  -> connect(endpoint, deviceToken, publicKeyB64)
+  -> E2EE hello/ready/auth/authenticated
+  -> status.get
+  -> saveHost(metadata in AsyncStorage, token in SecureStore)
+  -> router.replace("/h/:hostId")</code></pre>
+        <p>
+          后续恢复不会重新扫码。App 根部的 <code>RpcClientProvider</code> 为每个 host 共享一个 client；
+          首页 <code>mobile/app/index.tsx</code> 调 <code>loadHosts()</code> 后 prime hosts，
+          再用保存的 token 和 public key 重新连接。foreground 或网络恢复时，client 会发 <code>status.get</code>
+          probe 或重置 reconnect backoff。
+        </p>
+
+        <h2>runtime 边界：scope 和 allowlist</h2>
+        <p>
+          桌面 runtime 的 WebSocket 先由 <code>E2EEChannel</code> 校验 token，认证通过后才把明文 RPC 交给 dispatcher。
+          token 对应的 device scope 决定授权：mobile scope 只能调用 <code>MOBILE_RPC_METHOD_ALLOWLIST</code> 里的方法；
+          runtime scope 用于 web/desktop remote clients。<code>status.get</code> 返回时会被注入 <code>deviceScope</code>，
+          让旧保存的 pairing 也能知道自己属于哪类客户端。
+        </p>
+
+        <h3>检索练习</h3>
+        <p>
+          手机扫码后提示 “Pairing succeeded but couldn't save the host”，你应该先查网络/E2EE，还是查本地持久化？为什么？
+        </p>
+        <div class="answer">
+          先查本地持久化。这个文案在 <code>mobile/app/pair-confirm.tsx</code> 和
+          <code>mobile/app/pair-scan.tsx</code> 的 <code>status.get</code> 成功之后才出现；
+          失败点是 <code>saveHost()</code>，也就是 AsyncStorage metadata 或 SecureStore token 写入。
+          网络、token、E2EE 已经通过了临时 client 的验证。完整来源见
+          <a href="../reference/mobile-pairing-flow-map.html">移动端配对与会话恢复参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/main/ipc/mobile.ts</code>、
+          <code>src/main/runtime/runtime-rpc.ts</code>、
+          <code>mobile/app/pair-confirm.tsx</code>、
+          <code>mobile/src/transport/rpc-client.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

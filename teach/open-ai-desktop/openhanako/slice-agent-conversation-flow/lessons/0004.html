@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · LLM 调用与流式处理</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · LLM 调用与流式处理 <span class="tag">LLM & 流式</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能画出 4 种 LLM 协议适配的请求构造差异，能解释 ThinkTagParser / MoodParser / CardParser 三重解析器链的流式解析管道模型，能说清流式事件 Ring Buffer 与断线续传机制。
+</div>
+
+<p>上一课我们到达了 Pi SDK 入口。本课先看 Pi SDK 底层的 LLM HTTP 调用（L7），再看响应如何通过 EventBus 回流到 WebSocket 广播到前端（L8）——这是对话链路响应路径的完整演绎。</p>
+
+<h2>一、LLM callText——4 种 API 协议适配</h2>
+
+<p><code>core/llm-client.ts</code> 的 <code>callText()</code> 提供统一的非流式 LLM 调用入口（用于标题生成、摘要等 utility 场景）。主对话的流式调用走 Pi SDK 内部的 <code>completeSimple</code> 管道，但同样经 <code>lib/llm/provider-client.ts</code> 做 URL 构造和认证注入。</p>
+
+<pre><code>// core/llm-client.ts -- callText 协议适配（真实代码片段）
+// 3. 按协议构造请求——支持 4 种 API 格式
+let endpoint, headers, body;
+if (api === "anthropic-messages") {
+  endpoint = appendProviderApiPath(base, "/v1/messages");
+  headers = { "Content-Type": "application/json", "anthropic-version": "2023-06-01" };
+  if (apiKey) headers["x-api-key"] = apiKey;
+  body = { model: modelId, max_tokens: ..., system: mergedSystem, messages: ... };
+} else if (api === "openai-codex-responses") {
+  // Codex OAuth: 需要 account-id header + /codex/responses endpoint
+  const accountId = resolveCodexAccountId(modelObj, apiKey);
+  endpoint = resolveCodexResponsesUrl(baseUrl);
+  headers = { "Content-Type": "application/json", "chatgpt-account-id": accountId };
+  body = { model: modelId, instructions: mergedSystem, input: ..., stream: true };
+} else if (api === "openai-responses") {
+  endpoint = `${base}/responses`;
+  body = { model: modelId, instructions: mergedSystem, input: ... };
+} else {
+  // 默认 OpenAI Completions API
+  endpoint = `${base}/chat/completions`;
+  body = { model: modelId, messages: [...systemMsg, ...normalizedMessages] };
+}</code></pre>
+
+<table>
+<tr><th>协议</th><th>认证方式</th><th>System Prompt 字段</th><th>消息格式</th></tr>
+<tr><td><code>anthropic-messages</code></td><td><code>x-api-key</code> header</td><td><code>system</code>（顶层字段）</td><td><code>messages[]</code>（user/assistant）</td></tr>
+<tr><td><code>openai-codex-responses</code></td><td>OAuth + <code>chatgpt-account-id</code></td><td><code>instructions</code></td><td><code>input[]</code>（扁平数组）</td></tr>
+<tr><td><code>openai-responses</code></td><td>Bearer token</td><td><code>instructions</code></td><td><code>input[]</code></td></tr>
+<tr><td>默认 (OpenAI Completions)</td><td>Bearer token</td><td>messages[0] role=system</td><td><code>messages[]</code>（system/user/assistant）</td></tr>
+</table>
+
+<div class="side">
+💡 <b>关键差异：</b>System Prompt 在 Anthropic 中是顶层 <code>system</code> 字段，在 OpenAI Responses 中是 <code>instructions</code> 字段，在 OpenAI Completions 中是 <code>messages[0]</code> 伪装为消息。同一段 System Prompt 需要 3 种不同的注入方式——这就是 <code>normalizeProviderPayload</code> 存在的意义。
+</div>
+
+<h2>二、流式响应回流——EventBus to WebSocket to React</h2>
+
+<p>Pi SDK 产生的流式事件通过 EventBus 传回 <code>chat.ts</code> 的 <code>hub.subscribe</code> 回调，经过<b>三重解析器链</b>处理后再通过 WebSocket 广播到前端：</p>
+
+<pre><code>// server/routes/chat.ts -- hub.subscribe 事件回调（真实代码片段）
+hub.subscribe((event, sessionPath) => {
+  const ss = sessionPath ? getState(sessionPath) : null;
+
+  if (event.type === "message_update") {
+    const sub = event.assistantMessageEvent?.type;
+
+    if (sub === "text_delta") {
+      // ★ 文本增量通过三重解析器链
+      const delta = event.assistantMessageEvent.delta || "";
+      ss.thinkTagParser.feed(delta, (tEvt) => {
+        if (tEvt.type === "text") feedMoodPipeline(tEvt.data);
+        else if (tEvt.type === "think_text") emitStreamEvent(..., "thinking_delta", ...);
+      });
+    }
+  } else if (event.type === "tool_execution_start") {
+    ss.hasToolCall = true;
+    emitStreamEvent(sessionPath, ss, {
+      type: "tool_start", id: event.toolCallId, name: event.toolName,
+      args: summarizeToolStartArgs(event.toolName, event.args),
+    });
+  } else if (event.type === "tool_execution_end") {
+    emitStreamEvent(sessionPath, ss, {
+      type: "tool_end", id: event.toolCallId, name: event.toolName,
+      success: !event.isError, details: event.result?.details,
+    });
+  } else if (event.type === "turn_end") {
+    // 空回复检测 + Token 统计 + 清理
+    if (!ss.hasOutput && !ss.hasToolCall && !ss.hasThinking
+        && !ss.hasError && !ss.isAborted) {
+      broadcast({ type: "error", message: t("error.modelNoResponse"), sessionPath });
+    }
+    finishStreamingState(ss, sessionPath);
+  }
+});</code></pre>
+
+<h2>三、三重解析器链——流式解析管道</h2>
+
+<p>文本增量（<code>text_delta</code>）不是直接广播的，而是依次通过三个解析器，各自产生对应的事件类型：</p>
+
+<div class="step"><span class="num">1</span><b>ThinkTagParser</b>——识别 <code>&lt;think&gt;...&lt;/think&gt;</code> 标签，分离模型的思考过程。产生 <code>text</code>（普通文本）和 <code>think_text</code>（思考内容）事件。<br><span class="where">core/events.ts</span></div>
+
+<div class="step"><span class="num">2</span><b>MoodParser</b>——在 ThinkTagParser 输出的 <code>text</code> 事件中识别情绪表情标记。产生 <code>mood_start</code> / <code>mood_end</code> 事件。<br><span class="where">core/events.ts</span></div>
+
+<div class="step"><span class="num">3</span><b>CardParser</b>——识别交互式卡片语法（如 <code>&lt;card&gt;...&lt;/card&gt;</code>）。产生 <code>card_start</code> / <code>card_delta</code> / <code>card_end</code> 事件。<br><span class="where">core/events.ts</span></div>
+
+<pre><code>// 流式解析管道模型（简化示意）
+text_delta 流入
+  → ThinkTagParser.feed(delta)
+    → type="text" → MoodParser.feed(text)
+      → type="mood_start" / "mood_end"
+      → CardParser.feed(text)
+        → type="card_start" / "card_delta" / "card_end"
+    → type="think_text" → 直接产生 thinking_delta 事件</code></pre>
+
+<blockquote>
+<b>管道设计的精妙之处：</b>每个解析器只关心自己的语法，互相独立。ThinkTagParser 先剥离思考标签，MoodParser 和 CardParser 在「净文本」上工作。这是编译器前端「词法分析 → 语法分析」流水线模式在流式文本处理中的经典应用。
+</blockquote>
+
+<h2>四、流式事件 Ring Buffer 与断线续传</h2>
+
+<p>前端切走 session 后，流式事件仍在产生。系统通过 Ring Buffer 暂存事件，前端切回时请求补发：</p>
+
+<pre><code>// server/session-stream-store.ts（概念代码）
+export function createSessionStreamState() {
+  return {
+    streamId: null,
+    events: [],           // Ring buffer，最多保留最近 N 个事件
+    maxEvents: 500,
+    nextSeq: 1,
+    isStreaming: false,
+  };
+}
+
+// 前端切回 session 时请求补发离屏期间的流式事件
+if (msg.type === "resume_stream") {
+  const ss = getExistingState(currentPath);
+  const resumed = resumeSessionStream(ss, {
+    streamId: msg.streamId, sinceSeq: msg.sinceSeq
+  });
+  wsSend(ws, createStreamResumeWsMessage({
+    sessionPath: currentPath, streamId: resumed.streamId,
+    events: resumed.events,          // 补发的事件列表
+    reset: resumed.reset,            // 溢出标记——事件太多需全量刷新
+    isStreaming: resumed.isStreaming,
+  }));
+}</code></pre>
+
+<div class="side">
+💡 <b>reset 标记的作用：</b>当 Ring Buffer 溢出（事件超过 500 条）时，无法补发全部事件。此时设置 <code>reset: true</code>，前端放弃增量更新，改为全量拉取最新消息状态。这是「最终一致性」在流式 UI 中的工程实现。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. callText() 支持几种 LLM 协议？</p>
+<span class="opt">A. 1 种——只有 OpenAI Completions</span>
+<span class="opt">B. 2 种——OpenAI + Anthropic</span>
+<span class="opt">C. 3 种——OpenAI + Anthropic + Google</span>
+<span class="opt">D. 4 种——anthropic-messages、openai-codex-responses、openai-responses、默认 OpenAI Completions</span>
+<details><summary>看答案</summary><b>D</b>。4 种协议：anthropic-messages（x-api-key）、openai-codex-responses（OAuth + account-id）、openai-responses（instructions 字段）、默认 OpenAI Completions（messages 数组）。每种协议的 System Prompt 注入方式和消息格式都不同。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 三重解析器链的执行顺序是什么？</p>
+<span class="opt">A. CardParser → MoodParser → ThinkTagParser</span>
+<span class="opt">B. ThinkTagParser → MoodParser → CardParser</span>
+<span class="opt">C. 三个解析器并行执行</span>
+<span class="opt">D. MoodParser → ThinkTagParser → CardParser</span>
+<details><summary>看答案</summary><b>B</b>。ThinkTagParser 先剥离 &lt;think&gt; 标签，产生纯文本后交由 MoodParser 识别情绪标记，最后 CardParser 识别交互式卡片。这是顺序管道——前一个解析器的输出是后一个的输入。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 为什么 callText 不走 Pi SDK 的 completeSimple（强制流式）？</p>
+<span class="opt">A. Pi SDK 不支持非流式调用</span>
+<span class="opt">B. utility 短文本（50-200 token）不需要流式传输，直接 HTTP POST 避免 SSE 延迟膨胀</span>
+<span class="opt">C. callText 不需要 LLM 调用</span>
+<span class="opt">D. Pi SDK 只支持 OpenAI 协议</span>
+<details><summary>看答案</summary><b>B</b>。callText 用于标题生成、摘要等短文本场景（50-200 token），不需要流式传输。直接 HTTP POST 可以避免 DashScope 等 Provider 的 SSE 延迟膨胀问题。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 断线续传中 reset 标记意味着什么？</p>
+<span class="opt">A. 重新连接 WebSocket</span>
+<span class="opt">B. Ring Buffer 溢出——前端应放弃增量更新，改为全量拉取最新状态</span>
+<span class="opt">C. 重置 LLM session</span>
+<span class="opt">D. 清空用户消息历史</span>
+<details><summary>看答案</summary><b>B</b>。Ring Buffer 最多保留 500 条事件。溢出时设置 reset=true，前端不再尝试增量补发，而是全量拉取最新消息列表。这是流式 UI 中「最终一致性」的工程实现。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>core/llm-client.ts</code>，搜索 <code>if (api === "anthropic-messages")</code>，对比 4 个 if 分支的请求构造差异。再打开 <code>core/events.ts</code>，搜索 <code>ThinkTagParser</code>，追踪流式解析管道的入口。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 LLM 返回的 text_delta 中包含半个 &lt;think&gt; 标签（标签跨 chunk），解析器怎么处理？」「为什么 Ring Buffer 是 500 条而不是 1000 条？」下一课我们收尾——<strong>异常路径全解与综合测验</strong>。</div>
+
+<div class="nav">课程 0004 / openhanako 对话链路由浅入深 · <a href="0003.html">← 上一课：Agent 初始化</a> · 下一课预告：异常路径全解 + 综合测验</div>
+
+</body>
+</html>

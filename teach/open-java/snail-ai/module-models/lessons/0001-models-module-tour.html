@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>模型适配层模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+  </style>
+</head>
+<body>
+  <h1>模型适配层模块导览</h1>
+  <p class="lead">这一课只做一件事：建立 <code>snail-ai-models</code> 的模块边界。学完后，你应该能判断一次模型配置会被哪条能力线接住，并由哪个 adapter 创建实际可调用对象。</p>
+  <div class="meta">
+    <span class="pill">学习目标：识别模型适配边界</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">先回 L0：<a href="../../00-overview/lessons/0001-project-map.html">项目地图</a></span>
+    <span class="pill">主来源：<span class="where">open-java/snail-ai/snail-ai-models/pom.xml</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-models/snail-ai-model-chat/snail-ai-model-chat-core/src/main/java/com/aizuda/snail/ai/model/chat/ChatModelRuntime.java</span></span>
+  </div>
+
+  <h2>1. 职责：把配置变成模型对象</h2>
+  <p>L0 已把模型能力分成 Chat、Embedding、Rerank；RAG 模块会依赖 embedding/rerank，但真正“怎么创建模型客户端”不在 RAG 里。<code>snail-ai-models</code> 的职责是接收标准化配置，选择匹配的 provider adapter，再产出 Spring AI 的 <code>ChatModel</code>、<code>EmbeddingModel</code>，或 Snail 自己的 <code>RerankApiClient</code>。它不负责管理模型配置页面、不负责解密 API Key、不负责 Prompt 组装，也不负责完整对话运行时；这些事情分别属于 Server、Agent 或 RAG。</p>
+
+  <h2>2. 位置：四条 Maven 边界</h2>
+  <div class="filetree">snail-ai-models/
+├── pom.xml                         ← 聚合 common、chat、embedding、rerank
+├── snail-ai-model-common/          ← adapterKey、能力枚举、descriptor、异常
+├── snail-ai-model-chat/            ← Chat core、OpenAI-compatible provider、starter
+├── snail-ai-model-embedding/       ← Embedding core、OpenAI-compatible provider、starter
+└── snail-ai-model-rerank/          ← Rerank core、Qwen HTTP provider、starter</div>
+  <p>这个目录是横向能力层：Server 侧 <code>ServerModelFacade</code> 会同时注入三条 runtime；Agent Client 侧当前主要通过 <code>DefaultChatModelFactory</code> 构建 ChatModel。也就是说，models 模块站在“配置”和“具体 SDK/HTTP 客户端”之间，向上给业务层一个稳定入口，向下隔离不同模型服务的构造细节。</p>
+
+  <h2>3. 分层：common、core、provider、starter</h2>
+  <pre class="diagram">ModelConfig / DispatchConfig
+  ↓
+SpecFactory 生成 ChatModelSpec / EmbeddingModelSpec / RerankModelSpec
+  ↓
+Runtime 校验 adapterKey、baseUrl、apiKey、modelKey
+  ↓
+Adapter.create(spec)
+  ↓
+ChatModel / EmbeddingModel / RerankApiClient</pre>
+  <p>公共接口清单放在 <a href="../reference/models-overview.html">模型适配层参考</a>。这里先记住四层：<code>common</code> 定义能力、默认 adapter 和错误码；每条 <code>core</code> 定义 <code>Spec</code>、<code>Adapter</code>、<code>Runtime</code>；<code>provider</code> 把 spec 翻译成具体 SDK 或 HTTP 客户端；<code>starter</code> 用 Spring Boot 自动装配把 runtime、内置 adapter 和可展示的 <code>ModelAdapterDescriptor</code> 注册为 Bean。</p>
+
+  <h2>4. 示例：Chat adapter 如何被选中</h2>
+  <p>以 Server 侧 Chat 为例，调用从 <code>ServerModelFacade</code> 进入，<code>ServerModelSpecFactory</code> 先把 <code>ModelConfigInfoDTO</code> 转成 <code>ChatModelSpec</code>。如果配置没填 <code>adapterKey</code>，<code>ModelAdapterDefaults.resolve</code> 会把 Chat 默认成 <code>openai-compatible</code>。随后 <code>ChatModelRuntime</code> 在 Spring 注入的 adapter 列表里做大小写不敏感匹配，命中 <code>OpenAiCompatibleChatModelAdapter</code> 后才创建 <code>OpenAiChatModel</code>。</p>
+  <pre class="diagram">ServerModelFacade.buildChatModel(...)
+  → specFactory.chatSpec(config, decryptedApiKey)
+  → chatModelRuntime.build(spec)
+  → adapters.filter(adapterKey == spec.adapterKey)
+  → OpenAiCompatibleChatModelAdapter.create(spec)</pre>
+  <p>这一层最关键的判断是：<code>providerKey</code> 会被放进 spec，但当前内置 adapter 的实际选择依据是 <code>adapterKey</code>。所以排查“为什么没有走某个模型实现”时，先看配置表或请求里的 <code>adapterKey</code>，再看 starter 是否注册了同名 <code>Adapter</code> Bean。</p>
+  <div class="practice"><strong>暂停回忆：</strong>不看上文，判断三个说法：Chat 和 Embedding 默认 adapterKey 相同吗？Rerank 返回的是 Spring AI 的 <code>EmbeddingModel</code> 吗？<code>ModelAdapterDescriptor</code> 负责真正创建模型客户端吗？<br><strong>参考答案：</strong>Chat 和 Embedding 默认都是 <code>openai-compatible</code>；Rerank 返回的是 <code>RerankApiClient</code>；<code>ModelAdapterDescriptor</code> 只给管理端列出 adapter 元数据，真正创建对象的是对应 <code>Adapter.create(spec)</code>。如果你把 <code>providerKey</code> 当成当前内置实现的选择键，需要回到本课第 4 节重看。</div>
+  <p>主要推荐来源：先读 <code>ChatModelRuntime.java</code>，再对照 <code>OpenAiCompatibleChatModelAdapter.java</code>。后续遇到 RAG 中 embedding/rerank 的问题，可以继续向 agent 追问“这条调用最后进入哪个 runtime”。</p>
+</body>
+</html>

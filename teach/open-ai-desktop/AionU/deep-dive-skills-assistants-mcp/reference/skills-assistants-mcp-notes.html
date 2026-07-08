@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills / Assistants / MCP 映射设计参考笔记</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .matrix td:first-child {
+      font-family: "SF Mono", Consolas, monospace;
+      white-space: nowrap;
+    }
+    .compact td,
+    .compact th {
+      padding: 8px 10px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Skills / Assistants / MCP 映射设计参考笔记</h1>
+    <p class="subtitle">速查概念边界、数据流、关键源码、测试证据、性能/可靠性/局限和改进方向。</p>
+    <div class="meta">
+      <span class="pill">主题：deep-dive-skills-assistants-mcp</span>
+      <span class="pill">源仓：open-ai-desktop/AionU</span>
+      <span class="pill">L4 速查页</span>
+    </div>
+  </section>
+
+  <p class="muted">课程入口：<a href="../lessons/0001-problem-frame.html">0001-problem-frame</a>、<a href="../lessons/0002-core-mechanism.html">0002-core-mechanism</a>、<a href="../lessons/0003-verification-and-tests.html">0003-verification-and-tests</a>。</p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#concepts">1. 概念边界</a>
+    <a href="#flow">2. 数据流</a>
+    <a href="#sources">3. 关键源码表</a>
+    <a href="#tests">4. 测试证据表</a>
+    <a href="#qualities">5. 性能、可靠性、局限、改进</a>
+  </nav>
+
+  <h2 id="concepts">1. 概念边界</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>概念</th><th>持久化/注册内容</th><th>运行时语义</th><th>常见误判</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>Assistant</code></td><td>profile、engine、rules、prompts、defaults、capabilities、preferences。</td><td>创建会话时解析默认值和 override，生成 assistant snapshot。</td><td>把 Assistant 当作 Skill 文件或 MCP server 的拥有者。</td></tr>
+      <tr><td><code>Skill</code></td><td>builtin/custom/cron/extension 的技能目录项，字段包含 name、description、location、source、is_auto_inject。</td><td>会话创建或发送时作为 skill id/name 注入，旧会话保留自己的 skills snapshot。</td><td>以为取消自动 Skill 会删除 builtin Skill。</td></tr>
+      <tr><td><code>MCP</code></td><td>server id、name、enabled、transport、original_json、tools、last_test_status。</td><td>会话创建时选择 user MCP ids 和 session MCP servers；连接测试仅是可用性检查。</td><td>把 Tools 页的 connected 状态当作当前会话实时状态。</td></tr>
+      <tr><td><code>Extension</code></td><td>通过 manifest 贡献 assistants、agents、skills、mcpServers 等条目。</td><td>进入对应 registry，部分在设置页以只读方式展示。</td><td>以为 extension assistant 自动绑定所有 extension skill/MCP。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="flow">2. 数据流</h2>
+  <p class="muted">当前 Assistant 默认能力和会话快照链路里，所谓 Skill id 通常表现为 skill name；读 <code>skill_ids</code>、<code>enabled_skills</code> 或 <code>resolved_skill_ids</code> 时，应先按名称语义理解，再回查后端是否另有内部标识。</p>
+  <table class="matrix compact">
+    <thead>
+      <tr><th>阶段</th><th>入口</th><th>关键动作</th><th>落点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Assistant 编辑</td><td><code>useAssistantEditor</code></td><td>并行加载 assistant detail、Skill 列表、MCP catalog；保存 defaults 和 capabilities。</td><td>API /api/assistants，API /api/skills/assistant-rule</td></tr>
+      <tr><td>Skill 导入</td><td><code>SkillsHubSettings</code> 或 pending skill 保存路径</td><td>调用 <code>importSkills</code>，刷新 <code>listAvailableSkills</code>，Assistant 只保存 skill names。</td><td>API /api/skills/import，API /api/skills</td></tr>
+      <tr><td>自动 builtin Skill</td><td><code>AssistantEditorSections</code></td><td>把 auto-inject builtin skill 合入显示值，取消时写 disabled list。</td><td><code>disabled_builtin_skills</code></td></tr>
+      <tr><td>MCP catalog</td><td><code>ensureBackendMcpCatalog</code></td><td>合并 backend user servers 与本地 builtin servers，按 user/builtin 名称去重。</td><td>Assistant 默认 MCP 下拉与 Tools 页列表</td></tr>
+      <tr><td>MCP CRUD</td><td><code>McpManagement</code></td><td>创建、批量导入、编辑、删除、toggle、测试连接、OAuth 登录。</td><td>API /api/mcp/servers，API /api/mcp/test-connection</td></tr>
+      <tr><td>Extension 贡献</td><td>examples manifests</td><td>manifest 的 contributes 分别进入 extension endpoints。</td><td>API /api/extensions/skills，API /api/extensions/mcp-servers，API /api/extensions/assistants</td></tr>
+      <tr><td>Guid 创建会话</td><td><code>useGuidSend</code></td><td>解析 Assistant 默认值与用户 override，发送 skill ids、disabled builtin ids、mcp ids、session MCP servers。</td><td>API /api/conversations 与 backend snapshot</td></tr>
+      <tr><td>会话显示</td><td><code>ChatConversation</code></td><td>从 conversation extra 读取 loaded skills、loaded MCP names/statuses，传入 ACP/Aionrs chat context。</td><td>发送框和附件菜单的 loaded capability 展示</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="sources">3. 关键源码表</h2>
+  <table>
+    <thead>
+      <tr><th>源码路径</th><th>用途</th><th>关键度</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>packages/desktop/src/common/types/agent/assistantTypes.ts</code></td><td>Assistant 类型边界：defaults、capabilities、preferences、create/update request。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/common/config/storage.ts</code></td><td>conversation extra 中 skills/MCP snapshot、MCP transport、server、status、tool 类型。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/assistant/useAssistantEditor.ts</code></td><td>Assistant 编辑状态、资源加载、pending skill 导入、defaults 保存。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/AssistantSettings/AssistantEditorSections.tsx</code></td><td>自动 builtin skill 合并显示、disabled auto 反向列表。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/AssistantSettings/editor/DefaultsSection.tsx</code></td><td>Default Skills/MCP 的 auto/fixed 多选 UI，以及跳转 Skills Hub/Tools。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/SkillsHubSettings.tsx</code></td><td>全局 Skill 列表、导入限制、导入、删除、历史刷新。</td><td>辅助</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/mcp/catalog.ts</code></td><td>MCP catalog 合并、去重、transport 归一化、session MCP server 生成。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/mcp/useMcpServers.ts</code></td><td>加载 backend/builtin MCP 与 extension MCP；extension MCP 作为附加只读列表。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/mcp/useMcpServerCRUD.ts</code></td><td>MCP create/import/update/delete/toggle 的持久化路径。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/mcp/useMcpConnection.ts</code></td><td>连接测试、tools 回填、错误提示、批量测试 concurrency。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/ToolsSettings/McpManagement.tsx</code></td><td>Tools/MCP 设置页的组合入口，串联列表、CRUD、测试和 OAuth。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/ToolsSettings/McpServerHeader.tsx</code></td><td>MCP 手动检查结果提示，明确检查结果不代表当前会话实时状态。</td><td>辅助</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/ToolsSettings/mcpJsonImport.ts</code></td><td>解析 JSON、数组、stdio/http/sse transport，并拒绝 bare server 配置。</td><td>辅助</td></tr>
+      <tr><td><code>packages/desktop/src/common/adapter/ipcBridge.ts</code></td><td>Assistants、Skills、MCP、Extensions、Conversation API 面。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/guid/utils/assistantDefaults.ts</code></td><td>把 Assistant auto/fixed defaults 解析为 Guid 默认选择。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/guid/hooks/useGuidSend.ts</code></td><td>创建会话时组装 assistant overrides、skill ids、MCP ids 和 session MCP servers。</td><td>核心</td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx</code></td><td>把 conversation extra 的 loaded skills/MCP/statuses 传给聊天平台组件。</td><td>辅助</td></tr>
+      <tr><td><code>examples/hello-world-extension/aion-extension.json</code></td><td>完整 extension 贡献示例：assistants、agents、skills、mcpServers。</td><td>辅助</td></tr>
+      <tr><td><code>examples/e2e-full-extension/aion-extension.json</code></td><td>E2E fixture，声明 extension assistant、enabledSkills、skills、MCP servers。</td><td>辅助</td></tr>
+      <tr><td><code>docs/prds/assistants/README.md</code></td><td>当前为空文件；只能作为设计文档缺口记录。</td><td>空白</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="tests">4. 测试证据表</h2>
+  <table>
+    <thead>
+      <tr><th>测试路径</th><th>证明了什么</th><th>未证明什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>tests/e2e/specs/ext-skills.e2e.ts</code></td><td>扩展 Skills 相关设置页可打开，页面没有明显崩溃。</td><td>未断言具体 skill 名称、Assistant 绑定、会话 snapshot。</td></tr>
+      <tr><td><code>tests/e2e/specs/ext-mcp.e2e.ts</code></td><td>Tools/MCP 页可打开，包含 MCP 相关文本，并至少有一个开关。</td><td>未断言具体 extension MCP、连接测试结果、tools 列表或会话使用。</td></tr>
+      <tr><td><code>tests/e2e/specs/ext-ipc-queries.e2e.ts</code></td><td>通过 extension snapshot 断言 examples 中的 assistants、skills、mcpServers 名称可从 IPC 查询到。</td><td>未覆盖 Assistant 设置页保存或会话创建。</td></tr>
+      <tr><td><code>tests/e2e/specs/assistant-settings-skills.e2e.ts</code></td><td>默认 Skills/MCP 单控件、hub 链接、内置 Assistant 只读摘要、固定 Skill 保存后重开仍存在。</td><td>未直接读数据库 snapshot。</td></tr>
+      <tr><td><code>tests/e2e/specs/assistant-settings-defaults.e2e.ts</code></td><td>auto/fixed 选项、默认 remember-last-used、切换主 agent 重置、内置 Assistant 模型/权限可编辑。</td><td>不覆盖 Skill/MCP snapshot。</td></tr>
+      <tr><td><code>tests/e2e/specs/assistant-settings-conversation-defaults.e2e.ts</code></td><td>强证据：fixed/auto 默认能力会进入 create payload、conversation snapshot 和 assistant preferences。</td><td>依赖可用 skill/MCP fixture；不直接覆盖 extension-specific Assistant 绑定。</td></tr>
+      <tr><td><code>tests/unit/renderer/hooks/useMcpServers.dom.test.ts</code></td><td>hook 挂载时加载 MCP catalog，失败时不回退旧 business data，本地 saveMcpServers 只改 UI state。</td><td>不覆盖真实 backend 和连接测试。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="qualities">5. 性能、可靠性、局限、改进</h2>
+  <table>
+    <thead>
+      <tr><th>类别</th><th>源码事实</th><th>维护判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>性能</td><td><code>useAssistantEditor</code> 用 <code>Promise.all</code> 并行加载 detail、skills、MCP；<code>useMcpConnection</code> 批量测试默认 concurrency 为 4。</td><td>设置页打开和批量导入后测试连接不会故意串行阻塞。</td></tr>
+      <tr><td>可靠性</td><td><code>ensureBackendMcpCatalog</code> 对 builtin/user 分开去重；<code>useMcpConnection</code> 成功回填 tools，失败只写 UI 状态并提示。</td><td>MCP 目录避免明显重复；失败不会误写成会话状态。</td></tr>
+      <tr><td>可靠性</td><td><code>McpServerHeader</code> 明确提示手动检查不代表当前会话实时状态。</td><td>排查“会话没用 MCP”时不要只看 Tools 页 connected。</td></tr>
+      <tr><td>局限</td><td>指定的 <code>ext-skills</code> / <code>ext-mcp</code> 主要是页面可用性断言。</td><td>需要补更强的 extension-to-assistant-to-conversation 链路测试。</td></tr>
+      <tr><td>局限</td><td><code>docs/prds/assistants/README.md</code> 为空。</td><td>缺少可引用的产品设计背景，课程只能从源码反推。</td></tr>
+      <tr><td>局限</td><td>extension MCP 在 <code>McpManagement</code> 中只读展示，edit/delete 为空操作。</td><td>用户若想修改 extension MCP，需要改 extension 或导入为用户 MCP。</td></tr>
+      <tr><td>改进</td><td>新增 E2E：选中 extension skill/MCP 创建 Assistant，再创建会话并断 snapshot。</td><td>覆盖当前最薄弱的 extension 映射链路。</td></tr>
+      <tr><td>改进</td><td>新增 bridge-level probe：读取 create payload 与 backend snapshot 的 skill/MCP ids。</td><td>减少只靠 UI 文本长度判断的假阳性。</td></tr>
+      <tr><td>改进</td><td>为 Assistant PRD 补充“目录、默认值、会话快照”三层模型。</td><td>降低新维护者把 Assistant/Skill/MCP 混为一谈的概率。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>最短排障路径：</strong>先问问题发生在哪个时间点。设置页保存前查 editor state；保存后新会话前查 API /api/assistants/{id}；创建会话时查 create payload；进入聊天页后查 conversation extra 和 snapshot。不要用一个页面状态推断所有层。</p>
+  </div>
+</main>
+</body>
+</html>

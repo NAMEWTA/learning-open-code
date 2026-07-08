@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>parallel / chain execution 参考图谱</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:.52rem .6rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>parallel / chain execution 参考图谱</h1>
+  <p class="note">本页承载 L2 切片的长清单：入口分流、step 形态、模板变量、核心函数、workflow graph 节点类型与测试索引。短课 <a href="../lessons/0001-flow-map.html">0001-flow-map</a> 只保留全链路指认技能。</p>
+
+  <h2>1. 总流程</h2>
+  <pre>subagent tool 参数
+  ↓
+subagent-executor.ts
+  ├─ tasks / parallel action
+  │     → mapConcurrent(items, concurrency, runSync)
+  │     → details.mode = "parallel"
+  └─ chain: ChainStep[]
+        → chain-execution.ts executeChain
+        → details.mode = "chain" + workflowGraph</pre>
+
+  <h2>2. ChainStep 三种形态</h2>
+  <table>
+    <tr><th>形态</th><th>识别条件（settings.ts）</th><th>执行路径</th><th>输出传递</th></tr>
+    <tr><td>顺序 step</td><td>含 <code>agent</code>，非 parallel / dynamic</td><td>单步 <code>runSync</code></td><td><code>prev</code> ← child 输出；可选 <code>as</code> → <code>outputs</code></td></tr>
+    <tr><td>静态 parallel</td><td><code>isParallelStep</code>：<code>parallel: ParallelTaskItem[]</code></td><td><code>runParallelChainTasks</code></td><td><code>aggregateParallelOutputs</code> → <code>prev</code>；每 task 可选 <code>as</code></td></tr>
+    <tr><td>动态 fanout</td><td><code>isDynamicParallelStep</code>：<code>expand</code> + <code>collect</code> + 单对象 <code>parallel</code></td><td><code>materializeDynamicParallelStep</code> → <code>runParallelChainTasks</code> → <code>collectDynamicResults</code></td><td><code>outputs[collect.as]</code> 为 collected JSON；<code>prev</code> 为聚合文本</td></tr>
+  </table>
+
+  <h2>3. 模板与上下文变量</h2>
+  <table>
+    <tr><th>占位符</th><th>含义</th><th>解析位置</th></tr>
+    <tr><td><code>{task}</code></td><td>链的原始用户任务</td><td><code>executeChain</code> 内 replace</td></tr>
+    <tr><td><code>{previous}</code></td><td>上一步聚合输出 <code>prev</code></td><td>顺序 / parallel task 模板</td></tr>
+    <tr><td><code>{outputs.name}</code></td><td>命名输出槽内容</td><td><code>resolveOutputReferences</code></td></tr>
+    <tr><td><code>{chain_dir}</code></td><td>本次 chain 工作目录</td><td>replace 为 <code>chainDir</code></td></tr>
+    <tr><td><code>{item}</code> / <code>{item.field}</code></td><td>dynamic fanout 每项数据</td><td><code>resolveItemTemplate</code>（dynamic-fanout.ts）</td></tr>
+  </table>
+  <p><code>resolveChainTemplates</code>（settings.ts）为每步生成默认模板：parallel 子 task 默认 <code>{previous}</code>；顺序 step 默认取 <code>task</code> 或 <code>{previous}</code>。</p>
+
+  <h2>4. 核心源码索引</h2>
+  <table>
+    <tr><th>文件</th><th>关键符号</th><th>职责</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code></td><td><code>executeChain</code>、<code>runParallelChainTasks</code></td><td>链主循环、并行子任务、TUI clarify、失败 / interrupt / detach 早退</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/shared/dynamic-fanout.ts</code></td><td><code>materializeDynamicParallelStep</code>、<code>collectDynamicResults</code></td><td>从 structured output 展开项、校验 maxItems / key、收集结果</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/shared/workflow-graph.ts</code></td><td><code>buildWorkflowGraphSnapshot</code></td><td>把 steps + results + dynamicChildren 建成 UI 可渲染图</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/settings.ts</code></td><td><code>isParallelStep</code>、<code>isDynamicParallelStep</code>、<code>resolveChainTemplates</code>、<code>aggregateParallelOutputs</code></td><td>类型守卫、模板默认值、并行输出拼接</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/utils.ts</code></td><td><code>mapConcurrent</code></td><td>有界并发、结果顺序与输入一致</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code></td><td><code>runSync</code></td><td>实际 child Pi spawn（chain / parallel 共用）</td></tr>
+  </table>
+
+  <h2>5. workflowGraph 节点类型</h2>
+  <table>
+    <tr><th>kind</th><th>何时出现</th><th>关键字段</th></tr>
+    <tr><td><code>step</code></td><td>顺序 chain step</td><td><code>agent</code>、<code>flatIndex</code>、<code>outputName</code>（<code>as</code>）</td></tr>
+    <tr><td><code>parallel-group</code></td><td>静态 parallel step</td><td><code>children[]</code> 每项 <code>kind: agent</code></td></tr>
+    <tr><td><code>dynamic-parallel-group</code></td><td>dynamic fanout step</td><td><code>dynamic.sourceOutput</code>、<code>collectAs</code>、materialized <code>children</code></td></tr>
+    <tr><td><code>agent</code></td><td>parallel / dynamic 子任务</td><td><code>status</code>、<code>itemKey</code>（动态）、<code>acceptanceStatus</code></td></tr>
+  </table>
+  <p>节点状态优先级：<code>stepStatuses</code> 覆盖 → <code>results[flatIndex]</code>（detached / interrupted / exitCode）→ 当前 <code>currentFlatIndex</code> 为 <code>running</code> → 否则 <code>pending</code>。</p>
+
+  <h2>6. 并行控制参数</h2>
+  <table>
+    <tr><th>参数</th><th>作用域</th><th>默认 / 行为</th></tr>
+    <tr><td><code>concurrency</code></td><td>单个 parallel / dynamic step</td><td>默认 <code>MAX_CONCURRENCY</code>；传给 <code>mapConcurrent</code></td></tr>
+    <tr><td><code>failFast</code></td><td>单个 parallel step</td><td>首个失败 exit 后后续 task 标记 skipped（exit -1）</td></tr>
+    <tr><td><code>globalConcurrencyLimit</code></td><td>整条 chain</td><td><code>Semaphore</code> 跨 step 限制同时运行的 child 数</td></tr>
+    <tr><td><code>expand.maxItems</code> / <code>dynamicFanoutMaxItems</code></td><td>dynamic fanout</td><td>限制展开项数，超出则执行前失败</td></tr>
+  </table>
+
+  <h2 id="tests">7. 测试佐证索引</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖点</th></tr>
+    <tr><td><code>test/integration/parallel-execution.test.ts</code></td><td><code>mapConcurrent</code> 顺序与并发上限；top-level <code>tasks</code>；per-task output 路径</td></tr>
+    <tr><td><code>test/integration/chain-execution.test.ts</code></td><td>顺序 <code>{previous}</code>；命名 <code>as</code>；parallel step；funnel + fan-out；dynamic fanout（空数组、maxItems、collect schema）；workflowGraph 节点状态；parallel 失败终止链</td></tr>
+  </table>
+
+  <h2>8. 常见早退与错误</h2>
+  <table>
+    <tr><th>场景</th><th>返回特征</th></tr>
+    <tr><td>parallel step 任一 child exit ≠ 0</td><td><code>isError: true</code> + <code>buildChainSummary(..., "failed")</code></td></tr>
+    <tr><td>用户 interrupt</td><td>文案含 <code>Chain paused after interrupt</code>，graph 节点 <code>paused</code></td></tr>
+    <tr><td>intercom detach</td><td>文案含 <code>Chain detached</code>，节点 <code>detached</code></td></tr>
+    <tr><td>dynamic 源非数组 / 超 maxItems</td><td>spawn 前失败，dynamic 组 <code>status: failed</code></td></tr>
+    <tr><td>collect schema 校验失败</td><td><code>Collected output validation failed</code></td></tr>
+  </table>
+
+  <p>课程入口：<a href="../lessons/0001-flow-map.html">lessons/0001-flow-map.html</a> · 使命：<a href="../MISSION.md">MISSION.md</a></p>
+</main>
+</body>
+</html>

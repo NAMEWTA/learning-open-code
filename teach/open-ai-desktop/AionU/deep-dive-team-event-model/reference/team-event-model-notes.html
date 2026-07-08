@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 事件模型参考笔记</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .matrix td:first-child {
+      font-family: "SF Mono", Consolas, monospace;
+      white-space: nowrap;
+    }
+    .compact td,
+    .compact th {
+      padding: 8px 10px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode 事件模型参考笔记</h1>
+    <p class="subtitle">速查 ack、WebSocket run event、child turn、reconcile、slot gate 与测试覆盖边界。</p>
+    <div class="meta">
+      <span class="pill">主题：deep-dive-team-event-model</span>
+      <span class="pill">入口：lessons/0001-problem-frame.html</span>
+      <span class="pill">源仓：open-ai-desktop/AionU</span>
+    </div>
+  </section>
+
+  <p class="muted">课程入口：<a href="../lessons/0001-problem-frame.html">0001-problem-frame</a>、<a href="../lessons/0002-core-mechanism.html">0002-core-mechanism</a>、<a href="../lessons/0003-reconcile-and-tests.html">0003-reconcile-and-tests</a>。上游参考：<a href="../../module-team-mode/reference/team-mode-overview.html">Team Mode L1</a>、<a href="../../slice-team-run/reference/team-run-flow-map.html">Team run L2</a>。</p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#sources">1. 源码锚点</a>
+    <a href="#events">2. 事件输入矩阵</a>
+    <a href="#reducers">3. 状态合成规则</a>
+    <a href="#gate">4. slot gate 规则</a>
+    <a href="#tests">5. 测试证据与缺口</a>
+  </nav>
+
+  <h2 id="sources">1. 源码锚点</h2>
+  <table>
+    <thead>
+      <tr><th>文件</th><th>用途</th><th>关键度</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/common/types/team/teamTypes.ts</code></td><td>定义 <code>ITeamRunAck</code>、<code>ITeamRunEvent</code>、<code>ITeamSlotWork</code>、<code>ITeamChildTurnEvent</code>。</td><td>核心</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</code></td><td>定义 <code>sendMessage</code>、<code>sendMessageToAgent</code>、<code>getRunState</code>、<code>pauseSlotWork</code> 和 <code>team.run*</code> / <code>team.childTurn*</code> emitter。</td><td>核心</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code></td><td>把 leader/member 发送返回的 ack 注入 <code>onTeamRunAck</code>，并构建 slot runtime。</td><td>核心</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code></td><td>事件模型核心 reducer：ack 合成、run event 覆盖、child turn 局部更新、reconcile。</td><td>核心</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/teamSendRuntime.ts</code></td><td>按 slot 计算 loading、canSendMessage、stop handler 和 stale pause reconcile。</td><td>核心</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/TeamPage.tsx</code></td><td>创建 <code>useTeamRunView(team.id)</code>，把状态和 ack/reconcile 回调传给每个 assistant slot。</td><td>辅助</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamSession.ts</code></td><td>处理 agent status、spawn/remove/rename、task/session 事件并刷新 Team record。</td><td>辅助</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="events">2. 事件输入矩阵</h2>
+  <table class="matrix compact">
+    <thead>
+      <tr><th>输入</th><th>来源</th><th>进入点</th><th>状态效果</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>ITeamRunAck</td><td><code>sendMessage</code> / <code>sendMessageToAgent</code> HTTP 返回</td><td><code>TeamChatView → onTeamRunAck → applyAck</code></td><td>转成 run event，给 <code>accepted_slot_id || target_slot_id</code> 生成 pending wake 占位。</td></tr>
+      <tr><td>team.runAccepted</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>设置 active run 与 slot work。</td></tr>
+      <tr><td>team.runStarted</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>设置 running run 与 slot work。</td></tr>
+      <tr><td>team.runUpdated</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>覆盖 slot work 索引，保留 child turn 索引。</td></tr>
+      <tr><td>team.runCompleted</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>终态，清空 active run、child turns 和 slot work。</td></tr>
+      <tr><td>team.runCancelled</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>终态，清空所有 run view 状态。</td></tr>
+      <tr><td>team.runFailed</td><td>WebSocket</td><td><code>applyRunEvent</code></td><td>终态，清空所有 run view 状态。</td></tr>
+      <tr><td>team.childTurnStarted</td><td>WebSocket</td><td><code>applyChildStarted</code></td><td>写入 <code>childTurnsBySlot[slot_id]</code>，补 <code>active_turn_id</code>。</td></tr>
+      <tr><td>team.childTurnCompleted</td><td>WebSocket</td><td><code>applyChildTerminal</code></td><td>清掉该 slot active turn；无剩余 work 时删除 slot work。</td></tr>
+      <tr><td>team.childTurnCancelled</td><td>WebSocket</td><td><code>applyChildTerminal</code></td><td>同 completed，按 slot 局部清理。</td></tr>
+      <tr><td>realtime.reconnected</td><td>实时连接恢复</td><td><code>reconcile('realtime.reconnected')</code></td><td>拉取 <code>getRunState</code>，以 backend 快照校准。</td></tr>
+      <tr><td>team.listChanged</td><td>Team 结构变化</td><td><code>reconcile('team.listChanged')</code></td><td>仅当前 team id 匹配时拉快照。</td></tr>
+      <tr><td>team.sessionChanged</td><td>session 生命周期变化</td><td><code>reconcile('team.sessionChanged')</code></td><td>仅当前 team id 匹配时拉快照。</td></tr>
+      <tr><td>team.agentSpawned / Removed / Renamed</td><td>成员结构事件</td><td><code>reconcile('team.agent*')</code></td><td>slot 集合可能变化，重新校准 run view。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="reducers">3. 状态合成规则</h2>
+  <table>
+    <thead>
+      <tr><th>规则</th><th>源码行为</th><th>维护判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>ack 与 WS 同形</td><td><code>ackToRunEvent()</code> 将 ack 转成 <code>ITeamRunEvent</code> 后复用 <code>applyRunEvent()</code>。</td><td>排查“刚发送不 busy”时，先看 ack 是否进入 hook。</td></tr>
+      <tr><td>终态 run 强清理</td><td><code>completed</code>、<code>cancelled</code>、<code>failed</code> 直接返回 <code>emptyState</code>。</td><td>终态 run 比局部 child turn 更强，不等待后续 child 事件。</td></tr>
+      <tr><td>run event 覆盖 slot work</td><td><code>slotWorkBySlot</code> 由 <code>event.slot_work</code> 重建。</td><td>slot work 是后端快照，不要在前端累加旧项。</td></tr>
+      <tr><td>child turn 局部更新</td><td><code>childTurnStarted</code> 只写对应 <code>slot_id</code>；terminal 也只清对应 slot。</td><td>不要按 active tab 或 conversation id 猜测目标 slot。</td></tr>
+      <tr><td>reconcile 丢弃 child turn</td><td>有 active run 快照时保留 active run 和 slot work，但 <code>childTurnsBySlot</code> 重置为空。</td><td>reconcile 是快照校准，不试图恢复所有局部事件日志。</td></tr>
+      <tr><td>reconcile 失败保留本地状态</td><td>catch 后返回 false，不清空现有 state。</td><td>网络失败时避免误释放 gate；调用方可显示错误或稍后重试。</td></tr>
+      <tr><td>team id 过滤</td><td>run、child、结构事件都按 <code>event.team_id !== team_id</code> 忽略。</td><td>跨 Team 页面打开时，这是防串扰底线。</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead><tr><th>可靠性 / 性能特征</th><th>取舍</th><th>改进方向</th></tr></thead>
+    <tbody>
+      <tr><td><code>indexSlotWork()</code> 重建 slot 索引</td><td>每次 run event O(slot work 数量)，但能避免旧 work 残留。</td><td>如果 slot 数增长明显，再考虑 memo 或增量更新。</td></tr>
+      <tr><td><code>reconcileSeq</code> 序号</td><td>防止慢请求覆盖新快照，但不能取消已经发出的请求。</td><td>可结合 AbortController 降低无效请求成本。</td></tr>
+      <tr><td>reconcile 清空 child turns</td><td>承认快照不是事件日志，避免恢复不完整局部状态。</td><td>后端若提供 active child turns 快照，可补全恢复。</td></tr>
+      <tr><td>E2E 主要观察 UI 结果</td><td>接近用户路径，但难证明 reducer 合并顺序。</td><td>增加 bridge-level run-state probe 或 DOM 单测断言 ack 注入。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="gate">4. slot gate 规则</h2>
+  <table>
+    <thead>
+      <tr><th>输入状态</th><th>当前 slot 是否锁</th><th>理由</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>别的 slot 有 <code>active_turn_id</code></td><td>否</td><td><code>buildTeamSendRuntime()</code> 只查当前 <code>slot_id</code>。</td></tr>
+      <tr><td>当前 slot 有 <code>pending_wake_count &gt; 0</code></td><td>是</td><td>已有待唤醒工作，重复发送会串扰。</td></tr>
+      <tr><td>当前 slot 有 <code>starting_child_count &gt; 0</code></td><td>是</td><td>child turn 正在启动，输入框进入 processing。</td></tr>
+      <tr><td>当前 slot 的 child status 为 accepted/running/cancelling</td><td>是</td><td>即便 slot work 不完整，child turn 仍说明该 slot 忙。</td></tr>
+      <tr><td>当前 slot <code>paused: true</code> 且有 suppressed work</td><td>否</td><td>源码允许 priority send，不把 suppressed work 当作 processing。</td></tr>
+      <tr><td>stop 时后端返回 no active team run to pause</td><td>不直接报错</td><td><code>isStaleTeamRunPauseError()</code> 触发 <code>onRunStateStale()</code> reconcile。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="tests">5. 测试证据与缺口</h2>
+  <table>
+    <thead>
+      <tr><th>测试文件</th><th>覆盖点</th><th>未覆盖点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/useTeamRunView.dom.test.tsx</code></td><td>terminal child 清 slow 字段；reconcile 清 stale、替换 run、失败保留；reconnect 拉取；直接覆盖 <code>listChanged</code> 的 team id 过滤。</td><td>未直接覆盖 <code>applyAck()</code> 对 ack 的占位语义，也未逐项覆盖其他结构事件。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/teamSendRuntime.test.ts</code></td><td>teammate-only work 不锁 leader；当前 slot pending/child turn 会锁；paused slot 可 priority send；stale pause 触发 reconcile。</td><td>不覆盖真实 Chat 组件中的键盘发送和 bridge 返回 ack。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/team/TeamChatView.dom.test.tsx</code></td><td>覆盖 assistant 身份、backend、skills 和 MCP snapshot 透传。</td><td>未直接断言 leader/member send 返回 ack 后调用 <code>onTeamRunAck</code>。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-communication.e2e.ts</code></td><td>leader UI 输入、Enter 发送、消息文本可见、Team record 仍有效。</td><td>不证明 run ack、WebSocket run event 或 child turn 合并正确。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-member-messaging.e2e.ts</code></td><td>成员 tab 直接发送，断言消息可见，并接受 active badge 或输入清空作为处理证据。</td><td>未直接断言 slot gate 由 <code>ITeamSlotWork</code> 或 child turn 事件驱动。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-agent-lifecycle.e2e.ts</code></td><td>创建 Team、添加成员、成员 tab 出现、assistant-first contract 保留。</td><td>不覆盖 send/run event 全链路。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-tab-context.e2e.ts</code></td><td>通过 bridge 拿到 <code>runAck.team_run_id</code> 并验证 tab 切换后 leader conversation 历史保持。</td><td>有 ack 可用性证据，但不证明 reducer 合并顺序。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>补测建议：</strong>最小缺口是给 <code>TeamChatView</code> 增加一个 DOM 单测，mock <code>ipcBridge.team.sendMessage</code> / <code>sendMessageToAgent</code> 返回 ack，断言 <code>onTeamRunAck</code> 收到原始 ack；再给 E2E 增加可观测 run-state 或 bridge probe，避免只凭消息文本和输入清空判断 run event 全链路。</p>
+  </div>
+</main>
+</body>
+</html>

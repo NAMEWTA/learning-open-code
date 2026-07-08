@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · PathGuard 深度拆解：11 级级联判定算法</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · PathGuard 深度拆解：11 级级联判定链 <span class="tag">核心算法</span></h1>
+
+<div class="mission">
+&#127919; <b>本节目标：</b>学完你能逐级画出一条路径在 PathGuard 11 级判定链中的全部匹配过程，理解 BLOCKED / READ_ONLY / READ_WRITE / FULL 四种访问级别的判定逻辑，掌握符号链接追踪和存在性检查的安全机制。
+</div>
+
+<p><strong>源码位置：</strong><code>lib/sandbox/path-guard.ts</code> — <code>getAccessLevel()</code> 方法（107-183 行）和 <code>check()</code> 方法（185-207 行）。PathGuard 是整个沙盒系统的第一道防线，使用纯 JavaScript 实现，跨平台行为完全一致。</p>
+
+<h2>一、四种访问级别与操作需求映射</h2>
+
+<p>PathGuard 的输出不是简单的"允许/拒绝"，而是四种访问级别：</p>
+
+<pre><code>BLOCKED    — 完全禁止访问（敏感认证文件、浏览器数据）
+READ_ONLY  — 只读（Agent 配置、用户目录、系统文件）
+READ_WRITE — 可读写但不能删除（Agent 工作目录、日志、上传）
+FULL       — 完全访问（workspace 根目录，可读可写可删）</code></pre>
+
+<p>每种操作需要的<b>最低级别</b>通过 <code>OP_REQUIREMENTS</code> 映射表定义：</p>
+
+<pre><code>// path-guard.ts — check() 方法中的操作要求映射
+const OP_REQUIREMENTS = {
+  read:   AccessLevel.READ_ONLY,   // 至少 READ_ONLY 即可读
+  write:  AccessLevel.READ_WRITE,  // 至少 READ_WRITE 才可写
+  delete: AccessLevel.FULL,        // 只有 FULL 才可删
+};
+
+// check(path, operation) 的逻辑：
+//   level = getAccessLevel(path)
+//   required = OP_REQUIREMENTS[operation]
+//   return level >= required  // 级别越高权限越大</code></pre>
+
+<div class="side">
+&#128161; <b>为什么删除操作要求 FULL 而非 READ_WRITE？</b><br>
+删除是不可逆操作。Agent 在 workspace 内可以随意创建和修改文件，但只有 workspace 根目录下才能删除文件（FULL 级别）。这防止了 Agent 意外删除 <code>agentDir/memory/</code> 中的重要数据——memory 目录是 READ_WRITE，可以写入但不能删除文件。
+</div>
+
+<h2>二、11 级级联判定链（逐级拆解）</h2>
+
+<p>判定链按优先级从高到低排列，<b>一旦匹配即返回，不继续后续判定</b>。这是"级联"的核心含义。</p>
+
+<h3>级别 1-2：BLOCKED 匹配（最高优先级）</h3>
+
+<div class="step"><span class="num">1</span><b>级别 1 — hanakoHome 根级禁止文件</b><br>
+<pre><code>if (resolved === hanakoHome/auth.json) → BLOCKED
+if (resolved === hanakoHome/models.json) → BLOCKED</code></pre>
+精确匹配 <code>BLOCKED_FILES</code> 列表。这些是认证凭据和模型密钥，必须在任何规则之前拦截。<br><span class="where">policy.ts → BLOCKED_FILES 常量</span></div>
+
+<div class="step"><span class="num">2</span><b>级别 2 — hanakoHome 下禁止目录</b><br>
+<pre><code>if (resolved starts with hanakoHome/browser-data/) → BLOCKED
+if (resolved starts with hanakoHome/playwright-browsers/) → BLOCKED</code></pre>
+前缀匹配 <code>BLOCKED_DIRS</code> 列表。浏览器数据和自动化浏览器缓存包含 cookie、localStorage 等敏感信息。<br><span class="where">policy.ts → BLOCKED_DIRS 常量</span></div>
+
+<h3>级别 3-5：READ_ONLY 匹配</h3>
+
+<div class="step"><span class="num">3</span><b>级别 3 — Agent 配置文件（精确匹配）</b><br>
+<pre><code>if (resolved === agentDir/ishiki.md)    → READ_ONLY
+if (resolved === agentDir/config.yaml)  → READ_ONLY
+if (resolved === agentDir/identity.md)  → READ_ONLY</code></pre>
+精确匹配 <code>READ_ONLY_AGENT_FILES</code>。Agent 可以读取这些配置文件来了解自身设置，但不能修改它们。修改必须通过 settings API。<br><span class="where">policy.ts → READ_ONLY_AGENT_FILES 常量</span></div>
+
+<div class="step"><span class="num">4</span><b>级别 4 — Agent 只读目录（扩展预留）</b><br>
+<pre><code>// 当前为空数组，保留扩展点
+// 未来可添加如 agentDir/capabilities/ 等只读目录</code></pre>
+通用前缀匹配机制，遍历 <code>READ_ONLY_AGENT_DIRS</code> 数组。当前无实际匹配项。<br><span class="where">policy.ts → READ_ONLY_AGENT_DIRS（空数组）</span></div>
+
+<div class="step"><span class="num">5</span><b>级别 5 — 全局只读目录</b><br>
+<pre><code>if (resolved starts with hanakoHome/skills/)        → READ_ONLY
+if (resolved starts with hanakoHome/session-files/)  → READ_ONLY
+if (resolved starts with hanakoHome/user/)           → READ_ONLY</code></pre>
+前缀匹配 <code>READ_ONLY_HOME_DIRS</code>。Skills 定义、会话文件、用户配置等属于全局共享资源，Agent 只读。<br><span class="where">policy.ts → READ_ONLY_HOME_DIRS 常量</span></div>
+
+<h3>级别 6-7：READ_WRITE 匹配</h3>
+
+<div class="step"><span class="num">6</span><b>级别 6 — Agent 工作目录 + 可写文件</b><br>
+<pre><code>// 6a: 工作目录（前缀匹配）
+if (resolved starts with agentDir/memory/)    → READ_WRITE
+if (resolved starts with agentDir/sessions/)  → READ_WRITE
+if (resolved starts with agentDir/desk/)      → READ_WRITE
+if (resolved starts with agentDir/heartbeat/) → READ_WRITE
+if (resolved starts with agentDir/book/)      → READ_WRITE
+
+// 6b: 可写文件（精确匹配）
+if (resolved === agentDir/pinned.md) → READ_WRITE</code></pre>
+Agent 运行时产生的数据（记忆、会话、桌面文件、心跳、书签）可读写但不可删除。pinned.md 是唯一可写的 Agent 配置文件。<br><span class="where">policy.ts → READ_WRITE_AGENT_DIRS + READ_WRITE_AGENT_FILES</span></div>
+
+<div class="step"><span class="num">7</span><b>级别 7 — 全局可写目录</b><br>
+<pre><code>if (resolved starts with hanakoHome/channels/)   → READ_WRITE
+if (resolved starts with hanakoHome/logs/)       → READ_WRITE
+if (resolved starts with hanakoHome/uploads/)    → READ_WRITE
+if (resolved starts with hanakoHome/.ephemeral/) → READ_WRITE</code></pre>
+前缀匹配 <code>READ_WRITE_HOME_DIRS</code>。日志、上传文件、临时文件属于全局可写。.ephemeral 是沙盒临时目录。<br><span class="where">policy.ts → READ_WRITE_HOME_DIRS 常量</span></div>
+
+<h3>级别 8-11：兜底与外部路径</h3>
+
+<div class="step"><span class="num">8</span><b>级别 8 — hanakoHome 未匹配兜底</b><br>
+<pre><code>if (resolved starts with hanakoHome) {
+  if (allowExternalReads) → READ_ONLY
+  else → BLOCKED
+}</code></pre>
+hanakoHome 内但未被前面规则覆盖的路径。按 read-all 契约默认只读，但如果 <code>allowExternalReads=false</code> 则全部 BLOCKED。<br><span class="where">path-guard.ts — getAccessLevel() 末尾逻辑</span></div>
+
+<div class="step"><span class="num">9</span><b>级别 9 — Workspace Roots → FULL</b><br>
+<pre><code>if (resolved starts with any workspaceRoot) → FULL</code></pre>
+用户项目目录是 Agent 的主要工作区，应拥有完全的读写删权限。workspaceRoots 来自 <code>deriveSandboxPolicy()</code>，包含 workspace + workspaceFolders + authorizedFolders + cwd。<br><span class="where">path-guard.ts — workspaceRoots 遍历匹配</span></div>
+
+<div class="step"><span class="num">10</span><b>级别 10 — 运行时可写路径 → READ_WRITE</b><br>
+<pre><code>if (resolved starts with any policyWritablePath) → READ_WRITE</code></pre>
+运行时缓存、沙盒临时目录等非 workspace 但需要写入的路径，由 <code>runtimeWritablePaths</code> 参数注入。<br><span class="where">policy.ts → deriveSandboxPolicy() 构建</span></div>
+
+<div class="step"><span class="num">11</span><b>级别 11 — 外部系统路径最终兜底</b><br>
+<pre><code>if (allowExternalReads) → READ_ONLY
+else → BLOCKED</code></pre>
+对于不在 hanakoHome、不在 workspace 的普通系统路径（如 <code>/usr/bin</code>、<code>/etc/hosts</code>），按 read-all 契约只允许读取。<br><span class="where">path-guard.ts — 最终 return 语句</span></div>
+
+<h2>三、符号链接安全：_resolveReal() 先行解析</h2>
+
+<div class="step"><span class="num">&#128737;</span><b>关键安全机制：所有判定之前先解析真实路径</b><br>
+<pre><code>// path-guard.ts — _resolveReal() 方法（72-95 行）
+_resolveReal(inputPath: string): string {
+  try {
+    return fs.realpathSync(inputPath);  // 跟随符号链接
+  } catch {
+    // 路径不存在时，递归向上查找最近存在的祖先
+    let current = inputPath;
+    while (!fs.existsSync(current) && current !== path.dirname(current)) {
+      current = path.dirname(current);
+    }
+    const existing = fs.realpathSync(current);
+    const remaining = path.relative(current, inputPath);
+    return path.join(existing, remaining);
+  }
+}</code></pre>
+<p>这防止了通过符号链接绕过检查的攻击：<code>/tmp/link → ~/.ssh</code> 会在判定前被解析为真实路径 <code>/home/user/.ssh</code>，然后被 BLOCKED 级别拦截。<br><span class="where">path-guard.ts — getAccessLevel() 第一行即调用 _resolveReal()</span></div>
+
+<div class="danger">
+&#9888; <b>警惕 TOCTOU 窗口：</b>PathGuard 先调用 <code>_resolveReal()</code> 做判定，然后 OS 沙盒才执行命令。在判定通过后、命令执行前的窗口内，攻击者理论上可以替换符号链接。但 OS 沙盒通过 mount 绑定（bwrap）或 ACL（Windows）进一步限制了实际文件访问范围，两层防线互补削弱了这个窗口。
+</div>
+
+<h2>四、Managed Config Guard — 额外防线</h2>
+
+<p><code>managed-config-guard.ts</code>（57 行）在 PathGuard 之外提供额外保护：</p>
+
+<pre><code>// managed-config-guard.ts — 拦截直接编辑 config.yaml
+if (path matches agents/*/config.yaml) {
+  throw new Error(
+    "managed config files must be changed through settings APIs"
+  );
+}</code></pre>
+
+<p>即使 PathGuard 判定该路径为 READ_WRITE，Managed Config Guard 也会单独拦截，强制 Agent 通过 settings API 修改配置。这防止了 Agent 通过文件编辑工具绕过配置管理直接篡改自身安全设置。</p>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 一条路径 /home/user/workspace/project/src/main.ts 在 PathGuard 中会被判定为什么级别？</p>
+<span class="opt">A. BLOCKED — 这是系统路径</span>
+<span class="opt">B. FULL — 因为在 workspace root 下（级别 9 匹配）</span>
+<span class="opt">C. READ_ONLY — 级别 11 兜底</span>
+<span class="opt">D. READ_WRITE — 级别 10 运行时可写路径</span>
+<details><summary>看答案</summary><b>B</b>。workspace root 路径在级别 9 就会被匹配为 FULL。这是 Agent 最常见的操作场景——在用户项目目录中工作。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 为什么 BLOCKED 判定放在最前面（级别 1-2）？</p>
+<span class="opt">A. 因为这些路径最常见，放在前面可以加速判定</span>
+<span class="opt">B. 因为安全规则必须最先执行——敏感文件的保护不能被后续规则"覆盖"</span>
+<span class="opt">C. 因为代码可读性更好</span>
+<span class="opt">D. 因为 BLOCKED 判定最复杂，需要先计算</span>
+<details><summary>看答案</summary><b>B</b>。级联判定的"一旦匹配即返回"特性要求最高优先级的规则放在最前面。如果 BLOCKED 放在后面，敏感的 auth.json 可能被前面的 READ_ONLY 规则错误地判定为可读。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. _resolveReal() 方法处理不存在路径的策略是？</p>
+<span class="opt">A. 直接返回原路径不做解析</span>
+<span class="opt">B. 抛出错误要求路径必须存在</span>
+<span class="opt">C. 递归向上查找最近存在的祖先目录做 realpath，再把不存在的段拼回去</span>
+<span class="opt">D. 假设路径都是安全的直接通过</span>
+<details><summary>看答案</summary><b>C</b>。这是处理 mkdir -p /tmp/a/b/c 场景的关键设计——中间目录可能尚不存在，但判定仍需准确。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. Managed Config Guard 阻止的是什么行为？</p>
+<span class="opt">A. Agent 通过 curl 下载恶意配置文件</span>
+<span class="opt">B. Agent 通过文件编辑工具直接修改 agents/*/config.yaml 绕过配置管理</span>
+<span class="opt">C. 用户通过 UI 手动修改配置</span>
+<span class="opt">D. 其他 Agent 进程修改当前 Agent 的配置</span>
+<details><summary>看答案</summary><b>B</b>。这是防止 Agent 自我篡改的最后一道防线——即使 PathGuard 允许写入，Managed Config Guard 也会单独拦截 config.yaml 的直接编辑，强制走 settings API。</details>
+</div>
+
+<div class="cite">&#128214; 推荐一手资料：打开 <code>lib/sandbox/path-guard.ts</code>（207 行），逐行阅读 <code>getAccessLevel()</code> 和 <code>_resolveReal()</code> 方法。配合 <code>lib/sandbox/policy.ts</code>（142 行）中的常量定义交叉对照。</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。可以问："如果一个目录同时在 READ_WRITE_AGENT_DIRS 和 READ_ONLY_HOME_DIRS 中会怎样？""级别 4 的扩展预留机制在未来可能用于什么场景？"下一课我们对比 <strong>三大平台的 OS 级沙盒实现</strong>——Linux bwrap、macOS seatbelt、Windows Restricted Token 的参数构造与差异。</div>
+
+<div class="nav">上一课：<a href="0001.html">沙盒设计哲学</a> · 课程 0002 / 沙盒架构深度剖析 · 下一课预告：OS 级沙盒实现对比——bwrap / seatbelt / Restricted Token</div>
+
+</body>
+</html>

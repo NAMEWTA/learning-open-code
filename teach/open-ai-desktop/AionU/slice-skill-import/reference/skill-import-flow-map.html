@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 助手或 Skill 导入流程图谱</title>
+  <link rel="stylesheet" href="../assets/skill-import.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>助手或 Skill 导入流程图谱</h1>
+    <p class="subtitle">L2 参考文档：按源码文件、调用层级、adapter endpoint、刷新动作、异常路径和 E2E 证据汇总，供改代码前快速定位。</p>
+    <div class="meta">
+      <span class="pill">主入口：lessons/0001-flow-map.html</span>
+      <span class="pill">源仓库：open-ai-desktop/AionU</span>
+      <span class="pill">快照 commit：0ea13fd</span>
+    </div>
+  </section>
+
+  <p class="muted">
+    回链：
+    <a href="../lessons/0001-flow-map.html">短课</a>、
+    <a href="../../00-overview/reference/00-overview.html#candidates">L0 候选切片</a>、
+    <a href="../../module-assistants-skills/reference/assistants-skills-overview.html#examples">Assistants / Skills 调用示例</a>、
+    <a href="../../module-common-adapter/reference/common-adapter-overview.html#apis">common adapter API 域</a>、
+    <a href="../../module-test-quality/reference/test-quality-overview.html#evidence">测试证据</a>。
+  </p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#files">1. 源文件定位</a>
+    <a href="#layers">2. 分层图谱</a>
+    <a href="#sequence">3. Mermaid 时序</a>
+    <a href="#paths">4. 正常与异常路径</a>
+    <a href="#evidence">5. E2E 证据</a>
+    <a href="#limits">6. 边界说明</a>
+  </nav>
+
+  <h2 id="files">1. 源文件定位</h2>
+  <table>
+    <thead><tr><th>文件</th><th>读什么</th><th>关键行段</th></tr></thead>
+    <tbody>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/SkillsHubSettings.tsx</code></td><td>导入入口、fetchData、消息分发、导入后刷新。</td><td><code>fetchData()</code>、<code>handleImport()</code>、<code>handleManualImport()</code></td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/skillImportMessages.ts</code></td><td>后端错误码到 i18n 文案的统一映射；部分成功和全失败提示。</td><td><code>SKILL_IMPORT_ERROR_CODES</code>、<code>buildSkillImportNotice()</code></td></tr>
+      <tr><td><code>packages/desktop/src/renderer/components/base/TalkToButlerButton.tsx</code></td><td>设置页“Add Skill”的下拉入口；手动项通过 <code>onManual</code> 回调触发。</td><td><code>MANUAL_KEY</code>、<code>handleSelect()</code></td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/AssistantSettings/index.tsx</code></td><td>AssistantSettings 装配 <code>useAssistantList</code> 与 <code>useAssistantEditor</code>，把 save/skills 状态传给编辑器。</td><td><code>editorViewModel</code>、<code>AssistantEditorPage</code></td></tr>
+      <tr><td><code>packages/desktop/src/renderer/pages/settings/AssistantSettings/editor/DefaultsSection.tsx</code></td><td>默认 skill 多选控件和跳转 Skills Hub 的按钮。</td><td><code>btn-open-skills-settings</code>、<code>select-assistant-default-skills</code></td></tr>
+      <tr><td><code>packages/desktop/src/renderer/hooks/assistant/useAssistantEditor.ts</code></td><td>加载 skill catalog、保存 assistant、保存前导入 pending skill、刷新 cache。</td><td><code>loadEditorResources()</code>、<code>handleSave()</code></td></tr>
+      <tr><td><code>packages/desktop/src/common/adapter/ipcBridge.ts</code></td><td>renderer API 到 backend HTTP endpoint 的实际映射。</td><td><code>assistants</code> 域、<code>fs</code> 域</td></tr>
+      <tr><td><code>packages/desktop/src/common/adapter/httpBridge.ts</code></td><td>HTTP base URL、结构化错误和 provider-like <code>invoke()</code> 形状。</td><td><code>getBaseUrl()</code>、<code>httpPost()</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">2. 分层图谱</h2>
+  <table>
+    <thead><tr><th>层级</th><th>导入 skill</th><th>绑定 assistant 默认 skill</th><th>状态刷新</th></tr></thead>
+    <tbody>
+      <tr><td>用户动作</td><td>Settings → Skills → Add Skill → Import Skills。</td><td>Settings → Assistants → Create/Edit → Default Skills。</td><td>用户不直接刷新；UI 在成功后主动重新读取。</td></tr>
+      <tr><td>UI 组件</td><td><code>TalkToButlerButton</code> 选择 manual action。</td><td><code>DefaultsSection</code> 多选控件。</td><td><code>AssistantEditorPage</code> 保存按钮。</td></tr>
+      <tr><td>页面 / hook</td><td><code>SkillsHubSettings.handleImport()</code>。</td><td><code>AssistantEditorSections.handleSkillSelectionChange()</code> 写入 <code>selectedSkills</code> 与 disabled auto skill。</td><td><code>useAssistantEditor.refreshAssistantCatalog()</code>、<code>refreshAssistantDetailCaches()</code>。</td></tr>
+      <tr><td>消息层</td><td><code>skillImportMessages.ts</code> 把后端 code 转为 success/warning/error。</td><td>保存失败统一落到 <code>common.failed</code>；pending skill 导入失败走 skill import 文案。</td><td>成功消息来自 <code>common.createSuccess</code> 或 <code>common.saveSuccess</code>。</td></tr>
+      <tr><td>adapter</td><td><code>fs.importSkills</code> → <code>POST /api/skills/import</code>。</td><td><code>assistants.create/update</code> → <code>POST /api/assistants</code> 或 <code>PUT /api/assistants/:id</code>。</td><td><code>fs.listAvailableSkills</code>、<code>assistants.list</code>、<code>assistants.get</code>。</td></tr>
+      <tr><td>后端边界</td><td>aioncore 负责解析目录、父目录、<code>SKILL.md</code> 或 zip，并返回 <code>skill_names</code> / <code>failed</code>。</td><td>aioncore 持久化 assistant capabilities 和 defaults。</td><td>再次 GET 是本切片可观察的后端状态确认点。</td></tr>
+      <tr><td>测试</td><td>手动导入 E2E mock dialog，最后用 HTTP helper 读取 <code>/api/skills</code>。</td><td>assistant skills E2E 保存后重新打开 assistant 并断言选择摘要存在。</td><td>refresh/empty E2E 用 bridge 预置 skill 后重新进入 Skills Hub。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="sequence">3. Mermaid 时序</h2>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  actor User as 用户
+  participant Btn as TalkToButlerButton
+  participant SH as SkillsHubSettings
+  participant Dialog as ipcBridge.dialog
+  participant Msg as skillImportMessages
+  participant Fs as ipcBridge.fs
+  participant Http as httpBridge
+  participant Core as aioncore /api
+  participant AS as AssistantSettings
+  participant AE as useAssistantEditor
+  participant Assist as ipcBridge.assistants
+
+  User-&gt;&gt;Btn: Add Skill 下拉选择 Import Skills
+  Btn-&gt;&gt;SH: onManual()
+  SH-&gt;&gt;Dialog: showOpen({ openFile, openDirectory })
+  Dialog--&gt;&gt;SH: [skillPath]
+  SH-&gt;&gt;Fs: importSkills({ skill_path: skillPath })
+  Fs-&gt;&gt;Http: httpPost('/api/skills/import')
+  Http-&gt;&gt;Core: POST /api/skills/import
+  Core--&gt;&gt;Http: { skill_names, failed? } 或 HTTP error
+  Http--&gt;&gt;Fs: data 或 throw
+  Fs--&gt;&gt;SH: result 或 error
+  alt 全部成功
+    SH-&gt;&gt;Msg: buildSkillImportNotice(result)
+    SH-&gt;&gt;User: Message.success
+    SH-&gt;&gt;Fs: listAvailableSkills()
+  else 部分成功
+    SH-&gt;&gt;Msg: buildSkillImportNotice(result)
+    SH-&gt;&gt;User: Message.warning
+    SH-&gt;&gt;Fs: listAvailableSkills()
+  else result.failed 全失败
+    SH-&gt;&gt;Msg: buildSkillImportNotice(result)
+    SH-&gt;&gt;User: Message.error
+    SH-&gt;&gt;Fs: listAvailableSkills()
+  else HTTP throw/catch
+    SH-&gt;&gt;User: Message.error
+    Note over SH: catch 分支不调用 fetchData()
+  end
+
+  User-&gt;&gt;AS: 打开 assistant 编辑器并选择默认 skill
+  AS-&gt;&gt;AE: selectedSkills / defaultSkillsMode
+  User-&gt;&gt;AE: Save
+  opt pendingSkills 尚未导入
+    AE-&gt;&gt;Fs: importSkills({ skill_path })
+    Fs-&gt;&gt;Core: POST /api/skills/import
+  end
+  AE-&gt;&gt;Assist: create(request) 或 update(request)
+  Assist-&gt;&gt;Core: POST /api/assistants 或 PUT /api/assistants/:id
+  AE-&gt;&gt;Assist: list() / get()
+  AE-&gt;&gt;User: Message.success
+    </div>
+  </div>
+
+  <h2 id="paths">4. 正常与异常路径</h2>
+  <h3>4.1 Skills Hub 正常路径</h3>
+  <ol>
+    <li><code>fetchData()</code> 初始读取 <code>listAvailableSkills</code>、<code>listSkillImportHistory</code>、<code>getSkillImportLimits</code>。</li>
+    <li><code>handleManualImport()</code> 通过原生 dialog 得到文件或目录路径。</li>
+    <li><code>handleImport()</code> 调用 <code>fs.importSkills.invoke({ skill_path })</code>。</li>
+    <li><code>buildSkillImportNotice()</code> 根据 <code>skill_names</code> 和 <code>failed</code> 生成成功、警告或错误消息。</li>
+    <li><code>notice.importedNames.length &gt; 0</code> 时清空搜索并 <code>fetchData()</code>；<code>notice.type !== 'success'</code> 的 result 失败也会 <code>fetchData()</code>；HTTP throw 的 catch 只显示错误，不刷新。</li>
+  </ol>
+
+  <h3>4.2 AssistantSettings 正常路径</h3>
+  <ol>
+    <li><code>useAssistantList()</code> 从 <code>assistants.list.invoke()</code> 加载 catalog。</li>
+    <li><code>handleCreate()</code> 或 <code>handleEdit()</code> 读取 skill catalog，交给 <code>DefaultsSection</code> 渲染。</li>
+    <li>用户选择默认 skill 后，<code>handleSkillSelectionChange()</code> 更新 <code>selectedSkills</code> 和被禁用的自动注入 skill。</li>
+    <li><code>handleSave()</code> 把选择写入 <code>enabled_skills</code> 和 <code>defaults.skills.value</code>。</li>
+    <li>保存成功后刷新 assistant list、detail cache，并发出 <code>chat.history.refresh</code>。</li>
+  </ol>
+
+  <h3>4.3 异常 / 边界路径</h3>
+  <table>
+    <thead><tr><th>边界</th><th>触发点</th><th>传播方式</th><th>用户可见结果</th></tr></thead>
+    <tbody>
+      <tr><td>文件过大</td><td>后端返回 <code>SKILL_IMPORT_FILE_TOO_LARGE</code>。</td><td><code>isBackendHttpError()</code> 或 result.failed → <code>getSkillImportCodeMessage()</code>。</td><td>显示“文件超过大小限制”的本地化错误；pending skill 保存链路中止。</td></tr>
+      <tr><td>部分成功</td><td>父目录或 zip 内部分 skill 成功、部分失败。</td><td><code>buildSkillImportNotice()</code> 生成 warning，并格式化失败项。</td><td>显示 warning，随后重新拉取 skill 列表和导入历史。</td></tr>
+      <tr><td>builtin assistant</td><td>打开官方助手详情。</td><td><code>AssistantEditorSections</code> 判定 <code>isReadOnlyAssistant</code>。</td><td>不渲染可编辑默认 skill Select，只显示只读摘要。</td></tr>
+      <tr><td>highlight 不存在</td><td>URL 里带不存在的 <code>?highlight=</code>。</td><td><code>SkillsHubSettings</code> 找不到 DOM ref，不清除 search param。</td><td>页面仍显示 My Skills，不崩溃；E2E 断言 section 可见。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">5. E2E 证据</h2>
+  <table>
+    <thead><tr><th>测试文件</th><th>证明点</th><th>可复用读法</th></tr></thead>
+    <tbody>
+      <tr><td><code>tests/e2e/features/settings/skills/manual-import.e2e.ts</code></td><td>mock <code>dialog.showOpenDialog</code> 返回临时 skill 路径；点击手动导入；断言 success message、My Skills 卡片和 <code>source === 'custom'</code>。</td><td>这是手动导入意图最贴近用户动作的 E2E，但 selector 需要与当前 <code>TalkToButlerButton</code> 输出重新核对。</td></tr>
+      <tr><td><code>tests/e2e/specs/assistant-settings-skills.e2e.ts</code></td><td>创建 custom assistant，选择默认 skill，保存并重开，断言选中摘要仍存在。</td><td>证明绑定 skill 写入后端并能重新读取。</td></tr>
+      <tr><td><code>tests/e2e/features/settings/skills/refresh-empty-tabs.e2e.ts</code></td><td>通过 HTTP helper 预置 skill，再回到 Skills Hub 验证列表变化。</td><td>证明 UI 依赖重新读取后端状态，而不是本地猜测。</td></tr>
+      <tr><td><code>tests/e2e/features/settings/skills/edge-cases.e2e.ts</code></td><td>无外部源和 highlight 不存在时页面仍可用。</td><td>适合验证 URL 参数和空状态边界。</td></tr>
+      <tr><td><code>tests/e2e/features/settings/skills/special-cases.e2e.ts</code></td><td>特殊字符名称和 20 个 skill 渲染不会让 My Skills 崩溃。</td><td>提醒 data-testid 与 skill name 需要规范化。</td></tr>
+      <tr><td><code>tests/e2e/helpers/skillsHub.ts</code></td><td><code>getMySkills()</code>、<code>importSkillViaBridge()</code> 等 helper 直接访问 <code>/api/skills</code>。</td><td>用于区分“UI 行为断言”和“后端状态断言”。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="limits">6. 边界说明</h2>
+  <div class="callout warning">
+    <p><strong>后端实现边界：</strong>本切片在 AionU 前端仓库内没有读到 <code>/api/skills/import</code> 的后端路由实现，后端内部解析和持久化细节应继续进入 aioncore 源码验证。本切片只把可观察边界讲到 <code>ipcBridge</code> HTTP contract、导入结果结构和 E2E 的后端状态读取。</p>
+  </div>
+  <div class="callout warning">
+    <p><strong>测试资产演进：</strong><code>tests/e2e/features/settings/skills/</code> 中仍有外部源卡片、批量导入按钮等相邻证据；当前读到的 <code>SkillsHubSettings.tsx</code> 主入口集中在手动导入、导入历史、custom / official tab。本参考把手动导入作为 current source 主链路，把外部源相关测试视为相邻测试资产。</p>
+  </div>
+  <div class="callout warning">
+    <p><strong>手动导入 selector 漂移：</strong>当前 <code>SkillsHubSettings.tsx</code> 给 <code>TalkToButlerButton</code> 传入 <code>data-testid='btn-add-skill'</code>，组件会把手动菜单项渲染为 <code>btn-add-skill-manual</code>。而 <code>manual-import.e2e.ts</code> 仍查找 <code>btn-manual-import</code>。因此它能作为链路意图证据，但在声明测试已通过前必须运行或修正 selector。</p>
+  </div>
+</main>
+<script>
+  mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });
+</script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin 智能体流式对话切片参考</title>
+  <link rel="stylesheet" href="../assets/admin-agent-chat.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-server-entry/reference/server-entry-overview.html">Server 入口参考</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">责任链参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Client 参考</a>
+    <a href="../../module-commons-grpc/reference/commons-grpc-overview.html">gRPC 参考</a>
+  </nav>
+
+  <h1>Admin 智能体流式对话切片参考</h1>
+  <p class="lead">这份参考用于排查 Admin 智能体流式对话。它把入口端点、关键 DTO、Handler 顺序、gRPC URI、stream writer、失败/取消/usage/持久化边界和调试 checklist 放在一处。</p>
+
+  <h2>1. 入口端点与认证上下文</h2>
+  <table>
+    <thead>
+      <tr><th>项目</th><th>当前源码事实</th><th>源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP 入口</td>
+        <td><code>POST /agent/{id}/chat</code>，Controller 类级路径是 <code>/agent</code>，方法路径是 <code>/{id}/chat</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/AgentController.java</span></td>
+      </tr>
+      <tr>
+        <td>响应类型</td>
+        <td><code>produces = MediaType.TEXT_EVENT_STREAM_VALUE</code>，返回 <code>Flux&lt;String&gt;</code>。</td>
+        <td><span class="where">AgentController#chat</span></td>
+      </tr>
+      <tr>
+        <td>认证</td>
+        <td><code>@LoginRequired(role = RoleEnum.USER)</code> 触发 Admin 拦截器读取 <code>Snail-Ai-Auth</code>。</td>
+        <td><span class="where">AuthenticationInterceptor.java</span></td>
+      </tr>
+      <tr>
+        <td>用户上下文</td>
+        <td>拦截器将 <code>UserPO</code> 写入 <code>UserSessionUtils</code>；请求完成后清理 ThreadLocal。</td>
+        <td><span class="where">UserSessionUtils.java</span></td>
+      </tr>
+      <tr>
+        <td>请求体</td>
+        <td><code>conversationId</code>、<code>content</code> 必填；<code>disabledMcpServerIds</code>、<code>disabledSkillIds</code> 可选。</td>
+        <td><span class="where">AgentChatRequestVO.java</span></td>
+      </tr>
+      <tr>
+        <td>Controller 输出口</td>
+        <td><code>FluxBridgeChatStreamWriter</code> 实现 <code>ChatStreamWriter</code>，<code>send</code> 调 <code>sink.next</code>，<code>complete</code> 调 <code>sink.complete</code>。</td>
+        <td><span class="where">AgentController.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>2. 关键 DTO 与共享上下文</h2>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>方向</th><th>关键字段</th><th>使用边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AgentChatRequestVO</code></td>
+        <td>HTTP 请求体</td>
+        <td><code>conversationId</code>、<code>content</code>、禁用 MCP/Skill 列表</td>
+        <td>Admin Controller 的入参校验模型。</td>
+      </tr>
+      <tr>
+        <td><code>AgentChatCommand</code></td>
+        <td>Controller 到服务</td>
+        <td><code>agentId</code>、<code>conversationId</code>、<code>content</code>、<code>streamWriter</code>、<code>sid</code></td>
+        <td>把 Web 层参数转成应用服务命令。</td>
+      </tr>
+      <tr>
+        <td><code>AgentChatContext</code></td>
+        <td>Server 责任链内部</td>
+        <td><code>user</code>、<code>agent</code>、<code>modelConfig</code>、<code>mcpServerDescriptors</code>、<code>skillDescriptors</code>、<code>historyMessages</code>、<code>targetClient</code></td>
+        <td>所有 Handler 共享的接力棒；失败时用 <code>terminated</code> 短路。</td>
+      </tr>
+      <tr>
+        <td><code>ChatDispatchRequest</code></td>
+        <td>Server 到 Client</td>
+        <td><code>requestId</code>、<code>sid</code>、Agent/model/MCP/Skill/history/system prompt/server port</td>
+        <td><code>LlmCallHandler</code> 组装，gRPC body 用 JSON 字符串传输。</td>
+      </tr>
+      <tr>
+        <td><code>ChatStreamResponse</code></td>
+        <td>Client 到 Server</td>
+        <td><code>type</code>、<code>content</code>、<code>fullText</code>、<code>fullThinking</code>、token、duration、error</td>
+        <td>gRPC streaming 的业务 data；类型为 <code>text</code>、<code>thinking</code>、<code>completion</code>、<code>error</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ChatResultPersistCommand</code></td>
+        <td>Server completion 到持久化</td>
+        <td><code>fullText</code>、<code>thinkingText</code>、input/output/cache tokens、memory 开关、shortTermWindow</td>
+        <td><code>ChatStreamObserver.handleCompletion</code> 创建，交给虚拟线程异步持久化。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. Server Handler 顺序</h2>
+  <table>
+    <thead>
+      <tr><th>Order</th><th>Handler</th><th>职责</th><th>失败边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>10</td><td><code>InitContextHandler</code></td><td>取当前用户或显式请求用户，按 <code>agentId</code> 加载 Agent。</td><td>Agent 不存在时写错误、complete、置 <code>terminated</code>。</td></tr>
+      <tr><td>20</td><td><code>ConversationHandler</code></td><td>按 <code>conversationId</code> 创建会话并保存用户消息，状态为 RUNNING。</td><td>没有显式捕获异常；数据库异常会向外抛。</td></tr>
+      <tr><td>30</td><td><code>ModelResolveHandler</code></td><td>选择 Agent 绑定模型或默认 chat 模型，组装 <code>ModelConfig</code>。</td><td>未配置模型或配置加载失败时终止。</td></tr>
+      <tr><td>40</td><td><code>McpHandler</code></td><td>加载 Agent MCP Server，过滤本次禁用列表，生成 Client 描述符。</td><td>解析 JSON 失败时回退空列表或空 Map。</td></tr>
+      <tr><td>50</td><td><code>SystemPromptHandler</code></td><td>以 Agent instruction 初始化 system prompt。</td><td>instruction 为空时使用默认助手提示。</td></tr>
+      <tr><td>60</td><td><code>RagHandler</code></td><td>强制模式在 Server 检索并追加 prompt；智能模式追加可用知识库说明。</td><td>知识库不存在或检索失败时记录日志，通常不终止主链路。</td></tr>
+      <tr><td>70</td><td><code>SkillAgentChatHandler</code></td><td>加载 Skill 内容，过滤本次禁用列表，生成 Skill 描述符。</td><td>Skill 为空时直接跳过。</td></tr>
+      <tr><td>75</td><td><code>ContextCollectorHandler</code></td><td>校验 app、选择活跃 Client、写入用户短期记忆、加载历史消息。</td><td>缺 appId、app 停用、无 Client 时写错误并终止。</td></tr>
+      <tr><td>80</td><td><code>LlmCallHandler</code></td><td>组装 <code>ChatDispatchRequest</code>，调用 <code>GrpcChannelUtil.sendServerStreaming</code>。</td><td>缺 targetClient 或 modelConfig 时终止；gRPC 发起异常会向外抛。</td></tr>
+    </tbody>
+  </table>
+  <p class="note">执行器 <code>AgentChatChainService</code> 只是遍历列表，不会主动 break。每个 Handler 必须自己检查 <code>ctx.isTerminated()</code>，这是调试“错误已写出但后续还执行吗”的关键。</p>
+
+  <h2>4. gRPC URI 与 Client 执行</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>组件</th><th>关键事实</th><th>源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Server 发起</td>
+        <td><code>GrpcChannelUtil.sendServerStreaming</code></td>
+        <td>构造统一 <code>GrpcSnailAiRequest</code>，metadata.uri 为 <code>/chat/dispatch</code>，body 为 <code>ChatDispatchRequest</code> JSON。</td>
+        <td><span class="where">GrpcChannelUtil.java</span></td>
+      </tr>
+      <tr>
+        <td>业务 URI</td>
+        <td><code>UriConstants.CHAT_DISPATCH</code></td>
+        <td>常量值是 <code>/chat/dispatch</code>，方向是 Server 到 Client。</td>
+        <td><span class="where">UriConstants.java</span></td>
+      </tr>
+      <tr>
+        <td>Client gRPC server</td>
+        <td><code>ClientGrpcServer</code></td>
+        <td>注册 unary 和 server-streaming service，监听 Agent Client 本地端口。</td>
+        <td><span class="where">ClientGrpcServer.java</span></td>
+      </tr>
+      <tr>
+        <td>Client 分发</td>
+        <td><code>ClientRequestDispatcher</code></td>
+        <td>读取 metadata.uri，委托 <code>GrpcRequestDispatcher.dispatchStreaming</code>。</td>
+        <td><span class="where">ClientRequestDispatcher.java</span></td>
+      </tr>
+      <tr>
+        <td>聊天 handler</td>
+        <td><code>ChatDispatchStreamingHandler</code></td>
+        <td>只支持 <code>/chat/dispatch</code>，解析请求后把 text/thinking/completion/error 映射为 <code>GrpcSnailAiResult.data</code>。</td>
+        <td><span class="where">ChatDispatchStreamingHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>运行壳</td>
+        <td><code>ChatSessionRuntime</code></td>
+        <td>增加 active chat 计数，解析工具，执行流式聊天，在 completion/error 后清理工具连接并减少计数。</td>
+        <td><span class="where">ChatSessionRuntime.java</span></td>
+      </tr>
+      <tr>
+        <td>工具解析</td>
+        <td><code>ToolRuntime</code></td>
+        <td>解析 MCP、基础工具、智能 RAG 工具、Skill 工具和业务 <code>@Tool</code>。</td>
+        <td><span class="where">ToolRuntime.java</span></td>
+      </tr>
+      <tr>
+        <td>模型执行</td>
+        <td><code>ClientChatExecutor</code></td>
+        <td>构建 Prompt 和 ChatClient，写入 Advisor context，订阅 <code>stream().chatResponse()</code>。</td>
+        <td><span class="where">ClientChatExecutor.java</span></td>
+      </tr>
+      <tr>
+        <td>Advisor</td>
+        <td><code>TokenUsageCollectorAdvisor</code>、<code>ThinkingCollectorAdvisor</code>、<code>StreamChunkForwarderAdvisor</code></td>
+        <td>分别收集 usage、thinking 和文本 chunk，写入 <code>ClientStreamExecutionContext</code>。</td>
+        <td><span class="where">SnailAiAgentAutoConfiguration.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. 流式回写、取消与持久化边界</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>当前行为</th><th>排查提示</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>text chunk</td>
+        <td>Client 发 <code>ChatStreamResponse.text(sid, text)</code>；Server <code>ChatStreamObserver.handleText</code> 序列化后追加换行并写入 <code>ChatStreamWriter.send</code>。</td>
+        <td>前端没有增量输出时，看 Client 是否触发 <code>StreamChunkForwarderAdvisor</code>。</td>
+      </tr>
+      <tr>
+        <td>thinking chunk</td>
+        <td>Client 从 metadata 或底层响应对象抽取 thinking；Server 过滤空文本后按 <code>thinking</code> 类型写回。</td>
+        <td>依赖模型是否返回 reasoning/thinking metadata。</td>
+      </tr>
+      <tr>
+        <td>completion</td>
+        <td>Client 将 fullText、fullThinking、tokens、duration 发回后调用 observer completed；Server 收到 completion 只触发持久化，不把 completion 事件写给 HTTP 客户端。</td>
+        <td>助手消息和 usage 缺失时，先确认 completion 是否到达 Server。</td>
+      </tr>
+      <tr>
+        <td>error</td>
+        <td>Client error 会以 <code>ChatStreamResponse.error</code> 回传；Server 写 <code>[ERROR] message</code>，但不触发 completion 持久化。</td>
+        <td>只看到用户消息没有助手消息，可能是 error 路径。</td>
+      </tr>
+      <tr>
+        <td>HTTP 取消</td>
+        <td>Controller 的 <code>sink.onCancel(() -&gt; {})</code> 当前为空；writer 会避免向已取消 sink 写入，但没有主动取消已经发起的 gRPC 调用。</td>
+        <td>用户关闭页面不等于 Client 模型调用立即停止。</td>
+      </tr>
+      <tr>
+        <td>usage</td>
+        <td><code>TokenUsageCollectorAdvisor</code> 只在流式响应 metadata 中存在 usage 且 totalTokens 大于 0 时写入 state。</td>
+        <td>usage 为 0 可能是模型或配置未返回流式 usage，不一定是持久化失败。</td>
+      </tr>
+      <tr>
+        <td>用户消息持久化</td>
+        <td><code>ConversationHandler</code> 在 gRPC 分发前插入 USER 记录。</td>
+        <td>这解释了“用户消息有、助手消息没有”的常见现象。</td>
+      </tr>
+      <tr>
+        <td>助手消息持久化</td>
+        <td><code>ChatResultPersistService</code> 在虚拟线程中插入 ASSISTANT 记录，写 thinking 和 token。</td>
+        <td>失败会记录日志并抛出到虚拟线程内，不会补发 SSE。</td>
+      </tr>
+      <tr>
+        <td>短期记忆</td>
+        <td>用户消息在 <code>ContextCollectorHandler</code> 追加；助手消息在 completion 后由 <code>ChatResultPersistService</code> 追加。</td>
+        <td>上下文缺历史时，分别检查这两个写入点。</td>
+      </tr>
+      <tr>
+        <td>每日统计</td>
+        <td><code>updateUsageStat</code> 当前递增 <code>message_count</code>，并在无记录时插入当天统计。</td>
+        <td>统计的是消息/会话计数；token 数保存在对话记录中。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. 调试 checklist</h2>
+  <table>
+    <thead>
+      <tr><th>症状</th><th>优先检查</th><th>判断依据</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>HTTP 401 或未登录</td>
+        <td><code>Snail-Ai-Auth</code> header、JWT audience、用户是否存在、角色是否满足 USER。</td>
+        <td><code>AuthenticationInterceptor</code> 只对带 <code>@LoginRequired</code> 的方法强制认证。</td>
+      </tr>
+      <tr>
+        <td>SSE 建立后立即错误</td>
+        <td><code>InitContextHandler</code>、<code>ModelResolveHandler</code>、<code>ContextCollectorHandler</code> 的错误文本。</td>
+        <td>这些错误会直接写 stream writer 并 complete。</td>
+      </tr>
+      <tr>
+        <td>找不到 Client</td>
+        <td>Agent 的 <code>appId</code>、应用启用状态、Client 心跳、<code>ClientInstanceManager.getAliveInstances</code>。</td>
+        <td>Client 心跳每 10 秒上报；Server 认为 40 秒未心跳过期。</td>
+      </tr>
+      <tr>
+        <td>Client 收不到任务</td>
+        <td><code>LlmCallHandler</code> 日志中的目标 host/port、<code>UriConstants.CHAT_DISPATCH</code>、Client gRPC 端口。</td>
+        <td>Server 到 Client 是 gRPC server-streaming，不是 HTTP。</td>
+      </tr>
+      <tr>
+        <td>Client 收到任务但无文本</td>
+        <td><code>ChatDispatchStreamingHandler</code>、<code>ChatSessionRuntime</code>、工具解析异常、模型配置校验、<code>ClientChatExecutor</code> error consumer。</td>
+        <td>error 会通过 <code>ChatStreamResponse.error</code> 回传。</td>
+      </tr>
+      <tr>
+        <td>文本有但 thinking 没有</td>
+        <td>模型是否支持 reasoning/thinking metadata，<code>ThinkingCollectorAdvisor</code> 是否能识别 key。</td>
+        <td>当前兼容 <code>reasoningContent</code>、<code>thinking</code>、<code>reasoning</code> 和部分 additionalProperties。</td>
+      </tr>
+      <tr>
+        <td>文本有但 usage 为 0</td>
+        <td>模型流式 usage 是否启用，最终 chunk 是否包含 usage，<code>TokenUsageCollectorAdvisor</code> 日志。</td>
+        <td>Advisor 只在 totalTokens 大于 0 时写入 token。</td>
+      </tr>
+      <tr>
+        <td>用户消息有、助手消息无</td>
+        <td>是否收到 completion、<code>ChatStreamObserver.handleCompletion</code> 是否执行、<code>ChatResultPersistService</code> 日志。</td>
+        <td>用户消息在 gRPC 前保存；助手消息只在 completion 后保存。</td>
+      </tr>
+      <tr>
+        <td>关闭页面后模型还在跑</td>
+        <td><code>AgentController.chat</code> 中 <code>sink.onCancel</code> 当前为空。</td>
+        <td>取消只阻止继续写已取消 sink，没有向 gRPC 或 Client 传播取消信号。</td>
+      </tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

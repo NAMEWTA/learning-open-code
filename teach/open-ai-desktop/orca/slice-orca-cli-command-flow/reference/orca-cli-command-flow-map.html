@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca CLI 命令执行参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Orca CLI 命令执行参考</h1>
+        <p class="meta">范围：CLI 入口、command spec、handler、RuntimeClient、本地/远程 transport、main runtime RPC 边界与测试护栏。</p>
+
+        <h2>端到端时序</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>主文件</th>
+              <th>关键事实</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>进程入口</td>
+              <td><code>src/cli/index.ts</code></td>
+              <td>处理 `agent-teams-tmux`、`claude-teams` special shim；普通命令进入 parse、help、validate、RuntimeClient、dispatch。</td>
+            </tr>
+            <tr>
+              <td>参数解析</td>
+              <td><code>src/cli/args.ts</code></td>
+              <td>非 flag token 进入 commandPath；boolean flag 不消费值；`--flag=value` 支持值以 `--` 开头；positionals 由 spec 归一化。</td>
+            </tr>
+            <tr>
+              <td>命令声明</td>
+              <td><code>src/cli/specs/index.ts</code></td>
+              <td>`COMMAND_SPECS` 聚合 core、project、file、browser、orchestration、computer、environment、linear、vm、emulator 等 spec。</td>
+            </tr>
+            <tr>
+              <td>handler 查找</td>
+              <td><code>src/cli/dispatch.ts</code></td>
+              <td>多个 handler group 合并成 Map，重复 key 立即失败；实际查找 key 是 `commandPath.join(" ")`。</td>
+            </tr>
+            <tr>
+              <td>命令适配</td>
+              <td><code>src/cli/handlers/terminal.ts</code></td>
+              <td>代表性普通命令：解析 terminal/worktree/timeout flag，调用 `terminal.*` runtime RPC，再格式化输出。</td>
+            </tr>
+            <tr>
+              <td>本地 runtime client</td>
+              <td><code>src/cli/runtime/client.ts</code></td>
+              <td>无 remote pairing 时读取 metadata 并调用 `sendRequest()`；失败由 RuntimeClientError/RuntimeRpcFailureError 统一表达。</td>
+            </tr>
+            <tr>
+              <td>远程 runtime client</td>
+              <td><code>src/cli/runtime/websocket-transport.ts</code></td>
+              <td>pairing code 或 saved environment 转成 WebSocket request，错误映射回 CLI RuntimeClientError。</td>
+            </tr>
+            <tr>
+              <td>runtime server</td>
+              <td><code>src/main/runtime/runtime-rpc.ts</code></td>
+              <td>main 进程发布 metadata，校验 auth/device token，控制 long-poll，并调用 RpcDispatcher。</td>
+            </tr>
+            <tr>
+              <td>runtime 方法</td>
+              <td><code>src/main/runtime/rpc/methods/index.ts</code></td>
+              <td>`ALL_RPC_METHODS` 是 server 暴露方法的总清单；各 method 文件才是真正业务入口。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>入口和语法校验</h2>
+        <p>
+          <code>src/cli/index.ts</code> 的普通路径先调用 <code>parseArgs()</code> 和 <code>normalizeCommandPositionals()</code>。
+          如果用户请求 help，直接打印，不创建 RuntimeClient。没有 commandPath 时打印 root help。
+          只有非 help 的真实命令才进入 try/catch。
+        </p>
+        <pre><code class="language-text">parse argv
+  -> help? printHelp and return
+  -> empty? root help and return
+  -> validateCommandAndFlags
+  -> new RuntimeClient
+  -> dispatch</code></pre>
+        <p>
+          `validateCommandAndFlags()` 先找 command spec，不存在就抛 <code>invalid_argument</code>。
+          然后检查 positional 和 flag 是否重复提供，最后逐个 flag 检查它是否是 global flag、spec allowed flag，
+          或 browser 命令允许的 <code>--page</code>。这个顺序是用户体验护栏：语法错误不应被 runtime unavailable 掩盖。
+          具体 allowed flags 不在聚合文件里，而在 <code>src/cli/specs/core.ts</code>、
+          <code>src/cli/specs/serve.ts</code>、<code>src/cli/specs/browser-basic.ts</code>、
+          <code>src/cli/specs/browser-advanced.ts</code>、<code>src/cli/specs/orchestration.ts</code>
+          等具体 spec 文件中声明。
+        </p>
+        <p>
+          <code>src/cli/args.test.ts</code> 覆盖了 <code>--text=--help</code>、repeatable <code>--label</code>、
+          unknown command-specific flag 等边界；<code>src/cli/index.test.ts</code> 还覆盖 positional 和 flag 同时传入时的冲突提示。
+        </p>
+
+        <h2>remote selection 和本地命令</h2>
+        <p>
+          RuntimeClient 构造参数里，<code>undefined</code> 表示允许读取默认环境变量，
+          <code>null</code> 表示明确禁用 remote fallback。<code>src/cli/index.ts</code> 对
+          <code>environment</code>、<code>serve</code>、<code>agent</code>、<code>vm</code> 传入 null，
+          这样即使 shell 里有 <code>ORCA_ENVIRONMENT</code>，本地管理命令也不会误连远程 runtime。
+        </p>
+        <p>
+          <code>src/cli/runtime/client.ts</code> 的 <code>resolveRemotePairing()</code> 保证 pairing code 与 environment selector 互斥。
+          environment selector 会调用 saved environment store，pairing code 会解析 `orca://pair?...` 或 bare payload。
+          malformed pairing code 在本地 metadata lookup 前就失败。
+        </p>
+        <p>
+          remote 命令的另一个边界在 <code>src/cli/selectors.ts</code>。<code>active/current</code>
+          这种 cwd shortcut 只能用于本机 Orca，因为 paired CLI 的 cwd 属于客户端机器，不属于远程 server。
+          browser 命令在远程省略 worktree 时让 server-side focus 决定目标；terminal create 在远程必须显式给 <code>--worktree</code>。
+          <code>worktree current</code> 是更严格的例子：<code>src/cli/specs/core.ts</code> 没有给它声明
+          <code>--worktree</code>，<code>src/cli/handlers/worktree.ts</code> 也固定解析当前 cwd。
+          远程场景应改用 <code>worktree show --worktree id:&lt;id&gt;</code> 这类接受显式 selector 的命令。
+        </p>
+
+        <h2>handler 形状</h2>
+        <p>
+          <code>src/cli/handlers/core.ts</code> 说明 core 命令和普通 RPC 命令的不同：
+          <code>open</code> 调 <code>RuntimeClient.openOrca()</code> 并轮询 reachable；
+          <code>status</code> 调 <code>getCliStatus()</code>，普通模式下 runtime unreachable 会设置 exit code 1；
+          <code>serve</code> 直接调用 <code>serveOrcaApp()</code> 启动 foreground server，并校验 port、pairing flag、recipe-json 约束。
+          <code>src/cli/help.ts</code> 和 <code>src/cli/runtime/launch.ts</code> 分别是 help 文案与 app/server 启动的支撑文件。
+        </p>
+        <p>
+          普通命令 handler 通常有四步：读 flag、解析 selector、调用 <code>client.call()</code>、调用 <code>printResult()</code>。
+          <code>src/cli/handlers/worktree.ts</code> 把 repo、parent、agent、setup、Linear issue 等 flag 组装成
+          <code>worktree.create</code> params；<code>src/cli/handlers/browser-interact.ts</code> 把 element/value/mouse flag
+          映射到 <code>browser.click</code>、<code>browser.fill</code>、<code>browser.mouseMove</code> 等 method；
+          <code>src/cli/handlers/browser-nav.ts</code> 给 goto/reload/wait 这种慢操作设置 per-call timeout。
+        </p>
+        <p>
+          <code>src/cli/handlers/terminal.ts</code> 是理解 selector 的好入口。没传 <code>--terminal</code> 时，
+          它会通过 <code>terminal.resolveActive</code> 找当前 worktree 的活跃终端。<code>terminal.wait</code>
+          对 timeout 有单独设置，未满足等待条件时会把 CLI exit code 设为 1。远程 <code>terminal create</code>
+          不允许隐式 cwd 推断，必须传 server-side worktree selector。
+        </p>
+        <p>
+          <code>src/cli/handlers/orchestration.ts</code> 有两个特例。<code>check --wait</code> 会向 stderr 输出 JSON heartbeat，
+          防止父进程因为长时间无输出把 subprocess 背景化；<code>ask --json</code> 输出 bare JSON result，
+          不走普通 pretty RPC envelope，方便 worker 直接管道到 `jq`。<code>src/cli/handlers/orchestration.test.ts</code>
+          覆盖 check/ask 的 timeout flag；<code>src/main/runtime/orchestration-cli-subprocess.test.ts</code>
+          以 subprocess 方式验证 <code>check --wait</code> heartbeat 只写 stderr，stdout 保持干净 JSON。
+        </p>
+
+        <h2>RuntimeClient 本地路径</h2>
+        <p>
+          <code>src/cli/runtime/metadata.ts</code> 先决定 userData 路径。macOS 默认是
+          <code>~/Library/Application Support/orca</code>，Windows 走 APPDATA，Linux 走 XDG config；<code>ORCA_USER_DATA_PATH</code>
+          可以覆盖。metadata 必须包含兼容 transport 和 authToken。metadata 的 shared shape 和 transport 查找来自
+          <code>src/shared/runtime-bootstrap.ts</code>。
+        </p>
+        <p>
+          <code>src/cli/runtime/transport.ts</code> 用 metadata 里的 Unix socket 或 named pipe 建连，
+          写入一行 JSON request，并解析 newline-delimited response frame。它会拒绝 invalid JSON、schema 不匹配、
+          response id 不匹配，以及 runtimeId 在 in-flight 时变化的情况。keepalive frame 是
+          <code>{"_keepalive":true}</code>，只刷新 timeout，不交给 caller。
+        </p>
+        <p>
+          <code>src/cli/runtime/status.ts</code> 是本地 status 的特殊包装。读不到 transport 时返回 not_running 或 stale_bootstrap；
+          transport 存在但 RPC 不通时，会用 pid 判断 app 是 starting 还是 stale_bootstrap。
+          这比普通 RPC 的 runtime unavailable 更适合 CLI status。
+        </p>
+
+        <h2>RuntimeClient 远程路径</h2>
+        <p>
+          <code>src/cli/runtime/client.ts</code> 如果发现 remotePairing，就用
+          <code>src/cli/runtime/websocket-transport.ts</code> 调 shared <code>src/shared/remote-runtime-client.ts</code>。
+          除 <code>status.get</code> 外，第一次普通 RPC 之前会先请求 status，结合
+          <code>src/shared/protocol-version.ts</code> 和 <code>src/shared/protocol-compat.ts</code>
+          判定 client/server protocol 是否兼容。
+        </p>
+        <p>
+          远程 status 的语义也不同：它证明 paired runtime reachable，但本机 app.running 固定为 false、pid 为 null。
+          如果使用 saved environment，成功后会记录 recently used runtimeId，供环境列表排序或状态显示。
+          旧导入路径由 <code>src/cli/runtime-client.ts</code> 继续导出，错误类型定义在 <code>src/cli/runtime/types.ts</code>。
+        </p>
+
+        <h2>main runtime RPC 边界</h2>
+        <p>
+          CLI 传来的 method 不是直接进入业务函数。<code>src/main/runtime/runtime-rpc.ts</code>
+          启动时创建 Unix socket transport，生成 authToken，写入 metadata。WebSocket transport 是可选附加路径，
+          用 device token、E2EE channel 和 allowlist 区分 mobile/runtime scope。
+        </p>
+        <p>
+          本地 socket message 先经过 <code>parseAndAuth()</code>：必须有 id、method、authToken，且 token 等于 server 生成值。
+          long-poll request 由 <code>isLongPollRequest()</code> 分类，只有 <code>terminal.wait</code> 和
+          <code>orchestration.check</code> 且 wait=true 会占用 long-poll slot 并启动 keepalive。cap 满时返回
+          <code>runtime_busy</code>，短 RPC 仍可通过。
+          <code>orchestration.ask</code> 虽然也是阻塞式 RPC，CLI handler 会给它设置 per-call timeout override；
+          但 main runtime 的 <code>isLongPollRequest()</code> 不把它纳入 long-poll keepalive/cap 分类。
+        </p>
+        <p>
+          <code>src/main/runtime/rpc/unix-socket-transport.ts</code> 负责 socket idle timeout、1MB message cap、
+          newline frame、per-request AbortController 和 keepalive timer。WebSocket 路径在
+          <code>src/main/runtime/rpc/ws-transport.ts</code> 管连接数、pre-auth timeout、ping/pong heartbeat。
+        </p>
+        <p>
+          通过边界后，<code>src/main/runtime/rpc/dispatcher.ts</code> 从 registry 找 method，
+          用 method 自带 Zod schema parse params，调用 handler，并把 success/failure 包成
+          <code>src/shared/runtime-rpc-envelope.ts</code> 兼容的 envelope。<code>src/main/runtime/rpc/core.ts</code>
+          定义了普通 method、streaming method、request/response 和 registry。
+          CLI 侧 formatter 与 handler 的 result 类型主要引用 <code>src/shared/runtime-types.ts</code>。
+        </p>
+
+        <h2>方法表和业务入口</h2>
+        <p>
+          <code>src/main/runtime/rpc/methods/index.ts</code> 是 server 暴露方法的 manifest。
+          CLI handler 调的 <code>worktree.create</code>、<code>terminal.wait</code>、<code>browser.click</code>、
+          <code>orchestration.check</code> 都必须在这个总表里间接出现。最小例子是
+          <code>src/main/runtime/rpc/methods/status.ts</code>：`status.get` 无 params，handler 直接返回 <code>runtime.getStatus()</code>。
+        </p>
+        <p>
+          这也解释了排障顺序：如果 CLI 能 dispatch 但 runtime 返回 <code>method_not_found</code>，
+          先查 CLI handler method string 是否和 runtime method manifest 一致；如果返回 <code>invalid_argument</code>，
+          再查 runtime method schema，而不是只查 CLI allowed flags。
+        </p>
+
+        <h2>输出和错误</h2>
+        <p>
+          <code>src/cli/format.ts</code> 的 <code>printResult()</code> 在 <code>--json</code> 下输出 runtime success envelope，
+          普通模式只输出 formatter 文本。<code>reportCliError()</code> 在 JSON 模式下对 local CLI error 构造 failure envelope；
+          对 <code>RuntimeRpcFailureError</code> 则原样打印 runtime failure。普通模式下，runtime unavailable 会补充
+          “Run 'orca open' first” 的下一步。
+        </p>
+        <p>
+          这意味着测试 CLI 时要区分三类错误来源：CLI local validation error、transport/runtime availability error、
+          runtime method schema 或业务错误。它们都可能显示为 nonzero exit，但 JSON envelope 的 code/data 来源不同。
+        </p>
+
+        <h2>测试护栏</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>测试</th>
+              <th>保护的不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/cli/args.test.ts</code></td>
+              <td>`--flag=value` 能表达以 `--` 开头的值；repeatable flag 保留；unknown flag 被 command spec 拒绝。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/index.test.ts</code></td>
+              <td>root/help 不触 runtime；serve 参数先校验；environment 命令忽略远程 env fallback；remote cwd shortcut 被拒绝；terminal wait unsatisfied 设置 exit code。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/handlers/orchestration.test.ts</code></td>
+              <td>structured payload、heartbeat group recipient guard、check timeout 和 ask timeout 的 handler 行为。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/runtime-client.test.ts</code></td>
+              <td>本地 RuntimeClient 能调用 socket；`openOrca()` 已 reachable 时立即成功；structured runtime failure 被保留；invalid response 被拒绝。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/runtime/client-timeout-policy.test.ts</code></td>
+              <td>long-poll method 没有 params 时也不会在 timeout policy 里崩溃。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/runtime/transport.test.ts</code></td>
+              <td>runtime keepalive frame 会刷新 client per-call timeout；socket 关闭会转成 runtime_unavailable。</td>
+            </tr>
+            <tr>
+              <td><code>src/cli/runtime/websocket-transport.test.ts</code></td>
+              <td>remote pairing、saved environment、malformed pairing code、server protocol too old 都有覆盖。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/runtime-rpc.test.ts</code></td>
+              <td>auth token、status.get、WebSocket scope、long-poll keepalive、slot release、runtime_busy、短 RPC 不发 keepalive 都有覆盖。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/orchestration-cli-subprocess.test.ts</code></td>
+              <td>`check --wait` 子进程级验证：stderr line-flushed heartbeat、stdout 无 heartbeat、最终 JSON payload 可被管道处理。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/rpc/schemas.test.ts</code></td>
+              <td>runtime method schema 能解析 CLI 传来的代表性 params。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/rpc/dispatcher-feature-interactions.test.ts</code></td>
+              <td>dispatcher 在调用 runtime method 后按 method/result 记录 feature interaction。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>调试入口</h2>
+        <ul>
+          <li>unknown flag 却提示 Orca 未运行：先查 <code>src/cli/index.ts</code> 的 validate 是否仍早于 RuntimeClient lookup。</li>
+          <li>命令在 help 里出现但无法执行：查 <code>src/cli/specs/index.ts</code> 和 <code>src/cli/dispatch.ts</code> 是否同时注册。</li>
+          <li>远程命令误用客户端路径：查 <code>src/cli/selectors.ts</code> 的 remote cwd guard，以及 handler 是否绕过 selector helper。</li>
+          <li>long-poll 60 秒失败：查 <code>src/cli/runtime/client.ts</code> 的 timeout policy 和 runtime server keepalive/cap。</li>
+          <li>runtime 返回 method_not_found：查 CLI handler method string 与 <code>src/main/runtime/rpc/methods/index.ts</code>。</li>
+          <li>JSON 输出解析失败：查是否遇到 <code>orchestration ask --json</code> 这种 deliberately bare JSON 的特例。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,8 +1,6 @@
 ---
 name: teach
 description: 在本工作区内教用户学习新技能或新概念。适用于用户想要学习某个主题、请求教学指导的场景。
-disable-model-invocation: true
-argument-hint: "你想学习什么？"
 ---
 
 用户请求你教他们一些东西。这是一个有状态的请求——他们打算通过多个会话学习这个主题。
@@ -89,6 +87,16 @@ teach/<path>/<topic-teach>/
 
 > 💡 **自动化脚本**：使用 `scripts/init_topic.sh <project-path> <topic-slug>` 一键创建目录结构、占位文件并更新 index.md。
 
+### 主题完成硬闸门
+
+主题目录创建后只是脚手架，不能视为完成。标记主题完成前必须满足：
+
+- `MISSION.md` 已写入真实使命；批量生成模式可使用默认使命，但不得保留 `{主题}`、`{……}` 等占位符。
+- `RESOURCES.md` 已写入真实资源；源码入口、README、官方文档、测试目录都可以作为知识资源，找不到外部社区时必须在 `## 空白` 写明原因。
+- `SNAPSHOT.md` 已在课程和参考文档生成后运行 `scripts/generate_snapshot.py <topic-path>` 填充，不得保留 `generate_snapshot.py 将自动填充`。
+- `lessons/` 下至少有 1 个 HTML 课程。`reference/` 是辅助速查资料，不能替代课程。
+- 运行 `scripts/audit_topic.py <topic-path>` 通过；项目级批量检查用 `scripts/audit_topic.py <project-path> --all`。
+
 ## 源项目版本快照
 
 每个教学主题目录下的 `SNAPSHOT.md` 记录课程生成时所基于的源项目 git 版本和参考文件清单。当源项目更新后，用它作为 diff 基准，识别哪些课程需要更新。
@@ -110,7 +118,7 @@ teach/<path>/<topic-teach>/
    git -C <工作区根目录> ls-tree HEAD <子模块path>
    ```
 
-2. **记录课程引用的源文件**——列出所有被课程分析、引用、摘录的源文件路径及用途说明。
+2. **记录课程和参考文档引用的源文件**——列出所有被课程或参考文档分析、引用、摘录的源文件路径及用途说明。
 
 3. **写入 SNAPSHOT.md**，格式如下：
 
@@ -172,10 +180,10 @@ teach/<path>/<topic-teach>/
 
 教学根目录（`teach/<path>/<topic-teach>/`）即为当前教学工作区。用户的学习状态记录在此目录中的几个文件中：
 
-- `MISSION.md`：一份记录用户对该主题感兴趣 _原因_ 的文档。所有教学都应当以此为基础。使用 [references/MISSION-FORMAT.md](references/MISSION-FORMAT.md) 中的格式。
+- `MISSION.md`：一份记录用户对该主题感兴趣 _原因_ 的文档。所有教学都应当以此为基础。使用 [MISSION-FORMAT.md](MISSION-FORMAT.md) 中的格式。
 - `./reference/*.html`：参考资料目录。这些是课程中提炼出的学习要点——速查表、参考算法、语法、瑜伽体式、词汇表。它们是学习的原始单元。它们应该是美观的文档，打印效果好，专为快速查阅而设计。
-- `RESOURCES.md`：一份资源列表，可供探索以为教学提供上下文知识，或获取知识与智慧。使用 [references/RESOURCES-FORMAT.md](references/RESOURCES-FORMAT.md) 中的格式。
-- `./learning-records/*.md`：学习记录目录，记录用户学到的东西。它们大致相当于软件开发中的架构决策记录（ADR）——记录那些非显而易见的经验教训和关键洞察，这些内容可能以后需要修正，或推动未来的学习会话。它们用于计算最近发展区。文件命名格式为 `0001-<短横线命名>.md`，编号每次递增。使用 [references/LEARNING-RECORD-FORMAT.md](references/LEARNING-RECORD-FORMAT.md) 中的格式。
+- `RESOURCES.md`：一份资源列表，可供探索以为教学提供上下文知识，或获取知识与智慧。使用 [RESOURCES-FORMAT.md](RESOURCES-FORMAT.md) 中的格式。
+- `./learning-records/*.md`：学习记录目录，记录用户学到的东西。它们大致相当于软件开发中的架构决策记录（ADR）——记录那些非显而易见的经验教训和关键洞察，这些内容可能以后需要修正，或推动未来的学习会话。它们用于计算最近发展区。文件命名格式为 `0001-<短横线命名>.md`，编号每次递增。使用 [LEARNING-RECORD-FORMAT.md](LEARNING-RECORD-FORMAT.md) 中的格式。
 - `./lessons/*.html`：课程目录。一节课是一个独立、自包含的 HTML 输出，教授与使命紧密相关的一项内容。这是本工作区的主要教学单元。
 - `./assets/*`：课程间共享的可复用**组件**。参见[资产](#assets)。
 - `NOTES.md`：一个便签本，供你记录用户偏好或工作笔记。
@@ -212,6 +220,19 @@ teach/<path>/<topic-teach>/
 课程应当**美观**——干净、可读的排版和布局——因为用户以后会回头复习。想想 Tufte 的设计理念。
 
 课程应当简短，能够很快完成。学习者的工作记忆非常有限，我们需要控制在其容量之内。但每节课都应该给用户一个可以继续积累的、切实的收获。课程应当与使命直接相关，并且处于用户的最近发展区内。
+
+### 短课合约（强制）
+
+每节 lesson 必须是 15 分钟内可完成的短课，而不是源码百科页。按以下规则写：
+
+- **一个学习目标**：只教一个概念、一个链路阶段或一个判断技能。
+- **长度上限**：正文目标 800-1200 中文字；硬上限 1500 中文字。超过就拆成多节课。
+- **结构上限**：最多 4 个主章节、3 个源码文件、3 个短代码片段；每个代码片段最多 35 行。
+- **拆课优先**：当一个功能链路很长时，在同一主题目录下生成多节课，例如 `lessons/0001-flow-map.html`、`lessons/0002-entry-dispatch.html`、`lessons/0003-error-path.html`。
+- **参考分流**：接口清单、源码索引、长表格、速查图谱写入 `reference/*.html`，lesson 只保留达成本节学习目标所需的材料。
+- **练习闭环**：每节课必须包含一个检索练习、判断题、小型浏览器任务或“暂停回忆”问题，并给出反馈或参考答案。
+
+如果你发现自己正在写一篇覆盖 5 个以上源码文件、多个异常路径或多个设计决策的课，立即停止扩写，改为创建 lesson manifest，把内容拆成多节短课。
 
 如果可能，通过运行 CLI 命令为用户打开课程文件。
 

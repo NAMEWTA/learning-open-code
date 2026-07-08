@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>成功主路径：从 dispatch 到 completion</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #5f6f7c;
+      --line: #d8e0e8;
+      --soft: #f5f8fb;
+      --paper: #ffffff;
+      --accent: #0f766e;
+      --warn: #92400e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: #edf2f6;
+      line-height: 1.65;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      min-height: 100vh;
+      padding: 32px 18px 46px;
+      background: var(--paper);
+    }
+    nav { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; font-size: 14px; }
+    h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
+    h2 { margin: 28px 0 12px; font-size: 20px; letter-spacing: 0; }
+    p { margin: 10px 0; }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #edf7f5;
+      color: #0f4f49;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; border-radius: 0; }
+    .lead { color: var(--muted); max-width: 760px; }
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+    .step { border: 1px solid var(--line); background: var(--soft); border-radius: 8px; padding: 12px; }
+    .step strong { display: block; color: var(--warn); margin-bottom: 6px; }
+    .note, .answer { border-left: 4px solid var(--accent); background: #f0fdfa; padding: 10px 12px; margin: 14px 0; }
+    @media (max-width: 760px) {
+      main { padding: 24px 14px 38px; }
+      .steps { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="0001-flow-map.html">上一课：全链路地图</a>
+    <a href="0003-error-path.html">下一课：异常边界</a>
+    <a href="../reference/client-advisor-stream-flow-map.html">参考图谱</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client 执行层参考</a>
+  </nav>
+
+  <header>
+    <h1>成功主路径：从 dispatch 到 completion</h1>
+    <p class="lead">本课只练一个判断：一次正常的 <code>/chat/dispatch</code> 会如何从请求解析、模型流订阅，走到最终 <code>completion</code> 回写。</p>
+  </header>
+
+  <h2>三步主线</h2>
+  <div class="steps">
+    <div class="step"><strong>入口绑定</strong><code>ChatDispatchStreamingHandler</code> 解析 body，取 <code>requestId</code> 和 <code>sid</code>，把四类 consumer 交给 runtime。</div>
+    <div class="step"><strong>会话执行</strong><code>ChatSessionRuntime</code> 增加活跃计数，解析工具，再调用 <code>ClientChatExecutor.executeStream()</code>。</div>
+    <div class="step"><strong>终态回写</strong><code>ClientChatExecutor</code> 在 Flux complete 时生成 <code>ChatCompletionResult</code>，handler 写回 <code>completion</code>。</div>
+  </div>
+  <p>这条路径上，text 和 thinking 是中途增量；completion 是终态摘要。判断是否成功，不要只看前端有没有零散文字，还要看最终是否收到包含 <code>fullText</code>、<code>fullThinking</code>、token 和耗时的 completion。</p>
+
+  <h2>源码锚点</h2>
+  <p>入口的关键动作在 <code>handle()</code>：解析请求后，consumer 只转发事件，不直接调用模型。</p>
+<pre><code>ChatDispatchRequest dispatchRequest = parseDispatchRequest(request.getBody());
+String requestId = dispatchRequest.getRequestId();
+String sid = dispatchRequest.getSid();
+
+chatSessionRuntime.execute(ChatSessionRequest.builder()
+    .dispatchRequest(dispatchRequest)
+    .textConsumer(text -> handleTextChunk(reqId, sid, text, observer))
+    .thinkingConsumer(thinking -> handleThinkingChunk(reqId, sid, thinking, observer))
+    .completionConsumer(completion -> handleCompletion(reqId, requestId, sid, completion, observer))
+    .errorConsumer(error -> handleError(reqId, sid, error, observer))
+    .build());</code></pre>
+  <p>执行器的完成信号来自 Reactor 订阅的第三个回调。前面的 <code>Advisor</code> 已把 text、thinking、usage 累积进 <code>ClientStreamExecutionContext</code>，所以 complete 时才能一次性取出完整结果。</p>
+<pre><code>.subscribe(
+    response -> {
+    },
+    request::acceptError,
+    () -> request.acceptCompletion(state.toCompletionResult())
+);</code></pre>
+
+  <h2>completion 的真正含义</h2>
+  <p><code>completion</code> 不等于“最后一个 text chunk”。它是 <code>ClientStreamExecutionContext.toCompletionResult()</code> 的快照：完整文本来自 <code>StreamChunkForwarderAdvisor</code>，完整 thinking 来自 <code>ThinkingCollectorAdvisor</code>，usage 来自 <code>TokenUsageCollectorAdvisor</code>。</p>
+  <p>正常发送时，<code>handleCompletion()</code> 先 <code>observer.onNext()</code> 发送 status 1 和 JSON data，随后在同一个 <code>try</code> 内调用 <code>observer.onCompleted()</code> 结束 gRPC 流。也就是说，Server 侧看到 completion 后，才有机会进入持久化链路。</p>
+  <p class="note">横向背景可查 <a href="../../module-agent-client/reference/agent-client-overview.html"><code>../module-agent-client/reference/agent-client-overview.html</code></a>。L3 API 参考暂待后续覆盖率扫描生成；本 L2 先用源码锚点建立主路径判断。</p>
+
+  <h2>检索练习</h2>
+  <p>暂停回忆：如果你要证明一次调用走完成功主路径，至少要在日志或断点里确认哪三个位置？</p>
+  <div class="answer">
+    <strong>参考答案：</strong>先确认 <code>ChatDispatchStreamingHandler.handle()</code> 成功解析出 <code>requestId/sid</code>；再确认 <code>ClientChatExecutor</code> 的 complete 回调执行 <code>state.toCompletionResult()</code>；最后确认 <code>handleCompletion()</code> 发出 <code>ChatStreamResponse.completion()</code> 并调用 <code>observer.onCompleted()</code>。
+  </div>
+  <p>主要来源建议读 <code>ChatDispatchStreamingHandler.java</code>、<code>ClientChatExecutor.java</code> 和 <code>ClientStreamExecutionContext.java</code>。不清楚的地方可以继续让 agent 带你沿调用栈查。</p>
+</main>
+</body>
+</html>

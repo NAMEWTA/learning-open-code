@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 共享基础设施模块导览</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #0f172a; color: #e5e7eb; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.86rem; line-height: 1.55; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>共享基础设施模块导览</h1>
+  <p class="meta">学习目标：15 分钟内能说清 `src/shared` 如何用类型、路径和文件写入支撑后台可观测执行。</p>
+
+  <h2>1. 一句话职责</h2>
+  <p><span class="mono">open-ai-agent/pi-subagents/src/shared</span> 是整个 extension 的“公共契约和文件基础设施层”：它不决定某次 subagent 该怎么跑，却规定运行结果长什么样、状态文件写到哪里、事件如何追加、chain 步骤如何声明、session 如何继承。L0 说后台运行不能靠终端输出猜状态，本课的落点就是：这些可观测状态先被 shared 定义，再被 runs 写入，最后被 extension、slash 和 TUI 读取展示。</p>
+  <div class="diagram">agent / extension / runs / slash / tui
+        ↓ 共享导入
+src/shared
+├─ types contract      → Details、SingleResult、AsyncStatus、事件名、目录常量
+├─ file infrastructure → artifacts 路径、atomic JSON、events JSONL
+└─ runtime helpers     → chain 行为、status 文案、session/fork/model 工具</div>
+
+  <h2>2. 三层分工</h2>
+  <p>第一层是契约层，代表文件是 <code>open-ai-agent/pi-subagents/src/shared/types.ts</code>。它把 <code>SingleResult</code>、<code>Details</code>、<code>AsyncStatus</code>、<code>AsyncJobState</code>、事件名和目录常量集中定义，让后台 runner、RPC、slash live state、TUI render 使用同一套字段。第二层是路径层，代表文件是 <code>open-ai-agent/pi-subagents/src/shared/artifacts.ts</code>。当有 project cwd 时，产物进入项目下的 <span class="mono">.pi-subagents/artifacts</span>；没有 project cwd 时，回退到 session 旁边的 <span class="mono">subagent-artifacts</span> 或 scoped temp 目录。第三层是写入层，代表文件是 <code>open-ai-agent/pi-subagents/src/shared/atomic-json.ts</code>。它先写临时文件，再 rename 到目标路径；Windows 上遇到 <span class="mono">EPERM/EBUSY/EACCES</span> 会按延迟重试，避免 status reader 看到半截 JSON。</p>
+
+  <h2>3. 一次状态写入</h2>
+  <p>把三层合起来看，一个 async run 更新状态时，核心动作可以简化成下面这样：类型来自契约层，目录来自共享常量，最终写入由 atomic writer 保证“要么旧文件可读，要么新文件完整可读”。真实 runner 还会维护 steps、tokens、nested children、control events，但这个最小例子足够解释文件状态基础设施。</p>
+  <pre><code>import * as path from "node:path";
+import { writeAtomicJson } from "./shared/atomic-json.ts";
+import { ASYNC_DIR, type AsyncStatus } from "./shared/types.ts";
+
+const runId = "run-123";
+const status: AsyncStatus = {
+  runId,
+  mode: "single",
+  state: "running",
+  startedAt: Date.now(),
+  lastUpdate: Date.now(),
+};
+
+writeAtomicJson(path.join(ASYNC_DIR, runId, "status.json"), status);</code></pre>
+  <p>这里的判断技能是：看到 <span class="mono">status.json</span> 字段问题，先查 <code>types.ts</code>；看到路径问题，先查 <code>artifacts.ts</code> 和目录常量；看到读到损坏 JSON 或并发替换问题，先查 <code>atomic-json.ts</code>。</p>
+
+  <h2>4. 测试佐证与回忆</h2>
+  <p>本主题的证据不是字段名猜测，而是单测：<code>open-ai-agent/pi-subagents/test/unit/artifacts.test.ts</code> 验证 project-local artifacts 路径；<code>open-ai-agent/pi-subagents/test/unit/atomic-json.test.ts</code> 验证 rename retry、非重试错误和临时文件清理；<code>open-ai-agent/pi-subagents/test/unit/jsonl-writer.test.ts</code> 验证 JSONL 换行、背压暂停/恢复、no-op writer 和大小上限；<code>open-ai-agent/pi-subagents/test/unit/status-format.test.ts</code> 验证 activity label 与并行 outcome 文案。本轮在源项目根目录运行 <span class="mono">node --experimental-strip-types --test test/unit/artifacts.test.ts test/unit/atomic-json.test.ts test/unit/jsonl-writer.test.ts test/unit/status-format.test.ts</span>，结果为 4 个 suite、14 个测试全部通过。</p>
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>如果 TUI 显示某个后台任务“active 3s ago”，你会先怀疑 executor 逻辑、status 字段定义，还是 status 文案格式化？</p>
+    <p><strong>参考答案：</strong>先分层定位。若 status 文件里 `lastActivityAt/activityState` 正确，问题在格式化或展示；若文件字段缺失，问题在 runner 写入；若路径下没有 status，则先查路径解析和 async 目录。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/src/shared/types.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/artifacts.ts</code>、<code>open-ai-agent/pi-subagents/src/shared/atomic-json.ts</code>；完整字段、依赖和测试矩阵见 <a href="../reference/shared-infra-overview.html">shared-infra-overview 参考页</a>。不清楚某个字段从哪里写入时，可以继续让 agent 追踪对应 runner 调用点。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>profiles overview</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; --warn:#b45309; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:.52rem .6rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    .warn { border-left:4px solid var(--warn); background:#fff8ed; padding:.8rem 1rem; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>profiles 模块参考图谱</h1>
+  <p class="note">本页承载 L1 的长清单：profile 字段、解析规则、模型能力/供应商差异、调用方与测试证据。短课只保留“profile 是模型事实来源”这一判断技能。</p>
+
+  <h2>1. 模块边界</h2>
+  <table>
+    <tr><th>文件</th><th>在本主题中的用途</th><th>关键结论</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>核心实现</td><td>管理 profile 文件、刷新 provider catalog、探测模型、分类分层、生成 quota/quality profile、应用和检查 profile。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td><td>settings 消费侧</td><td>读取 <code>subagents.agentOverrides</code>、<code>defaultModel</code>、<code>modelScope</code>，把 profile 结果合成 <code>AgentConfig</code>。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code></td><td>运行时候选与 fallback</td><td>规范化模型 id，继承父会话模型，合成 primary + fallback 候选列表，识别 retryable 模型失败。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code></td><td>能力边界</td><td>用 allow pattern 约束模型范围；explicit 越界为 error，inherited 越界为 warn。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/agent-management.ts</code></td><td>管理面</td><td><code>models</code> 动作展示有效模型与来源；create/update 提示模型或 fallback 是否存在于 registry。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/schemas.ts</code></td><td>对外 schema</td><td>任务级参数只暴露 <code>model</code> override；profile 的落点是 settings，而不是 tool schema 中的独立字段。</td></tr>
+  </table>
+
+  <h2>2. 文件位置与 JSON 形状</h2>
+  <p><code>getSubagentProfilesRootDir</code> 把所有 profile 数据放在 agent 目录下的 <code>profiles/pi-subagents</code>。普通 profile 文件直接位于该目录；provider catalog 放在其 <code>providers</code> 子目录。profile 名和 provider 名都经过安全文件名校验，拒绝空值、斜杠、反斜杠、<code>.</code>、<code>..</code> 与路径穿越。</p>
+  <pre>{
+  "subagents": {
+    "agentOverrides": {
+      "scout": { "model": "provider/cheap-model" },
+      "reviewer": { "model": "provider/strong-model" }
+    }
+  }
+}</pre>
+  <table>
+    <tr><th>结构</th><th>字段</th><th>规则</th></tr>
+    <tr><td>SubagentProfileFile</td><td><code>subagents.agentOverrides</code></td><td>必须是对象；每个 override 必须是对象；<code>model</code> 若存在必须是字符串。</td></tr>
+    <tr><td>ProviderModelCatalogFile</td><td><code>provider</code>、<code>refreshedAt</code>、<code>maxAgeDays</code>、<code>sources</code>、<code>models</code></td><td>记录 provider 目录快照、缓存时效、数据来源和每个模型的 observed/derived 信息。</td></tr>
+    <tr><td>ProviderModelCatalogModel.observed</td><td><code>availableInRegistry</code>、<code>name</code>、<code>reasoning</code>、<code>thinkingLevels</code>、<code>contextWindow</code>、<code>maxTokens</code>、<code>cost</code>、<code>probe</code></td><td>来自 runtime registry、模型信息工具和 live probe，是“看到的事实”。</td></tr>
+    <tr><td>ProviderModelCatalogModel.derived</td><td><code>profileRank</code>、<code>costTier</code>、<code>qualityTier</code>、<code>latencyTier</code>、<code>recommendedRoleTier</code>、<code>recommendedAgents</code>、<code>classificationSources</code></td><td>由分类器派生，是“如何使用这个模型”的建议。</td></tr>
+  </table>
+
+  <h2>3. 刷新、探测与分类规则</h2>
+  <table>
+    <tr><th>阶段</th><th>源码证据</th><th>规则</th></tr>
+    <tr><td>缓存复用</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>默认 <code>DEFAULT_PROVIDER_MODELS_MAX_AGE_DAYS = 7</code>。未 force 且 catalog 未过期时直接复用，并返回 heuristic fallback 数量。</td></tr>
+    <tr><td>registry 收集</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>从 <code>ctx.modelRegistry.getAvailable()</code> 过滤 provider；没有模型时抛出 provider 无模型错误。</td></tr>
+    <tr><td>live probe</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>调用 <code>pi -p --model fullId --no-tools</code>，工作目录是系统临时目录，timeout 为 45 秒；可通过 <code>probe: false</code> 跳过。</td></tr>
+    <tr><td>probe 状态</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>退出码 0 为 <code>ok</code>；超时为 <code>timeout</code>；auth/billing/quota/key 类文本为 <code>auth</code>；unknown/unavailable/disabled 类文本为 <code>unavailable</code>；其余为 <code>error</code>。</td></tr>
+    <tr><td>官方 metadata</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>若存在 cost、contextWindow 或 maxTokens，classificationSources 包含 <code>official-metadata</code> 和 <code>heuristic-name</code>。</td></tr>
+    <tr><td>名称启发式</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>按 token 识别 spark/flash/nano/tiny/instant、mini/haiku/small、sonnet/turbo/plus、opus/max/ultra/pro 等档位；无官方 metadata 时写入 warning。</td></tr>
+    <tr><td>排序</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td>按 <code>derived.profileRank</code> 升序，再按 <code>fullId</code> 排序。profile 选择基于这个排序后的可用模型池。</td></tr>
+  </table>
+
+  <h2>4. 模型分层与供应商差异</h2>
+  <p>分类器不硬编码某个供应商品牌的固定等级，而是把同一个 provider 内的模型放入相对比较：成本归一化决定 cheap/medium/expensive，contextWindow/maxTokens/reasoning/名称档位共同影响质量，flash/instant/turbo 等影响 latency。这样可以处理不同供应商字段不齐的情况，但也意味着没有 metadata 时只能靠名称启发式，结果必须带 warning。</p>
+  <table>
+    <tr><th>派生字段</th><th>含义</th><th>调用影响</th></tr>
+    <tr><td><code>costTier</code></td><td>cheap、medium、expensive</td><td>中等质量且便宜的模型会被推荐给 cheap role tier；高成本模型更可能进入强模型池。</td></tr>
+    <tr><td><code>qualityTier</code></td><td>weak、medium、strong</td><td>strong 直接映射到 worker、reviewer、oracle 这类强角色建议。</td></tr>
+    <tr><td><code>latencyTier</code></td><td>fast、medium、slow</td><td>fast 名称提示会降低 quality score，并施加 profileRank penalty，避免高速变体误占质量最高档。</td></tr>
+    <tr><td><code>recommendedRoleTier</code></td><td>cheap、medium、strong</td><td>决定 recommendedAgents：cheap 对应 scout/delegate，medium 对应 planner/context-builder/researcher，strong 对应 worker/reviewer/oracle。</td></tr>
+    <tr><td><code>classificationSources</code></td><td>official-metadata、heuristic-name</td><td>用于统计 heuristic fallback，提示用户哪些选择需要人工复核。</td></tr>
+  </table>
+  <p class="warn">可用模型过滤会排除 <code>unavailable</code>、<code>auth</code>、<code>timeout</code>、<code>error</code>。随后还会过滤被支配模型：如果另一个模型成本不高、rank 不低、reasoning/context/maxTokens 不差，并且至少一项更好，当前模型会被移出 profile 选择池。</p>
+
+  <h2>5. quota 与 quality profile 的选择差异</h2>
+  <table>
+    <tr><th>profile kind</th><th>cheap 位置</th><th>medium 位置</th><th>strong 位置</th><th>含义</th></tr>
+    <tr><td><code>quota</code></td><td>0</td><td>1/3</td><td>2/3</td><td>偏节省。若模型数大于 1，会先去掉排序末尾最强/最贵的一档，再从剩余池中挑三档。</td></tr>
+    <tr><td><code>quality</code></td><td>1/3</td><td>2/3</td><td>1</td><td>偏质量。保留全池，strong 选择排序末尾的最高档。</td></tr>
+  </table>
+  <pre>{
+  "scout": "cheap",
+  "delegate": "cheap",
+  "planner": "medium",
+  "context-builder": "medium",
+  "researcher": "medium",
+  "worker": "strong",
+  "reviewer": "strong",
+  "oracle": "strong"
+}</pre>
+  <p>生成结果会写出两个 profile 文件，命名形如 provider.quota.json 和 provider.quality.json，同时保留 provider catalog 路径、两套模型选择、总 heuristic fallback 数与被选中模型里的 heuristic fallback 数。</p>
+
+  <h2>6. 调用方链路</h2>
+  <table>
+    <tr><th>链路位置</th><th>源码证据</th><th>说明</th></tr>
+    <tr><td>应用 profile</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td><td><code>applySubagentProfile</code> 读取 profile 后，把 settings 的 <code>subagents</code> 整段替换为 profile 的 <code>subagents</code>，保留 settings 其他顶层字段。</td></tr>
+    <tr><td>发现 agent</td><td><code>open-ai-agent/pi-subagents/src/agents/agents.ts</code></td><td><code>readSubagentSettings</code> 解析 <code>agentOverrides</code>、<code>defaultModel</code>、<code>modelScope</code>；builtin 先应用 defaultModel，再应用 user/project overrides。</td></tr>
+    <tr><td>管理面展示</td><td><code>open-ai-agent/pi-subagents/src/agents/agent-management.ts</code></td><td><code>models</code> 动作通过 <code>resolveSubagentModelOverride</code> 展示有效模型和来源，如 override、defaultModel、builtin config、inherit current session。</td></tr>
+    <tr><td>前台执行</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code></td><td><code>buildModelCandidates</code> 把 <code>options.modelOverride ?? agent.model</code> 与 <code>agent.fallbackModels</code> 合成尝试顺序；retryable 失败才进入下一个候选。</td></tr>
+    <tr><td>后台执行</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code></td><td>async chain/single 同样先解析 primary model，再用 <code>buildModelCandidates</code> 生成带 thinking suffix 的候选列表。</td></tr>
+    <tr><td>scope 边界</td><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code></td><td>allow pattern 对 canonical provider/id 匹配；thinking suffix 会在比较前剥离。</td></tr>
+  </table>
+
+  <h2>7. profile check 与 thinking suffix</h2>
+  <p><code>checkSubagentProfile</code> 面向“已经保存的 profile 是否还能用”。它会读取 profile，收集所有非空 model override，用 registry 查找模型。若用户写的是短 id 或带 thinking suffix 的 id，它会先用模型信息工具拆出已知 suffix，再把 probe 模型恢复为 canonical <code>provider/id:suffix</code>。同一个 probe id 会缓存，避免重复探测。</p>
+
+  <h2>8. 测试证据地图</h2>
+  <table>
+    <tr><th>测试文件</th><th>关键断言</th><th>覆盖的设计点</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/profiles.test.ts</code></td><td>空目录 list；apply profile 只保留 settings 其他顶层字段；拒绝路径穿越；刷新 catalog 调用 <code>--no-tools</code>；fresh cache 复用；quota/quality 选择；MiniMax highspeed 不误选；check profile 检查 registry 与 live probe；短 id + thinking suffix canonical probe。</td><td>profile 模块本体。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/agent-overrides.test.ts</code></td><td><code>subagents.defaultModel</code> 应用到 builtin/custom；显式 override 胜过 defaultModel；project defaultModel 胜过 user；frontmatter 显式字段胜过 custom override。</td><td>profile 写入 settings 后的消费优先级。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/model-fallback.test.ts</code></td><td>provider/id 保持；短 id 唯一匹配；thinking suffix 保留；模糊匹配；不跨 provider；candidate 去重；retryable failure 识别；scope 对 fallback 越界只 warn。</td><td>运行时 fallback 与模型解析。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/model-scope.test.ts</code></td><td>exact/wildcard 匹配；大小写无关；剥离已知 thinking suffix；explicit 越界为 error；inherited 越界为 warn；非法配置报错。</td><td>能力边界规则。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/model-scope-settings.test.ts</code></td><td>discoverAgents 暴露 user modelScope；project modelScope 优先；无配置为 undefined；非法配置在 discovery 时失败。</td><td>scope settings 发现与优先级。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/schemas.test.ts</code></td><td>任务、parallel task、dynamic parallel、single agent 均有可选 <code>model</code> 字段；schema 保持 provider-friendly。</td><td>对外 override 参数边界。</td></tr>
+  </table>
+
+  <h2>9. 常见误判</h2>
+  <table>
+    <tr><th>误判</th><th>正确判断</th></tr>
+    <tr><td>profile 负责运行时 fallback。</td><td>profile 只生成/应用事实。fallback 顺序来自 <code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code> 和 agent 配置的 <code>fallbackModels</code>。</td></tr>
+    <tr><td>live probe 成功就说明模型质量强。</td><td>probe 只判断可用性。质量来自 metadata 与名称启发式的分类结果。</td></tr>
+    <tr><td>schema 里应该有 profile 参数。</td><td>schema 暴露的是调用级 <code>model</code> override；profile 是 settings 侧批量覆盖机制。</td></tr>
+    <tr><td>modelScope 会阻止所有越界模型。</td><td>explicit 越界抛错；inherited 或 fallback 越界按源码规则 warn 并保留模型。</td></tr>
+    <tr><td>没有官方 metadata 时不能生成 profile。</td><td>可以生成，但 classificationSources 只含 <code>heuristic-name</code>，并带 warning。</td></tr>
+  </table>
+
+  <h2>10. 后续 L2 候选</h2>
+  <table>
+    <tr><th>候选切片</th><th>目标问题</th><th>主要文件</th></tr>
+    <tr><td>provider catalog refresh 与 live probe</td><td>一次 provider 刷新如何从 registry 变成可缓存 catalog，并把失败文本归类成 probe status？</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/profiles.test.ts</code></td></tr>
+    <tr><td>模型分类与支配过滤</td><td>cost/context/maxTokens/reasoning/name token 如何共同影响 rank，并过滤掉性价比被支配的模型？</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code></td></tr>
+    <tr><td>quota/quality profile 生成</td><td>为什么 quota 会避开最末端强模型，而 quality 会把 strong 取到最高档？</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/profiles.test.ts</code></td></tr>
+    <tr><td>profile 应用到 agent discovery</td><td><code>applySubagentProfile</code> 写入 settings 后，user/project/defaultModel/agentOverrides/frontmatter 如何决定最终 <code>AgentConfig.model</code>？</td><td><code>open-ai-agent/pi-subagents/src/profiles/profiles.ts</code>、<code>open-ai-agent/pi-subagents/src/agents/agents.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/agent-overrides.test.ts</code></td></tr>
+    <tr><td>runtime fallback 尝试顺序</td><td>primary model、fallbackModels、retryable failure、attempt notes 和 attemptedModels 如何共同解释一次失败后的重试？</td><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/model-fallback.test.ts</code></td></tr>
+    <tr><td>modelScope 策略</td><td>为什么显式越界会失败，而继承/配置越界只是警告？allow pattern 如何处理 thinking suffix？</td><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code>、<code>open-ai-agent/pi-subagents/test/unit/model-scope.test.ts</code></td></tr>
+  </table>
+</main>
+</body>
+</html>

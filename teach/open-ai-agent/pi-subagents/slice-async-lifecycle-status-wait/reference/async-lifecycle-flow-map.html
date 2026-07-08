@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>async lifecycle 流程图谱</title>
+	<link rel="stylesheet" href="../assets/topic.css">
+	<style>
+		main { width: min(1120px, calc(100% - 40px)); }
+		table { font-size: 0.92rem; }
+		th { background: var(--wash); }
+		@media print { main { width: 100%; padding: 0; } a { color: inherit; } }
+	</style>
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-async-lifecycle 参考</p>
+		<h1>async lifecycle 流程图谱</h1>
+		<p>本页承载长清单：产物路径、状态机、观测 API 对照与测试索引。短课只保留判断技能。</p>
+	</header>
+
+	<section>
+		<h2>1. 垂直切片五要素对照</h2>
+		<table>
+			<tr><th>要素</th><th>本切片落点</th></tr>
+			<tr><td>入口</td><td><code>subagent-executor</code> → <code>executeAsyncSingle/Chain</code>（<code>async-execution.ts</code>）</td></tr>
+			<tr><td>沿途层</td><td>runner 写盘 → job tracker 内存投影 → status/wait 父观测 → result watcher 完成通知</td></tr>
+			<tr><td>时序</td><td>见 <a href="../lessons/0001-flow-map.html">0001 流程图</a></td></tr>
+			<tr><td>异常路径</td><td><code>needs_attention</code>、timeout、stale reconcile、wait disabled、ambiguous id prefix</td></tr>
+			<tr><td>交叉链接</td><td><a href="../../module-runs-execution/reference/runs-execution-overview.html">runs L1</a> · <a href="../../module-intercom/reference/intercom-overview.html">intercom L1</a></td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>2. asyncDir 产物清单</h2>
+		<table>
+			<tr><th>文件</th><th>写入方</th><th>消费方</th></tr>
+			<tr><td><code>status.json</code></td><td><code>subagent-runner.ts</code></td><td><code>async-job-tracker</code>、<code>run-status.ts</code>、<code>wait.ts</code>（经 <code>listAsyncRuns</code>）</td></tr>
+			<tr><td><code>events.jsonl</code></td><td>runner / control channel</td><td><code>async-job-tracker.emitNewControlEvents</code></td></tr>
+			<tr><td><code>output-&lt;n&gt;.log</code></td><td>runner</td><td><code>run-status</code> transcript 视图</td></tr>
+			<tr><td><code>runner.stdout.log</code> / <code>stderr</code></td><td>spawn 时重定向</td><td>排障</td></tr>
+			<tr><td><code>RESULTS_DIR/&lt;id&gt;.json</code></td><td>runner 完成时</td><td><code>result-watcher.ts</code>、<code>run-status</code> 回退读取</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>3. 状态与观测 API</h2>
+		<table>
+			<tr><th>run.state（status.json）</th><th>含义</th><th>wait 是否继续等</th></tr>
+			<tr><td><code>queued</code> / <code>running</code></td><td>仍在执行</td><td>是（除非 needs_attention）</td></tr>
+			<tr><td><code>complete</code></td><td>成功结束</td><td>否</td></tr>
+			<tr><td><code>failed</code></td><td>失败结束</td><td>否</td></tr>
+			<tr><td><code>paused</code></td><td>可恢复暂停</td><td>否（终态对待）</td></tr>
+			<tr><td><code>activityState: needs_attention</code></td><td>需父会话决策</td><td><strong>wait 立即返回</strong></td></tr>
+		</table>
+		<table>
+			<tr><th>API</th><th>参数要点</th><th>返回特征</th></tr>
+			<tr><td><code>subagent({ action: "status" })</code></td><td>无 id → 列出 active runs</td><td>不阻塞；可 <code>view: "fleet" | "transcript"</code></td></tr>
+			<tr><td><code>wait({ })</code></td><td>默认 first-completion</td><td>阻塞；适合 fleet 滚动</td></tr>
+			<tr><td><code>wait({ all: true })</code></td><td>等全部 initial set 终态</td><td>阻塞至 0 个 active initial run</td></tr>
+			<tr><td><code>wait({ id })</code></td><td>单 run；前缀歧义时报错</td><td>等价于 waitForAll 对该 id</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>4. 源码文件索引</h2>
+		<table>
+			<tr><th>文件</th><th>职责</th><th>首读符号</th></tr>
+			<tr><td><code>async-execution.ts</code></td><td>spawn detached runner；started event</td><td><code>executeAsyncSingle</code>、<code>spawnRunner</code></td></tr>
+			<tr><td><code>async-job-tracker.ts</code></td><td>session job map；轮询；control 转发</td><td><code>createAsyncJobTracker</code>、<code>handleStarted</code></td></tr>
+			<tr><td><code>run-status.ts</code></td><td>status/fleet/transcript 格式化</td><td><code>inspectSubagentStatus</code></td></tr>
+			<tr><td><code>wait.ts</code></td><td>阻塞等待；事件唤醒</td><td><code>waitForSubagents</code>、<code>waitForWake</code></td></tr>
+			<tr><td><code>result-watcher.ts</code></td><td>result JSON → complete event</td><td><code>createResultWatcher</code></td></tr>
+			<tr><td><code>async-status.ts</code></td><td>扫描 asyncDir 列表</td><td><code>listAsyncRuns</code></td></tr>
+			<tr><td><code>stale-run-reconciler.ts</code></td><td>修正僵尸/已完成未同步状态</td><td><code>reconcileAsyncRun</code></td></tr>
+			<tr><td><code>extension/index.ts</code></td><td>注册 wait；接线 tracker/watcher</td><td>事件订阅块</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>5. 测试佐证</h2>
+		<table>
+			<tr><th>测试</th><th>佐证行为</th></tr>
+			<tr><td><code>test/integration/async-execution.test.ts</code></td><td>spawn、status、launch message 禁 poll、timeout、result、live output</td></tr>
+			<tr><td><code>test/integration/async-job-tracker.test.ts</code></td><td>started/complete、control events、restore active jobs</td></tr>
+			<tr><td><code>test/integration/async-status.test.ts</code></td><td>list/format 边界</td></tr>
+			<tr><td><code>test/unit/.../wait</code>（若存在 wait 单测）</td><td>first-completion、all、attention、timeout、disabled</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>6. 课程导航</h2>
+		<ul>
+			<li><a href="../lessons/0001-flow-map.html">0001 async lifecycle 全链路流程图</a></li>
+			<li><a href="../lessons/0002-status-wait-complete.html">0002 status、wait 与完成通知</a></li>
+			<li><a href="../../module-runs-execution/lessons/0001-runs-execution-module-tour.html">L1 runs 执行模块导览</a></li>
+		</ul>
+	</section>
+</main>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backend lifecycle 与 SQLite 竞争规避速查</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .compact td,
+    .compact th {
+      padding: 8px 10px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Backend lifecycle 与 SQLite 竞争规避速查</h1>
+    <p class="subtitle">面向维护者的 L4 参考：owner 职责、启动顺序、数据目录契约、SQLite 竞争缓冲、失败边界和测试证据。</p>
+    <div class="meta">
+      <span class="pill">课程：0001-problem-frame</span>
+      <span class="pill">范围：web-host / desktop startup / database service</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="参考目录">
+    <a href="#invariants">设计不变量</a>
+    <a href="#owner">Lifecycle owner</a>
+    <a href="#sqlite">SQLite 竞争规避</a>
+    <a href="#evidence">源码与测试证据</a>
+    <a href="#gaps">缺口</a>
+  </nav>
+
+  <h2 id="invariants">1. 设计不变量</h2>
+  <table class="compact">
+    <thead><tr><th>可选方案</th><th>好处</th><th>为什么不是最终主策略</th></tr></thead>
+    <tbody>
+      <tr><td>每个入口都 ownBackend</td><td>局部代码简单。</td><td>Desktop、WebUI、resetpass 和 recovery 会争同一 dataDir。</td></tr>
+      <tr><td>单 owner + useExistingBackend</td><td>生命周期、诊断、停止和恢复集中。</td><td>入口必须正确传递/读取现有 port，失败时要早报错。</td></tr>
+      <tr><td>SQLite WAL / busy_timeout</td><td>缓解短暂锁等待。</td><td>不能替代进程级 owner，不应掩盖双 backend。</td></tr>
+      <tr><td>Electron 单实例锁</td><td>挡住普通桌面双开。</td><td>测试、多实例 env、WebUI 和 CLI 路径仍要自己守边界。</td></tr>
+    </tbody>
+  </table>
+  <table class="compact">
+    <thead>
+      <tr><th>不变量</th><th>判断方式</th><th>破坏后的典型现象</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>同一个 dataDir 只能有一个长期 backend owner</td><td>查是否复用 <code>globalThis.__backendPort</code> 或同一个 <code>BackendLifecycleManager</code></td><td><code>database is locked</code>、迁移失败、WebUI 与桌面状态不一致</td></tr>
+      <tr><td>backend 启动晚于 main process storage 初始化</td><td>查 <code>initializeProcess()</code> 是否已经完成</td><td>legacy SQLite 迁移与 backend 数据初始化争同一文件</td></tr>
+      <tr><td>WebUI inside Electron 复用现有 backend</td><td>查 <code>backend.kind === 'useExistingBackend'</code></td><td>设置页或 headless WebUI 额外 spawn backend</td></tr>
+      <tr><td>失败需要回传边界信息</td><td>查 <code>BackendStartupError.details</code> 是否含 stage、dataDir、stderrTail</td><td>UI 只能显示泛化启动失败，无法区分迁移、损坏或安装问题</td></tr>
+      <tr><td>恢复标志只用于用户确认后的重启</td><td>查 crash restart 是否复用 <code>--recover-corrupted-database</code></td><td>未经用户确认的后续重启继续破坏性恢复</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="owner">2. Lifecycle owner</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>职责</th><th>源码证据</th><th>维护含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>保存当前 backend 状态</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:464-488</code></td><td>端口、子进程、上次 dataDir 和重启窗口都集中在 manager 内。</td></tr>
+      <tr><td>组装启动参数</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:566-585</code></td><td><code>--data-dir</code>、<code>--log-dir</code>、<code>--work-dir</code> 和恢复标志在同一处进入 backend。</td></tr>
+      <tr><td>等待端口报告</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:669-705</code></td><td>manager 等 aioncore 输出 <code>AIONCORE_LISTENING</code>，而不是自己假设端口已可用。</td></tr>
+      <tr><td>健康检查与 pending health</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:738-770</code></td><td>桌面普通模式可保留 pending backend，WebUI/resetpass 更倾向失败即退出。</td></tr>
+      <tr><td>停止和清理</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:773-790</code></td><td>停止 backend 后还用 dataDir 清理登记过的 agent 进程。</td></tr>
+      <tr><td>崩溃重启</td><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts:882-925</code></td><td>同一个 owner 控制退避和最大重启次数，避免分散重启策略。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="sqlite">3. SQLite 竞争规避</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>层次</th><th>源码证据</th><th>作用</th><th>边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Electron 单实例</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:77-87</code></td><td>第二个桌面实例在早期退出，减少重复启动 backend 的机会。</td><td>E2E 或 <code>AIONUI_MULTI_INSTANCE=1</code> 可跳过，不能只依赖它。</td></tr>
+      <tr><td>先 storage 后 backend</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:658-661</code></td><td>legacy SQLite 一次性迁移先完成并关闭连接，backend 再接管数据目录。</td><td>只约束 Desktop main 启动顺序，不说明 aioncore 内部锁策略。</td></tr>
+      <tr><td>legacy migration 短期开连接</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/database/runLegacyDatabaseMigrations.ts:45-91</code></td><td>打开 <code>aionui.db</code>、跑 schema/migration/repair，finally 中关闭 driver。</td><td>这是迁移交接，不是长期业务读写 owner。</td></tr>
+      <tr><td>driver 是真实 SQLite 连接</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/database/drivers/BetterSqlite3Driver.ts:23-42</code></td><td><code>new BetterSqlite3(dbPath)</code> 说明该迁移路径确实打开本地 DB 文件。</td><td>driver 本身不协调多个 backend 进程。</td></tr>
+      <tr><td>busy_timeout 与 WAL</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/services/database/schema.ts:15-28</code></td><td>瞬时锁等待最多 5 秒，并启用 WAL 改善并发读写表现。</td><td>它是缓冲，不是允许两个长期 backend 写同一 DB。</td></tr>
+      <tr><td>WebUI 复用 backend</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/webuiConfig.ts:228-262</code></td><td>设置页 WebUI 必须拿现有 backend port，并让 dataDir 与桌面 IPC 路径一致。</td><td>拿不到 port 就抛错，不能自行启动第二个 backend。</td></tr>
+      <tr><td>Headless WebUI 复用 backend</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:767-804</code></td><td>Electron <code>--webui</code> 分支也复用前面已经启动的 backend。</td><td>与独立 WebCLI 的 ownBackend 场景不同。</td></tr>
+      <tr><td>Reset password 特殊模式</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:679-708</code>、<code>index.ts:747-758</code></td><td><code>isResetPasswordMode</code> 不允许 pending health，失败直接退出。</td><td>它共享启动 owner，不是旁路启动第二个 backend。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">4. 源码与测试证据</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>证据</th><th>证明了什么</th><th>读法</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.test.ts:275-314</code></td><td>aioncore 自己报告监听端口，launcher 不预绑定 backend 端口；启动参数包含同一 <code>--data-dir</code>。</td><td>先看 mock 的 <code>AIONCORE_LISTENING</code>，再看 spawn args 断言。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.test.ts:393-457</code></td><td>早退 stderr 中的 <code>database.open</code>、<code>database.migration</code> 能进入 <code>BackendStartupError.details</code>。</td><td>这是 UI 能分类数据库边界失败的前提。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.test.ts:532-552</code></td><td>health timeout 诊断保留 <code>stderrTail</code>，包括 <code>database is locked</code>。</td><td>用于排查真实用户日志时判断是 backend 启动边界，而非 renderer 问题。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.test.ts:1069-1094</code></td><td>用户确认的 corrupted database recovery 标志不会在 crash restart 中复用。</td><td>说明恢复是受控动作，不是普通重启策略。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/process/startup/backendStartup.ts</code></td><td><code>startBackendOrExit()</code> 只包装策略：成功回调端口，失败采集并按模式退出。</td><td>不要把它看成 lifecycle owner；owner 仍是 manager。</td></tr>
+    </tbody>
+  </table>
+
+  <section class="callout">
+    <p><strong>排查口诀：</strong>先问“谁是 owner”，再问“dataDir 是否一致”，最后才看 UI。看到 <code>database is locked</code> 时，优先检查是否有第二个 backend、legacy migration 是否未关闭、WebUI 是否误走 ownBackend。</p>
+  </section>
+
+  <h2 id="gaps">5. 缺口</h2>
+  <ul>
+    <li>本页未分析 aioncore Rust 侧实际 SQLite 文件名、migration 顺序和恢复标志消费。</li>
+    <li>当前 TypeScript 测试覆盖诊断和 owner 行为，但没有启动真实 aioncore 做跨进程 SQLite 锁复现。</li>
+    <li>如果后续新增独立 CLI 与桌面共用 dataDir 的入口，需要补一条“是否必须检测已有 backend port”的规则。</li>
+  </ul>
+</main>
+</body>
+</html>

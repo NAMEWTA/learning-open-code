@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backend lifecycle 为什么必须单点管理</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Backend lifecycle 为什么必须单点管理</h1>
+    <p class="subtitle">学习目标：能用源码判断一条启动路径是否会制造第二个 aioncore，从而引发 SQLite 数据目录竞争。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">主入口：backend-launcher</span>
+      <span class="pill">配套参考：backend-lifecycle-notes</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="本课目录">
+    <a href="#problem">1. 问题框架</a>
+    <a href="#mechanism">2. 单 owner 机制</a>
+    <a href="#boundary">3. SQLite 边界</a>
+    <a href="#practice">4. 检索练习</a>
+  </nav>
+
+  <h2 id="problem">1. 问题框架</h2>
+  <p>AionU 的 backend 不是一个随手可起的无状态服务。它持有端口、子进程、agent 子进程清理、健康检查状态，还会接触同一个本地数据目录。真正危险的场景不是“WebUI 能不能打开”，而是 Desktop main、headless WebUI、设置页 WebUI 或恢复路径各自都以为自己可以启动 backend。只要两个 aioncore 指向同一个 <code>--data-dir</code>，SQLite 就可能出现锁等待、迁移交错或用户看到两套状态。</p>
+  <p>因此本课的判断标准很窄：一条路径要么复用已有 backend port，要么由同一个 <code>BackendLifecycleManager</code> 启动并停止；不要在旁路里再 spawn 一个 backend。完整 WebUI 链路见 <a href="../../slice-webui-remote/reference/webui-remote-flow-map.html">L2 WebUI 图谱</a>，本课只深挖这个约束为什么存在。</p>
+  <table>
+    <thead><tr><th>方案</th><th>取舍</th></tr></thead>
+    <tbody>
+      <tr><td>每个入口 ownBackend</td><td>启动逻辑简单，但最容易让相同 dataDir 出现双 backend。</td></tr>
+      <tr><td>单 owner + useExistingBackend</td><td>入口要传递 port，但 owner、stop、diagnostics 和 recovery 边界集中。</td></tr>
+      <tr><td>只依赖 SQLite WAL / busy_timeout</td><td>能缓冲瞬时锁等待，不能治理两个长期 backend 写同一库。</td></tr>
+      <tr><td>只依赖 Electron 单实例锁</td><td>能挡普通桌面双开，但挡不住 WebUI、测试和显式多实例路径。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="mechanism">2. 单 owner 机制</h2>
+  <p><code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.ts</code> 把 owner 需要记住的状态集中在一个类里：子进程、端口、状态、上次数据目录、上次目录配置和重启窗口。它不是纯函数，因为 backend 生命周期本身就是长期状态。</p>
+  <pre><code class="language-typescript">export class BackendLifecycleManager {
+  private childProcess: ChildProcess | null = null;
+  private _port = 0;
+  private _status: BackendStatus = 'stopped';
+  private _lastDbPath = '';
+  private _lastLogDir?: string;
+  private _lastDirs?: BackendDirConfig;
+  private _lastOptions?: BackendStartOptions;
+  private restartCount = 0;
+  private restartWindowStart = 0;
+  private readonly maxRestarts = 3;
+  private readonly restartWindowMs = 60_000;
+
+  constructor(
+    private readonly appMeta: AppMetadata,
+    private readonly resolveBackend: BackendBinaryResolver
+  ) {}</code></pre>
+  <p>启动时，它把 <code>dbPath</code> 写入 <code>--data-dir</code>，等待 aioncore 输出 <code>AIONCORE_LISTENING</code>，再轮询 <code>/health</code>。失败时，错误详情会带上 dataDir、stderr tail 和 backend boundary stage。停止时，它先 SIGTERM，再超时 SIGKILL，并用最后一次 dataDir 清理登记过的 agent 进程。这个 owner 是“知道怎么起，也知道怎么停”的地方。</p>
+
+  <h2 id="boundary">3. SQLite 边界</h2>
+  <p>Desktop main 的启动顺序先把短期开库窗口收掉，再让 backend 长期持有数据目录。注释直接说明：<code>initializeProcess()</code> 里的 <code>initStorage</code> 可能为 v26 一次性迁移打开 legacy Electron SQLite catalog，必须先关闭，backend 才能碰同一个文件。</p>
+  <pre><code class="language-typescript">// Start aioncore only after initializeProcess(). initStorage may open
+// the legacy Electron SQLite catalog for a one-shot v26 migration and must
+// close it before the backend touches the same file.
+const backendStartup = await startBackendOrExit({
+  startBackend: async () =&gt; {
+    assertStartupArchitectureCompatible({
+      arch: process.arch,
+      isPackaged: app.isPackaged,
+      platform: process.platform,
+    });
+    const { getDataPath } = await import('./process/utils/utils');
+    const { getSystemDir } = await import('./process/utils/initStorage');
+    const sysDir = getSystemDir();
+    return backendManager.start(
+      getDataPath(),
+      sysDir.logDir,
+      {
+        cacheDir: sysDir.cacheDir,
+        workDir: sysDir.workDir,
+        logDir: sysDir.logDir,
+      },</code></pre>
+  <p>设置页启动 WebUI 时也不重新起 backend。<code>open-ai-desktop/AionU/packages/desktop/src/process/utils/webuiConfig.ts</code> 先读 <code>globalThis.__backendPort</code>，没有端口就抛错；有端口才调用 <code>startWebHost({ backend: useExistingBackend })</code>。</p>
+  <pre><code class="language-typescript">// Reuse the backend already spawned by backendManager.start() in src/index.ts.
+// Spawning a second backend here would race the first on the same SQLite file.
+const backendPort = (globalThis as typeof globalThis &amp; { __backendPort?: number }).__backendPort;
+if (!backendPort) {
+  throw new Error('[WebUI] Cannot start: aioncore is not running (globalThis.__backendPort unset)');
+}</code></pre>
+  <p>数据库服务本身还有 <code>busy_timeout</code> 和 WAL，但那是短期缓冲，不是允许双 backend 的理由。详细证据见 <a href="../reference/backend-lifecycle-notes.html">backend lifecycle 速查</a>。</p>
+  <p>密码重置也共享这个约束：<code>isResetPasswordMode</code> 下启动策略不允许 pending health，失败会退出；所以 resetpass 不是独立第二个 backend，而是同一个启动管线上的特殊模式。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <section class="quiz">
+    <p><strong>判断题：</strong>用户在设置页打开 WebUI，如果没有 <code>globalThis.__backendPort</code>，正确行为是临时启动一个新 backend，让 WebUI 至少可用。</p>
+    <p><strong>答案：</strong>错。源码选择直接抛错，因为第二个 backend 会与桌面 backend 争同一个 SQLite 文件；正确排查方向是回到 <code>backendManager.start()</code> 为什么没成功暴露端口。</p>
+    <p><strong>继续追问：</strong>如果你想练习排查，请让 agent 带你从一次 <code>database is locked</code> 日志反推是 legacy migration、WebUI 复用失败，还是 backend 自身启动边界。</p>
+  </section>
+  <p class="muted">课后参考：<code>open-ai-desktop/AionU/packages/web-host/src/backend-launcher.test.ts</code>。它用行为测试固定了端口报告、启动参数、数据库错误诊断和恢复标志边界；本节主源码仍以前面 3 个代码块为准。</p>
+</main>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Goal Loop 算法
 
-自主驱动教学文档生成的完整算法。核心思想：不断从目标清单取出下一个学习目标 → 收集上下文 → 派发 subagent 调用 teach SKILL 生成文档 → 审查产出 → 标记完成并发现新目标 → 循环，直到清单清空且覆盖率校验全部通过。
+自主驱动教学文档生成的完整算法。核心思想：不断从目标清单取出下一个学习目标 → 收集上下文 → 派发 subagent Read 并激活 `.agents/skills/teach/SKILL.md` 生成文档 → 审查产出 → 标记完成并发现新目标 → 循环，直到清单清空且覆盖率校验全部通过。
 
 ## 目录
 
@@ -13,6 +13,8 @@
 - [异常处理](#异常处理)
 - [全局上下文包（GCP）](#全局上下文包gcp)
 
+路径校验与误放检测规则见 [persistence.md](persistence.md)。
+
 ## 流程图
 
 ```mermaid
@@ -24,7 +26,10 @@ flowchart TD
     D --> E["为每个 goal 创建主题目录<br/>组装 GCP+任务单"]
     E --> F["并行派发 subagent<br/>每个 subagent 只处理一个 goal"]
     F --> G[收集所有 subagent 回报]
-    G --> R{按采样策略<br/>需要审查?}
+    G --> A0{路径与主题审计<br/>audit_topic.py 通过?}
+    A0 -- 否 --> AF[标记 needs_fix<br/>补元文件/拆短课/补 lesson]
+    AF --> C
+    A0 -- 是 --> R{按采样策略<br/>需要审查?}
     R -- 是 --> RV[派发 teach-review]
     RV --> RD{审查结论}
     RD -- 通过/有条件通过 --> I[标记 goal 为 done]
@@ -62,15 +67,21 @@ flowchart TD
     progress = 在 teach/<project>/ 下新建 _progress.json / _progress.md
 
 while goal_queue 非空:
+    # 误放检测（见 persistence.md）：扫描 .agents/ 下是否存在教学标记文件，发现则告警并中止
+    scan_misplaced_teach_artifacts(".agents/")
+
     batch = 取出优先级最高且 depends_on 全部满足的最多 {MAX_PARALLEL_AGENTS} 个 goal
 
     # 主 Agent（编排器）为每个 goal 做派发前准备
     # 每个 goal = 1 个 subagent，绝不合并
     for goal in batch:
-        若 goal 的主题目录不存在: 运行 init_topic.sh 创建（L3 复用父 L1 的目录，跳过）
-        gcp = 生成全局上下文包（模板见 task-order.md）
-        task_order = 按标准任务单格式填充（见 task-order.md）
-        prompt = gcp + task_order
+        validate_output_path(goal.output_path)  # 必须以 teach/ 开头，不得含 .agents/
+        若 goal 的主题目录不存在:
+            运行 init_topic.sh teach/<path> <topic-slug> 创建（L3 复用父 L1 的目录，跳过）
+            确认脚本打印的绝对路径落在 {工作区根}/teach/ 下，而非 .agents/ 下
+        gcp = 生成全局上下文包（模板见 task-order.md，含 TEACH_ROOT）
+        task_order = 按标准任务单格式填充（见 task-order.md，含 Read 并激活 `.agents/skills/teach/SKILL.md` 指令）
+        prompt = 【首要指令：Read 并激活 `.agents/skills/teach/SKILL.md`】+ gcp + task_order
 
     并行启动 subagent(goal, prompt) for goal in batch
 
@@ -85,9 +96,23 @@ while goal_queue 非空:
 
         记录产出路径、产出摘要
 
+        # 路径校验（见 persistence.md）：标记 done 前的硬闸门
+        若 not validate_output_path(result.output_path) 或 文件不存在:
+            goal.status = "needs_fix"
+            记录路径违规原因，跳过审查，continue
+
+        若 result.topic_audit_passed != true:
+            goal.status = "needs_fix"
+            记录 subagent 回报的 audit_errors，跳过审查，continue
+
+        运行 `.agents/skills/teach/scripts/audit_topic.py {goal.topic_dir}` 二次校验
+        若审计失败:
+            goal.status = "needs_fix"
+            记录 audit_topic.py 输出，跳过审查，continue
+
         # 审查（采样策略见 agent/teach-review.md：L3 每 5 个审 1 个，其余全审）
         若 goal 需要审查:
-            review_result = 派发 teach-review subagent(goal, output_path, GCP)
+            review_result = 派发 teach-review subagent(goal, topic_dir, output_path, GCP)
             goal.review_round += 1
             若 review_result == "通过":
                 goal.review_status = "passed"; 标记 done
@@ -141,7 +166,20 @@ while goal_queue 非空:
     "src/repositories/userRepository.ts"
   ],
   "discovered_from": "L1-auth-module",
-  "output_path": "teach/<project>/slice-auth-login-flow/lessons/auth-login-flow.html",
+  "topic_dir": "teach/<project>/slice-auth-login-flow",
+  "output_path": "teach/<project>/slice-auth-login-flow/lessons/0001-flow-map.html",
+  "required_outputs": {
+    "meta": [
+      "teach/<project>/slice-auth-login-flow/MISSION.md",
+      "teach/<project>/slice-auth-login-flow/RESOURCES.md",
+      "teach/<project>/slice-auth-login-flow/SNAPSHOT.md"
+    ],
+    "lessons": [
+      "teach/<project>/slice-auth-login-flow/lessons/0001-flow-map.html"
+    ],
+    "reference": []
+  },
+  "lesson_manifest": [],
   "new_goals_found": [],
   "retry_count": 0,
   "completed_at": null,
@@ -167,7 +205,10 @@ while goal_queue 非空:
 | `depends_on` | 必须在这些 goal 完成后才能开始 |
 | `sources` | 涉及的源码文件路径（可含行号范围） |
 | `discovered_from` | 从哪个 goal 的分析中发现此目标 |
-| `output_path` | 产出文件路径 |
+| `topic_dir` | 当前 goal 所属 teach 主题目录 |
+| `output_path` | 主入口文件路径，不代表全部交付物 |
+| `required_outputs` | 元文件、lesson、reference 的完整交付清单 |
+| `lesson_manifest` | 已生成课程清单：路径、学习目标、预计时长 |
 | `new_goals_found` | 本轮完成后发现的新目标 id 列表 |
 | `retry_count` | subagent 失败重试次数，默认 0，达到 3 次标记为 blocked |
 | `completed_at` | 完成时间（ISO 8601），用于 GCP"最近完成"排序，未完成为 null |
@@ -206,8 +247,8 @@ pending → in_progress → done                     （审查通过 / 跳过审
 
 | 角色 | 职责 | 禁止行为 |
 |------|------|---------|
-| **主 Agent（编排器）** | Goal Loop 循环控制、创建主题目录、进度台账更新、覆盖率校验、新 goal 发现、派发 teach-review | 不直接调用 teach SKILL、不直接读取源码生成文档 |
-| **Teach Subagent（执行器）** | 读取源码、调用 teach SKILL 生成文档、写入产出文件、回报结果 | 不修改进度台账、不修改 goal_queue、不越权做覆盖率判断 |
+| **主 Agent（编排器）** | Goal Loop 循环控制、创建主题目录、进度台账更新、覆盖率校验、新 goal 发现、派发 teach-review | 不直接 Read `.agents/skills/teach/SKILL.md` 生成文档、不直接读取源码生成文档 |
+| **Teach Subagent（执行器）** | Read 并激活 `.agents/skills/teach/SKILL.md`、读取源码、生成文档、写入产出文件、回报结果 | 不修改进度台账、不修改 goal_queue、不越权做覆盖率判断、不得跳过 `.agents/skills/teach/SKILL.md` 自行撰写 |
 | **Teach-Review Subagent（审查员）** | 对照教学规范审查产出质量、验证技术事实与源码一致性、返回审查报告 | 不修改产出文件、不修改进度台账、不生成新内容 |
 
 ### 调度流程
@@ -218,8 +259,9 @@ pending → in_progress → done                     （审查通过 / 跳过审
   ├─ 取出批次 goal ──────────────────────│                        │
   ├─ 创建主题目录（init_topic.sh）       │                        │
   ├─ 为每个 goal 组装 GCP + 任务单       │                        │
-  ├─ runSubagent(goal) ─────────────────→├─ 读取源码              │
-  │                                      ├─ 调用 teach SKILL      │
+  ├─ runSubagent(goal) ─────────────────→├─ Read `.agents/skills/teach/SKILL.md`
+  │                                      ├─ 读取源码              │
+  │                                      ├─ 按 `.agents/skills/teach/SKILL.md` 生成 │
   │                                      ├─ 写入产出              │
   │                                      ├─ 回报结果              │
   ├─ 收集回报 ←──────────────────────────│                        │

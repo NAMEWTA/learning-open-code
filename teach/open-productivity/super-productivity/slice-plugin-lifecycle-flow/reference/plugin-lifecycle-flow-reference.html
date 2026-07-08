@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件生命周期全链路参考</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">参考文档</p>
+      <h1>插件生命周期全链路参考</h1>
+      <p class="lede">
+        这份文档用于复查 Super Productivity 插件从 manifest/社区列表到加载、初始化、Bridge/API、OAuth、Node executor 和 issue provider 接入的边界。短课入口见
+        <a href="../lessons/0001-flow-map.html">生命周期地图</a>、
+        <a href="../lessons/0002-startup-init-path.html">启动初始化</a>、
+        <a href="../lessons/0003-bridge-issue-provider-path.html">Bridge 与 issue provider</a>。
+      </p>
+
+      <h2>1. 源码入口索引</h2>
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>关键源码</th><th>读法</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>社区插件列表</td>
+            <td><span class="where">src/assets/community-plugins.json</span><br /><span class="where">src/app/plugins/ui/plugin-management/plugin-management.component.ts</span></td>
+            <td>管理页把 JSON 排序展示。它不安装、不缓存、不启用插件。</td>
+          </tr>
+          <tr>
+            <td>Angular provider token</td>
+            <td><span class="where">src/main.ts</span><br /><span class="where">src/app/plugins/plugin-initializer.ts</span></td>
+            <td><code>PLUGIN_INITIALIZER_PROVIDER</code> 只注册 <code>'PLUGIN_INITIALIZER'</code> provider；不要把它当成当前运行时初始化调用栈。</td>
+          </tr>
+          <tr>
+            <td>启动时机</td>
+            <td><span class="where">src/app/core/startup/startup.service.ts</span></td>
+            <td>`_initPlugins()` 等初始数据加载和当前同步结束后调用插件初始化。</td>
+          </tr>
+          <tr>
+            <td>发现与状态</td>
+            <td><span class="where">src/app/plugins/plugin.service.ts</span></td>
+            <td>`_discoverBuiltInPlugins()` 和 `_discoverUploadedPlugins()` 创建 `PluginState`，此时通常还没执行插件代码。</td>
+          </tr>
+          <tr>
+            <td>资源加载</td>
+            <td><span class="where">src/app/plugins/plugin-loader.service.ts</span><br /><span class="where">src/app/plugins/util/validate-manifest.util.ts</span></td>
+            <td>加载 manifest、`plugin.js`、`index.html`、icon、i18n；iframe-only 插件可没有 `plugin.js`，但必须有非空 `index.html`。</td>
+          </tr>
+          <tr>
+            <td>代码执行</td>
+            <td><span class="where">src/app/plugins/plugin-runner.ts</span><br /><span class="where">src/app/plugins/plugin-api.ts</span></td>
+            <td>`PluginRunner.loadPlugin()` 创建 `PluginAPI`，然后用 `new Function('plugin', 'PluginAPI', code)` 执行。</td>
+          </tr>
+          <tr>
+            <td>宿主 Bridge</td>
+            <td><span class="where">src/app/plugins/plugin-bridge.service.ts</span></td>
+            <td>`createBoundMethods()` 给每个 pluginId 绑定应用服务、OAuth、Node、issue provider 等受控方法。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>2. 加载阶段速查</h2>
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>发生什么</th><th>关键判断</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>discover built-in</td>
+            <td>`BUNDLED_PLUGIN_PATHS` 加上 discover-only 插件路径，逐个读取 `manifest.json` 和可选图标。</td>
+            <td>issue provider 迁移插件可能被自动启用，但前提是用户未已有显式 metadata。</td>
+          </tr>
+          <tr>
+            <td>discover uploaded</td>
+            <td>从 `PluginCacheService.getAllPlugins()` 读取上传缓存，解析 manifest，检查 uploaded 插件不能复用内置 id。</td>
+            <td>缓存 id 必须等于 manifest id，否则忽略。</td>
+          </tr>
+          <tr>
+            <td>load enabled</td>
+            <td>`_loadEnabledPlugins()` 只对 `state.isEnabled` 为真的插件调用 `activatePlugin()`。</td>
+            <td>manifest 已发现不代表插件代码已运行。</td>
+          </tr>
+          <tr>
+            <td>activate</td>
+            <td>设置 loading，调用 `_loadPluginLazy()` 加载资源、i18n、base config，再执行插件。</td>
+            <td>非手动启动的 nodeExecution 插件只做平台可用性检查，grant 在 `onReady` 前申请。</td>
+          </tr>
+          <tr>
+            <td>ready</td>
+            <td>`_fireOnReady()` 对 nodeExecution 插件先拿 grant、ping bridge，再调用 `PluginRunner.triggerReady()`。</td>
+            <td>`onReady` 是插件做运行时初始化的安全位置；不要把顶层 `plugin.js` 执行等同于 ready。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>3. Plugin API 与 Bridge</h2>
+      <div class="twocol">
+        <div class="panel">
+          <h3>host-side plugin.js</h3>
+          <p>
+            <span class="where">src/app/plugins/plugin-runner.ts</span> 创建 `PluginAPI`，并把生命周期注册函数交给 runner 内部 Map。`PluginAPI.registerHook()`、`registerIssueProvider()`、`startOAuthFlow()` 等方法再转发到 Bridge。
+          </p>
+          <p>
+            <span class="where">packages/plugin-api/src/types.ts</span> 是插件作者看到的 manifest、hooks、Node script、OAuth 等类型契约。
+          </p>
+        </div>
+        <div class="panel">
+          <h3>iframe index.html</h3>
+          <p>
+            <span class="where">src/app/plugins/ui/plugin-index/plugin-index.component.ts</span> 从 `PluginService.getPluginIndexHtml()` 取缓存的 HTML，构造 `PluginIframeConfig`，再设置 iframe `srcdoc`。
+          </p>
+          <p>
+            <span class="where">src/app/plugins/util/plugin-iframe.util.ts</span> 注入 API script。iframe 内的 `PluginAPI` 通过 `postMessage` 调宿主，宿主校验 `bridgeToken` 与 `bridgeGeneration`。
+          </p>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>边界</th><th>允许什么</th><th>拒绝或限制什么</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>iframe API allowlist</td>
+            <td>任务、项目、标签、snack、dialog、persist、部分 hook、work context、Node script 等有限方法。</td>
+            <td>菜单、header button、shortcut、config handler 等注册只支持 `plugin.js`，iframe 中返回 unsupported。</td>
+          </tr>
+          <tr>
+            <td>Bridge bound methods</td>
+            <td>所有调用都绑定当前 pluginId，持久化 key 会落到插件命名空间。</td>
+            <td>未在允许 action 列表里的 NgRx action 会被拒绝。</td>
+          </tr>
+          <tr>
+            <td>iframe sandbox</td>
+            <td>静态属性允许 scripts、same-origin、forms、popups、modals。</td>
+            <td>同源是为了 packaged desktop 渲染，但安全注释明确承认这是权衡；危险 Node 能力仍由 main consent 守门。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>4. OAuth 边界</h2>
+      <table>
+        <thead>
+          <tr><th>层</th><th>关键源码</th><th>职责</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>插件定义</td>
+            <td><span class="where">packages/plugin-api/src/issue-provider-types.ts</span><br /><span class="where">packages/plugin-dev/google-calendar-provider/src/plugin.ts</span></td>
+            <td>`configFields` 可放 `oauthButton`，其 `oauthConfig` 声明 authUrl、tokenUrl、clientId、scopes、平台 client id。</td>
+          </tr>
+          <tr>
+            <td>Bridge</td>
+            <td><span class="where">src/app/plugins/oauth/plugin-oauth-bridge.service.ts</span></td>
+            <td>校验 OAuth 配置，解析平台有效配置，调用 `prepareRedirectUri()`，打开浏览器，等待 code，换 token，持久化到本地 OAuth token store。</td>
+          </tr>
+          <tr>
+            <td>OAuth service</td>
+            <td><span class="where">src/app/plugins/oauth/plugin-oauth.service.ts</span></td>
+            <td>生成 PKCE verifier/challenge/state，构造授权 URL，校验 HTTPS tokenUrl/authUrl，刷新 token，校验 redirect state。</td>
+          </tr>
+          <tr>
+            <td>Electron main</td>
+            <td><span class="where">electron/plugin-oauth.ts</span></td>
+            <td>启动 `127.0.0.1` loopback server；只允许 https 授权 URL；系统浏览器返回 code/error/state 后发 IPC 给 renderer。</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="callout">
+        OAuth token 是本地存储，不走 op-log 同步。web 环境若插件没有 `webClientId`，Bridge 会清理 token 并报告不可用。
+      </p>
+
+      <h2>5. Node executor 边界</h2>
+      <table>
+        <thead>
+          <tr><th>检查点</th><th>源码</th><th>失败时现象</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>manifest 权限</td>
+            <td><span class="where">packages/plugin-api/src/types.ts</span><br /><span class="where">packages/plugin-dev/sync-md/src/manifest.json</span></td>
+            <td>没有 `nodeExecution` 时不应调用 `executeNodeScript()`；web 环境直接不可用。</td>
+          </tr>
+          <tr>
+            <td>renderer grant</td>
+            <td><span class="where">src/app/plugins/plugin.service.ts</span><br /><span class="where">src/app/plugins/plugin-bridge.service.ts</span></td>
+            <td>`_ensureNodeExecutionGrant()` 拿不到 grant 时，`onReady` 不会继续；用户拒绝会变成可重新启用的 disabled 状态。</td>
+          </tr>
+          <tr>
+            <td>main process 授权</td>
+            <td><span class="where">electron/plugin-node-executor.ts</span></td>
+            <td>main 校验 safe plugin id、webContents、grant token；uploaded 插件的同意可持久化，disable/uninstall/re-upload 会清理。</td>
+          </tr>
+          <tr>
+            <td>脚本执行</td>
+            <td><span class="where">electron/plugin-node-executor.ts</span></td>
+            <td>简单脚本走 `vm.runInContext()`；复杂脚本 spawn 当前 Electron 二进制并设置 `ELECTRON_RUN_AS_NODE=1`；超时和脚本错误返回失败结果。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>6. Issue provider 注册与调用</h2>
+      <table>
+        <thead>
+          <tr><th>步骤</th><th>源码</th><th>边界判断</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>插件声明 provider 类型</td>
+            <td><span class="where">packages/plugin-dev/github-issue-provider/src/manifest.json</span><br /><span class="where">packages/plugin-dev/google-calendar-provider/src/manifest.json</span></td>
+            <td>`type: "issueProvider"` 让管理/设置层能识别插件用途，但实际 provider 定义仍要由插件代码注册。</td>
+          </tr>
+          <tr>
+            <td>插件代码注册定义</td>
+            <td><span class="where">packages/plugin-dev/github-issue-provider/src/plugin.ts</span><br /><span class="where">packages/plugin-api/src/issue-provider-types.ts</span></td>
+            <td>`registerIssueProvider()` 必须提供 `getHeaders`、`searchIssues`、`getById`、`getIssueLink`、`issueDisplay`、`configFields`。</td>
+          </tr>
+          <tr>
+            <td>Bridge 校验并登记</td>
+            <td><span class="where">src/app/plugins/plugin-bridge.service.ts</span><br /><span class="where">src/app/plugins/issue-provider/plugin-issue-provider-registry.service.ts</span></td>
+            <td>不能注册到内置 key；registry key 默认为 `plugin:&lt;pluginId&gt;`，迁移插件可用 manifest 中的 `issueProviderKey`。</td>
+          </tr>
+          <tr>
+            <td>调用 provider</td>
+            <td><span class="where">src/app/plugins/issue-provider/plugin-issue-provider-adapter.service.ts</span><br /><span class="where">src/app/plugins/issue-provider/plugin-http.service.ts</span></td>
+            <td>adapter 从 store 取 issue provider 配置，再用 registry 找 definition，创建 HTTP helper 调 `searchIssues()`、`getById()` 等。</td>
+          </tr>
+          <tr>
+            <td>可选 sync adapter</td>
+            <td><span class="where">src/app/plugins/issue-provider/plugin-sync-adapter.service.ts</span></td>
+            <td>Bridge 立即注册 adapter 的条件是 `createIssue`、`deleteIssue` 或 `fieldMappings` 且 `updateIssue`。后续 `IssueSyncAdapterResolverService.getAdapter()` 的懒创建条件更宽：`createIssue`、`deleteIssue`、`updateIssue` 任一存在即可。</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        `PluginHttpService` 限制 HTTP method、URL scheme 和私网访问。`allowPrivateNetwork` 只允许由内置插件 manifest 开启，云 metadata endpoint 始终被阻断。
+      </p>
+
+      <h2>7. 故障排查表</h2>
+      <table>
+        <thead>
+          <tr><th>症状</th><th>优先检查</th><th>常见根因</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>管理页看到社区插件，但列表里没有已安装插件卡片</td>
+            <td>是否上传 zip 或是否为内置 bundled 插件</td>
+            <td>社区 JSON 只是推荐列表，不会自动缓存插件。</td>
+          </tr>
+          <tr>
+            <td>插件显示 not-loaded</td>
+            <td>`pluginMetadata.isEnabled` 与 `PluginState.status`</td>
+            <td>manifest 发现成功，但用户未启用或启用状态未持久化。</td>
+          </tr>
+          <tr>
+            <td>iframe 空白或 API 调用超时</td>
+            <td>是否有非空 `index.html`、bridge token/generation 是否匹配、方法是否在 allowlist</td>
+            <td>iframe-only 插件缺资源、旧 iframe 消息、调用了 host-only 注册 API。</td>
+          </tr>
+          <tr>
+            <td>OAuth 按钮失败</td>
+            <td>authUrl/tokenUrl 是否 HTTPS、redirectUri 是否匹配平台、state 是否一致</td>
+            <td>web 无 `webClientId`、系统浏览器打不开、loopback 端口无效或被占用。</td>
+          </tr>
+          <tr>
+            <td>Node script 返回 permission denied</td>
+            <td>Electron 运行时、manifest 权限、grant token、用户是否拒绝</td>
+            <td>web 环境、用户拒绝、本次会话 token 被 revoke、main 校验 webContents 不匹配。</td>
+          </tr>
+          <tr>
+            <td>issue provider 搜索为空</td>
+            <td>provider 是否注册、store 中 issueProviderKey 是否命中 registry、getHeaders 是否能返回凭据</td>
+            <td>插件代码未执行、注册 key 冲突、OAuth token 缺失、HTTP helper 阻止私网或 metadata 请求。</td>
+          </tr>
+          <tr>
+            <td>搜索可以，双向同步不可用</td>
+            <td>是否有 `createIssue/deleteIssue/updateIssue`，以及字段 push 是否有 `fieldMappings` 和 `updateIssue`</td>
+            <td>只读 provider 不会有写回 adapter；updateIssue-only provider 可由 resolver 懒创建 adapter，但普通任务字段 push 仍取决于 field mappings。</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

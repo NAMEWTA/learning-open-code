@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conversation Runtime 模块导览短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Conversation Runtime：统一会话壳层怎样接住两种平台</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU 会话页怎样从路由入口进入统一壳层，再把消息、workspace、preview 与 ACP / aionrs 平台实现组织成同一套交互。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：conversation/index.tsx / ChatConversation.tsx / ChatLayout/index.tsx</span>
+    </div>
+  </section>
+
+  <h2 id="entry">1. 页面入口先把“当前会话”变成稳定对象</h2>
+  <p><code>packages/desktop/src/renderer/pages/conversation/index.tsx</code> 不是聊天本体，而是路由落点适配层。它从 URL 里的 <code>:id</code> 读取会话，监听 <code>ipcBridge.conversation.listChanged</code> 以便会话更新后重取数据，并在会话切换时调用 <code>closePreview()</code>，避免上一个会话的预览标签残留到新页面。如果目标会话已经被删除，它会 toast 提示后导航回首页。换句话说，conversation runtime 的第一步不是渲染消息，而是把“我要读哪个会话”这个前提先校准好。</p>
+  <pre><code class="language-tsx">useEffect(() => {
+  if (!id) return;
+  if (previousConversationIdRef.current !== id) {
+    closePreview();
+  }
+  previousConversationIdRef.current = id;
+}, [id, closePreview]);
+
+const { data, isLoading } = useSWR(id ? `conversation/${id}` : null, () => {
+  return getConversationOrNull(id!);
+});</code></pre>
+  <p>这层和 <a href="../../module-renderer-core/lessons/0001-renderer-core-module-tour.html">renderer-core 短课</a> 的关系是：前者负责“路由到了会话页”，后者从这里开始负责“会话页内部怎么运行”。</p>
+
+  <h2 id="split">2. ChatConversation 先做统一装配，再按平台分叉</h2>
+  <p><code>packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx</code> 是本模块真正的总装点。它先统一处理标题栏、workspace 开关、定时任务按钮、预设助手信息与模型选择器，然后根据 <code>conversation.type</code> 把内容分发给 <code>AcpChat</code>、<code>AionrsChat</code> 或只读兼容页。重点不是 if/else 数量，而是“壳层复用、平台差异下沉”：Header 和三栏布局保持一致，平台差异只落在消息流和发送框实现中。</p>
+  <p class="muted">下面是总装层节选，省略了部分 props 和非关键分支。</p>
+  <pre><code class="language-tsx">if (conversation && conversation.type === 'aionrs') {
+  return &lt;AionrsConversationPanel conversation={conversation} sliderTitle={sliderTitle} /&gt;;
+}
+
+return (
+  &lt;ChatLayout conversation_id={conversation?.id} workspacePath={conversation?.extra?.workspace} ...&gt;
+    {conversationNode}
+  &lt;/ChatLayout&gt;
+);</code></pre>
+  <p>因此读源码时要先抓两层边界：<code>ChatConversation</code> 决定“当前会话属于哪种运行时”，而真正的平台行为放进 <code>platforms/acp/</code> 与 <code>platforms/aionrs/</code>。完整入口清单和差异表见 <a href="../reference/conversation-runtime-overview.html#entries">reference</a>。</p>
+
+  <h2 id="layout">3. ChatLayout 把消息、preview、workspace 固定在同一张桌面上</h2>
+  <p><code>packages/desktop/src/renderer/pages/conversation/components/ChatLayout/index.tsx</code> 是 conversation runtime 的 UI 壳层。它一边管理标题重命名、workspace 折叠、响应式宽度和拖拽分隔；一边通过 <code>usePreviewContext()</code> 决定 preview 是否打开。源码里保持稳定的是聊天区 children 所在的统一 DOM 结构，<code>PreviewPanel</code> 则按 <code>isPreviewOpen</code> 条件挂载，所以打开/关闭预览时消息区不会卸载重建。平台组件再往里面插入 <code>MessageList</code> 和各自的 SendBox，于是“消息流”“文件工作区”“文档预览”三块能力能在一份布局里长期并存。</p>
+  <div class="filetree">packages/desktop/src/renderer/pages/conversation/
+├── index.tsx                              ← 路由入口，装载具体会话
+├── components/
+│   ├── ChatConversation.tsx               ← 会话总装，按类型分发平台
+│   └── ChatLayout/
+│       └── index.tsx                      ← 标题栏、消息区、preview、workspace 壳层
+├── platforms/
+│   ├── acp/                               ← ACP 消息流与发送框
+│   ├── aionrs/                            ← aionrs 消息流与发送框
+│   └── useConversationCommandQueue.ts     ← 统一排队与执行闸门
+├── Preview/
+│   └── context/
+│       └── PreviewContext.tsx             ← 预览标签页与 sendbox 注入
+└── Workspace/
+    └── index.tsx                          ← 文件树、改动列表与预览打开点</div>
+  <p>如果你想继续深读，推荐顺序是：先从 <code>ChatLayout</code> 看三栏骨架，再读 <code>packages/desktop/src/renderer/pages/conversation/Preview/context/PreviewContext.tsx</code> 和 <code>packages/desktop/src/renderer/pages/conversation/Workspace/index.tsx</code>，最后回到平台目录看发送与流式状态怎样消费这些公共能力。<code>module-common-adapter</code> 可视为候选回链，因为消息结构与 IPC/HTTP 桥接能力最终都要经过 common 层定义。</p>
+
+  <h2 id="practice">4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>为什么 AionU 没把 ACP 和 aionrs 完全拆成两套页面，而是先保留同一个 <code>ChatLayout</code> 壳层？请至少说出两个共享能力。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>因为两种平台共享的是会话工作台，而不是底层协议。最关键的共享能力至少有两类：一是消息区外层布局，例如标题栏、workspace 折叠、preview 面板；二是运行时协作能力，例如 <code>useConversationRuntimeView</code> 驱动的发送闸门、命令队列、文件预览注入。如果你只答“UI 统一”，说明方向对了，但还要继续把共享能力说具体。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先回读 <code>packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx</code>，再对照 React 官方的 <a href="https://react.dev/learn/conditional-rendering">条件渲染文档</a> 看平台分流为什么适合放在总装层。接着追问 agent：请按“路由入口 → 会话总装 → 平台实现 → runtime gate”带我再走一遍 ACP 和 aionrs 的分叉点。</p>
+</main>
+</body>
+</html>

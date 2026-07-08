@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 责任链回调与边缘 Handler API</title>
+  <link rel="stylesheet" href="../assets/agent-chain.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-agent-chain-module-tour.html">返回短课</a>
+    <a href="agent-chain-overview.html">模块地图 L1</a>
+    <a href="../../slice-agent-chain-grpc/reference/agent-chain-grpc-flow-map.html">gRPC 切片 L2</a>
+    <a href="../../module-commons-grpc/reference/commons-grpc-api.html">gRPC 公共 API L3</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+  </nav>
+
+  <h1>Agent 责任链回调与边缘 Handler API</h1>
+  <p class="lead">本页是 L3 微观 API 字典，覆盖责任链中的边缘 Handler 与 Client 回调 Handler。<a href="agent-chain-overview.html">agent-chain-overview.html</a> 负责模块地图与完整 Handler 顺序表；本文聚焦 <code>WebSearchHandler</code>、<code>ConversationCreateCallbackHandler</code>、<code>ConversationRecordCallbackHandler</code> 三类的入参/出参、触发时机，以及与主链 Handler 的差异。</p>
+
+  <div class="grid">
+    <div class="panel">
+      <strong>覆盖范围</strong>
+      3 个 Handler 类 + 2 个回调 DTO + 2 个接口契约（<code>AgentChatHandler</code> / <code>GrpcRequestHandler</code>）
+    </div>
+    <div class="panel">
+      <strong>源码 commit</strong>
+      2ae56c0（<code>open-java/snail-ai</code>）
+    </div>
+  </div>
+
+  <h2>1. 两类 Handler 在架构中的位置</h2>
+  <p>本模块存在<strong>两条互不串联</strong>的 Handler 管线：</p>
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>接口</th>
+        <th>触发方</th>
+        <th>执行器</th>
+        <th>典型时机</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>主责任链 Handler</strong></td>
+        <td><code>AgentChatHandler</code></td>
+        <td>Server 内部（REST/SSE 对话入口）</td>
+        <td><code>AgentChatChainService.proceed</code></td>
+        <td>用户发起一次对话请求后，按 <code>@Order</code> 同步顺序执行</td>
+      </tr>
+      <tr>
+        <td><strong>回调 Handler</strong></td>
+        <td><code>GrpcRequestHandler</code></td>
+        <td>Agent Client 经 gRPC unary 回调</td>
+        <td><code>GrpcRequestDispatcher.dispatchUnary</code></td>
+        <td>Client 通过 <code>RpcClient</code> 动态代理调用 Server 时</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note warn"><strong>关键边界：</strong>回调 Handler 不在 <code>AgentChatChainService</code> 的 Handler 列表中；它们由 Spring 注入到 <code>GrpcRequestDispatcher</code>，按 <code>supports(uri)</code> 路由。主链的会话持久化主要由 <code>ConversationHandler</code>（用户消息）和 <code>ChatResultPersistService</code>（助手消息）完成；回调 Handler 提供<strong>Client 侧主动回写</strong>的备用通道。</p>
+
+  <h2>2. 主链 vs 回调：持久化路径对照</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>动作</th>
+        <th>主链路径（当前默认）</th>
+        <th>回调路径（基础设施已就绪）</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>创建会话 + 保存用户消息</td>
+        <td><code>ConversationHandler</code> @Order(20)，同步写库</td>
+        <td>Client 调用 <code>RpcClient.createConversation</code> → <code>ConversationCreateCallbackHandler</code></td>
+      </tr>
+      <tr>
+        <td>保存单条对话记录</td>
+        <td><code>ChatResultPersistService.persistAll</code>（流结束后异步）</td>
+        <td>Client 调用 <code>RpcClient.saveRecord</code> → <code>ConversationRecordCallbackHandler</code></td>
+      </tr>
+      <tr>
+        <td>联网搜索工具注入</td>
+        <td><code>WebSearchHandler</code>（设计 order=65，当前未注册）</td>
+        <td>无对应回调；工具在 Client 端由 <code>ToolRuntime</code> 解析</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. WebSearchHandler — 主链边缘 Handler</h2>
+  <p><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/WebSearchHandler.java</span></p>
+
+  <h3>在链中的位置</h3>
+  <table>
+    <thead>
+      <tr><th>属性</th><th>值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>设计 order</td><td>65（介于 <code>RagHandler</code> 60 与 <code>SkillAgentChatHandler</code> 70 之间）</td></tr>
+      <tr><td>当前注册状态</td><td><code>@Component</code> 与 <code>@Order(65)</code> 均被注释，<strong>默认不进入 Spring Handler 列表</strong></td></tr>
+      <tr><td>接口</td><td><code>AgentChatHandler</code></td></tr>
+      <tr><td>前置依赖</td><td><code>InitContextHandler</code> 已写入 <code>ctx.agent</code>；建议在 <code>LlmCallHandler</code> 之前执行以填充 <code>toolCallbacks</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>方法 API</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>入参</th><th>出参 / 副作用</th><th>边界 / 异常</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>handle</code></td>
+        <td><code>void handle(AgentChatContext ctx)</code></td>
+        <td><code>ctx.agent.webSearchEnabled</code>、<code>ctx.toolCallbacks</code>（已有列表）</td>
+        <td>向 <code>ctx.toolCallbacks</code> 追加 <code>WebSearchTool</code> 的 <code>ToolCallback</code></td>
+        <td>见下方触发条件表；不设置 <code>terminated</code>，失败时静默跳过</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>触发条件与短路语义</h3>
+  <table>
+    <thead>
+      <tr><th>条件</th><th>行为</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>agent.webSearchEnabled != true</code></td><td>直接 <code>return</code>，不修改上下文</td></tr>
+      <tr><td><code>snail-ai.web-search.tavily.api-key</code> 为空</td><td>记录 warn 日志后 <code>return</code></td></tr>
+      <tr><td>两项均满足</td><td>实例化 <code>WebSearchTool(apiKey, maxResults)</code> 并注入回调列表</td></tr>
+    </tbody>
+  </table>
+
+  <h3>配置项</h3>
+  <table>
+    <thead>
+      <tr><th>配置键</th><th>类型</th><th>默认</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>snail-ai.web-search.tavily.api-key</code></td><td><code>String</code></td><td>空</td><td>Tavily API 密钥</td></tr>
+      <tr><td><code>snail-ai.web-search.max-results</code></td><td><code>int</code></td><td>5</td><td>单次搜索最大结果数</td></tr>
+    </tbody>
+  </table>
+
+  <h3>与主链 Handler 的差异</h3>
+  <table>
+    <thead>
+      <tr><th>维度</th><th>主链典型 Handler（如 <code>McpHandler</code>）</th><th><code>WebSearchHandler</code></th></tr>
+    </thead>
+    <tbody>
+      <tr><td>写入目标</td><td><code>ChatDispatchRequest</code> 可序列化字段（如 <code>mcpServerDescriptors</code>）</td><td>仅写内存 <code>toolCallbacks</code>，当前 <code>LlmCallHandler.buildDispatchRequest</code> <strong>未读取</strong> 该字段</td></tr>
+      <tr><td>失败策略</td><td>部分 Handler 会 <code>terminated=true</code> 短路</td><td>永不终止链路，配置缺失时跳过</td></tr>
+      <tr><td>注册方式</td><td><code>@Component</code> + <code>@Order</code></td><td>注释掉注解，属于<strong>预留扩展点</strong></td></tr>
+      <tr><td>执行位置</td><td>Server 同步责任链</td><td>同上（若启用），但工具实际执行在 Client <code>ToolRuntime</code></td></tr>
+    </tbody>
+  </table>
+  <p class="note warn"><strong>实现注意：</strong>当前源码中 <code>handle</code> 先把已有 <code>toolCallbacks</code> 复制到新列表再 <code>addAll</code> 回原列表，会导致列表内容翻倍；启用前需修复。且 <code>ChatDispatchRequest</code> 无 tools 字段，即使注册该 Handler，联网搜索工具也无法经 gRPC 下发到 Client——完整打通需同步扩展 DTO 与 <code>LlmCallHandler</code>。</p>
+
+  <h2>4. ConversationCreateCallbackHandler — 会话创建回调</h2>
+  <p><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/callback/ConversationCreateCallbackHandler.java</span></p>
+
+  <h3>在系统中的位置</h3>
+  <table>
+    <thead>
+      <tr><th>属性</th><th>值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>接口</td><td><code>GrpcRequestHandler</code></td></tr>
+      <tr><td>URI</td><td><code>/callback/conversation/create</code>（<code>UriConstants.CALLBACK_CONVERSATION_CREATE</code>）</td></tr>
+      <tr><td>Client 入口</td><td><code>RpcClient.createConversation(ConversationCreateRequest)</code></td></tr>
+      <tr><td>传输</td><td>gRPC unary；body 为 DTO 的 JSON；经 <code>GrpcClientInvokeHandler</code> 代理发送</td></tr>
+      <tr><td>注册</td><td><code>@Component</code>，由 <code>GrpcRequestDispatcher</code> 自动收集</td></tr>
+    </tbody>
+  </table>
+
+  <h3>方法 API</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>入参</th><th>返回值</th><th>边界 / 异常</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>supports</code></td>
+        <td><code>boolean supports(String uri)</code></td>
+        <td>gRPC 请求 URI</td>
+        <td>URI 等于 <code>CALLBACK_CONVERSATION_CREATE</code> 时返回 <code>true</code></td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><code>handle</code></td>
+        <td><code>GrpcSnailAiResult handle(GrpcHandlerRequest request)</code></td>
+        <td><code>request.body</code> → <code>ConversationCreateRequest</code></td>
+        <td>成功：<code>status=1, message="OK"</code>；失败：<code>status=0, message=异常信息</code></td>
+        <td>任意异常被 catch，记录 error 日志，不向外抛出</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>请求 DTO：ConversationCreateRequest</h3>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>类型</th><th>必填</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>agentId</code></td><td><code>Long</code></td><td>是</td><td>智能体 ID</td></tr>
+      <tr><td><code>userId</code></td><td><code>Long</code></td><td>是</td><td>用户 ID</td></tr>
+      <tr><td><code>conversationId</code></td><td><code>String</code></td><td>是</td><td>会话唯一标识</td></tr>
+      <tr><td><code>userMessage</code></td><td><code>String</code></td><td>是</td><td>用户首条消息内容</td></tr>
+    </tbody>
+  </table>
+
+  <h3>处理逻辑与数据库副作用</h3>
+  <ol>
+    <li>按 <code>conversationId</code> 查询会话；不存在则插入 <code>AgentConversationPO</code>，标题取 <code>userMessage</code> 前 16 字符。</li>
+    <li>插入 <code>AgentConversationRecordPO</code>：<code>role=USER</code>，<code>status=RUNNING</code>。</li>
+  </ol>
+  <p class="note">与 <code>ConversationHandler</code> 逻辑高度重叠，但回调路径由 Client 主动发起，适用于不经 Server 主链、或 Client 独立管理会话生命周期的场景。当前 executor 源码中尚无对 <code>createConversation</code> 的调用点。</p>
+
+  <h2>5. ConversationRecordCallbackHandler — 单条记录回调</h2>
+  <p><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/callback/ConversationRecordCallbackHandler.java</span></p>
+
+  <h3>在系统中的位置</h3>
+  <table>
+    <thead>
+      <tr><th>属性</th><th>值</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>接口</td><td><code>GrpcRequestHandler</code></td></tr>
+      <tr><td>URI</td><td><code>/callback/conversation/record</code>（<code>UriConstants.CALLBACK_CONVERSATION_RECORD</code>）</td></tr>
+      <tr><td>Client 入口</td><td><code>RpcClient.saveRecord(ConversationRecordRequest)</code></td></tr>
+      <tr><td>注册</td><td><code>@Component</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>方法 API</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>入参</th><th>返回值</th><th>边界 / 异常</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>supports</code></td>
+        <td><code>boolean supports(String uri)</code></td>
+        <td>gRPC URI</td>
+        <td>URI 等于 <code>CALLBACK_CONVERSATION_RECORD</code> 时 <code>true</code></td>
+        <td>—</td></tr>
+      <tr>
+        <td><code>handle</code></td>
+        <td><code>GrpcSnailAiResult handle(GrpcHandlerRequest request)</code></td>
+        <td><code>request.body</code> → <code>ConversationRecordRequest</code></td>
+        <td>成功 <code>status=1</code>；失败 <code>status=0</code></td>
+        <td>异常 catch 后返回错误结果，不抛出</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>请求 DTO：ConversationRecordRequest</h3>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>类型</th><th>Handler 是否使用</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>agentId</code></td><td><code>Long</code></td><td>✅</td><td>智能体 ID</td></tr>
+      <tr><td><code>userId</code></td><td><code>Long</code></td><td>✅</td><td>用户 ID</td></tr>
+      <tr><td><code>conversationId</code></td><td><code>String</code></td><td>✅</td><td>会话 ID</td></tr>
+      <tr><td><code>role</code></td><td><code>String</code></td><td>✅</td><td>消息角色（USER / ASSISTANT 等）</td></tr>
+      <tr><td><code>content</code></td><td><code>String</code></td><td>✅</td><td>消息正文</td></tr>
+      <tr><td><code>thinking</code></td><td><code>String</code></td><td>❌</td><td>DTO 有字段，Handler 未写入 PO</td></tr>
+      <tr><td><code>inputTokens</code></td><td><code>Integer</code></td><td>❌</td><td>DTO 有字段，Handler 未写入 PO</td></tr>
+      <tr><td><code>outputTokens</code></td><td><code>Integer</code></td><td>❌</td><td>同上</td></tr>
+      <tr><td><code>cacheTokens</code></td><td><code>Integer</code></td><td>❌</td><td>同上</td></tr>
+    </tbody>
+  </table>
+  <p class="note">对比 <code>ChatResultPersistService</code>：主链持久化会写入 thinking、token 统计，并追加短期记忆与用量统计；回调 Handler 仅做<strong>裸插入</strong>，无后续副作用。</p>
+
+  <h2>6. 回调触发时序</h2>
+  <div class="flow">
+    <div class="step"><strong>Client 业务代码</strong><small>调用 <code>rpcClient.createConversation(req)</code> 或 <code>saveRecord(req)</code></small></div>
+    <div class="step"><strong>GrpcClientInvokeHandler</strong><small>读取 <code>@Mapping.path</code>，DTO 序列化为 JSON body，经 <code>GrpcChannelUtil.sendUnary</code> 发往 Server</small></div>
+    <div class="step"><strong>GrpcRequestDispatcher</strong><small>遍历 <code>List&lt;GrpcRequestHandler&gt;</code>，首个 <code>supports(uri)==true</code> 的 Handler 处理</small></div>
+    <div class="step"><strong>Callback Handler</strong><small>解析 body → 写库 → 返回 <code>GrpcSnailAiResult</code></small></div>
+    <div class="step"><strong>Client 代理校验</strong><small><code>status != 1</code> 时抛 <code>CallbackServerErrorException</code>；网络失败按配置重试</small></div>
+  </div>
+
+  <h2>7. 与主链 Handler 差异总表</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>对比维度</th>
+        <th>主链 Handler（如 <code>ConversationHandler</code>）</th>
+        <th>本文三个 Handler</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>编排入口</td>
+        <td><code>AgentChatChainService</code> 有序循环</td>
+        <td><code>WebSearchHandler</code>：同主链（若注册）；回调类：<code>GrpcRequestDispatcher</code></td>
+      </tr>
+      <tr>
+        <td>上下文对象</td>
+        <td><code>AgentChatContext</code></td>
+        <td><code>WebSearchHandler</code> 用 <code>AgentChatContext</code>；回调用 <code>GrpcHandlerRequest</code></td>
+      </tr>
+      <tr>
+        <td>返回值</td>
+        <td><code>void</code>，通过 mutating context 传递状态</td>
+        <td>回调返回 <code>GrpcSnailAiResult</code>；<code>WebSearchHandler</code> 无返回值</td>
+      </tr>
+      <tr>
+        <td>失败处理</td>
+        <td>可 <code>terminated=true</code> 或抛异常中断</td>
+        <td>回调吞异常转 <code>status=0</code>；<code>WebSearchHandler</code> 静默跳过</td>
+      </tr>
+      <tr>
+        <td>触发时机</td>
+        <td>每次 Server 对话请求，同步</td>
+        <td>回调：Client 主动发起；WebSearch：主链装配阶段（未启用）</td>
+      </tr>
+      <tr>
+        <td>与 gRPC 分发关系</td>
+        <td>在 <code>LlmCallHandler</code> 之前/之中执行</td>
+        <td>回调在分发<strong>之外</strong>独立到达；WebSearch 应在分发前填充工具（当前未接通）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>8. 调用示例</h2>
+  <h3>启用 WebSearchHandler（需取消注释并修复列表重复问题）</h3>
+  <pre><code class="language-java">// WebSearchHandler.java — 取消 //@Component 与 //@Order(65)
+@Override
+public void handle(AgentChatContext ctx) {
+    if (!Boolean.TRUE.equals(ctx.getAgent().getWebSearchEnabled())) return;
+    // 建议改为：ctx.getToolCallbacks().addAll(
+    //     Arrays.asList(ToolCallbacks.from(new WebSearchTool(tavilyApiKey, maxResults))));
+}</code></pre>
+
+  <h3>Client 侧触发会话创建回调</h3>
+  <pre><code class="language-java">rpcClient.createConversation(ConversationCreateRequest.builder()
+        .agentId(1L)
+        .userId(100L)
+        .conversationId("conv-uuid")
+        .userMessage("你好，请介绍自己")
+        .build());</code></pre>
+
+  <h3>Client 侧触发记录保存回调</h3>
+  <pre><code class="language-java">rpcClient.saveRecord(ConversationRecordRequest.builder()
+        .agentId(1L)
+        .userId(100L)
+        .conversationId("conv-uuid")
+        .role("ASSISTANT")
+        .content("我是 Snail AI 助手。")
+        .build());</code></pre>
+
+  <p class="note">遇到 URI 路由、回调重试或主链/回调双写冲突时，可结合 <a href="../../slice-agent-chain-grpc/reference/agent-chain-grpc-flow-map.html">gRPC 切片速查</a> 与 <a href="../../module-commons-grpc/reference/commons-grpc-api.html">commons-grpc API</a> 继续向 agent 追问。</p>
+</main>
+</body>
+</html>

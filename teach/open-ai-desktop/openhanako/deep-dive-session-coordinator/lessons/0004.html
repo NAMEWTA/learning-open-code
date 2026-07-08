@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 并发控制与错误恢复：看门狗、Token 压缩与工具重试</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .arch { background: #f7f9fc; border: 1px solid #d6e4ff; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; text-align: center; font-size: 0.88rem; line-height: 2.2; }
+  .arch .layer { display: inline-block; background: #eef4ff; border: 1.5px solid #1d6fd6; border-radius: 6px; padding: 0.2rem 1rem; margin: 0.15rem; font-weight: 600; }
+  .arch .arrow { color: #1d6fd6; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 并发控制与错误恢复：看门狗、Token 压缩与工具重试 <span class="tag">韧性设计</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能列出 SessionCoordinator 的 4 种保护机制（看门狗、Token 压缩、内存压力、工具重试），讲清每种机制的触发条件和恢复策略，理解 5 种 Snapshot 在错误恢复中的作用。
+</div>
+
+<p>5220 行的代码中，约 40% 的复杂度不在于"正常流程"，而在于<b>异常场景的处理</b>。LLM API 可能超时、Token 可能超限、session 可能被意外关闭、工具可能执行失败。Coordinator 通过多层防御机制保证韧性。</p>
+
+<h2>一、四层保护机制总览</h2>
+
+<table>
+<tr><th>保护机制</th><th>触发条件</th><th>策略</th><th>代码位置</th></tr>
+<tr><td><b>Turn 停滞看门狗</b></td><td>一个 turn 执行超过阈值时间无响应</td><td>AbortController 取消当前 turn → 保留已完成的消息 → 用户可重试</td><td><code>_prePromptAbortControllers</code></td></tr>
+<tr><td><b>Token 超限压缩</b></td><td>上下文窗口超过模型限制</td><td>Compact（摘要压缩）→ Hard Truncate（硬截断）→ 提示用户</td><td><code>_compactWithModel</code> / <code>_hardTruncate</code></td></tr>
+<tr><td><b>内存压力保护</b></td><td>RSS > 1.5G / external > 512M / payload > 64M</td><td>Hibernate 休眠 session → _memoryPressure 定时检查</td><td><code>_runtimePressureTimers</code> / <code>scheduleRuntimePressureCheck</code></td></tr>
+<tr><td><b>工具执行失败重试</b></td><td>工具调用返回错误</td><td>错误信息注入 LLM 上下文 → LLM 自主决策重试或放弃</td><td>Pi SDK tool_use 循环内</td></tr>
+</table>
+
+<h2>二、Turn 停滞看门狗 —— _prePromptAbortControllers</h2>
+
+<p><code>_prePromptAbortControllers</code> 是一个 <code>Map&lt;string, AbortController&gt;</code>，每个 session 一个。它的核心职责是<b>取消视觉预处理</b>——当图片描述生成卡住时（模型 API 超时或网络故障），用户可以取消当前 turn 而不会丢失整个 session。</p>
+
+<pre><code>// 简化逻辑
+class SessionCoordinator {
+  _prePromptAbortControllers = new Map();
+
+  async promptSession(path, text, opts) {
+    // 1. 为本次 prompt 创建 AbortController
+    const ac = new AbortController();
+    this._prePromptAbortControllers.set(path, ac);
+
+    try {
+      // 2. 视觉预处理可被取消
+      await prepareVisionInputForTextOnlyModel({
+        signal: ac.signal,  // ← 传入 signal
+      });
+      // 3. 核心 LLM 调用
+      await entry.session.prompt(text, promptOpts);
+    } finally {
+      // 4. 清理
+      this._prePromptAbortControllers.delete(path);
+    }
+  }
+
+  // 外部可调用此方法取消
+  cancelPrePrompt(sessionPath) {
+    this._prePromptAbortControllers.get(sessionPath)?.abort();
+  }
+}</code></pre>
+
+<div class="side">
+💡 <b>为什么只取消预处理而非整个 LLM 调用？</b>视觉预处理（图片描述生成）是独立的 API 调用，发生在主 LLM 调用之前。如果图片描述 API 超时（例如图片过大），用户不应被迫等待或丢失 session。而主 LLM 调用通过 Pi SDK 的流式管道处理中断。
+</div>
+
+<h2>三、Token 超限压缩 —— 两级降级策略</h2>
+
+<p>当 session 的上下文窗口超过模型限制时，Coordinator 采用两级降级：</p>
+
+<table>
+<tr><th>级别</th><th>方法</th><th>策略</th><th>代价</th></tr>
+<tr><td><b>L1: Compact</b></td><td><code>_compactWithModel</code></td><td>用旧模型对历史对话生成摘要，保留最近 <code>effectiveWindow</code> tokens</td><td>需要一次额外的 LLM 调用（摘要生成）</td></tr>
+<tr><td><b>L2: Hard Truncate</b></td><td><code>_hardTruncate</code></td><td>不调用 API，用固定文本"[由于模型切换，早期对话历史已被截断]"作为摘要，直接丢弃最旧的消息</td><td>丢失对话历史细节，但不消耗 token</td></tr>
+</table>
+
+<p><b>触发路径：</b></p>
+
+<table>
+<tr><th>场景</th><th>触发</th><th>使用的方法</th></tr>
+<tr><td>用户切换模型</td><td>新模型窗口更小</td><td><code>switchSessionModel</code> → <code>_compactWithModel</code>（失败则 <code>_hardTruncate</code>）</td></tr>
+<tr><td>继续已删除 Agent 的 session</td><td>旧 Agent 不再存在</td><td><code>_freshCompactDeletedAgentContinuation</code>：从只读 session 提取历史，用新 Agent 模型压缩</td></tr>
+<tr><td>Meta 文件过大（> 1MB）</td><td>元数据膨胀</td><td><code>_compactOversizedSessionMeta</code>：将 > 256KB 字段外化到 sidecar 文件</td></tr>
+</table>
+
+<h2>四、内存压力保护 —— _runtimePressureTimers</h2>
+
+<p>Coordinator 维护 3 个内存阈值和 per-session 检查定时器：</p>
+
+<pre><code>// 内存压力阈值
+_memoryPressure = {
+  rss: 1.5 * 1024 * 1024 * 1024,      // 1.5 GB RSS
+  external: 512 * 1024 * 1024,          // 512 MB external
+  payload: 64 * 1024 * 1024,            // 64 MB payload
+};
+
+// per-session 定时器 Map
+_runtimePressureTimers = new Map();</code></pre>
+
+<p><b>工作流程：</b>每次 <code>promptSession</code> 的 finally 块中调用 <code>scheduleRuntimePressureCheck()</code> → 定时检查内存使用 → 超过阈值时调用 <code>hibernateSessionRuntime()</code> 将 session 从内存卸载到磁盘 → 需要时再 <code>ensureSessionLoaded()</code> 从磁盘恢复。</p>
+
+<div class="danger">
+⚠️ <b>Hibernate 的影响：</b>休眠的 session 不在 _sessions Map 中，下次访问需要从磁盘 JSONL 恢复。恢复过程会重放 JSONL 中的消息构建 LLM 上下文，对于超大 session 可能需要数秒。这就是为什么 <code>_sessions</code> Map 有 LRU 上限 20——超过的自动休眠。
+</div>
+
+<h2>五、5 种 Snapshot 在错误恢复中的角色</h2>
+
+<table>
+<tr><th>Snapshot 类型</th><th>存储位置</th><th>错误恢复中的作用</th></tr>
+<tr><td><code>promptSnapshot</code></td><td><code>session-meta.json</code></td><td>进程重启后恢复 session 时，复用冻结的 system prompt——无需重新调用 agent.buildSystemPrompt()</td></tr>
+<tr><td><code>toolSnapshot</code></td><td><code>session-meta.json</code></td><td>恢复后工具集与创建时一致，避免工具变更导致 LLM 调用失败</td></tr>
+<tr><td><code>memoryReflectionSnapshot</code></td><td><code>session-meta.json</code></td><td>恢复后记忆编译状态不变，不需要重新触发编译</td></tr>
+<tr><td><code>cacheSnapshot</code></td><td>运行时</td><td>校验恢复后的 prompt 与创建时的 prefix cache 是否一致，不一致则警告用户</td></tr>
+<tr><td><code>capabilityDrift</code></td><td><code>entry.capabilityDrift</code></td><td>检测恢复后可用工具与快照工具的差异，提示用户是否需要刷新 session</td></tr>
+</table>
+
+<h2>六、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. _prePromptAbortControllers 主要取消的是什么操作？</p>
+<span class="opt">A. 整个 LLM API 调用——包括流式 token 生成</span>
+<span class="opt">B. 视觉预处理阶段的图片描述生成——这是独立的 API 调用，发生在主 LLM 调用之前</span>
+<span class="opt">C. session 的 JSONL 文件写入</span>
+<span class="opt">D. tool_use 循环中的工具执行</span>
+<details><summary>看答案</summary><b>B</b>。AbortController 传入 prepareVisionInputForTextOnlyModel 的 signal 参数，用于取消视觉预处理（图片描述生成）。主 LLM 调用的中断由 Pi SDK 的流式管道处理。解析取舍：只在可能长时间卡住的预处理阶段提供取消能力。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Compact 和 Hard Truncate 的区别是什么？</p>
+<span class="opt">A. Compact 用 AI 生成摘要，保留最近 tokens；Hard Truncate 用固定文本直接丢弃最旧消息，不消耗 API token</span>
+<span class="opt">B. Compact 是自动的，Hard Truncate 需要用户手动触发</span>
+<span class="opt">C. 两者效果完全相同，只是实现方式不同</span>
+<span class="opt">D. Compact 只删除消息，Hard Truncate 只压缩消息</span>
+<details><summary>看答案</summary><b>A</b>。Compact 调用 LLM API 生成有意义的摘要，代价是一次额外 API 调用但保留更多上下文信息。Hard Truncate 不调用 API，用固定文本替代被截断的历史，零 token 成本但丢失细节。Compact 失败时自动降级到 Hard Truncate。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. session 被 hibernate 后，下次访问会发生什么？</p>
+<span class="opt">A. 直接报错——休眠的 session 不可恢复</span>
+<span class="opt">B. 从磁盘 JSONL 恢复——重放消息构建 LLM 上下文，大 session 可能需要数秒</span>
+<span class="opt">C. session 数据被永久删除</span>
+<span class="opt">D. 自动创建一个新的空 session 替代</span>
+<details><summary>看答案</summary><b>B</b>。休眠是将 session 从 _sessions Map 中移除以释放内存，但 JSONL 文件和 meta 文件保留在磁盘上。下次访问时 ensureSessionLoaded() 从 JSONL 恢复，包括重放消息和重建 prompt snapshot。LRU 上限 20 意味着超过此数的最旧 session 自动休眠。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. capabilityDrift snapshot 检测到什么时会提示用户？</p>
+<span class="opt">A. session 的 JSONL 文件损坏</span>
+<span class="opt">B. 当前可用工具与 session 创建时快照的工具不一致——有新工具可用或旧工具已移除</span>
+<span class="opt">C. LLM API 返回了错误</span>
+<span class="opt">D. session 的 token 用量超过预算</span>
+<details><summary>看答案</summary><b>B</b>。capabilityDrift 对比 toolSnapshot（创建时冻结的工具列表）与当前 _computeLiveToolSnapshotForEntry（实时的可用工具列表）。如果有差异——例如插件更新了工具定义或用户安装了新插件——会提示用户刷新 session 以使用最新工具集。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：阅读 <code>session-coordinator.ts</code> 中 _compactWithModel (L2927)、_hardTruncate、scheduleRuntimePressureCheck、markCapabilitySnapshotsStale (L3593) 的实现。</div>
+
+<div class="reminder">💡 本章 4 课全部结束。回顾章节：<a href="0001.html">0001 架构全景</a> | <a href="0002.html">0002 promptSession 流程</a> | <a href="0003.html">0003 executeIsolated 隔离执行</a> | 0004 并发控制与错误恢复。你可以问我任何关于 SessionCoordinator 的问题，或者让我帮你设计自定义的 compaction 策略。</div>
+
+<div class="nav">课程 0004 / SessionCoordinator 架构剖析 · 终课 · 上一课：<a href="0003.html">0003 executeIsolated 隔离执行</a></div>
+
+</body>
+</html>

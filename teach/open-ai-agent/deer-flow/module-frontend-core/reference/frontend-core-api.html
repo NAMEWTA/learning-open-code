@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Frontend core 微观 API 参考</title>
+    <link rel="stylesheet" href="../assets/core-lesson.css" />
+    <style>
+      nav.toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 24px; }
+      nav.toc a {
+        font-size: 0.88rem;
+        padding: 4px 10px;
+        border: 1px solid #e5e7eb;
+        border-radius: 6px;
+        text-decoration: none;
+      }
+      .tag {
+        display: inline-block;
+        border: 1px solid #e5e7eb;
+        border-radius: 999px;
+        padding: 1px 9px;
+        margin: 2px 4px 2px 0;
+        font-size: 0.84rem;
+        background: #fbfcfd;
+      }
+      .tag.sdk { border-color: #86efac; background: #f0fdf4; }
+      .tag.rest { border-color: #93c5fd; background: #eff6ff; }
+      .tag.hook { border-color: #c4b5fd; background: #f5f3ff; }
+      .tests { font-size: 0.86rem; color: #5f6e7a; margin-top: 8px; }
+      .callout {
+        background: #f7f9fb;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 12px 0;
+      }
+      .warn {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 12px 0;
+      }
+      pre.sig {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.84rem;
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 10px 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        white-space: pre;
+        margin: 8px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Frontend core 微观 API 参考</h1>
+        <p class="lead">
+          <strong>L3 速查：</strong>按源码文件列出 <code>frontend/src/core/</code> 各域
+          <code>api.ts</code> / <code>hooks.ts</code> 的公共函数签名、参数约束、返回值与边界行为。
+          返回
+          <a href="frontend-core-overview.html">L1 模块速查</a> ·
+          <a href="../lessons/0001-frontend-core-module-tour.html">短课</a> ·
+          <a href="../../00-overview/reference/00-overview.html">L0 总览</a>。
+        </p>
+        <div class="meta">
+          <span class="pill">层级：L3</span>
+          <span class="pill">源码：frontend/src/core</span>
+          <span class="pill">通道 A：LangGraph SDK</span>
+          <span class="pill">通道 B：fetcher REST</span>
+        </div>
+
+        <div>
+          <span class="tag sdk">通道 A — getAPIClient</span>
+          <span class="tag rest">通道 B — fetcher.fetch</span>
+          <span class="tag hook">React Query hooks</span>
+        </div>
+
+        <nav class="toc" aria-label="分节导航">
+          <a href="#infra">基础设施</a>
+          <a href="#threads">threads</a>
+          <a href="#skills">skills</a>
+          <a href="#mcp">mcp</a>
+          <a href="#uploads">uploads</a>
+          <a href="#agents">agents</a>
+          <a href="#memory">memory</a>
+          <a href="#channels">channels</a>
+          <a href="#scheduled">scheduled-tasks</a>
+          <a href="#tasks">tasks</a>
+          <a href="#workspace">workspace-changes</a>
+          <a href="#misc">models / suggestions / sidecar</a>
+          <a href="#local">本地状态 hooks</a>
+          <a href="#examples">调用示例</a>
+          <a href="#tests">测试索引</a>
+        </nav>
+
+        <p class="warn">
+          <strong>出站契约：</strong>凡需认证的 Gateway REST 调用应走
+          <code>frontend/src/core/api/fetcher.ts</code> 的 <code>fetch</code>（<code>credentials: "include"</code>、
+          POST/PUT/PATCH/DELETE 自动带 <code>X-CSRF-Token</code>、401 跳转登录）。
+          LangGraph threads/runs 走 <code>getAPIClient()</code>，其 <code>onRequest</code> 与 fetcher 共享
+          <code>readCsrfCookie</code>。
+        </p>
+
+        <!-- ========== INFRA ========== -->
+        <h2 id="infra">基础设施</h2>
+
+        <h3><code>api/api-client.ts</code> — 通道 A</h3>
+        <table>
+          <thead>
+            <tr><th>符号</th><th>签名</th><th>返回值 / 行为</th><th>边界与异常</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>getAPIClient</code></td>
+              <td><code>(isMock?: boolean) =&gt; LangGraphClient</code></td>
+              <td>按 <code>isMock</code> 缓存单例（<code>"mock"</code> / <code>"default"</code>）；创建时注入 CSRF、包装 stream/cancel/joinStream</td>
+              <td>静态站模式（<code>isStaticWebsiteOnly()</code>）返回 mock client，threads/runs 走本地 demo 数据</td>
+            </tr>
+            <tr>
+              <td><code>isInactiveRunStreamError</code></td>
+              <td><code>(error: unknown) =&gt; boolean</code></td>
+              <td>识别 Gateway 409「not active on this worker / cannot be streamed」</td>
+              <td>用于 joinStream 短路，清除 sessionStorage 重连 key</td>
+            </tr>
+            <tr>
+              <td><code>isRunNotCancellableError</code></td>
+              <td><code>(error: unknown) =&gt; boolean</code></td>
+              <td>识别终端 run 的 cancel 409（<code>is not cancellable</code>）</td>
+              <td>cancel 包装器吞掉此错误视为 no-op</td>
+            </tr>
+            <tr>
+              <td><code>clearReconnectRun</code></td>
+              <td><code>(threadId: string | null | undefined, runId: string) =&gt; void</code></td>
+              <td>清除 <code>sessionStorage</code> 键 <code>lg:stream:{threadId}</code></td>
+              <td>仅当存储值与 <code>runId</code> 匹配时删除；SSR / 无 threadId 时 no-op</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="callout">
+          <strong>包装行为：</strong><code>runs.stream</code> / <code>joinStream</code> 经
+          <code>sanitizeRunStreamOptions</code> 规范化；终端状态（success/error/timeout/interrupted）的
+          <code>joinStream</code> 在预检后短路，避免 <code>isLoading</code> 永久为 true。
+        </p>
+        <p class="tests">测试：<code>frontend/tests/unit/core/api/api-client.test.ts</code></p>
+
+        <h3><code>api/fetcher.ts</code> — 通道 B</h3>
+        <table>
+          <thead>
+            <tr><th>符号</th><th>签名</th><th>返回值 / 行为</th><th>边界与异常</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fetch</code></td>
+              <td><code>(input, init?) =&gt; Promise&lt;Response&gt;</code></td>
+              <td>带 cookie + CSRF 的 <code>globalThis.fetch</code> 包装</td>
+              <td>401 → 跳转 <code>/login</code> 并抛 <code>Error("Unauthorized")</code></td>
+            </tr>
+            <tr>
+              <td><code>readCsrfCookie</code></td>
+              <td><code>() =&gt; string | null</code></td>
+              <td>从 <code>document.cookie</code> 解析 <code>csrf_token</code></td>
+              <td>SSR（无 <code>document</code>）返回 <code>null</code></td>
+            </tr>
+            <tr>
+              <td><code>isStateChangingMethod</code></td>
+              <td><code>(method: string) =&gt; boolean</code></td>
+              <td>判断 POST/PUT/DELETE/PATCH</td>
+              <td>与 Gateway CSRFMiddleware 决策对齐</td>
+            </tr>
+            <tr>
+              <td><code>getCsrfHeaders</code></td>
+              <td><code>() =&gt; HeadersInit</code></td>
+              <td>手动组 CSRF 头（遗留路径）</td>
+              <td>新代码优先用 <code>fetch</code> 自动注入</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3><code>api/errors.ts</code> · <code>api/feedback.ts</code></h3>
+        <table>
+          <thead>
+            <tr><th>符号</th><th>签名</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>throwGatewayApiError</code></td>
+              <td><code>(response, fallback) =&gt; Promise&lt;never&gt;</code></td>
+              <td>解析 FastAPI <code>{ detail: string }</code> 并抛 Error；channels / scheduled-tasks 共用</td>
+            </tr>
+            <tr>
+              <td><code>upsertFeedback</code></td>
+              <td><code>(threadId, runId, rating, comment?) =&gt; Promise&lt;FeedbackData&gt;</code></td>
+              <td>PUT <code>/api/threads/{id}/runs/{runId}/feedback</code></td>
+            </tr>
+            <tr>
+              <td><code>deleteFeedback</code></td>
+              <td><code>(threadId, runId) =&gt; Promise&lt;void&gt;</code></td>
+              <td>DELETE 同路径；404 视为成功</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== THREADS ========== -->
+        <h2 id="threads"><code>threads/</code> — 主链路</h2>
+
+        <h3><code>threads/api.ts</code></h3>
+        <table>
+          <thead>
+            <tr><th>函数</th><th>签名</th><th>REST 路径</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fetchThreadTokenUsage</code></td>
+              <td><code>(threadId: string) =&gt; Promise&lt;ThreadTokenUsageResponse | null&gt;</code></td>
+              <td>GET <code>/api/threads/{id}/token-usage</code></td>
+              <td>403/404 → <code>null</code>；其他错误抛 Error</td>
+            </tr>
+            <tr>
+              <td><code>branchThreadFromTurn</code></td>
+              <td><code>(threadId, input: BranchThreadFromTurnInput) =&gt; Promise&lt;ThreadBranchResponse&gt;</code></td>
+              <td>POST <code>/api/threads/{id}/branches</code></td>
+              <td>body: <code>message_id</code>、<code>message_ids</code>、可选 <code>title</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3><code>threads/hooks.ts</code> — 核心 hook</h3>
+        <pre class="sig">function useThreadStream(options: ThreadStreamOptions): {
+  thread: StreamResult &amp; { stop: () =&gt; Promise&lt;void&gt;; messages: Message[] };
+  pendingUsageMessages: Message[];
+  sendMessage: (threadId, message: PromptInputMessage, extraContext?, options?) =&gt; Promise&lt;void&gt;;
+  regenerateMessage: (threadId, messageId, supersededMessageIds?) =&gt; Promise&lt;void&gt;;
+  isUploading: boolean;
+  isHistoryLoading: boolean;
+  hasMoreHistory: boolean;
+  loadMoreHistory: () =&gt; void;
+}</pre>
+        <table>
+          <thead>
+            <tr><th>参数 / 回调</th><th>类型</th><th>含义</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>threadId</code></td><td><code>string | null | undefined</code></td><td>当前线程；空表示新对话</td></tr>
+            <tr><td><code>displayThreadId</code></td><td><code>string | null | undefined</code></td><td>侧栏展示用 ID，默认同 <code>threadId</code></td></tr>
+            <tr><td><code>context</code></td><td><code>LocalSettings["context"]</code></td><td>模式、agent、model 等提交上下文</td></tr>
+            <tr><td><code>isMock</code></td><td><code>boolean?</code></td><td>静态演示模式，跳过历史加载</td></tr>
+            <tr><td><code>onSend / onStart / onFinish / onToolEnd</code></td><td>回调</td><td>发送、run 创建、完成、工具结束事件</td></tr>
+          </tbody>
+        </table>
+        <p class="callout">
+          <strong>内部机制：</strong>基于 <code>@langchain/langgraph-sdk/react</code> 的
+          <code>useStream</code> + <code>getAPIClient(isMock)</code>；合并历史（<code>useThreadHistory</code>）、
+          乐观消息、摘要迁移缓冲；<code>sendMessage</code> 先上传附件再 <code>thread.submit</code>；
+          <code>sendInFlightRef</code> 防并发发送。
+        </p>
+
+        <h3>其他 threads hooks</h3>
+        <table>
+          <thead>
+            <tr><th>Hook / 函数</th><th>签名要点</th><th>Query key / 说明</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>useThreadHistory</code></td><td><code>(threadId, opts?) =&gt; { messages, loading, hasMore, loadMore, appendMessages }</code></td><td>分页加载 run messages；过滤 middleware 调用方</td></tr>
+            <tr><td><code>useThreads</code></td><td><code>(params?: ThreadSearchParams) =&gt; UseQueryResult&lt;AgentThread[]&gt;</code></td><td><code>["threads", "search"]</code>；SDK <code>threads.search</code></td></tr>
+            <tr><td><code>useInfiniteThreads</code></td><td><code>(params?) =&gt; InfiniteQuery</code></td><td><code>["threads", "searchInfinite", params]</code>；页大小 50</td></tr>
+            <tr><td><code>useThreadRuns</code></td><td><code>(threadId?, { enabled? })</code></td><td><code>["thread", threadId]</code>；SDK <code>runs.list</code></td></tr>
+            <tr><td><code>useThreadMetadata</code></td><td><code>(threadId?, { enabled?, isMock? })</code></td><td><code>["thread", "metadata", threadId, isMock]</code>；403/404 → null</td></tr>
+            <tr><td><code>useThreadTokenUsage</code></td><td><code>(threadId?, { enabled? })</code></td><td><code>threadTokenUsageQueryKey(threadId)</code></td></tr>
+            <tr><td><code>useBranchThread</code></td><td><code>useMutation</code> → <code>branchThreadFromTurn</code></td><td>成功后 invalidate metadata + search</td></tr>
+            <tr><td><code>useRunDetail</code></td><td><code>(threadId, runId)</code></td><td>SDK <code>runs.get</code></td></tr>
+            <tr><td><code>useDeleteThread</code></td><td><code>mutationFn: { threadId, onRemoteDeleted? }</code></td><td>级联删除 sidecar + 本地 thread 数据</td></tr>
+            <tr><td><code>useRenameThread</code></td><td><code>mutationFn: { threadId, title }</code></td><td>SDK <code>threads.updateState</code></td></tr>
+            <tr><td><code>stopThreadAndInvalidateCaches</code></td><td><code>(queryClient, stop, threadId?, isMock?)</code></td><td>停止后 invalidate + 1.5s 延迟二次 refetch</td></tr>
+            <tr><td><code>buildThreadSubmitMessages</code></td><td><code>({ text, additionalKwargs?, filesForSubmit? }) =&gt; Message[]</code></td><td>纯函数：组装 human 消息</td></tr>
+          </tbody>
+        </table>
+        <p class="tests">测试：<code>frontend/tests/unit/core/threads/send-message.test.ts</code>、<code>history-merge.test.ts</code></p>
+
+        <!-- ========== SKILLS ========== -->
+        <h2 id="skills"><code>skills/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>loadSkills</code></td>
+              <td><code>() =&gt; Promise&lt;Skill[]&gt;</code></td>
+              <td><code>useSkills()</code> → <code>{ skills, isLoading, error }</code></td>
+              <td>失败抛 <code>SkillRequestError</code>；403 → <code>isAdminRequired</code></td>
+            </tr>
+            <tr>
+              <td><code>enableSkill</code></td>
+              <td><code>(skillName, enabled: boolean)</code></td>
+              <td><code>useEnableSkill()</code> mutation</td>
+              <td>PUT <code>/api/skills/{name}</code></td>
+            </tr>
+            <tr>
+              <td><code>installSkill</code></td>
+              <td><code>({ thread_id, path }) =&gt; InstallSkillResponse</code></td>
+              <td>—（组件直接调用）</td>
+              <td>403 抛错；其他 HTTP 错误返回 <code>{ success: false }</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== MCP ========== -->
+        <h2 id="mcp"><code>mcp/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>loadMCPConfig</code></td>
+              <td><code>() =&gt; Promise&lt;MCPConfig&gt;</code></td>
+              <td><code>useMCPConfig()</code> → <code>{ config, isLoading, error }</code></td>
+              <td>失败抛 <code>MCPConfigRequestError</code></td>
+            </tr>
+            <tr>
+              <td><code>updateMCPConfig</code></td>
+              <td><code>(config: MCPConfig)</code></td>
+              <td><code>useEnableMCPServer()</code> 局部更新 <code>enabled</code></td>
+              <td>无 config 或 server 不存在时 mutation 抛 Error</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="tests">测试：<code>frontend/tests/unit/core/mcp/api.test.ts</code></p>
+
+        <!-- ========== UPLOADS ========== -->
+        <h2 id="uploads"><code>uploads/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th><th>REST</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>uploadFiles</code></td>
+              <td><code>(threadId, files: File[]) =&gt; UploadResponse</code></td>
+              <td><code>useUploadFiles(threadId)</code></td>
+              <td>POST multipart <code>/api/threads/{id}/uploads</code></td>
+            </tr>
+            <tr>
+              <td><code>getUploadLimits</code></td>
+              <td><code>(threadId) =&gt; UploadLimits</code></td>
+              <td><code>useUploadLimits(threadId)</code>；<code>retry: false</code></td>
+              <td>GET <code>.../uploads/limits</code></td>
+            </tr>
+            <tr>
+              <td><code>listUploadedFiles</code></td>
+              <td><code>(threadId) =&gt; ListFilesResponse</code></td>
+              <td><code>useUploadedFiles(threadId)</code></td>
+              <td>GET <code>.../uploads/list</code></td>
+            </tr>
+            <tr>
+              <td><code>deleteUploadedFile</code></td>
+              <td><code>(threadId, filename)</code></td>
+              <td><code>useDeleteUploadedFile(threadId)</code></td>
+              <td>DELETE <code>.../uploads/{filename}</code></td>
+            </tr>
+            <tr>
+              <td>—</td>
+              <td>—</td>
+              <td><code>useUploadFilesOnSubmit(threadId)</code> → <code>(files) =&gt; UploadedFileInfo[]</code></td>
+              <td>提交流封装；空数组直接返回</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="tests">测试：<code>frontend/tests/unit/core/uploads/file-validation.test.ts</code></p>
+
+        <!-- ========== AGENTS ========== -->
+        <h2 id="agents"><code>agents/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>listAgents</code> / <code>getAgent</code></td>
+              <td><code>() =&gt; Agent[]</code> / <code>(name) =&gt; Agent</code></td>
+              <td><code>useAgents()</code> / <code>useAgent(name)</code></td>
+              <td>404 → getAgent 抛 Error</td>
+            </tr>
+            <tr>
+              <td><code>createAgent</code> / <code>updateAgent</code> / <code>deleteAgent</code></td>
+              <td>CRUD on <code>/api/agents</code></td>
+              <td><code>useCreateAgent</code> / <code>useUpdateAgent</code> / <code>useDeleteAgent</code></td>
+              <td><code>agents_api.enabled</code> 关闭 → <code>AgentsApiDisabledError</code></td>
+            </tr>
+            <tr>
+              <td><code>fetchAgentsApiEnabled</code></td>
+              <td><code>() =&gt; boolean</code></td>
+              <td><code>useAgentsApiEnabled()</code> → <code>{ enabled, isLoading }</code></td>
+              <td>localStorage 粘性缓存；无缓存时 fail-open</td>
+            </tr>
+            <tr>
+              <td><code>checkAgentName</code></td>
+              <td><code>(name) =&gt; { available, name }</code></td>
+              <td>—</td>
+              <td>网络/502-504 → <code>AgentNameCheckError(backend_unreachable)</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== MEMORY ========== -->
+        <h2 id="memory"><code>memory/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>方法</th><th>Hook</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>loadMemory</code></td><td>GET <code>/api/memory</code></td><td><code>useMemory()</code></td></tr>
+            <tr><td><code>clearMemory</code></td><td>DELETE <code>/api/memory</code></td><td><code>useClearMemory()</code></td></tr>
+            <tr><td><code>createMemoryFact</code></td><td>POST <code>/api/memory/facts</code></td><td><code>useCreateMemoryFact()</code></td></tr>
+            <tr><td><code>updateMemoryFact</code></td><td>PATCH <code>/api/memory/facts/{id}</code></td><td><code>useUpdateMemoryFact()</code></td></tr>
+            <tr><td><code>deleteMemoryFact</code></td><td>DELETE <code>/api/memory/facts/{id}</code></td><td><code>useDeleteMemoryFact()</code></td></tr>
+            <tr><td><code>importMemory</code> / <code>exportMemory</code></td><td>POST import / GET export</td><td><code>useImportMemory()</code>；export 无 hook</td></tr>
+          </tbody>
+        </table>
+        <p>所有 mutation 成功后 <code>setQueryData(["memory"], memory)</code> 同步缓存。</p>
+
+        <!-- ========== CHANNELS ========== -->
+        <h2 id="channels"><code>channels/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>listChannelProviders</code></td><td><code>() =&gt; ChannelProvidersResponse</code></td><td><code>useChannelProviders()</code> → <code>{ enabled, providers, ... }</code></td></tr>
+            <tr><td><code>listChannelConnections</code></td><td><code>() =&gt; ChannelConnection[]</code></td><td><code>useChannelConnections()</code></td></tr>
+            <tr><td><code>connectChannelProvider</code></td><td><code>(provider) =&gt; ChannelConnectResponse</code></td><td><code>useConnectChannelProvider()</code>；成功后 <code>startConnectionPoll</code></td></tr>
+            <tr><td><code>configureChannelProvider</code></td><td><code>(provider, values)</code></td><td><code>useConfigureChannelProvider()</code></td></tr>
+            <tr><td><code>disconnectChannelConnection</code></td><td><code>(connectionId)</code></td><td><code>useDisconnectChannelConnection()</code></td></tr>
+            <tr><td><code>disconnectChannelProvider</code></td><td><code>(provider)</code></td><td><code>useDisconnectChannelProvider()</code></td></tr>
+          </tbody>
+        </table>
+        <p>Query keys：<code>channelProviderQueryKey</code>、<code>channelConnectionsQueryKey</code>。</p>
+
+        <!-- ========== SCHEDULED TASKS ========== -->
+        <h2 id="scheduled"><code>scheduled-tasks/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>Hook</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>fetchScheduledTasks</code></td><td><code>() =&gt; ScheduledTask[]</code></td><td><code>useScheduledTasks()</code>；15s 轮询</td></tr>
+            <tr><td><code>fetchThreadScheduledTasks</code></td><td><code>(threadId)</code></td><td><code>useThreadScheduledTasks(threadId)</code></td></tr>
+            <tr><td><code>fetchScheduledTaskRuns</code></td><td><code>(taskId)</code></td><td><code>useScheduledTaskRuns(taskId)</code>；15s 轮询</td></tr>
+            <tr><td><code>createScheduledTask</code></td><td><code>(ScheduledTaskPayload)</code></td><td><code>useCreateScheduledTask()</code></td></tr>
+            <tr><td><code>updateScheduledTask</code></td><td><code>(taskId, partial payload)</code></td><td><code>useUpdateScheduledTask(taskId)</code></td></tr>
+            <tr><td><code>pauseScheduledTask</code> / <code>resumeScheduledTask</code></td><td><code>(taskId)</code></td><td><code>usePauseScheduledTask</code> / <code>useResumeScheduledTask</code></td></tr>
+            <tr><td><code>triggerScheduledTask</code></td><td><code>(taskId) =&gt; { id, triggered }</code></td><td><code>useTriggerScheduledTask()</code></td></tr>
+            <tr><td><code>deleteScheduledTask</code></td><td><code>(taskId) =&gt; { id, deleted }</code></td><td><code>useDeleteScheduledTask()</code></td></tr>
+          </tbody>
+        </table>
+        <p><code>ScheduledTaskPayload</code>：<code>context_mode</code>（fresh_thread_per_run | reuse_thread）、<code>title</code>、<code>prompt</code>、<code>schedule_type</code>（once | cron）、<code>schedule_spec</code>、<code>timezone</code>、可选 <code>thread_id</code>。</p>
+
+        <!-- ========== TASKS ========== -->
+        <h2 id="tasks"><code>tasks/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API</th><th>签名</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fetchSubtaskSteps</code></td>
+              <td><code>(threadId, runId, taskId, pageSize?) =&gt; Promise&lt;SubtaskStep[]&gt;</code></td>
+              <td>分页 GET events（<code>event_types=subagent.step</code>、<code>task_id</code>、<code>after_seq</code>）；最多 100 页；经 <code>eventsToSteps</code> 归一化</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>无独立 <code>hooks.ts</code> API 层；实时步骤由 <code>useThreadStream</code> 的 <code>onCustomEvent(task_running)</code> + <code>useUpdateSubtask</code> 驱动。</p>
+
+        <!-- ========== WORKSPACE CHANGES ========== -->
+        <h2 id="workspace"><code>workspace-changes/</code></h2>
+        <table>
+          <thead>
+            <tr><th>API / Hook</th><th>签名</th><th>注意</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>fetchWorkspaceChanges</code></td>
+              <td><code>({ threadId, runId, includeFiles?, includeDiff? }) =&gt; WorkspaceChangesResponse</code></td>
+              <td>GET <code>.../runs/{runId}/workspace-changes</code>；<strong>使用全局 fetch（无 CSRF/cookie 包装）</strong></td>
+            </tr>
+            <tr>
+              <td><code>useWorkspaceChanges</code></td>
+              <td><code>({ threadId?, runId?, includeFiles?, includeDiff?, enabled? })</code></td>
+              <td><code>staleTime: 5min</code>；缺 threadId/runId 时 queryFn 抛错</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== MISC ========== -->
+        <h2 id="misc">models · suggestions · sidecar</h2>
+        <table>
+          <thead>
+            <tr><th>域</th><th>API</th><th>Hook</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>models</td>
+              <td><code>loadModels() =&gt; ModelsResponse</code></td>
+              <td><code>useModels({ enabled? })</code></td>
+              <td>静态站返回空列表；<strong>裸 fetch 无 credentials</strong></td>
+            </tr>
+            <tr>
+              <td>suggestions</td>
+              <td><code>loadSuggestionsConfig() =&gt; { enabled }</code></td>
+              <td><code>useSuggestionsConfig()</code>；<code>staleTime: Infinity</code></td>
+              <td>404 → 回退 <code>{ enabled: true }</code></td>
+            </tr>
+            <tr>
+              <td>sidecar</td>
+              <td><code>createSidecarThread({ parentThreadId, context })</code></td>
+              <td>—</td>
+              <td>同 parent 并发创建经 <code>inFlightCreates</code> 合并</td>
+            </tr>
+            <tr>
+              <td>sidecar</td>
+              <td><code>findLatestSidecarThread({ parentThreadId, isMock?, apiClient? })</code></td>
+              <td>—</td>
+              <td>SDK <code>threads.search</code> + metadata 过滤</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ========== LOCAL HOOKS ========== -->
+        <h2 id="local">本地状态 hooks（无 api.ts）</h2>
+        <table>
+          <thead>
+            <tr><th>文件</th><th>Hook</th><th>签名 / 职责</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>settings/hooks.ts</code></td><td><code>useLocalSettings()</code></td><td><code>[LocalSettings, setter]</code>；<code>useSyncExternalStore</code> + localStorage</td></tr>
+            <tr><td><code>settings/hooks.ts</code></td><td><code>useThreadSettings(threadId)</code></td><td>每线程 model 覆盖合并到 base settings</td></tr>
+            <tr><td><code>artifacts/hooks.ts</code></td><td><code>useArtifactContent({ filepath, threadId, enabled? })</code></td><td>write-file 工具内联 vs Gateway 拉取；5min stale</td></tr>
+            <tr><td><code>i18n/hooks.ts</code></td><td><code>useI18n()</code></td><td><code>{ t, locale, changeLocale }</code></td></tr>
+            <tr><td><code>notification/hooks.ts</code></td><td><code>useNotification()</code></td><td>浏览器 Notification API；尊重 settings 开关</td></tr>
+          </tbody>
+        </table>
+
+        <!-- ========== EXAMPLES ========== -->
+        <h2 id="examples">调用示例</h2>
+        <pre class="sig">// 通道 A：流式对话
+const { thread, sendMessage } = useThreadStream({
+  threadId,
+  context: settings.context,
+  onFinish: (state) => console.log(state.title),
+});
+await sendMessage(threadId, { text: "你好", files: [] });
+
+// 通道 B：REST 配置域
+const { skills } = useSkills();
+await enableSkill("web-search", true);
+
+// 混合：regenerate 走 REST prepare + SDK submit
+await regenerateMessage(threadId, messageId);</pre>
+
+        <!-- ========== TESTS ========== -->
+        <h2 id="tests">测试索引</h2>
+        <table>
+          <thead>
+            <tr><th>测试文件</th><th>覆盖 API / hook</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>tests/unit/core/api/api-client.test.ts</code></td><td><code>getAPIClient</code>、CSRF、终端 run、409 cancel</td></tr>
+            <tr><td><code>tests/unit/core/api/stream-mode.test.ts</code></td><td><code>sanitizeRunStreamOptions</code></td></tr>
+            <tr><td><code>tests/unit/core/threads/send-message.test.ts</code></td><td><code>buildThreadSubmitMessages</code>、上传附加</td></tr>
+            <tr><td><code>tests/unit/core/threads/history-merge.test.ts</code></td><td><code>mergeMessages</code>、摘要缓冲</td></tr>
+            <tr><td><code>tests/unit/core/mcp/api.test.ts</code></td><td><code>loadMCPConfig</code>、<code>updateMCPConfig</code></td></tr>
+            <tr><td><code>tests/unit/core/skills/api.test.ts</code></td><td><code>loadSkills</code>、<code>enableSkill</code></td></tr>
+            <tr><td><code>tests/unit/core/uploads/file-validation.test.ts</code></td><td>上传前校验</td></tr>
+            <tr><td><code>tests/unit/core/agents/api.test.ts</code></td><td>agents CRUD、feature flag</td></tr>
+          </tbody>
+        </table>
+
+        <p class="lead" style="margin-top: 2rem">
+          对某个函数的实现细节或边界条件有疑问？回到
+          <a href="../lessons/0001-frontend-core-module-tour.html">模块导览短课</a>
+          建立上下文后，向 agent 追问具体链路。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

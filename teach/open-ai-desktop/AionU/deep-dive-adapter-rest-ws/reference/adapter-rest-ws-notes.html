@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>REST/WS adapter 设计速查</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>REST/WS adapter 设计速查</h1>
+    <p class="subtitle">L4 配套参考：设计动机、核心机制、错误映射、事件回流、E2E helper 和维护检查表。</p>
+    <div class="meta">
+      <span class="pill">Reference</span>
+      <span class="pill">common/adapter</span>
+      <span class="pill">tests/e2e/helpers</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#frame">1. 设计框架</a>
+    <a href="#provider">2. provider-like invoke</a>
+    <a href="#error-events">3. 错误与事件</a>
+    <a href="#e2e">4. E2E 复用路径</a>
+    <a href="#limits">5. 性能与局限</a>
+    <a href="#checklist">6. 维护检查表</a>
+  </nav>
+
+  <h2 id="frame">1. 设计框架</h2>
+  <table>
+    <thead>
+      <tr><th>问题</th><th>判断</th><th>落点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>为什么还叫 <code>ipcBridge</code></td><td>这是 renderer 稳定调用面，不是传输承诺。</td><td><code>common/index.ts</code> 暴露调用面，<code>ipcBridge.ts</code> 决定真实传输。</td></tr>
+      <tr><td>什么能力走 REST</td><td>真实业务状态归 aioncore，且结果可由请求/响应表达。</td><td><code>httpGet/httpPost/httpPut/httpPatch/httpDelete</code></td></tr>
+      <tr><td>什么能力走 WS</td><td>结果异步、连续、可由事件名分发。</td><td><code>wsEmitter/wsMappedEmitter</code></td></tr>
+      <tr><td>什么能力继续 IPC</td><td>副作用依赖 Electron main、本机窗口、原生对话框、自动更新、托盘、通知。</td><td><code>bridge.buildProvider/buildEmitter</code></td></tr>
+      <tr><td>为什么 WebUI 重要</td><td>浏览器无 preload，不能依赖 Electron IPC；same-origin <code>/api/*</code> 和 <code>/ws</code> 才能复用 renderer contract。</td><td><code>httpBridge.ts</code>、<code>browser.ts</code>、<code>web-host</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="provider">2. provider-like invoke</h2>
+  <table>
+    <thead>
+      <tr><th>机制</th><th>说明</th><th>证据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ProviderLike</code></td><td>保留 <code>provider/invoke</code> 对象形状，兼容旧 renderer 调用。</td><td><code>httpBridge.ts:233-236</code></td></tr>
+      <tr><td>空 <code>provider</code></td><td>HTTP route 处理器在 backend；adapter 侧只保留形状。</td><td><code>httpBridge.ts:255-274</code></td></tr>
+      <tr><td>路径函数</td><td>从旧 params 拼 REST URL，避免页面层了解 route 细节。</td><td><code>ipcBridge.ts:241-249</code></td></tr>
+      <tr><td><code>mapBody</code></td><td>把前端语义参数转换为 backend DTO。</td><td><code>input -> content</code>、<code>conversation_id -> URL</code></td></tr>
+      <tr><td><code>withResponseMap</code></td><td>先请求，再把 raw DTO 转为前端旧 contract。</td><td><code>httpBridge.ts:238-248</code></td></tr>
+      <tr><td><code>stubProvider</code></td><td>显式未实现占位；不要和空 <code>provider</code> 混淆。</td><td><code>httpBridge.ts:318-329</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="error-events">3. 错误与事件</h2>
+  <table>
+    <thead>
+      <tr><th>主题</th><th>规则</th><th>维护动作</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>非 2xx</td><td><code>httpRequest</code> 读取 body，JSON 优先，抛 <code>BackendHttpError</code>。</td><td>新增 UI 分支时用 <code>isBackendHttpError</code>，不要解析错误字符串。</td></tr>
+      <tr><td>机器字段</td><td><code>status/code/backendMessage/details/body</code> 必须保留。</td><td>后端新增错误码后，在 renderer 分类器里补映射。</td></tr>
+      <tr><td>软失败</td><td><code>silentStatuses</code> 只降低日志噪音，不吞错误。</td><td>404 等预期失败仍应由调用方 catch。</td></tr>
+      <tr><td>backend WS</td><td><code>wsEmitter</code> 订阅事件名，消息取 <code>name/event</code> 与 <code>data/payload</code>。</td><td>事件不进 UI 时先核对事件名和 payload shape。</td></tr>
+      <tr><td>重连</td><td>断线指数退避；二次打开后派发 <code>realtime.reconnected</code>。</td><td>长会话 UI 应考虑重连后刷新状态。</td></tr>
+      <tr><td>main bridge 事件</td><td><code>adapter/main.ts</code> 广播传统 bridge 事件到 BrowserWindow，<code>emit</code> 最后调用 <code>broadcastToAll(name, data)</code>，并有 50 MB payload 上限。</td><td>不要把它误认为 backend stream；这是 Electron main 本地事件通道。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>WebUI browser bridge 与 backend WS 的边界</h3>
+  <table>
+    <thead>
+      <tr><th>分支</th><th>连接方式</th><th>可靠性行为</th><th>维护注意</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>browser.ts</code> 无 <code>electronAPI</code></td><td>连接同源 <code>/ws</code>，由 web-host 代理到 backend。</td><td>发送前先 <code>ensureSocket()</code>；未打开时进入消息队列；断线指数退避重连；收到 <code>ping</code> 立即回 <code>pong</code>。</td><td>认证缺失或过期属于 terminal error，会停止重连、清理 timer、关闭 socket，并跳转登录页。</td></tr>
+      <tr><td><code>httpBridge.ts</code> WS singleton</td><td>Electron renderer 走 <code>ws://127.0.0.1:{port}/ws</code>，WebUI browser mode 走同源 <code>/ws</code>。</td><td>按事件名分发到 <code>wsEmitter</code> listener；二次打开后派发 <code>realtime.reconnected</code>。</td><td>它承载 backend 业务事件，不负责 browser runtime bridge 的 emit 队列。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="e2e">4. E2E 复用路径</h2>
+  <table>
+    <thead>
+      <tr><th>Helper</th><th>证明范围</th><th>不能证明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>helpers/httpBridge.ts</code></td><td>renderer context 可读取 <code>window.__backendPort</code>，HTTP 请求、DELETE 默认 body、响应 <code>data</code> 解包符合 app 路径。</td><td>不能独立证明 backend 内部业务规则正确。</td></tr>
+      <tr><td><code>helpers/bridge/invoke.ts</code></td><td>legacy dotted key 优先映射 HTTP route；route 不存在时才 fallback 到旧 <code>subscribe-*</code> IPC。</td><td>不能保证所有 ipcBridge key 都已映射；只覆盖 E2E 实际需要的 key。</td></tr>
+      <tr><td><code>helpers/bridge/routes.ts</code></td><td>测试侧显式记录 key 到 method/path/body mapper 的 contract。</td><td>不是生产路由真值；生产真值仍在 <code>ipcBridge.ts</code> 与 backend route。</td></tr>
+      <tr><td><code>helpers/bridge/mappers.ts</code></td><td>测试断言保持旧 camelCase 语义。</td><td>不能替代生产 mapper；测试 mapper 只服务测试输入输出。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="limits">5. 性能与局限</h2>
+  <table>
+    <thead>
+      <tr><th>区域</th><th>当前特征</th><th>已知局限</th><th>可补强方向</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>HTTP helper</td><td>保留 provider-like 调用形状，每次 <code>invoke</code> 直发 <code>fetch</code>。</td><td>没有内建 retry、abort timeout、请求合并或幂等保护。</td><td>对长耗时/可取消操作引入 <code>AbortSignal</code> 和调用方可配置超时。</td></tr>
+      <tr><td>WS singleton</td><td>一个 renderer 共享一个 backend WS 连接，断线指数退避。</td><td>重连只通知 <code>realtime.reconnected</code>，不会自动重放所有业务查询。</td><td>为关键页面定义重连后 refresh contract。</td></tr>
+      <tr><td>main bridge</td><td>BrowserWindow 广播前序列化 payload，并拒绝超过 50 MB 的事件。</td><td>大对象事件仍会消耗序列化成本；超限后只通过 <code>bridge:error</code> 告知。</td><td>大 payload 改成文件引用、分页查询或 backend 拉取。</td></tr>
+      <tr><td>E2E route map</td><td><code>HTTP_ROUTES</code> 只覆盖当前测试需要的 legacy key。</td><td>不能证明所有 <code>ipcBridge</code> key 都已完成 REST 映射。</td><td>增加 route drift 检测，或从生产 contract 生成测试映射基线。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="checklist">6. 维护检查表</h2>
+  <div class="callout">
+    <p><strong>新增 adapter 能力时：</strong></p>
+    <p>1. 判断真实状态/副作用归属：aioncore、Electron main，还是混合。</p>
+    <p>2. REST provider：确认 method、URL、params、body mapper、响应解包。</p>
+    <p>3. WS emitter：确认事件名、payload shape、是否需要 <code>wsMappedEmitter</code>。</p>
+    <p>4. 错误：确认后端错误 envelope 是否有 <code>code/error/details</code>，renderer 是否按 <code>isBackendHttpError</code> 分类。</p>
+    <p>5. mapper：确认 snake_case、枚举、路径、默认值是否会破坏旧前端 contract。</p>
+    <p>6. E2E：优先在 renderer context 复用 HTTP bridge；legacy key 需要加入 route map，或明确保留 IPC fallback。</p>
+  </div>
+
+  <h2>交叉链接</h2>
+  <table>
+    <thead>
+      <tr><th>材料</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><a href="../lessons/0001-problem-frame.html">0001 问题框架</a></td><td>理解为什么保留名字、替换传输。</td></tr>
+      <tr><td><a href="../lessons/0002-provider-like-invoke.html">0002 provider-like invoke</a></td><td>理解 HTTP helper 怎样保持旧调用形状。</td></tr>
+      <tr><td><a href="../lessons/0003-error-events-e2e.html">0003 错误、事件与 E2E</a></td><td>理解非成功路径和测试策略。</td></tr>
+      <tr><td><a href="../../module-common-adapter/reference/common-adapter-overview.html">L1 Common Adapter 参考总览</a></td><td>需要完整能力域清单时回看。</td></tr>
+      <tr><td><a href="../../slice-webui-remote/reference/webui-remote-flow-map.html">L2 WebUI 远程访问</a></td><td>理解 same-origin <code>/api/*</code> 与 <code>/ws</code> 的部署背景。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

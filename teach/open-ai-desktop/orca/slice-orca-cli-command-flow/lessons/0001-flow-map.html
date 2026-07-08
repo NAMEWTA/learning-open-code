@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca CLI 命令执行导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Orca CLI Command Flow：一条命令如何变成 runtime RPC</h1>
+        <p class="meta">目标：15 分钟内能从 <code>orca terminal send --text hi</code> 追到 runtime method。</p>
+
+        <h2>先抓四段主路径</h2>
+        <p>
+          Orca CLI 的主路径不是“解析完就执行业务”。它先在 <code>src/cli/index.ts</code> 处理 special shim、
+          help、命令规格校验和 remote selection，再交给 <code>src/cli/dispatch.ts</code> 找 handler。
+          handler 大多只把 flag 和 selector 变成 RPC method/params，最后由 <code>src/cli/runtime/client.ts</code>
+          选择本地 socket 或远程 WebSocket。
+        </p>
+        <div class="filetree">shell argv
+  -> src/cli/index.ts             parse/help/validate/RuntimeClient
+  -> src/cli/dispatch.ts          commandPath.join(" ") -> handler
+  -> src/cli/handlers/*.ts        flags/selectors -> client.call(method, params)
+  -> src/cli/runtime/client.ts    local metadata socket or remote pairing WebSocket</div>
+
+        <h2>入口：先拒绝错误命令，再找 runtime</h2>
+        <p>
+          <code>src/cli/args.ts</code> 把非 <code>--</code> token 收进 commandPath，把 flag 收进 Map；
+          positional 参数会按 <code>COMMAND_SPECS</code> 归一化成 flag。关键顺序在 <code>src/cli/index.ts</code>：
+          <code>validateCommandAndFlags()</code> 先运行，然后才构造 <code>RuntimeClient</code>。
+          所以 unknown command、unknown flag、positionals 冲突会报 CLI 语法错误，不会误导成 runtime unavailable。
+        </p>
+        <pre><code class="language-text">main(argv)
+  -> normalizeCommandPositionals(COMMAND_SPECS, parseArgs(argv))
+  -> resolveHelpPath(parsed)
+  -> validateCommandAndFlags(COMMAND_SPECS, parsed)
+  -> new RuntimeClient(...)
+  -> dispatch(parsed.commandPath, ctx)</code></pre>
+        <p>
+          remote selection 也在入口决定。普通命令能用 <code>--pairing-code</code>、<code>--environment</code> 或环境变量；
+          但 <code>environment</code>、<code>serve</code>、<code>agent</code>、<code>vm</code> 会传入 <code>null</code>，
+          明确禁止 RuntimeClient 默认参数重新读取远程环境变量。
+        </p>
+
+        <h2>handler：薄适配，不藏业务</h2>
+        <p>
+          <code>dispatch.ts</code> 把 core、worktree、terminal、browser、orchestration 等 handler 组合成一个表，
+          并在重复 key 时直接抛错。比如 <code>terminal send</code> 会先用 selector helper 找 terminal handle，
+          再调用 <code>terminal.send</code>；<code>browser click</code> 解析 element 和 target 后调用
+          <code>browser.click</code>。这些文件的价值是看清 CLI flag 到 RPC params 的映射，而不是业务实现。
+        </p>
+        <pre><code class="language-text">orca terminal send --text hi --enter
+  -> handler "terminal send"
+  -> getTerminalHandle(flags, cwd, client)
+  -> client.call("terminal.send", { terminal, text: "hi", enter: true, ... })
+  -> printResult(...)</code></pre>
+        <p>
+          core handler 是例外：<code>open</code> 调 <code>client.openOrca()</code>，<code>status</code> 调
+          <code>client.getCliStatus()</code>，<code>serve</code> 直接走 <code>serveOrcaApp()</code> 启动 foreground server。
+        </p>
+
+        <h2>RuntimeClient：本地和远程在这里分叉</h2>
+        <p>
+          本地路径会读 userData 下的 runtime metadata，取 endpoint、authToken 和 runtimeId，
+          用 <code>src/cli/runtime/transport.ts</code> 发一行 JSON：<code>{ id, authToken, method, params }</code>。
+          client 只接受匹配 request id 和 runtimeId 的 terminal frame；keepalive frame 会刷新 timeout。
+        </p>
+        <p>
+          远程路径来自 pairing code 或 saved environment。普通 RPC 发送前，RuntimeClient 会先用
+          <code>status.get</code> 做 protocol compatibility check；不兼容时抛 <code>incompatible_runtime</code>。
+          <code>terminal.wait</code> 和 <code>orchestration.check --wait</code> 这类 long-poll 会按内层
+          <code>timeoutMs</code> 放宽 client-side timeout，避免默认 60 秒先超时。
+        </p>
+
+        <h3>检索练习</h3>
+        <p>
+          用户执行 <code>orca worktree current --pairing-code remote --json</code>，为什么不能让它改用显式远端 selector 继续完成？
+        </p>
+        <div class="answer">
+          参考路径：先看 <code>src/cli/specs/core.ts</code>，<code>worktree current</code> 的 spec 没有
+          <code>--worktree</code> 这类 selector flag；再看 <code>src/cli/handlers/worktree.ts</code>，
+          handler 固定调用 <code>resolveCurrentWorktreeSelector(cwd, client)</code>。远程 runtime 的 worktree
+          在服务器文件系统上，客户端 cwd shortcut 只在本地有意义，所以这条命令在 remote 下应被拒绝。
+          需要显式远端 selector 时，改用 <code>orca worktree show --worktree id:&lt;id&gt; --pairing-code remote --json</code>
+          这类接受 selector 的命令。
+          完整来源见 <a href="../reference/orca-cli-command-flow-map.html">Orca CLI 命令执行参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/cli/index.ts</code>、
+          <code>src/cli/args.ts</code>、
+          <code>src/cli/dispatch.ts</code>、
+          <code>src/cli/runtime/client.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

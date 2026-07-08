@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebUI 启动与远程访问流图短课</title>
+  <link rel="stylesheet" href="../assets/webui-remote.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>WebUI 启动与远程访问流图</h1>
+    <p class="subtitle">15 分钟短课：只建立一张可回忆的链路图，先知道每一层在哪里，再去参考页查细节。</p>
+    <div class="meta">
+      <span class="pill">L2：slice-webui-remote</span>
+      <span class="pill">主入口：desktop / web-cli</span>
+      <span class="pill">证据：docs + E2E</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#goal">目标</a>
+    <a href="#flow">主链路</a>
+    <a href="#edge">边界路径</a>
+    <a href="#exercise">检索练习</a>
+  </nav>
+
+  <div class="crosslinks">
+    <a href="../reference/webui-remote-flow-map.html">完整参考图谱</a>
+    <a href="../../module-web-runtime/reference/web-runtime-overview.html">L1 Web 运行时</a>
+    <a href="../../module-main-entry/reference/main-entry-overview.html">L1 主入口</a>
+    <a href="../../module-docs-resources/reference/docs-resources-overview.html">L1 文档资源</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览</a>
+  </div>
+
+  <h2 id="goal">1. 本课只记一个问题</h2>
+  <p>用户说“WebUI 远程打不开”时，不要先猜端口或前端页面。先问：这是 Electron <code>--webui</code>、桌面设置页恢复，还是独立 <code>aionui-web</code> CLI？正常 backend 可用路径会调用 <code>startWebHost()</code>；WebCLI 找不到 backend 时会降级为 <code>startStaticServer()</code> frontend-only，因此 backend 来源、配置来源、密码提示和失败方式不同。</p>
+  <p>推荐主来源：<a href="../reference/webui-remote-flow-map.html">WebUI 远程访问参考图谱</a>。它列出源码行号、调用时序、文档漂移和 E2E 证据。</p>
+
+  <h2 id="flow">2. 主链路地图</h2>
+  <div class="diagram">入口一：AionUi --webui [--remote] [--port n]
+  -> desktop/src/index.ts 解析 hasSwitch / getSwitchValue
+  -> initializeProcess()
+  -> startBackendOrExit()
+  -> loadUserWebUIConfig()
+  -> resolveWebUIPort() / resolveRemoteAccess()
+  -> startWebHost({ backend: useExistingBackend })
+  -> startStaticServer()
+  -> 浏览器访问 localUrl 或 networkUrl
+
+入口二：aionui-web start [--remote] [--port n]
+  -> web-cli/src/index.ts parseArgs()
+  -> resolveStaticDir() / resolveDataDir() / resolveBackendBinary()
+  -> backend 存在：startWebHost({ backend: ownBackend })
+  -> backend 缺失：startStaticServer(frontend-only)
+  -> ensureAdminPassword()
+  -> 浏览器访问 localUrl 或 networkUrl</div>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant User as 用户
+  participant Desktop as Electron main
+  participant CLI as aionui-web CLI
+  participant Host as WebHost
+  participant Static as Static server
+  participant Backend as backend
+  alt AionUi --webui
+    User-&gt;&gt;Desktop: --webui --remote --port
+    Desktop-&gt;&gt;Backend: startBackendOrExit()
+    Desktop-&gt;&gt;Host: startWebHost(useExistingBackend)
+    Host-&gt;&gt;Static: startStaticServer(allowRemote)
+    Static--&gt;&gt;User: localUrl / networkUrl
+  else aionui-web start
+    User-&gt;&gt;CLI: start --remote --port
+    CLI-&gt;&gt;Host: backend 存在时 startWebHost(ownBackend)
+    CLI-&gt;&gt;Static: backend 缺失时 startStaticServer(frontend-only)
+    Host--&gt;&gt;User: URL 与密码提示
+  end</code></pre>
+  <p>第一条路径发生在 Electron 主进程里。`index.ts` 先启动 aioncore，再把 `globalThis.__backendPort` 交给 WebHost，因此 WebUI 不会再启动第二个 backend，避免抢同一份 SQLite。第二条路径是独立 CLI，自行找 backend 二进制和 `static/`，启动后再检查管理员密码。</p>
+
+  <h2 id="edge">3. 一条关键边界路径</h2>
+  <p>远程访问不是默认打开的。桌面路径里，`resolveRemoteAccess()` 只有在 `--remote`、`AIONUI_ALLOW_REMOTE`、`AIONUI_REMOTE`、`AIONUI_HOST=0.0.0.0` 或用户配置 `allowRemote=true` 时返回 true。CLI 路径里，`resolveAllowRemote()` 只认 `--remote` 或远程 env。最后 `static-server.ts` 用这个布尔值选择监听地址：本地模式绑定 `127.0.0.1`，远程模式绑定 `0.0.0.0` 并生成 `networkUrl`。</p>
+  <div class="warning">
+    <p><strong>文档漂移要记住：</strong>`docs/guides/webui.md` 开头和排障段仍写 `3000`，但实现默认值不是它。当前实现是生产 `25808`，开发 `25809`，多实例开发 `25810`；E2E 也以 `25808` 或 WebUI 面板存在作为证据。</p>
+  </div>
+
+  <h2 id="exercise">4. 检索练习</h2>
+  <div class="exercise">
+    <p><strong>先回忆再看答案：</strong>如果用户运行 `AionUi --webui --remote --port 8080`，请从记忆写出 5 个连续层次。</p>
+    <p><strong>参考答案：</strong>命令行参数进入 `desktop/src/index.ts`，`getSwitchValue('port')` 让 `resolveWebUIPort()` 得到 `8080`，`--remote` 让 `resolveRemoteAccess()` 得到 true，`startWebHost()` 复用已启动 backend，`startStaticServer()` 绑定 `0.0.0.0` 并返回局域网 URL。</p>
+    <p><strong>反馈：</strong>如果你的答案里出现“启动第二个 backend”或“默认端口 3000”，说明混入了旧文档或独立 CLI 的语义。回到参考页的“配置优先级”和“文档漂移”两节复查。</p>
+  </div>
+
+  <p class="muted">追问建议：让 agent 带你继续检查 `webuiConfig.ts` 的桌面设置恢复路径，或把 `static-server.ts` 的 TCP splice 分支画成更细的请求路由图。</p>
+</main>
+</body>
+</html>

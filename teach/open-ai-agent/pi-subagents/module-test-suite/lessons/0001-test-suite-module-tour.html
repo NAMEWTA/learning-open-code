@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 测试体系模块边界导览</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#7c3aed; --warn:#b45309; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:900px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:1.95rem; margin:0 0 .45rem; letter-spacing:0; }
+    h2 { font-size:1.14rem; margin:1.8rem 0 .55rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    p, li { font-size:1rem; }
+    .meta, .source { color:var(--muted); font-size:.94rem; }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.9em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.84rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .callout { border-left:4px solid var(--accent); background:var(--soft); padding:.85rem 1rem; margin:1rem 0; }
+    .quiz { border-left:4px solid var(--warn); background:#fff8ed; padding:.85rem 1rem; margin:1rem 0; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>测试体系模块边界导览</h1>
+  <p class="meta">学习目标：15 分钟内能判断某个运行时行为应去 unit、integration 还是 e2e 找佐证，并知道该跑哪条 npm 命令。</p>
+
+  <h2>1. 一句话职责</h2>
+  <p><code>test/</code> 不是产品功能本身，而是整个 extension 的<strong>行为佐证层</strong>：当 README 或源码注释声称「前台 single 会写 artifact」「async 会落 status.json」「slash 能触发 workflow」时，测试文件给出可重复执行的断言。L0 已把 <code>test/</code> 标为架构旁路；本课只建立三层测试边界与夹具分工，完整 106 个测试文件索引见 <a href="../reference/test-suite-overview.html">test suite 参考页</a>。</p>
+
+  <h2>2. 三层结构与 npm 入口</h2>
+  <pre>test/
+├── unit/           ← 84 个 *.test.ts，纯函数，无 mock Pi
+├── integration/    ← 21 个 *.test.ts，mock Pi CLI 管道
+├── e2e/            ← 1 个 real-session 全链路
+└── support/        ← 夹具：mock-pi、loader、real-session-runner</pre>
+  <p><code>open-ai-agent/pi-subagents/package.json</code> 把三层拆成四条命令：<code>test:unit</code> 用 <code>--experimental-strip-types</code> 直接跑 unit；<code>test:integration</code> 与 <code>test:e2e</code> 额外加 <code>--experimental-transform-types</code> 并 <code>--import ./test/support/register-loader.mjs</code>，因为源码使用 TypeScript ESM 的 <code>.js</code> 扩展名且部分文件含参数属性；<code>test:all</code> 顺序执行三层。判断口诀：只测单个纯函数 → unit；要跑 spawn/parse/executor 但不碰真 LLM → integration；要验证真实 <code>AgentSession</code> 注册 extension 并回传 tool result → e2e。</p>
+
+  <h2>3. 夹具：mock-pi 与优雅跳过</h2>
+  <p>integration 的核心是 <code>test/support/mock-pi.ts</code>：它在临时目录生成名为 <code>pi</code> 的壳脚本，把该目录 prepend 到 <code>PATH</code>，于是 <code>runSync</code> 调用的 child CLI 实际执行 <code>mock-pi-script.mjs</code>。测试通过 <code>onCall({ jsonl: [...] })</code> 队列化响应，模拟 assistant 消息、tool 事件和退出码，无需 API key。若 Pi 包未安装，<code>test/support/helpers.ts</code> 的 <code>tryImport</code> 只对缺失的 bare specifier 返回 <code>null</code>，integration/e2e 用 <code>skip</code> 优雅退出，避免把环境缺依赖误判为代码回归。</p>
+  <pre>const mock = createMockPi();
+mock.install();
+mock.onCall({ jsonl: [events.assistantMessage("done")] });
+// runSync / executor 走完整前台管道
+mock.uninstall();</pre>
+
+  <h2>4. 模块佐证与检索练习</h2>
+  <p>读其他 L1 模块时，优先对照这些 integration 文件：runs 执行 → <code>single-execution</code>、<code>parallel-execution</code>、<code>chain-execution</code>、<code>async-execution</code>；slash → <code>slash-commands</code>、<code>slash-live-state</code>；intercom → <code>intercom-result-delivery</code>；TUI → <code>render-widget</code>、<code>render-fork-badge</code>。agent 发现与管理的多条边界落在 unit 层，例如 <code>agent-selection</code>、<code>agent-overrides</code>、<code>recursion-guard</code>。唯一 e2e <code>real-session-subagent.test.ts</code> 用 faux provider 驱动父会话调用 <code>subagent</code>，确认 marker 经真实 stdout 解析回到 tool result。</p>
+  <div class="quiz">
+    <p><strong>检索练习：</strong>你想验证「chain 步骤里 <code>{previous}</code> 是否正确传递」，应优先打开哪一层、哪个文件？</p>
+    <p><strong>参考答案：</strong>integration 层的 <code>open-ai-agent/pi-subagents/test/integration/chain-execution.test.ts</code>（模板纯逻辑还可看 <code>template-resolution.test.ts</code>）。unit 的 <code>chain-serializer</code> 只覆盖序列化，不跑完整 spawn 管道。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/package.json</code>、<code>open-ai-agent/pi-subagents/test/support/mock-pi.ts</code>、<code>open-ai-agent/pi-subagents/test/integration/single-execution.test.ts</code>。下一节 L2 建议从「single foreground run 垂直切片 + 对应 integration 用例」开始；不清楚某条断言覆盖什么行为时，可以继续让 agent 对照源码逐段讲解。</p>
+</main>
+</body>
+</html>

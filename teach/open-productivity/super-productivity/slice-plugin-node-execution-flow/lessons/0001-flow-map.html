@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 插件 Node execution grant 路径图</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main>
+      <article class="doc">
+        <p class="meta">L2 垂直切片 · 预计 15 分钟 · 目标：能把 nodeExecution 失败定位到 grant、consent、IPC 或脚本执行层</p>
+        <h1>插件 Node execution grant 路径图</h1>
+        <p class="lead">
+          本课只训练一个判断技能：看到 `executeNodeScript()` 或 `onReady` 卡住时，先判断问题在 renderer grant 缓存、main native consent、IPC 绑定，还是脚本执行沙箱。
+          完整入口见
+          <a href="../reference/plugin-node-execution-grant-flow-reference.html">参考文档</a>；
+          父模块见
+          <a href="../../module-plugin-system/lessons/0001-plugin-system-module-tour.html">插件系统 L1</a>、
+          <a href="../../slice-plugin-lifecycle-flow/lessons/0001-flow-map.html">插件生命周期 L2</a>。
+        </p>
+
+        <h2>1. Mermaid 时序图</h2>
+        <pre class="mermaid">sequenceDiagram
+  participant Plugin as plugin.js / iframe
+  participant Svc as PluginService
+  participant Bridge as PluginBridgeService
+  participant Pre as preload consumeApi
+  participant Main as plugin-node-executor
+  participant Store as plugin-node-consent-store
+
+  Note over Svc,Main: 启用或 onReady 前先拿 grant
+  Svc->>Bridge: requestNodeExecutionGrant(pluginId)
+  Bridge->>Pre: requestGrant
+  Pre->>Main: PLUGIN_REQUEST_NODE_EXECUTION_GRANT
+  alt uploaded 且已有持久 consent
+    Main->>Store: getNodeExecutionConsent
+    Store-->>Main: consent hit
+    Main-->>Bridge: mintGrant token
+  else 需要 native 对话框
+    Main->>Main: verified built-in 或 unverified uploaded dialog
+    Main-->>Bridge: Allow 后 mintGrant / Deny 返回 null
+    opt uploaded Allow
+      Main->>Store: setNodeExecutionConsent
+    end
+  end
+  Bridge->>Bridge: setNodeExecutionGrantToken
+  Svc->>Bridge: pingNodeBridge
+  Svc->>Plugin: triggerReady onReady
+
+  Note over Plugin,Main: 运行时脚本执行
+  Plugin->>Bridge: executeNodeScript(request)
+  Bridge->>Pre: executeScript(pluginId, grantToken, request)
+  Pre->>Main: PLUGIN_EXEC_NODE_SCRIPT
+  Main->>Main: 校验 grantToken + webContentsId
+  Main->>Main: vm 或 spawn 执行脚本
+  Main-->>Bridge: PluginNodeScriptResult
+  Bridge-->>Plugin: success / error</pre>
+
+        <h2>2. 四层边界别混读</h2>
+        <table>
+          <thead>
+            <tr><th>层</th><th>存什么</th><th>谁能写</th><th>典型源码</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>renderer token 缓存</td>
+              <td>当前会话 grant token</td>
+              <td>PluginBridgeService 在 main 返回 token 后写入</td>
+              <td><span class="where">src/app/plugins/plugin-bridge.service.ts</span></td>
+            </tr>
+            <tr>
+              <td>main session grant</td>
+              <td>token + webContentsId</td>
+              <td>只有 native Allow 或 persisted consent 命中后 mint</td>
+              <td><span class="where">electron/plugin-node-executor.ts</span></td>
+            </tr>
+            <tr>
+              <td>持久 consent</td>
+              <td>uploaded 插件 ask-once 记录</td>
+              <td>只有 main Allow 后写入；renderer 只能 clear</td>
+              <td><span class="where">electron/plugin-node-consent-store.ts</span></td>
+            </tr>
+            <tr>
+              <td>脚本执行</td>
+              <td>vm 沙箱或 spawn 子进程</td>
+              <td>main 在校验 grant 后才执行</td>
+              <td><span class="where">electron/plugin-node-executor.ts</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          `PluginBridgeService` 在构造时调用 `consumePluginNodeExecutionApi()`，必须早于任何 `new Function` 插件代码——否则插件可能抢走 one-shot handoff。
+          built-in 插件每会话弹 verified dialog；uploaded 插件走 unverified 文案，Allow 后可跨会话免重复弹窗，直到 disable、卸载或 re-upload 触发 `clearNodeExecutionConsent()`。
+        </p>
+
+        <h2>3. 关键入口速查</h2>
+        <pre class="diagram">用户启用 node 插件
+  -> plugin-management.component.ts
+  -> PluginService.checkNodeExecutionPermission()
+  -> _ensureNodeExecutionGrant()
+
+启动加载 enabled 插件
+  -> PluginService._fireOnReady()
+  -> _ensureNodeExecutionGrant() + pingNodeBridge()
+  -> PluginRunner.triggerReady()
+
+插件调用 executeNodeScript
+  -> PluginBridgeService._executeNodeScript()
+  -> preload PLUGIN_EXEC_NODE_SCRIPT
+  -> main executeScript()</pre>
+
+        <h2>4. 60 秒判断题</h2>
+        <p>
+          场景：Electron 桌面版，uploaded 插件已在上次会话 Allow 过 nodeExecution；用户这次冷启动后插件 tile 显示
+          “permission denied”，但设置页仍显示 enabled。你会先查哪两条链路？
+        </p>
+        <details class="answer">
+          <summary>参考答案与反馈</summary>
+          <p>
+            第一，查 `PluginService._fireOnReady()` 是否在本会话重新拿到 session grant：持久 consent 只跳过对话框，每次仍要 mint 新 token 并 ping bridge。
+            第二，查 main 的 grant 是否仍绑定当前 webContents——导航或窗口重建会清 session grant，但不应误删 persisted consent。
+            若 consent 存在却反复失败，再看 IPC/bridge unavailable 与 `_nodeExecutionDeniedThisSession` 是否记录了本会话拒绝。
+            细节索引见参考文档“失败症状表”。主要来源：<span class="where">src/app/plugins/plugin.service.ts</span>、<span class="where">electron/plugin-node-executor.ts</span>。
+            若某个边界仍不清楚，直接向 agent 追问下一跳源码。
+          </p>
+        </details>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cron 创建与编辑分流短课</title>
+  <link rel="stylesheet" href="../assets/slice.css" />
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Cron 创建与编辑分流</h1>
+    <p class="subtitle">学习目标：只读懂 <code>CreateTaskDialog.handleSubmit()</code> 如何把同一张表单分成 <code>addJob</code> 与 <code>updateJob</code> 两条写入路径。</p>
+    <div class="meta">
+      <span class="pill">短课 0002</span>
+      <span class="pill">入口：CreateTaskDialog</span>
+      <span class="pill">判断：新建不是编辑</span>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <a href="./0001-flow-map.html">返回 0001 flow map</a>
+    <a href="../reference/cron-trigger-flow-map.html">参考图谱</a>
+    <a href="../../module-cron/reference/cron-overview.html">Cron 模块</a>
+  </nav>
+
+  <h2>1. 先定位分流点</h2>
+  <p>创建和编辑共用一个 modal，所以调试时不要只看按钮文案。真正分叉的是 <code>isEditMode</code>：编辑会保留已有 <code>job_id</code>，新建会构造 <code>ICreateCronJobParams</code> 并把 <code>conversation_id</code> 填成当前会话或空字符串。</p>
+
+  <h2>2. 真实分流摘录</h2>
+  <pre><code class="language-typescript">if (isEditMode) {
+  const metadata: ICronJobUpdateParams['metadata'] = {
+    conversation_title: editJob!.metadata.conversation_title,
+  };
+  if (canEditAgentConfig) {
+    metadata.agent_config = agent_config;
+  }
+
+  // Edit mode: update existing job
+  const updates: ICronJobUpdateParams = {
+    name: values.name,
+    schedule,
+    target: {
+      payload: { kind: 'message', text: values.prompt },
+      execution_mode: resolvedExecutionMode,
+    },
+    metadata,
+    state: {
+      max_retries: editJob!.state.max_retries,
+    },
+  };
+
+  await ipcBridge.cron.updateJob.invoke({
+    job_id: editJob!.id,
+    updates,
+  });
+  Message.success(t('cron.page.updateSuccess'));
+}</code></pre>
+  <p>新建路径则进入 <code>else</code>，构造 <code>ICreateCronJobParams</code> 后调用 <code>addJob</code>。</p>
+  <pre><code class="language-typescript">} else {
+  // Create mode
+  const params: ICreateCronJobParams = {
+    name: values.name,
+    schedule,
+    prompt: values.prompt,
+    conversation_id: _conversation_id ?? '',
+    conversation_title,
+    created_by: 'user',
+    execution_mode: resolvedExecutionMode,
+    agent_config,
+  };
+  await ipcBridge.cron.addJob.invoke(params);
+  Message.success(t('cron.page.createSuccess'));
+}</code></pre>
+  <p>核心判断是：编辑路径的目标是“更新已有 job”，不是删除重建；新建路径才会构造 <code>ICreateCronJobParams</code> 并调用 <code>addJob</code>。</p>
+
+  <h2>3. Adapter 落点</h2>
+  <p><code>ipcBridge.cron.updateJob</code> 会把 <code>updates.target.payload.text</code> 映射成后端 <code>message</code> 字段；<code>addJob</code> 则直接 <code>POST /api/cron/jobs</code>。因此“AI 修改任务后 job id 保持不变”的 E2E 应该对照 <code>updateJob</code> 分支，而不是 create 分支。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果编辑任务后详情页显示成新任务，你会先检查 <code>CreateTaskDialog</code> 的哪个条件？</p>
+    <p><strong>参考答案：</strong>先检查 <code>isEditMode</code> 是否为 true，以及传入的 <code>editJob!.id</code> 是否进入 <code>ipcBridge.cron.updateJob.invoke({ job_id, updates })</code>。如果实际走了 <code>addJob</code>，历史和 job id 都会断裂。</p>
+  </div>
+</main>
+</body>
+</html>

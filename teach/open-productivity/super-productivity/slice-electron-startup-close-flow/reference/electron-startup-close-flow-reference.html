@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>参考：Electron 启动、窗口创建与关闭前同步全链路</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topline">L2 参考资料 · Super Productivity</div>
+      <h1>Electron 启动、窗口创建与关闭前同步全链路参考</h1>
+      <p class="lead">
+        这份参考用于排查桌面端启动、窗口显示、IPC、本地能力和关闭前同步问题。核心原则：Electron main process 管进程、窗口、本地能力和 IPC 管道；Angular renderer 管业务状态、同步决策、finish-day UI，并通过 preload bridge 交接。
+      </p>
+      <p class="lead">
+        短课顺序：<a href="../lessons/0001-flow-map.html">链路地图</a>、
+        <a href="../lessons/0002-main-path.html">启动主路径</a>、
+        <a href="../lessons/0003-close-protection-path.html">关闭前保护</a>。相关 L1：
+        <a href="../../module-electron-host/">Electron 宿主</a>、
+        <a href="../../module-angular-app-shell/">Angular 应用装配</a>、
+        <a href="../../module-op-log-sync/">op-log 同步架构</a>。
+      </p>
+
+      <h2>一、主进程入口与 app 生命周期</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>源码</th>
+            <th>职责</th>
+            <th>读码判断</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>进程入口</td>
+            <td><code>electron/main.ts</code></td>
+            <td>非 macOS 获取 <code>requestSingleInstanceLock()</code>，成功才调用 <code>startApp()</code>。</td>
+            <td>多开、协议启动、二次实例问题先看这里。</td>
+          </tr>
+          <tr>
+            <td>启动编排</td>
+            <td><code>electron/start-app.ts</code></td>
+            <td>注册协议、IPC、本地能力、下载、证书策略、ready 回调、idle/powerMonitor、退出钩子。</td>
+            <td>它是 main process 编排器，不是 Angular bootstrap。</td>
+          </tr>
+          <tr>
+            <td>ready 后建窗</td>
+            <td><code>electron/start-app.ts</code></td>
+            <td><code>appIN.on('ready', () =&gt; createMainWin())</code>，再调用 <code>createWindow(...)</code>。</td>
+            <td>窗口不存在时先确认 <code>ready</code> 是否触发、userData/GPU 前置逻辑是否失败。</td>
+          </tr>
+          <tr>
+            <td>退出兜底</td>
+            <td><code>electron/start-app.ts</code></td>
+            <td><code>before-quit</code> 拦截原生 quit；<code>window-all-closed</code> 调 <code>app.quit()</code> 并设置强制退出兜底。</td>
+            <td>原生菜单、Dock、快捷键退出都应回到 close 保护。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="flow-map">main process startup
+  main.ts
+    → startApp()
+       → initializeProtocolHandling()
+       → initIpcInterfaces()
+       → app commandLine / userData / GPU guard
+       → app ready
+          → createMainWin()
+             → createWindow()
+             → initPluginOAuth()
+             → processPendingProtocolUrls()</div>
+
+      <h2>二、窗口生命周期与 renderer 交接</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>源码</th>
+            <th>关键点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>创建窗口</td>
+            <td><code>electron/main-window.ts</code></td>
+            <td><code>new BrowserWindow</code> 设置 <code>preload</code>、<code>nodeIntegration: false</code>、<code>contextIsolation: true</code>、权限白名单和标题栏策略。</td>
+          </tr>
+          <tr>
+            <td>加载 renderer</td>
+            <td><code>electron/main-window.ts</code></td>
+            <td>开发环境加载 <code>http://localhost:4200</code>；打包环境加载 dist 下的 HTML 入口。真正的 renderer bootstrap 入口见 <code>src/main.ts</code>。</td>
+          </tr>
+          <tr>
+            <td>窗口可显示</td>
+            <td><code>electron/main-window.ts</code></td>
+            <td><code>ready-to-show</code> 后 <code>show()</code> 并处理焦点。它不等于业务数据加载完成。</td>
+          </tr>
+          <tr>
+            <td>业务就绪回报</td>
+            <td><code>src/app/core/startup/startup.service.ts</code></td>
+            <td>Angular 初始化后调用 <code>window.ea.informAboutAppReady()</code>；main 在 <code>IPC.APP_READY</code> 中设置 app ready 并标记 GPU startup 成功。</td>
+          </tr>
+          <tr>
+            <td>Angular bootstrap</td>
+            <td><code>src/main.ts</code></td>
+            <td><code>bootstrapApplication(AppComponent, ...)</code> 是 renderer 自己的启动，不由 main process 同步等待。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warning">
+        排障时不要把 <code>ready-to-show</code>、<code>did-finish-load</code>、<code>APP_READY</code> 混成一个事件。前两个属于 Electron 窗口加载层；<code>APP_READY</code> 是业务 bootstrap 后 renderer 主动发回的 IPC。
+      </div>
+
+      <h2>三、IPC 边界与本地能力</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>边界</th>
+            <th>源码</th>
+            <th>责任</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>通道常量</td>
+            <td><code>electron/shared-with-frontend/ipc-events.const.ts</code></td>
+            <td>main 和 renderer 共享 IPC 名称，避免魔法字符串散落。</td>
+          </tr>
+          <tr>
+            <td>preload bridge</td>
+            <td><code>electron/preload.ts</code>、<code>electron/electronAPI.d.ts</code></td>
+            <td>在隔离上下文里暴露 <code>window.ea</code>，把 renderer 的方法映射到 <code>ipcRenderer.send</code> 或 <code>ipcRenderer.invoke</code>。</td>
+          </tr>
+          <tr>
+            <td>IPC 注册入口</td>
+            <td><code>electron/ipc-handler.ts</code>、<code>electron/ipc-handlers/index.ts</code></td>
+            <td><code>initIpcInterfaces()</code> 注册 app data、app control、system、Jira、快捷键、剪贴板图片、local REST API 等处理器。</td>
+          </tr>
+          <tr>
+            <td>控制类事件</td>
+            <td><code>electron/ipc-handlers/app-control.ts</code></td>
+            <td><code>ipcMain.on</code> 处理 relaunch、exit、show/focus、lock screen、progress bar、settings update。</td>
+          </tr>
+          <tr>
+            <td>查询/文件能力</td>
+            <td><code>electron/ipc-handlers/app-data.ts</code>、<code>electron/ipc-handlers/system.ts</code></td>
+            <td><code>ipcMain.handle</code> 返回 userData、backup path、save dialog、native share 等异步结果。</td>
+          </tr>
+          <tr>
+            <td>安全包装</td>
+            <td><code>electron/ipc-handler-wrapper.ts</code></td>
+            <td>对 renderer 传入路径做 userData containment、文件名和 imageId 校验。renderer 不是可信输入源。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>四、关闭前同步与 finish-day 保护</h2>
+      <div class="flow-map">close / quit path
+  user close button / app menu quit / native Cmd+Q
+    → before-quit may prevent default
+    → closeWinAndQuit() marks quit intent
+    → mainWin.close()
+    → close handler
+       ├─ minimize-to-tray allowed → hide window
+       ├─ ids.length > 0 → send NOTIFY_ON_CLOSE(ids)
+       └─ ids.length === 0 → setIsQuiting(true), close again
+    → renderer handles ids
+       ├─ SyncEffects sync() → BEFORE_CLOSE_DONE(SYNC_BEFORE_CLOSE_ID)
+       └─ FinishDayBeforeCloseEffects dialog decision
+    → main removes ids
+    → ids empty → destroy task widget → mainWin.close()
+    → closed → clear refs
+    → window-all-closed → app.quit()</div>
+      <div class="callout warning">
+        托盘 indicator 菜单的 <code>Quit</code> 当前是另一条直接退出路径：它调用 <code>quitApp()</code>，先设置
+        <code>isQuiting=true</code> 再 <code>app.quit()</code>，所以不会走 <code>NOTIFY_ON_CLOSE</code> 等待项分支。应用菜单 Quit 和原生
+        Cmd+Q 仍通过 <code>closeWinAndQuit()</code> 进入关闭前保护。
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>组件</th>
+            <th>源码</th>
+            <th>关闭前行为</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>等待项仓库</td>
+            <td><code>electron/main-window.ts</code></td>
+            <td><code>REGISTER_BEFORE_CLOSE</code> 加 ID，<code>UNREGISTER_BEFORE_CLOSE</code> 移除 ID，<code>BEFORE_CLOSE_DONE</code> 清除已完成 ID。</td>
+          </tr>
+          <tr>
+            <td>renderer bridge</td>
+            <td><code>src/app/core/electron/exec-before-close.service.ts</code></td>
+            <td><code>schedule()</code>、<code>unschedule()</code>、<code>setDone()</code> 分别映射到 preload 暴露的 before-close IPC。</td>
+          </tr>
+          <tr>
+            <td>同步保护</td>
+            <td><code>src/app/imex/sync/sync.effects.ts</code></td>
+            <td>同步启用且 ready 后注册 <code>SYNC_BEFORE_CLOSE_ID</code>；收到通知后停止当前任务、flush counter、等待一个 macrotask，再调用 <code>sync()</code>，成功或失败都释放关闭。</td>
+          </tr>
+          <tr>
+            <td>finish-day 提醒</td>
+            <td><code>src/app/features/finish-day-before-close/finish-day-before-close.effects.ts</code></td>
+            <td>功能启用后就注册等待项；关闭通知到来后检查当天已完成任务。没有已完成任务会立即释放；有已完成任务时弹窗，选 <code>quit</code> 才释放，选 <code>finish-day</code> 导航到 daily summary 并保持窗口，选 <code>cancel</code> 不释放。</td>
+          </tr>
+          <tr>
+            <td>弹窗 UI</td>
+            <td><code>src/app/features/finish-day-before-close/dialog-finish-day-before-close/dialog-finish-day-before-close.component.ts</code>、<code>src/app/features/finish-day-before-close/dialog-finish-day-before-close/dialog-finish-day-before-close.component.html</code></td>
+            <td>返回 <code>cancel</code>、<code>quit</code>、<code>finish-day</code> 三种选择。</td>
+          </tr>
+          <tr>
+            <td>行为佐证</td>
+            <td><code>src/app/features/finish-day-before-close/finish-day-before-close.effects.spec.ts</code></td>
+            <td>测试固定了三种选择的结果：quit 调 <code>setDone</code>，cancel 不关闭，finish-day 导航但不关闭。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>五、排障速查</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>现象</th>
+            <th>优先检查</th>
+            <th>常见判断</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>第二个实例启动后主窗口没有响应协议 URL</td>
+            <td><code>electron/main.ts</code>、<code>electron/protocol-handler.ts</code></td>
+            <td>先看单实例锁和 pending protocol URL 是否等到 window ready 后处理。</td>
+          </tr>
+          <tr>
+            <td>窗口显示了，但 GPU startup guard 仍认为启动失败</td>
+            <td><code>electron/main-window.ts</code>、<code>electron/gpu-startup-guard.ts</code></td>
+            <td><code>ready-to-show</code> 不足以证明 Angular 完成；要等 <code>APP_READY</code>。</td>
+          </tr>
+          <tr>
+            <td>点击关闭只是隐藏到托盘</td>
+            <td><code>electron/main-window.ts</code>、<code>electron/shared-state.ts</code></td>
+            <td>如果 <code>getIsMinimizeToTray()</code> 且不是显式 quit intent，close handler 会 hide。</td>
+          </tr>
+          <tr>
+            <td>关闭卡住</td>
+            <td><code>electron/main-window.ts</code>、<code>src/app/core/electron/exec-before-close.service.ts</code></td>
+            <td>检查 pending ID 是否没有收到 <code>BEFORE_CLOSE_DONE</code>；finish-day 的 cancel/finish-day 本来就不释放。</td>
+          </tr>
+          <tr>
+            <td>同步失败后仍退出</td>
+            <td><code>src/app/imex/sync/sync.effects.ts</code></td>
+            <td>这是显式设计：catch 后提示用户，然后调用 <code>setDone(SYNC_BEFORE_CLOSE_ID)</code>，避免失败把用户困住。</td>
+          </tr>
+          <tr>
+            <td>renderer 能调用危险本地能力</td>
+            <td><code>electron/preload.ts</code>、<code>electron/ipc-handler-wrapper.ts</code></td>
+            <td>renderer 只通过 <code>window.ea</code> 触达白名单 IPC；路径和文件名需要在 main 侧再次校验。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>后续 L3/L4 线索</h2>
+      <ul>
+        <li>L3：<code>electron/main-window.ts</code> 中 <code>appCloseHandler()</code> 的状态机、重复 close 防护、tray hide 分支。</li>
+        <li>L3：<code>src/app/imex/sync/sync.effects.ts</code> 的 before-close sync 注册、macrotask yield 和失败释放策略。</li>
+        <li>L3：<code>electron/preload.ts</code> 与 <code>electron/electronAPI.d.ts</code> 的 bridge API 面积审计。</li>
+        <li>L4：<code>electron/gpu-startup-guard.ts</code> 的启动失败检测与 <code>APP_READY</code> 设计取舍。</li>
+        <li>L4：<code>electron/ipc-handler-wrapper.ts</code>、<code>electron/file-path-guard.ts</code>、<code>electron/sync-path-resolver.ts</code> 的路径安全边界。</li>
+      </ul>
+      <p class="footer">
+        这些线索后续可拆为 `api-electron-window-close-state-machine`、`api-electron-preload-bridge` 和
+        `deep-electron-ipc-path-security` 等 L3/L4 主题。
+      </p>
+    </main>
+  </body>
+</html>

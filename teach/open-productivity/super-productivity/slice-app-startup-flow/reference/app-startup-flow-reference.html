@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>应用启动与数据初始化全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 参考文档 · 入口清单、启动时序、边界判断与故障排查</p>
+    <h1>应用启动与数据初始化全链路参考</h1>
+    <p>一句话：本切片从 <code>src/main.ts</code> 的 Angular bootstrap 出发，追到 root shell、DataInit/op-log hydration、初始同步信号、迁移提示和插件初始化。关联模块：<a href="../../module-angular-app-shell/reference/angular-app-shell-overview.html">Angular 壳层 L1</a>、<a href="../../module-op-log-sync/reference/op-log-sync-overview.html">op-log 同步 L1</a>、<a href="../../module-plugin-system/reference/plugin-system-overview.html">插件系统 L1</a>。</p>
+
+    <h2>入口清单</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>源码入口</th><th>负责什么</th><th>排查信号</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Angular bootstrap</td><td><code>src/main.ts</code></td><td>调用 <code>bootstrapApplication(AppComponent, ...)</code>，注册根 providers、router、NgRx、HTTP、Translate、service worker、Capacitor 生命周期。</td><td>provider 缺失、APP_INITIALIZER、service worker、移动后台 flush。</td></tr>
+          <tr><td>Feature store 注册</td><td><code>src/app/root-store/feature-stores.module.ts</code></td><td>注册 app state、layout、config、task、project、tag、plugin metadata/user data、sync effects 等。</td><td>某个 effect 未触发、sync effects 未进入、平台条件 effects 缺失。</td></tr>
+          <tr><td>路由入口</td><td><code>src/app/app.routes.ts</code></td><td>定义工作区页面、独立页面、插件页和 wildcard 默认页。</td><td>URL 能否匹配页面、lazy component 是否加载、守卫是否挡住。</td></tr>
+          <tr><td>根组件行为</td><td><code>src/app/app.component.ts</code></td><td>构造函数触发启动服务；等待数据/同步后显示笔记、安全和加密迁移 banner；初始化主题、RTL、键盘布局。</td><td>shell 已出现但 banner/onboarding/全局体验异常。</td></tr>
+          <tr><td>根组件模板</td><td><code>src/app/app.component.html</code></td><td>把 side nav、header、right panel、<code>router-outlet</code>、progress bar、focus overlay、onboarding 放进 shell。</td><td>壳层在但页面空白时，先查路由/页面；壳层也不在则回 bootstrap。</td></tr>
+          <tr><td>启动服务</td><td><code>src/app/core/startup/startup.service.ts</code></td><td>单实例检查、备份恢复提示、持久化、主题预加载、Electron ready、延迟任务和插件初始化。</td><td>多标签阻塞、首屏闪主题、插件等待、Electron settings 发送。</td></tr>
+          <tr><td>数据初始化</td><td><code>src/app/core/data-init/data-init.service.ts</code></td><td>实例化即触发 <code>reInit()</code>，可选 user profile 初始化，再调用 op-log hydrator。</td><td>首次数据是否加载、是否 dispatch <code>allDataWasLoaded</code>。</td></tr>
+          <tr><td>首次数据状态</td><td><code>src/app/core/data-init/data-init-state.service.ts</code></td><td>用 <code>ReplaySubject</code> + <code>shareReplay(1)</code> 暴露只完成一次的初始数据信号。</td><td>其他服务是否还在等 <code>isAllDataLoadedInitially$</code>。</td></tr>
+          <tr><td>op-log hydration</td><td><code>src/app/op-log/persistence/operation-log-hydrator.service.ts</code></td><td>恢复 pending remote ops，迁移 archive，读 state cache，必要时旧库迁移/schema migration/replay，最后 dispatch <code>loadAllData</code>。</td><td>IndexedDB、快照损坏、旧库迁移、replay 卡住。</td></tr>
+          <tr><td>旧库迁移</td><td><code>src/app/op-log/persistence/operation-log-migration.service.ts</code></td><td>无 state cache 时检查 legacy <code>pf</code> 数据；创建自动备份、校验/修复、写 MIGRATION genesis op 和 state cache。</td><td>迁移弹窗、legacy 数据不可读、迁移锁、多标签。</td></tr>
+          <tr><td>schema migration</td><td><code>src/app/op-log/persistence/schema-migration.service.ts</code></td><td>迁移旧 state cache 和旧 operation payload 到当前 schema。</td><td>schemaVersion 不匹配、operation 被 drop/split、迁移 registry 异常。</td></tr>
+          <tr><td>同步触发</td><td><code>src/app/imex/sync/sync-trigger.service.ts</code></td><td>在数据完成后判断 initial sync 是否启用；生成初始同步完成信号和后续自动同步触发器。</td><td>UI 是否应等待同步、8 秒兜底、SuperSync 是否跳过等待 UI。</td></tr>
+          <tr><td>同步执行</td><td><code>src/app/imex/sync/sync-wrapper.service.ts</code></td><td>防并发、打开 sync window、下载远端 ops、上传本地 ops、设置 sync status、处理错误。</td><td>同步卡在进行中、插件等待当前同步、加密/网络/认证错误。</td></tr>
+          <tr><td>远端快照落地</td><td><code>src/app/op-log/persistence/sync-hydration.service.ts</code></td><td>远端同步下载后合并 archive 和实体模型，保存 state cache/vector clock，并 dispatch <code>loadAllData</code>。</td><td>远端数据下载后 NgRx 未更新、local-only sync 设置被覆盖、快照校验失败。</td></tr>
+          <tr><td>插件运行时</td><td><code>src/app/plugins/plugin.service.ts</code></td><td>发现内置/上传插件，读取 enabled 状态，自动启用 issue provider 迁移插件，加载 enabled 插件并触发 ready。</td><td>插件未发现、未启用、加载失败、Node grant 被拒。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>启动时序</h2>
+    <pre class="diagram">浏览器 / Electron / Native 打开 renderer
+  ↓
+src/main.ts
+  ├─ unlock audio / legacy KDF warning / platform flags
+  ├─ bootstrapApplication(AppComponent, providers)
+  ├─ APP_INITIALIZER 实例化 DataInitService
+  │    └─ src/app/core/data-init/data-init.service.ts
+  │        └─ src/app/op-log/persistence/operation-log-hydrator.service.ts
+  │            ├─ recover pending remote ops / cleanup corrupt ops
+  │            ├─ migrate archives from legacy pf if needed
+  │            ├─ load state cache or run legacy migration
+  │            ├─ schema migration or operation replay
+  │            └─ dispatch loadAllData → allDataWasLoaded → DataInitStateService
+  └─ AppComponent constructed
+       ├─ src/app/core/startup/startup.service.ts init()
+       │    ├─ single-instance / backup / persistence / theme
+       │    ├─ Electron ready or browser beforeunload
+       │    └─ delayed tasks after 1000ms
+       │         ├─ tracking reminder / update check / storage / offline banner
+       │         ├─ legacy custom theme migration
+       │         ├─ rate prompt
+       │         └─ wait data loaded + current sync done
+       │              └─ src/app/plugins/plugin.service.ts initializePlugins()
+       └─ src/app/app.component.html router-outlet 显示路由页面
+
+src/app/imex/sync/sync.effects.ts
+  └─ after DataInitStateService → provider ready → initial sync / auto sync
+       └─ SyncWrapperService.sync() download first, upload second
+            └─ SyncTriggerService.setInitialSyncDone(true)</pre>
+
+    <h2>边界判断</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>看到的代码/症状</th><th>属于哪一层</th><th>不要误判成</th><th>下一跳</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>src/app/plugins/plugin-initializer.ts</code> 的 <code>'PLUGIN_INITIALIZER'</code> provider</td><td>Angular DI token 接线</td><td>当前实际插件启动执行链</td><td><code>src/app/core/startup/startup.service.ts</code></td></tr>
+          <tr><td><code>src/main.ts</code> 的 DataInit APP_INITIALIZER 返回空函数</td><td>强制实例化 service</td><td>Angular 会等待数据加载 Promise 完成</td><td><code>src/app/core/data-init/data-init.service.ts</code></td></tr>
+          <tr><td>壳层显示，页面内容空白</td><td>路由或页面 lazy load 边界</td><td>整个 bootstrap 失败</td><td><code>src/app/app.routes.ts</code></td></tr>
+          <tr><td>壳层未出现，或启动 overlay 不退</td><td>bootstrap / DataInit / hydration 边界</td><td>普通页面路由失败</td><td><code>src/main.ts</code> 与 <code>src/app/core/data-init/data-init.service.ts</code></td></tr>
+          <tr><td>旧数据迁移弹窗</td><td>op-log migration</td><td>普通 sync conflict</td><td><code>src/app/op-log/persistence/operation-log-migration.service.ts</code></td></tr>
+          <tr><td>SuperSync 加密迁移 banner</td><td>初始同步后 UI nudge</td><td>启动必需迁移步骤</td><td><code>src/app/imex/sync/super-sync-encryption-migration-banner.service.ts</code></td></tr>
+          <tr><td>插件自动启用 issue provider</td><td>插件发现阶段读取已加载 store</td><td>业务 issue 同步已经完成</td><td><code>src/app/plugins/plugin.service.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>常见故障排查</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>故障</th><th>第一入口</th><th>第二入口</th><th>判断方法</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>应用提示已经在另一个 tab 运行。</td><td><code>src/app/core/startup/startup.service.ts</code></td><td>浏览器 BroadcastChannel</td><td>检查 <code>superProductivityTab</code> 通道是否收到 <code>alreadyOpenElsewhere</code>。</td></tr>
+          <tr><td>首次数据没有出现。</td><td><code>src/app/core/data-init/data-init.service.ts</code></td><td><code>src/app/op-log/persistence/operation-log-hydrator.service.ts</code></td><td>看是否进入 hydration、是否 dispatch <code>loadAllData</code>，以及是否记录 IndexedDB 或 recovery 错误。</td></tr>
+          <tr><td>IndexedDB backing store 错误。</td><td><code>src/app/op-log/persistence/operation-log-hydrator.service.ts</code></td><td><code>src/app/op-log/core/errors/indexed-db-open.error.ts</code></td><td>hydrator 会先尝试自动 reload 一次，再显示手动恢复说明。</td></tr>
+          <tr><td>旧版本数据迁移失败。</td><td><code>src/app/op-log/persistence/operation-log-migration.service.ts</code></td><td><code>src/app/core/persistence/legacy-pf-db.service.ts</code></td><td>确认 legacy 数据是否可读、自动备份是否创建、repair 后是否仍验证失败。</td></tr>
+          <tr><td>同步一直阻塞退出或插件等待。</td><td><code>src/app/imex/sync/sync-wrapper.service.ts</code></td><td><code>src/app/imex/sync/user-input-wait-state.service.ts</code></td><td>检查 <code>afterCurrentSyncDoneOrSyncDisabled$</code> 是否在等用户输入、是否超时兜底。</td></tr>
+          <tr><td>初始同步后 note/safety/encryption banner 没显示。</td><td><code>src/app/app.component.ts</code></td><td><code>src/app/imex/sync/sync-trigger.service.ts</code></td><td>确认 <code>afterInitialSyncDoneAndDataLoadedInitially$</code> 是否发出，或者是否触发 8 秒兜底。</td></tr>
+          <tr><td>插件页空白但 shell 正常。</td><td><code>src/app/core/startup/startup.service.ts</code></td><td><code>src/app/plugins/plugin.service.ts</code></td><td>先看插件初始化是否等待数据/当前同步；再看 discover、enabled、activate、ready 失败状态。</td></tr>
+          <tr><td>Electron 首次启动后设置没有发给主进程。</td><td><code>src/app/core/startup/startup.service.ts</code></td><td><code>src/app/core/data-init/data-init-state.service.ts</code></td><td>Electron 设置发送要等首次数据完成后读取 global config。</td></tr>
+          <tr><td>Android/iOS 退后台后最近操作丢失。</td><td><code>src/main.ts</code></td><td><code>src/app/op-log/sync/operation-write-flush.service.ts</code></td><td>检查 Capacitor <code>appStateChange</code> 是否触发后台 task，并调用 pending writes flush。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>继续深入</h2>
+    <ol>
+      <li>如果要展开启动数据落地，读 <code>src/app/op-log/persistence/operation-log-hydrator.service.ts</code> 的 snapshot、full-state op、tail replay、recovery 分支。</li>
+      <li>如果要展开初始同步，读 <code>src/app/imex/sync/sync-trigger.service.ts</code>、<code>src/app/imex/sync/sync.effects.ts</code>、<code>src/app/imex/sync/sync-wrapper.service.ts</code> 的等待关系。</li>
+      <li>如果要展开插件启动，读 <code>src/app/plugins/plugin.service.ts</code> 的 discover、auto-enable migration plugin、activate、ready failure 处理。</li>
+      <li>如果要展开迁移，读 <code>src/app/op-log/persistence/operation-log-migration.service.ts</code>、<code>src/app/op-log/persistence/schema-migration.service.ts</code>、<code>src/app/imex/sync/super-sync-encryption-migration-banner.service.ts</code> 三类迁移边界。</li>
+    </ol>
+
+    <p>配套短课：<a href="../lessons/0001-flow-map.html">0001 应用启动与数据初始化路径图</a>。</p>
+  </article>
+</main>
+</body>
+</html>

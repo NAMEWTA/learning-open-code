@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · 折叠与装配机制：零LLM拼接与滚动窗口</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · 折叠与装配机制：零LLM拼接与滚动窗口 <span class="tag">装配机制</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能解释 assembleWeekFromDaily 为什么不再用 LLM（以及旧 v3 方案的三大问题），理解 rollDailyWindow 的"失败保留源文件"保护机制，掌握 compileLongterm 作为通用 fold 入口的复用设计，以及 compileEditableFacts 的增量编译与独立水位线。
+</div>
+
+<p>在 compileToday 和 compileDaily 完成今天的草稿和昨天的日记后，传送带还需要三个关键步骤来维护 week、longterm 和 facts 这三个长期产物。这一课我们逐一拆解。</p>
+
+<h2>一、assembleWeekFromDaily：零 LLM 周段装配</h2>
+
+<h3>1.1 为什么不再用 LLM 编译 week？</h3>
+
+<p>这是 v4 传送带的关键创新点之一：<b>week.md 不再是独立的 LLM 编译产物</b>，而是从 <code>memory/daily/</code> 目录纯文件装配——取最近 6 个已结束逻辑日的日记条目，按日期正序拼接。零 LLM 调用。</p>
+
+<p>旧版 v3 设计是每天对过去 7 天的摘要做整周编译（compileWeek），有三大问题：</p>
+
+<div class="step"><span class="num">1</span><b>重复计算</b>：每天重编过去 7 天，产生 7 倍的 LLM 调用。每天的 daily 条目已经蒸馏过一次，week 编译是对"摘要的摘要"再做一次蒸馏——信息在每层都有损失。<br><span class="where">v3 方案：compileWeek 每天全量重编</span></div>
+
+<div class="step"><span class="num">2</span><b>输出不稳定</b>：每天给出的 week 摘要可能因模型随机性而不同（temperature 0.3 仍有波动），用户会看到"历史在变化"——同一周的内容在不同日子里看起来不一样。<br><span class="where">v3 方案：LLM 非确定性输出</span></div>
+
+<div class="step"><span class="num">3</span><b>摘要精度递减</b>：对摘要再做摘要（摘要的摘要），信息在每层蒸馏中都有损失。compileDaily 已经产出 60 字的精炼日记，再让 LLM 从中提炼 week 摘要反而可能丢掉关键信息。<br><span class="where">v3 方案：信息二次蒸馏损失</span></div>
+
+<div class="side">
+💡 <b>v4 方案核心洞察：</b>用 compileDaily 一次性写好每天 60 字的日记，week 只是把它们拼起来。每天的内容是独立产出的，不随天数增加而变化。这不只是降本，更是保证信息稳定性——每天的 daily 条目一旦产生就不再变化。
+</div>
+
+<h3>1.2 算法实现</h3>
+
+<pre><code>function assembleWeekFromDaily(dailyDir, weekPath,
+                                maxDays=6, maxChars=1200):
+    entries = listDailyFiles(dailyDir)
+               .slice(-6)                     // 取最近 6 天
+    blocks = entries.map(readFile).filter(nonEmpty)
+
+    content = blocks.join("\n\n")
+
+    // 超长截断：从最老的条目开始丢弃
+    if content.length > maxChars:
+        while blocks.length > 1 and blocks.join("\n\n").length > maxChars:
+            blocks.shift()                    // 丢弃最老的
+        content = blocks.join("\n\n")
+        if content.length > maxChars:
+            content = content.slice(0, maxChars)
+        log.warn("week 段总长超过上限，已从最老条目开始截断")
+
+    writeFile(weekPath, content)</code></pre>
+
+<table>
+<tr><th>设计点</th><th>值</th><th>理由</th></tr>
+<tr><td>窗口大小</td><td><code>DAILY_WINDOW_RETENTION_DAYS = 6</code></td><td>一周减掉今天 = 6 个已结束日</td></tr>
+<tr><td>总长上限</td><td><code>WEEK_ASSEMBLY_MAX_CHARS = 1200</code></td><td>6 条 x ~200 字/条 = 1200 字上限</td></tr>
+<tr><td>截断策略</td><td>从最老条目开始丢弃</td><td>最近的信息更重要，符合时间衰减原则</td></tr>
+<tr><td>LLM 调用</td><td>0</td><td>纯文件 I/O 操作，这是 week 段的核心降本设计</td></tr>
+</table>
+
+<h2>二、rollDailyWindow：滚动窗口折叠到长期</h2>
+
+<h3>2.1 功能定位</h3>
+
+<p>这是传送带的"出口"：把滚出 6 日窗口的 daily 条目 fold 进 longterm.md，成功后删除源文件。失败的条目保留在 daily/ 目录，交给下一轮重试，不静默丢弃。</p>
+
+<h3>2.2 五步算法流程</h3>
+
+<div class="step"><span class="num">1</span><b>计算窗口边界</b>：<code>cutoffDate = shiftLogicalDate(referenceDate, -retentionDays)</code>。referenceDate 默认为今天，retentionDays 默认为 6。<br><span class="where">compile.ts → rollDailyWindow()</span></div>
+
+<div class="step"><span class="num">2</span><b>筛选溢出条目</b>：列出 <code>daily/</code> 目录下所有 <code>YYYY-MM-DD.md</code> 文件，筛选 <code>date < cutoffDate</code> 的条目。<br><span class="where">compile.ts → 窗口边界过滤</span></div>
+
+<div class="step"><span class="num">3</span><b>拼接待折叠内容</b>：将所有溢出条目的内容拼接为一个文本块（保留 <code>## {date}</code> 抬头），作为 compileLongterm 的输入。<br><span class="where">compile.ts → 内容拼接</span></div>
+
+<div class="step"><span class="num">4</span><b>fold 进 longterm</b>：调用 <code>compileLongterm(combined, longtermPath, resolvedModel)</code>。成功则删除源 daily 文件。<br><span class="where">compile.ts → compileLongterm()</span></div>
+
+<div class="step"><span class="num">5</span><b>失败重试保护</b>：如果 compileLongterm 抛出异常，保留所有 daily 文件，下一轮 <code>_doDaily()</code> 重试。不静默丢弃任何内容。<br><span class="where">compile.ts → try/catch 保护</span></div>
+
+<h3>2.3 核心伪代码</h3>
+
+<pre><code>function rollDailyWindow(dailyDir, longtermPath, resolvedModel,
+                          referenceDate = today, retentionDays = 6):
+    cutoffDate = shiftLogicalDate(referenceDate, -retentionDays)
+    entries = listDailyFiles(dailyDir)
+               .filter(date => date < cutoffDate)
+
+    if entries is empty:
+        return { folded: [], failed: [] }
+
+    combined = entries.map((date, path) => {
+        body = readFile(path)
+        return body ? "## {date}\n\n{body}" : ""
+    }).filter(nonEmpty).join("\n\n")
+
+    if combined is empty:
+        for each entry: delete(entry.path)
+        return { folded: entries.map(e => e.date), failed: [] }
+
+    try:
+        await compileLongterm(combined, longtermPath, resolvedModel)
+        for each entry: delete(entry.path)    // 成功才删除
+        return { folded: entries.map(e => e.date), failed: [] }
+    catch err:
+        log.error("fold 失败，保留 {n} 份 daily 条目待下轮重试")
+        return { folded: [], failed: entries.map(e => e.date) }</code></pre>
+
+<div class="danger">
+⚠️ <b>失败保留源文件是核心安全机制：</b>try/catch 捕获异常后，失败条目留在 daily/ 目录。下一轮 daily 任务运行时，这些条目仍会被 fold 逻辑处理。如果 compileLongterm 的指纹去重判断"内容与上次相同"会跳过，但 rollDailyWindow 在失败场景下指纹不会更新，确保了重试能真正执行。
+</div>
+
+<h2>三、compileLongterm：通用 fold 入口</h2>
+
+<h3>3.1 功能定位</h3>
+
+<p><code>compileLongterm</code> 是一个<b>通用 fold 入口</b>，接受任意文本内容（已由调用方读好的文本，不是文件路径），将其合并进 <code>longterm.md</code>。被两个场景复用：</p>
+
+<ul>
+  <li><b>rollDailyWindow</b>：把滚出 6 日窗口的 daily 条目 fold 进 longterm</li>
+  <li><b>migrateLegacyWeekToLongterm</b>：一次性、幂等地把旧版 v3 的 week.md 整段 fold 进 longterm（迁移后更名为 <code>.migrated.bak</code>）</li>
+</ul>
+
+<h3>3.2 核心伪代码</h3>
+
+<pre><code>function compileLongterm(content, longtermPath, resolvedModel):
+    newContent = String(content).trim()
+    if newContent is empty: return "skipped"
+
+    fp = md5([newContent])
+    if readFile(fpPath) == fp and fileExists(longtermPath):
+        return "skipped"              // 指纹去重
+
+    prevLongterm = readFile(longtermPath)
+
+    input = prevLongterm
+        ? "## 上一份长期情况\n\n{prevLongterm}\n\n## 新沉淀内容\n\n{newContent}"
+        : "## 新沉淀内容\n\n{newContent}"
+
+    result = callLLM(
+        systemPrompt = buildCompileLongtermPrompt(locale),
+        userContent  = input,
+        maxTokens    = 600,
+        temperature  = 0.3
+    )
+
+    writeFile(longtermPath, normalizeOutput(result))
+    writeFile(fpPath, fp)
+    return "compiled"</code></pre>
+
+<table>
+<tr><th>设计点</th><th>实现</th><th>理由</th></tr>
+<tr><td>指纹去重</td><td>按输入内容的 MD5 哈希去重</td><td>同一批 daily 条目可能因断点续跑被重复 fold</td></tr>
+<tr><td>取舍而非追加</td><td>Prompt 要求"不要追加，必须做取舍、抽象、合并"</td><td>longterm 是唯一长期产物，每次追加会无限膨胀</td></tr>
+<tr><td>maxTokens: 600</td><td>长期记忆允许最长输出</td><td>需容纳用户身份、人格、长期偏好等较多信息</td></tr>
+<tr><td>通用 fold 设计</td><td>接受内容字符串而非文件路径</td><td>允许调用方自行决定输入来源，不绑定文件系统</td></tr>
+</table>
+
+<h2>四、compileEditableFacts：重要事实增量编译</h2>
+
+<h3>4.1 功能定位</h3>
+
+<p><code>compileEditableFacts</code> 从 session 摘要的 "### 重要事实 / Key Facts" 段提取用户画像类信息，编译成 <code>facts.md</code>。这是唯一一个<b>用户可编辑</b>的记忆产物——用户可以手动修正 LLM 提取的事实。</p>
+
+<div class="side">
+💡 <b>关键设计：增量编译 + 独立水位线。</b>与 compileToday 和 compileDaily 不同，compileEditableFacts 有独立的水位线状态文件 <code>editable-facts-state.json</code>，只处理上次编译之后新增/修订的摘要中的 facts 段。这是唯一的事实产物——曾经的 <code>memory.editable_facts</code> 实验字段已毕业。
+</div>
+
+<h3>4.2 核心伪代码</h3>
+
+<pre><code>function compileEditableFacts(summaryManager, outputPath, resolvedModel):
+    baseline = ensureEditableFactsBaseline(memoryDir)
+    if baseline.changed: return "compiled"
+
+    state = readEditableFactsState(statePath)
+    since = max(state.lastCompiledAt, opts.since)
+
+    newSessions = summaries.filter(s => s.updated_at > since)
+    if newSessions is empty: return "skipped"
+
+    factParts = []
+    for each session in newSessions:
+        if not hasFactSectionHeading(session.summary):
+            continue
+        factText = extractFactSection(session.summary)
+        if factText and not isEmptyFactSection(factText):
+            factParts.push(factText)
+
+    nextWatermark = max(updated_at of newSessions)
+    if factParts is empty:
+        updateWatermark(statePath, nextWatermark)
+        return "compiled"
+
+    prevFacts = readFile(outputPath)
+    newFacts = factParts.join("\n")
+    combined = prevFacts
+        ? "## 当前可信 Facts\n\n{prevFacts}\n\n## 新增候选 Facts\n\n{newFacts}"
+        : "## 新增候选 Facts\n\n{newFacts}"
+
+    result = callLLM(
+        systemPrompt = buildCompileEditableFactsPrompt(locale),
+        userContent  = combined,
+        maxTokens    = 300,
+        temperature  = 0.3
+    )
+
+    writeFile(outputPath, normalizeOutput(result))
+    updateWatermark(statePath, nextWatermark)
+    return "compiled"</code></pre>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 为什么 v4 不再用 LLM 编译 week 摘要？</p>
+<span class="opt">A. LLM 太贵了，用不起</span>
+<span class="opt">B. 旧方案有三大问题：重复计算（每天重编7天）、输出不稳定（模型随机性）、摘要精度递减（摘要的摘要）</span>
+<span class="opt">C. week 摘要不重要，直接删掉就行</span>
+<span class="opt">D. v4 改用了更简单的算法，但效果更差</span>
+<details><summary>看答案</summary><b>B</b>。v3 的 compileWeek 每天对过去 7 天重编，LLM 输出不稳定导致"历史在变化"，且对已蒸馏内容做二次蒸馏造成信息损失。v4 用零 LLM 的文件拼接替代，每天的 daily 条目独立产出、不再变化。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. rollDailyWindow 的"失败保留源文件"机制在什么情况下触发？</p>
+<span class="opt">A. 当 daily/ 目录为空时</span>
+<span class="opt">B. 当 compileLongterm 抛出异常时——保留所有 daily 文件，下一轮重试，不静默丢弃</span>
+<span class="opt">C. 当用户手动删除了 longterm.md 时</span>
+<span class="opt">D. 当日期切换发生在凌晨时</span>
+<details><summary>看答案</summary><b>B</b>。try/catch 包裹 compileLongterm 调用，只有成功后才会 delete 源 daily 文件。如果 LLM 调用失败（网络错误、凭证过期等），所有 daily 条目完好保留，等待下一轮 daily 任务重试。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. compileLongterm 的"通用 fold 入口"设计有什么好处？</p>
+<span class="opt">A. 代码更短</span>
+<span class="opt">B. 接受内容字符串而非文件路径，允许 rollDailyWindow 和 migrateLegacyWeekToLongterm 两个场景复用同一套指纹去重 + LLM 合并逻辑</span>
+<span class="opt">C. 让 longterm.md 文件更大</span>
+<span class="opt">D. 减少了对文件系统的依赖</span>
+<details><summary>看答案</summary><b>B</b>。compileLongterm 不绑定文件路径——调用方决定输入来源（daily 条目拼接、旧 week 迁移等），compileLongterm 只负责指纹去重 + LLM 取舍合并 + 落盘。这是典型的"通用核心 + 场景适配"设计。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. compileEditableFacts 与 compileToday 在水位线机制上有什么不同？</p>
+<span class="opt">A. 完全相同，没有任何区别</span>
+<span class="opt">B. compileEditableFacts 有独立的 <code>editable-facts-state.json</code> 水位线文件，只跟踪 facts 段相关摘要的时间戳，与 compileToday 的水位线完全独立</span>
+<span class="opt">C. compileEditableFacts 没有水位线，每次都全量编译</span>
+<span class="opt">D. compileEditableFacts 共享 compileToday 的水位线</span>
+<details><summary>看答案</summary><b>B</b>。compileEditableFacts 有独立的状态文件 <code>editable-facts-state.json</code> 和自己的 <code>lastCompiledAt</code> 水位线。它只关心摘要中的 "### 重要事实" 段的变化，与 compileToday 关注的 timeline 段完全独立。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>open-ai-desktop/openhanako/lib/memory/compile.ts</code>，搜索 <code>export async function assembleWeekFromDaily</code>、<code>export async function rollDailyWindow</code>、<code>export async function compileLongterm</code>、<code>export async function compileEditableFacts</code>，对照伪代码阅读实际实现。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 daily/ 目录里有 30 天的日记条目，rollDailyWindow 是一次性全 fold 还是分批？」「compileLongterm 的 Prompt 中 '必须做取舍、抽象、合并' 具体是怎么表达的？」下一课我们聚焦 <b>检索与注入优化</b>——assemble 的四段拼接、2000 token 预算分配、以及 Prompt 缓存策略。</div>
+
+<div class="nav"><a href="0002.html">← 上一课：编译流水线</a> · 课程 0003 / 记忆传送带深度剖析 · <a href="0004.html">下一课：检索与注入优化 →</a></div>
+
+</body>
+</html>

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · Hub 路由与 Engine 调度</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · Hub 路由与 Engine 调度 <span class="tag">路由 & 编排</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能背出 Hub.send() 的 4 条路由分支及其匹配条件，能解释防重入互斥锁的工作原理，能画出 HanaEngine Thin Facade 的依赖注入方向。
+</div>
+
+<p>上一课我们看到消息通过 WebSocket 进入 <code>hub.send()</code>。这一课深入 Hub 路由表和 Engine 编排层——消息如何被分发到不同处理路径，以及系统如何防止同一 session 的并发提交。</p>
+
+<h2>一、Hub 构造与 Engine 注入</h2>
+
+<p><code>hub/index.ts</code> 中的 <code>Hub</code> 类是消息调度中枢。它在构造器中组装了全部子系统并建立单向回调注入：</p>
+
+<pre><code>// hub/index.ts -- Hub 构造器（真实代码片段）
+export class Hub {
+  constructor({ engine }) {
+    this._engine = engine;
+    this._eventBus = new EventBus();
+    this._channelRouter = new ChannelRouter({ hub: this });
+    this._guestHandler = new GuestHandler({ hub: this });
+    this._scheduler = new Scheduler({ hub: this });
+    this._dmRouter = new DmRouter({ hub: this });
+
+    // 注入 Hub 回调到 Engine（单向：Hub → Engine）
+    engine.setHubCallbacks({
+      hub: this, scheduler: this._scheduler,
+      dmRouter: this._dmRouter, channelRouter: this._channelRouter,
+      eventBus: this._eventBus,
+    });
+
+    // 注入 EventBus 到 Engine
+    engine.setEventBus(this._eventBus);
+
+    // 建立 Session 事件处理器
+    this._setupSessionHandlers();
+  }
+}</code></pre>
+
+<div class="side">
+💡 <b>架构要点：</b>Hub 持有 Engine 引用并注入回调，但 Engine 不持有 Hub 引用——这是单向依赖。EventBus 作为解耦中介，Engine 发射事件，Hub 的 subscribe 回调消费事件，两者通过 EventBus 通信而非直接引用。
+</div>
+
+<h2>二、Hub.send() 路由表——4 条分支</h2>
+
+<p><code>hub.send()</code> 是消息分发入口，采用<b>路由表模式</b>——按顺序匹配，第一条命中即执行：</p>
+
+<pre><code>// hub/index.ts -- async send(text, opts) 路由表（真实代码片段）
+async send(text, opts = {}) {
+  const o = { sessionKey, role, ephemeral, meta, isGroup, cwd, model,
+              persist, permissionMode, from, to, onDelta, images, videos,
+              audios, clientMessageId, sessionPath, agentId, uiContext, ... };
+
+  // 图片预处理：base64 解码 → 磁盘持久化 → [attached_image] 标记
+  if (o.images?.length && !o.inboundFiles?.length) { /* ... */ }
+
+  // ★ 路由表：按顺序匹配，第一条命中即执行
+  const routes = [
+    { // ① 桌面端 owner（你正在看的这条路径）
+      match: o => !o.sessionKey && !o.ephemeral && o.role === "owner",
+      handle: () => o.sessionPath
+        ? submitDesktopSessionMessage(this._engine, { ... })
+        : this._engine.prompt(text, { ... }),
+    },
+    { // ② Bridge guest（外部平台访客）
+      match: o => o.sessionKey && o.role === "guest",
+      handle: () => this._guestHandler.handle(text, o.sessionKey, ...),
+    },
+    { // ③ Bridge owner（外部平台主人）
+      match: o => o.sessionKey && !o.ephemeral,
+      handle: () => this._engine.executeExternalMessage(text, ...),
+    },
+    { // ④ 隔离执行（cron / heartbeat / channel）
+      match: o => o.ephemeral,
+      handle: () => this._engine.executeIsolated(text, { ... }),
+    },
+  ];
+
+  for (const route of routes) {
+    if (route.match(o)) return route.handle();
+  }
+  throw new Error("no matching route for message");
+}</code></pre>
+
+<table>
+<tr><th>路由</th><th>匹配条件</th><th>目标处理函数</th><th>典型场景</th></tr>
+<tr><td>① 桌面 owner</td><td>无 sessionKey、非 ephemeral、role=owner</td><td><code>submitDesktopSessionMessage</code> 或 <code>engine.prompt</code></td><td>用户在桌面应用中输入消息</td></tr>
+<tr><td>② Bridge guest</td><td>有 sessionKey、role=guest</td><td><code>guestHandler.handle</code></td><td>Telegram/飞书用户通过 Bridge 发消息</td></tr>
+<tr><td>③ Bridge owner</td><td>有 sessionKey、非 ephemeral</td><td><code>engine.executeExternalMessage</code></td><td>Bridge 连接的主人发指令</td></tr>
+<tr><td>④ 隔离执行</td><td>ephemeral=true</td><td><code>engine.executeIsolated</code></td><td>Cron 定时任务、Heartbeat、Channel 消息</td></tr>
+</table>
+
+<blockquote>
+<b>路由优先级原则：</b>桌面 owner 路径优先级最高，其次是 Bridge guest/owner，最后是后台隔离执行。这保证了用户直接输入的消息不会被 Bridge 或后台任务抢占。
+</blockquote>
+
+<h2>三、防重入互斥锁——session_busy</h2>
+
+<p>路由匹配到桌面 owner 后，进入 <code>desktop-session-submit.ts</code>。它的核心职责是<b>防重入</b>：</p>
+
+<pre><code>// core/desktop-session-submit.ts（真实代码片段）
+const pendingDesktopSessionSubmissions = new Set();
+
+export async function submitDesktopSessionMessage(engine, opts) {
+  const { sessionPath, text, images, videos, audios, uiContext,
+          clientMessageId, displayMessage, sessionFileRefs } = opts;
+
+  if (!sessionPath) throw new Error("sessionPath is required");
+
+  // ★ 防重入：同一 session 不能并发提交
+  const sessionId = engine.getSessionIdForPath?.(sessionPath);
+  const submissionKey = sessionId || sessionPath;
+  if (pendingDesktopSessionSubmissions.has(submissionKey)) {
+    throw new Error("session_busy");  // ← 互斥锁命中
+  }
+  if (engine.isSessionStreaming(sessionPath)) {
+    throw new Error("session_busy");  // ← 正在流式生成中
+  }
+
+  pendingDesktopSessionSubmissions.add(submissionKey);
+  try {
+    // 确保 session 已加载（首次对话需从磁盘恢复或创建新 session）
+    await engine.ensureSessionLoaded(sessionPath);
+
+    // 来源标注（Bridge/RC 等非桌面来源）
+    const session = engine.getSessionByPath(sessionPath);
+    recordMessageOriginEntry(session, sessionPath, displayMessage);
+
+    // ★ 提交到引擎
+    await engine.promptSession(sessionPath, text, {
+      images, videos, audios, uiContext,
+      clientMessageId, inboundFiles: opts.inboundFiles,
+      onDelta: opts.onDelta, sessionFileRefs,
+    });
+  } finally {
+    pendingDesktopSessionSubmissions.delete(submissionKey);  // 释放锁
+  }
+}</code></pre>
+
+<div class="danger">
+⚠️ <b>防重入的双重检查：</b><br>
+（1）<code>pendingDesktopSessionSubmissions</code>（Set）——同一 session 已有待处理提交时拒绝，防止用户快速连击。<br>
+（2）<code>engine.isSessionStreaming(sessionPath)</code>——session 正在流式生成中时拒绝，防止在 AI 回复过程中再发消息。<br>
+两重检查覆盖了「提交排队中」和「生成进行中」两种并发场景。
+</div>
+
+<h2>四、HanaEngine Thin Facade——单向依赖注入</h2>
+
+<p><code>HanaEngine</code> 是整个系统的 Thin Facade，持有所有 Manager 引用，对外暴露统一 API：</p>
+
+<pre><code>// core/engine.ts -- Manager 组装（真实代码片段）
+export class HanaEngine {
+  constructor({ hanakoHome, productDir, agentId, appVersion }) {
+    this._prefs  = new PreferencesManager({ userDir, agentsDir, ... });
+    this._models = new ModelManager({ hanakoHome });
+    this._channels = new ChannelManager({ channelsDir, ... });
+
+    // Agent Manager：持有 Engine 回调以间接访问其他 Manager
+    this._agentMgr = new AgentManager({
+      getPrefs: () => this._prefs,
+      getModels: () => this._models,
+      getEngine: () => this,   // 单向引用
+    });
+
+    // Session Coordinator：不持有 Engine 引用，所有需求通过 deps 注入
+    this._sessionCoord = new SessionCoordinator({
+      getAgent: () => this.agent,
+      getModels: () => this._models,
+      buildTools: (cwd, ct, opts) => this.buildTools(cwd, ct, opts),
+      emitEvent: (e, sp) => this._emitEvent(e, sp),
+    });
+  }
+
+  // 对外委托方法（Thin Facade）
+  async promptSession(sessionPath, text, opts) {
+    return this._sessionCoord.promptSession(sessionPath, text, opts);
+  }
+}</code></pre>
+
+<div class="side">
+💡 <b>依赖注入方向：</b>Engine → Manager 是单向的。SessionCoordinator <b>不持有 Engine 引用</b>，所有对外需求通过构造器注入的 <code>this._d</code>（依赖对象 deps）间接访问。这避免了循环引用，也简化了单元测试。这是经典的「好莱坞原则」——Don't call us, we'll call you。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. Hub.send() 路由表中，桌面 owner 路径的匹配条件是什么？</p>
+<span class="opt">A. o.sessionKey && o.role === "admin"</span>
+<span class="opt">B. !o.sessionKey && !o.ephemeral && o.role === "owner"</span>
+<span class="opt">C. o.ephemeral && o.role === "owner"</span>
+<span class="opt">D. o.sessionKey && !o.ephemeral && o.role === "guest"</span>
+<details><summary>看答案</summary><b>B</b>。桌面 owner 路由的条件是：没有 Bridge 的 sessionKey、不是隔离执行（非 ephemeral）、角色为 owner。这是最优先匹配的路由。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 以下哪个场景会触发 "session_busy" 错误？</p>
+<span class="opt">A. 用户在一个 session 中快速连续发送两条消息</span>
+<span class="opt">B. 用户的网络断开</span>
+<span class="opt">C. LLM Provider 返回错误</span>
+<span class="opt">D. session 文件被删除</span>
+<details><summary>看答案</summary><b>A</b>。快速连击时，第一条消息正在 <code>pendingDesktopSessionSubmissions</code> 中排队，第二条消息的 <code>has(submissionKey)</code> 检查会命中，抛出 session_busy。这是防止并发提交的第一道防线。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. SessionCoordinator 为什么不持有 Engine 引用？</p>
+<span class="opt">A. 因为 TypeScript 不支持循环引用</span>
+<span class="opt">B. 为了避免循环引用——所有对外需求通过构造器注入的 deps 间接访问</span>
+<span class="opt">C. 因为 Engine 还未实现</span>
+<span class="opt">D. SessionCoordinator 不需要任何外部依赖</span>
+<details><summary>看答案</summary><b>B</b>。SessionCoordinator 通过构造器的 deps 参数接收所有外部依赖（getAgent、getModels、buildTools、emitEvent），不直接引用 Engine。这是单向依赖注入模式，避免循环引用并简化单元测试。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 路由表第④条（隔离执行）匹配 ephermal=true 的消息，典型场景是什么？</p>
+<span class="opt">A. 用户在桌面应用中发消息</span>
+<span class="opt">B. Telegram 用户通过 Bot 发消息</span>
+<span class="opt">C. Cron 定时任务触发、Heartbeat 健康检查、Channel 消息处理</span>
+<span class="opt">D. WebSocket 心跳 ping/pong</span>
+<details><summary>看答案</summary><b>C</b>。ephemeral 消息是后台自动触发的，不需要持久化 session、不产生 UI 交互。典型场景包括 Cron 定时任务、Agent Heartbeat、多 Agent Channel 消息等。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>hub/index.ts</code>，搜索 <code>async send(text, opts)</code>，逐行对照路由表的 4 个 match 条件。再打开 <code>core/desktop-session-submit.ts</code>，看 <code>pendingDesktopSessionSubmissions</code> 的 add/delete 配对的 try/finally 模式。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 Bridge guest 消息和桌面 owner 消息同时到达，hub.send() 怎么处理？」「为什么防重入用 Set 而不是 Map？」下一课我们深入 <strong>Agent 初始化与 System Prompt</strong>——10 段拼装流程 + 视觉预处理 + Pi SDK 管道。</div>
+
+<div class="nav">课程 0002 / openhanako 对话链路由浅入深 · <a href="0001.html">← 上一课：架构全景</a> · 下一课预告：Agent 初始化与 System Prompt 拼装</div>
+
+</body>
+</html>

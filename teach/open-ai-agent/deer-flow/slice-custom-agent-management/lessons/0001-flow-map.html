@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>15 分钟摸清自定义 agent 管理链路</title>
+    <link rel="stylesheet" href="../assets/slice-lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>15 分钟摸清自定义 agent 管理链路</h1>
+        <p class="lead">
+          本课只教一个目标：当用户在 workspace 里创建或更新自定义 agent 时，你能从 UI 一路追到磁盘上的
+          <code>config.yaml</code> 与 <code>SOUL.md</code>，并区分「向导 bootstrap」与「REST / 工具更新」两条路径。
+        </p>
+        <div class="meta">
+          <span class="pill">L2 垂直切片</span>
+          <span class="pill">入口：/workspace/agents</span>
+          <span class="pill">参考：<a href="../reference/custom-agent-management-flow-map.html">完整链路图</a></span>
+        </div>
+
+        <h2>1. 功能开关与页面入口</h2>
+        <p>
+          所有 agents 页面先经过
+          <span class="where">frontend/src/app/workspace/agents/layout.tsx</span>：它调用
+          <code>useAgentsApiEnabled()</code> 查询 <code>GET /api/features</code>，只有
+          <code>agents_api.enabled=true</code> 才渲染子页面；否则显示禁用页。列表页
+          <span class="where">frontend/src/app/workspace/agents/page.tsx</span> 只是挂载
+          <code>AgentGallery</code>，真正的数据来自
+          <span class="where">frontend/src/core/agents/hooks.ts</span> 里的
+          <code>listAgents()</code> → <code>GET /api/agents</code>。
+        </p>
+        <pre>用户打开 /workspace/agents
+  → layout 查 /api/features（agents_api.enabled）
+  → AgentGallery → useAgents → GET /api/agents
+  → Gateway routers/agents.py → list_custom_agents(user_id)</pre>
+
+        <h2>2. 创建：向导 bootstrap 主路径</h2>
+        <p>
+          「新建 agent」进入
+          <span class="where">frontend/src/app/workspace/agents/new/page.tsx</span>，分两步：先
+          <code>checkAgentName</code>（<code>GET /api/agents/check</code>），通过后进入聊天步，并以
+          <code>context.is_bootstrap=true</code> 启动线程。用户对话结束后点「保存」，前端发送隐藏消息触发 lead agent 调用
+          <code>setup_agent</code> 工具（仅 bootstrap 模式绑定）。工具在 harness 里把
+          <code>config.yaml</code> 与 <code>SOUL.md</code> 写入 per-user 目录；前端监听
+          <code>onToolEnd(setup_agent)</code> 再 <code>GET /api/agents/{name}</code> 确认落盘。
+        </p>
+        <pre>确认名称 → check API
+  → sendMessage(is_bootstrap, agent_name)
+  → LangGraph run → setup_agent 工具
+  → users/{user_id}/agents/{name}/config.yaml + SOUL.md
+  → getAgent 重试读取 → 向导完成</pre>
+        <p>
+          同一存储布局也被 Gateway 的 <code>POST /api/agents</code> 使用（REST 直创），但当前 UI 向导走的是工具路径而非 POST。
+          详细时序与错误码见
+          <a href="../reference/custom-agent-management-flow-map.html#create">参考文档 · 创建</a>。
+        </p>
+
+        <h2>3. 更新、列表与删除</h2>
+        <p>
+          已存在 agent 的元数据变更有两条路：（1）Gateway
+          <code>PUT /api/agents/{name}</code>，由
+          <span class="where">frontend/src/core/agents/api.ts</span> 的
+          <code>updateAgent</code> 封装，写回 YAML 并可选覆盖 SOUL；（2）在 agent 专属聊天里，lead agent 绑定
+          <code>update_agent</code> 工具做部分字段自更新。列表卡片
+          <span class="where">frontend/src/components/workspace/agents/agent-card.tsx</span>
+          用 <code>deleteAgent</code> 调 <code>DELETE /api/agents/{name}</code>。若 agent 仍停在 legacy 共享目录，更新/删除会返回
+          <code>409</code> 并提示运行 <code>migrate_user_isolation.py</code>——这是本切片最典型的边界错误。
+        </p>
+
+        <h2>练习：判断请求落点</h2>
+        <div class="callout">
+          <p>
+            用户在「新建 agent」向导里点保存后，Network 面板看到 LangGraph stream 里有
+            <code>setup_agent</code> 工具调用，但没有 <code>POST /api/agents</code>。这是 bug 还是设计如此？
+          </p>
+        </div>
+        <div class="answer">
+          <p>
+            <strong>设计如此。</strong>向导创建走 bootstrap 聊天 + <code>setup_agent</code> 工具落盘；<code>POST /api/agents</code>
+            是 Gateway 提供的并行 REST 入口，供 API 客户端或未来 UI 直调。持久化结果相同，都写入 per-user agent 目录并由
+            <code>agents_config.py</code> 读取。若保存后列表仍空，应查工具是否返回空 soul、<code>agents_api</code> 是否开启，或
+            <code>getAgent</code> 重试是否超时。
+          </p>
+        </div>
+
+        <p>
+          主要来源：本地
+          <span class="where">open-ai-agent/deer-flow/backend/app/gateway/routers/agents.py</span> 与
+          <span class="where">frontend/src/app/workspace/agents/new/page.tsx</span>。想继续深挖可让 agent 讲
+          <code>update_agent</code> 与 REST PUT 的字段合并语义，或对照
+          <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">Gateway 模块导览</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

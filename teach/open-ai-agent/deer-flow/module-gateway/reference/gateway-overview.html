@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gateway API 外壳参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; letter-spacing:0; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre.shell { padding:12px 14px; white-space:pre; overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#0f172a; color:#e2e8f0; font-family:"SF Mono",Consolas,monospace; font-size:.86rem; }
+    .endpoint { display:inline-block; font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.08rem .3rem; border-radius:5px; margin:1px 0; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.91rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Gateway API 外壳参考</h1>
+  <p class="lead">本页承载 L1 Gateway 模块的速查材料：边界、内部结构、router 清单、关键依赖、认证规则和简单调用。L3 微观 API 见 <a href="gateway-api.html">gateway-api.html</a>；短课入口：<a href="../lessons/0001-gateway-module-tour.html">0001-gateway-module-tour.html</a>；整体锚点见 <a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>。</p>
+
+  <h2 id="boundary">模块边界</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码依据</th></tr>
+    <tr><td>职责</td><td>创建 FastAPI app，启动 embedded LangGraph runtime，注册认证/CSRF/CORS/trace 中间件，挂载 HTTP router，暴露 health check。</td><td><code>backend/app/gateway/app.py</code></td></tr>
+    <tr><td>位置</td><td>位于 nginx 和 deerflow harness 之间，对应 L0 总体架构图中的 Gateway 层。nginx 把 <code>/api/langgraph/*</code> 改写到 Gateway 原生 <code>/api/*</code>；Gateway 再调用 RunManager、StreamBridge、checkpointer、store 和 lead agent。</td><td><code>docker/nginx/nginx.conf</code>、<code>backend/README.md</code></td></tr>
+    <tr><td>非职责</td><td>不实现 lead agent 推理策略，不实现工具执行细节，不直接渲染前端，不替代 persistence schema。</td><td><code>backend/packages/harness/deerflow/</code>、<code>frontend/src/</code></td></tr>
+    <tr><td>默认运行方式</td><td>Docker 与脚本默认用 <code>uvicorn app.gateway.app:app</code> 启动 Gateway embedded runtime；<code>langgraph.json</code> 主要保留给 LangGraph tooling/Studio 兼容。</td><td><code>docker/docker-compose.yaml</code>、<code>backend/langgraph.json</code></td></tr>
+  </table>
+
+  <h2 id="internal-map">内部分层结构</h2>
+  <div class="filetree">backend/app/gateway/
+├── app.py                 ← FastAPI app factory、lifespan、middleware、router 注册
+├── config.py              ← GatewayConfig，读取 GATEWAY_HOST、GATEWAY_PORT、GATEWAY_ENABLE_DOCS
+├── deps.py                ← request 依赖、app.state 单例访问、RunContext 构造、auth helper
+├── auth_middleware.py     ← fail-closed 认证、公开路径、internal token、user contextvar
+├── csrf_middleware.py     ← Double Submit Cookie、auth origin 检查、CORS origin 来源
+├── langgraph_auth.py      ← LangGraph Server/Studio 兼容认证与 user_id metadata filter
+├── trace_middleware.py    ← HTTP request trace id 绑定与响应 header
+├── routers/               ← 20 个 HTTP router 模块
+│   ├── thread_runs.py     ← thread-scoped run 生命周期和 SSE
+│   ├── runs.py            ← stateless run stream/wait
+│   ├── threads.py         ← thread metadata、state、goal、history
+│   └── auth.py            ← 登录、注册、初始化、OAuth
+└── auth/                  ← 认证子系统
+    ├── jwt.py             ← access token 创建与验证
+    ├── local_provider.py  ← 本地邮箱密码认证
+    └── oidc.py            ← OIDC 登录流程</div>
+
+  <h3>启动阶段</h3>
+  <table>
+    <tr><th>顺序</th><th>动作</th><th>说明</th></tr>
+    <tr><td>1</td><td>加载 <code>AppConfig</code> 与 GatewayConfig</td><td><code>AppConfig</code> 用于 deerflow runtime；<code>GatewayConfig</code> 只控制 host、port、docs。</td></tr>
+    <tr><td>2</td><td>配置日志与安全提示</td><td><code>configure_logging()</code> 使用启动快照；<code>warn_if_auth_disabled_enabled()</code> 提醒 auth-disabled 风险。</td></tr>
+    <tr><td>3</td><td>预热 token counting 与清理上传暂存</td><td>避免首个 memory request 卡住；清理 stale upload staging files。</td></tr>
+    <tr><td>4</td><td>进入 <code>langgraph_runtime()</code></td><td>构造 stream bridge、persistence engine、checkpointer、store、run store、thread store、scheduled task repo。</td></tr>
+    <tr><td>5</td><td>迁移 orphan thread、启动 IM channel 与 scheduler</td><td>认证升级路径与后台任务都挂在 Gateway 生命周期里。</td></tr>
+    <tr><td>6</td><td>关闭阶段 drain in-flight runs</td><td>先让 `RunManager.shutdown()` 有界收尾，再关闭 persistence engine。</td></tr>
+  </table>
+
+  <h2 id="router-map">对外接口清单</h2>
+  <p>下表按 router 文件列出 Gateway 的 HTTP 暴露面。绝大多数非公开路径受 <code>AuthMiddleware</code> 保护，状态变更请求还会受 <code>CSRFMiddleware</code> 校验；不要把 ASGI 中间件注册顺序简化成“先后经过”的调试结论。</p>
+  <table>
+    <tr><th>Router</th><th>接口</th><th>用途</th></tr>
+    <tr><td><code>models.py</code></td><td><span class="endpoint">GET /api/models</span><br><span class="endpoint">GET /api/models/{model_name}</span></td><td>查询可用模型与单个模型详情。</td></tr>
+    <tr><td><code>features.py</code></td><td><span class="endpoint">GET /api/features</span></td><td>返回前端可用的 feature flags。</td></tr>
+    <tr><td><code>console.py</code></td><td><span class="endpoint">GET /api/console/stats</span><br><span class="endpoint">GET /api/console/runs</span><br><span class="endpoint">GET /api/console/usage</span></td><td>跨线程观测统计、run 列表和 token usage。</td></tr>
+    <tr><td><code>mcp.py</code></td><td><span class="endpoint">GET /api/mcp/config</span><br><span class="endpoint">PUT /api/mcp/config</span><br><span class="endpoint">POST /api/mcp/cache/reset</span></td><td>MCP 配置读取、更新和工具缓存重置。</td></tr>
+    <tr><td><code>memory.py</code></td><td><span class="endpoint">GET /api/memory</span><br><span class="endpoint">POST /api/memory/reload</span><br><span class="endpoint">DELETE /api/memory</span><br><span class="endpoint">POST /api/memory/facts</span><br><span class="endpoint">PATCH /api/memory/facts/{fact_id}</span><br><span class="endpoint">DELETE /api/memory/facts/{fact_id}</span><br><span class="endpoint">GET /api/memory/export</span><br><span class="endpoint">POST /api/memory/import</span><br><span class="endpoint">GET /api/memory/config</span><br><span class="endpoint">GET /api/memory/status</span></td><td>长期记忆数据、facts、导入导出和状态配置。</td></tr>
+    <tr><td><code>skills.py</code></td><td><span class="endpoint">GET /api/skills</span><br><span class="endpoint">POST /api/skills/install</span><br><span class="endpoint">GET /api/skills/{skill_name}</span><br><span class="endpoint">PUT /api/skills/{skill_name}</span><br><span class="endpoint">GET /api/skills/custom</span><br><span class="endpoint">GET /api/skills/custom/{skill_name}</span><br><span class="endpoint">PUT /api/skills/custom/{skill_name}</span><br><span class="endpoint">DELETE /api/skills/custom/{skill_name}</span><br><span class="endpoint">GET /api/skills/custom/{skill_name}/history</span><br><span class="endpoint">POST /api/skills/custom/{skill_name}/rollback</span></td><td>内置和自定义 skills 的安装、查看、启用状态、历史与回滚。</td></tr>
+    <tr><td><code>artifacts.py</code></td><td><span class="endpoint">GET /api/threads/{thread_id}/artifacts/{path:path}</span></td><td>读取线程产物文件；活跃网页内容会按安全策略下载而非 inline。</td></tr>
+    <tr><td><code>uploads.py</code></td><td><span class="endpoint">POST /api/threads/{thread_id}/uploads</span><br><span class="endpoint">GET /api/threads/{thread_id}/uploads/limits</span><br><span class="endpoint">GET /api/threads/{thread_id}/uploads/list</span><br><span class="endpoint">DELETE /api/threads/{thread_id}/uploads/{filename}</span></td><td>上传、列出、限制查询和删除用户文件。</td></tr>
+    <tr><td><code>threads.py</code></td><td><span class="endpoint">POST /api/threads</span><br><span class="endpoint">POST /api/threads/search</span><br><span class="endpoint">GET /api/threads/{thread_id}</span><br><span class="endpoint">PATCH /api/threads/{thread_id}</span><br><span class="endpoint">DELETE /api/threads/{thread_id}</span><br><span class="endpoint">POST /api/threads/{thread_id}/branches</span><br><span class="endpoint">GET /api/threads/{thread_id}/goal</span><br><span class="endpoint">PUT /api/threads/{thread_id}/goal</span><br><span class="endpoint">DELETE /api/threads/{thread_id}/goal</span><br><span class="endpoint">GET /api/threads/{thread_id}/state</span><br><span class="endpoint">POST /api/threads/{thread_id}/state</span><br><span class="endpoint">POST /api/threads/{thread_id}/history</span></td><td>thread metadata、分支、goal、state 和历史读取。</td></tr>
+    <tr><td><code>thread_runs.py</code></td><td><span class="endpoint">POST /api/threads/{thread_id}/runs</span><br><span class="endpoint">POST /api/threads/{thread_id}/runs/stream</span><br><span class="endpoint">POST /api/threads/{thread_id}/runs/wait</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}</span><br><span class="endpoint">POST /api/threads/{thread_id}/runs/{run_id}/cancel</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/join</span><br><span class="endpoint">GET|POST /api/threads/{thread_id}/runs/{run_id}/stream</span><br><span class="endpoint">GET /api/threads/{thread_id}/messages</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/messages</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/events</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes</span><br><span class="endpoint">GET /api/threads/{thread_id}/token-usage</span><br><span class="endpoint">POST /api/threads/{thread_id}/runs/regenerate/prepare</span></td><td>线程内 run 创建、流式执行、等待、取消、重连、消息和事件查询。</td></tr>
+    <tr><td><code>runs.py</code></td><td><span class="endpoint">POST /api/runs/stream</span><br><span class="endpoint">POST /api/runs/wait</span><br><span class="endpoint">GET /api/runs/{run_id}/messages</span><br><span class="endpoint">GET /api/runs/{run_id}/feedback</span></td><td>无预置 thread 的 stateless run 入口及结果查询。</td></tr>
+    <tr><td><code>scheduled_tasks.py</code></td><td><span class="endpoint">GET /api/scheduled-tasks</span><br><span class="endpoint">POST /api/scheduled-tasks</span><br><span class="endpoint">GET /api/scheduled-tasks/{task_id}</span><br><span class="endpoint">PATCH /api/scheduled-tasks/{task_id}</span><br><span class="endpoint">POST /api/scheduled-tasks/{task_id}/pause</span><br><span class="endpoint">POST /api/scheduled-tasks/{task_id}/resume</span><br><span class="endpoint">POST /api/scheduled-tasks/{task_id}/trigger</span><br><span class="endpoint">DELETE /api/scheduled-tasks/{task_id}</span><br><span class="endpoint">GET /api/scheduled-tasks/{task_id}/runs</span><br><span class="endpoint">GET /api/threads/{thread_id}/scheduled-tasks</span></td><td>计划任务 CRUD、暂停恢复、手动触发和运行历史。</td></tr>
+    <tr><td><code>agents.py</code></td><td><span class="endpoint">GET /api/agents</span><br><span class="endpoint">GET /api/agents/check</span><br><span class="endpoint">GET /api/agents/{name}</span><br><span class="endpoint">POST /api/agents</span><br><span class="endpoint">PUT /api/agents/{name}</span><br><span class="endpoint">DELETE /api/agents/{name}</span><br><span class="endpoint">GET /api/user-profile</span><br><span class="endpoint">PUT /api/user-profile</span></td><td>自定义 agent 和 user profile 管理。</td></tr>
+    <tr><td><code>suggestions.py</code></td><td><span class="endpoint">GET /api/suggestions/config</span><br><span class="endpoint">POST /api/threads/{thread_id}/suggestions</span></td><td>后续问题建议配置与生成。</td></tr>
+    <tr><td><code>channel_connections.py</code></td><td><span class="endpoint">GET /api/channels/providers</span><br><span class="endpoint">GET /api/channels/connections</span><br><span class="endpoint">POST /api/channels/{provider}/connect</span><br><span class="endpoint">POST /api/channels/{provider}/runtime-config</span><br><span class="endpoint">DELETE /api/channels/{provider}/runtime-config</span><br><span class="endpoint">DELETE /api/channels/connections/{connection_id}</span></td><td>用户面向 IM channel provider 的连接和运行配置。</td></tr>
+    <tr><td><code>channels.py</code></td><td><span class="endpoint">GET /api/channels/</span><br><span class="endpoint">POST /api/channels/{name}/restart</span></td><td>channel 服务状态和重启。</td></tr>
+    <tr><td><code>assistants_compat.py</code></td><td><span class="endpoint">POST /api/assistants/search</span><br><span class="endpoint">GET /api/assistants/{assistant_id}</span><br><span class="endpoint">GET /api/assistants/{assistant_id}/graph</span><br><span class="endpoint">GET /api/assistants/{assistant_id}/schemas</span></td><td>LangGraph Platform assistants 兼容接口。</td></tr>
+    <tr><td><code>auth.py</code></td><td><span class="endpoint">POST /api/v1/auth/login/local</span><br><span class="endpoint">POST /api/v1/auth/register</span><br><span class="endpoint">POST /api/v1/auth/logout</span><br><span class="endpoint">POST /api/v1/auth/change-password</span><br><span class="endpoint">GET /api/v1/auth/me</span><br><span class="endpoint">GET /api/v1/auth/setup-status</span><br><span class="endpoint">POST /api/v1/auth/initialize</span><br><span class="endpoint">GET /api/v1/auth/providers</span><br><span class="endpoint">GET /api/v1/auth/oauth/{provider}</span><br><span class="endpoint">GET /api/v1/auth/callback/{provider}</span></td><td>本地登录、注册、初始化管理员、当前用户、密码变更和 OAuth/OIDC。</td></tr>
+    <tr><td><code>feedback.py</code></td><td><span class="endpoint">PUT /api/threads/{thread_id}/runs/{run_id}/feedback</span><br><span class="endpoint">POST /api/threads/{thread_id}/runs/{run_id}/feedback</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/feedback</span><br><span class="endpoint">GET /api/threads/{thread_id}/runs/{run_id}/feedback/stats</span><br><span class="endpoint">DELETE /api/threads/{thread_id}/runs/{run_id}/feedback</span><br><span class="endpoint">DELETE /api/threads/{thread_id}/runs/{run_id}/feedback/{feedback_id}</span></td><td>run 反馈创建、更新、查询、统计和删除。</td></tr>
+    <tr><td><code>github_webhooks.py</code></td><td><span class="endpoint">POST /api/webhooks/github</span></td><td>GitHub webhook 入站；只有配置 secret 或显式开发开关时才挂载。</td></tr>
+    <tr><td><code>app.py</code></td><td><span class="endpoint">GET /health</span></td><td>公开健康检查。</td></tr>
+  </table>
+
+  <h2 id="auth">认证与中间件速查</h2>
+  <table>
+    <tr><th>层</th><th>关键规则</th><th>源码</th></tr>
+    <tr><td>公开路径</td><td>`/health`、docs、OpenAPI、OAuth callback、GitHub webhook、登录/注册/初始化等少数路径公开。</td><td><code>backend/app/gateway/auth_middleware.py</code></td></tr>
+    <tr><td>session 认证</td><td>非公开路径要求 `access_token` cookie。JWT 解码后还会查用户表，并校验 `token_version`。</td><td><code>backend/app/gateway/deps.py</code>、<code>backend/app/gateway/auth/jwt.py</code></td></tr>
+    <tr><td>internal caller</td><td>IM channel 等可信内部调用可使用 `X-DeerFlow-Internal-Token`，并可带 owner override。</td><td><code>backend/app/gateway/internal_auth.py</code></td></tr>
+    <tr><td>CSRF</td><td>POST、PUT、DELETE、PATCH 默认需要 cookie/header 双提交；auth 首次 POST 有例外，但会做 Origin 限制并设置 cookie。</td><td><code>backend/app/gateway/csrf_middleware.py</code></td></tr>
+    <tr><td>CORS</td><td>默认 same-origin；split-origin 需要 `GATEWAY_CORS_ORIGINS`，该 allowlist 也被 CSRF origin 检查复用。</td><td><code>backend/app/gateway/csrf_middleware.py</code>、<code>backend/app/gateway/app.py</code></td></tr>
+    <tr><td>LangGraph auth</td><td>`langgraph.json` 的 `auth.path` 指向 `langgraph_auth.py:auth`，复用 JWT 与 CSRF，并在 metadata 写入 `user_id`。</td><td><code>backend/app/gateway/langgraph_auth.py</code>、<code>backend/langgraph.json</code></td></tr>
+  </table>
+
+  <h2 id="dependencies">关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>Gateway 如何使用</th></tr>
+    <tr><td><code>deerflow.config.app_config.get_app_config</code></td><td>启动拿快照；request 时通过 `get_config()` 重新读取可热加载字段。</td></tr>
+    <tr><td><code>RunManager</code></td><td>管理 run 创建、查询、取消、shutdown drain 和 SQLite orphan recovery。</td></tr>
+    <tr><td><code>StreamBridge</code></td><td>把 run 事件送到 SSE；Redis bridge 可支持跨 worker SSE delivery 与 replay。</td></tr>
+    <tr><td><code>checkpointer</code> 与 <code>store</code></td><td>LangGraph checkpoint 和 Store，由 `make_checkpointer()`、`make_store()` 在 lifespan 中创建。</td></tr>
+    <tr><td><code>RunEventStore</code></td><td>持久化或读取 run events，与启动时的 `run_events_config` 绑定。</td></tr>
+    <tr><td><code>ThreadMetaStore</code></td><td>线程元数据、状态和 owner 过滤的基础存储。</td></tr>
+    <tr><td><code>ScheduledTaskService</code></td><td>在 Gateway 生命周期里启动轮询，并复用 `launch_scheduled_thread_run()` 创建 run。</td></tr>
+    <tr><td><code>app.channels.service</code></td><td>IM channel 服务随 Gateway 启停，内部调用通过 internal auth 进入同一 API 边界。</td></tr>
+  </table>
+
+  <h2 id="calls">调用速查</h2>
+  <h3>健康检查</h3>
+  <pre class="shell">curl -s http://localhost:8001/health
+# {"status":"healthy","service":"deer-flow-gateway"}</pre>
+
+  <h3>本地登录后访问业务 API</h3>
+  <pre class="shell">curl -i -c cookies.txt \
+  -X POST http://localhost:8001/api/v1/auth/login/local \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data "username=admin@example.com&password=your-password"
+
+curl -b cookies.txt http://localhost:8001/api/models</pre>
+  <p>对 POST、PUT、PATCH、DELETE 业务请求，还需要从 `csrf_token` cookie 读取值并放入 `X-CSRF-Token` header。登录、注册、初始化这几个 auth POST 是首次会话入口，中间件会在响应中设置 CSRF cookie。</p>
+
+  <h2 id="source-index">源码索引</h2>
+  <table>
+    <tr><th>路径</th><th>阅读目的</th><th>关键度</th></tr>
+    <tr><td><code>backend/app/gateway/app.py</code></td><td>FastAPI app、lifespan、中间件和 router 注册。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/config.py</code></td><td>Gateway host、port、文档开关。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/deps.py</code></td><td>request dependency、runtime 单例、RunContext、auth helper。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/auth_middleware.py</code></td><td>全局认证与 user context 注入。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/csrf_middleware.py</code></td><td>CSRF、Origin、CORS allowlist。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/langgraph_auth.py</code></td><td>LangGraph Server/Studio 兼容认证。</td><td>辅助</td></tr>
+    <tr><td><code>backend/app/gateway/routers/thread_runs.py</code></td><td>一次线程 run 的创建、stream、join、events 和 workspace changes。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/runs.py</code></td><td>stateless run stream/wait。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/threads.py</code></td><td>thread metadata、state、goal 和 history。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/routers/auth.py</code></td><td>登录、注册、初始化和 OAuth/OIDC callback。</td><td>核心</td></tr>
+    <tr><td><code>backend/app/gateway/auth/jwt.py</code></td><td>JWT payload、签发与验证。</td><td>辅助</td></tr>
+    <tr><td><code>backend/app/gateway/auth/local_provider.py</code></td><td>本地邮箱密码认证和用户创建。</td><td>辅助</td></tr>
+    <tr><td><code>backend/README.md</code></td><td>后端架构和 Gateway API 官方说明。</td><td>核心</td></tr>
+    <tr><td><code>docker/nginx/nginx.conf</code></td><td>统一入口、`/api/langgraph/*` 改写和 SSE proxy 设置。</td><td>核心</td></tr>
+    <tr><td><code>docker/docker-compose.yaml</code></td><td>Gateway 容器启动命令、Redis stream bridge、nginx/frontend/gateway 拓扑。</td><td>辅助</td></tr>
+    <tr><td><code>backend/langgraph.json</code></td><td>LangGraph tooling graph、auth、checkpointer 兼容入口。</td><td>辅助</td></tr>
+  </table>
+
+  <p class="callout">阅读建议：先用短课建立边界，再从本页挑一个 router 做 L2 垂直切片。聊天主线优先看 `thread_runs.py`，账户主线优先看 `auth.py`、`auth_middleware.py`、`csrf_middleware.py`。</p>
+</main>
+</body>
+</html>

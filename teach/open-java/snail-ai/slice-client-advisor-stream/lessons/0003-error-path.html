@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>异常边界：哪些错误会回写，哪些只记录日志</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #5f6f7c;
+      --line: #d8e0e8;
+      --soft: #f6f8fb;
+      --paper: #ffffff;
+      --accent: #0f766e;
+      --danger: #9f1239;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: #edf2f6;
+      line-height: 1.65;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      min-height: 100vh;
+      padding: 32px 18px 46px;
+      background: var(--paper);
+    }
+    nav { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; font-size: 14px; }
+    h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.2; letter-spacing: 0; }
+    h2 { margin: 28px 0 12px; font-size: 20px; letter-spacing: 0; }
+    p { margin: 10px 0; }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #edf7f5;
+      color: #0f4f49;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; border-radius: 0; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 14px; }
+    th, td { border: 1px solid var(--line); padding: 9px 10px; vertical-align: top; }
+    th { background: var(--soft); text-align: left; }
+    .lead { color: var(--muted); max-width: 760px; }
+    .note, .answer { border-left: 4px solid var(--accent); background: #f0fdfa; padding: 10px 12px; margin: 14px 0; }
+    .danger { border-left-color: var(--danger); background: #fff1f2; }
+    @media (max-width: 760px) {
+      main { padding: 24px 14px 38px; }
+      table { font-size: 13px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="0002-main-path.html">上一课：成功主路径</a>
+    <a href="../reference/client-advisor-stream-flow-map.html">参考图谱</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client 执行层参考</a>
+  </nav>
+
+  <header>
+    <h1>异常边界：哪些错误会回写，哪些只记录日志</h1>
+    <p class="lead">本课只练一个判断：同样是失败，哪些会变成 <code>ChatStreamResponse.error()</code>，哪些只会被吞掉并留下 warn 日志。</p>
+  </header>
+
+  <h2>先分两道门</h2>
+  <p>第一道门在 <code>ChatDispatchStreamingHandler.handle()</code> 的开头：它先解析 body，并立即读取 <code>requestId</code> 与 <code>sid</code>。这段代码外面没有 <code>try/catch</code>，也没有包装成 <code>ChatStreamResponse.error()</code>。所以 body 解析失败或字段对象异常时，请求还没进入 <code>ChatSessionRuntime</code>。</p>
+  <p>第二道门在 <code>ChatSessionRuntime.execute()</code> 内部。进入 runtime 之后，工具解析、执行器启动异常、订阅中的 error 都会走 <code>request.acceptError()</code>，并在 completion/error 的 <code>finally</code> 或启动异常 catch 中执行 cleanup。</p>
+
+  <h2>源码边界</h2>
+<pre><code>try {
+    resolution = toolRuntime.resolve(request.getDispatchRequest());
+    chatExecutor.executeStream(ClientChatExecutionRequest.builder()
+        .completionConsumer(completion -> {
+            try {
+                request.acceptCompletion(completion);
+            } finally {
+                cleanup(currentResolution);
+            }
+        })
+        .errorConsumer(error -> {
+            try {
+                request.acceptError(error);
+            } finally {
+                cleanup(currentResolution);
+            }
+        })
+        .build());
+} catch (Exception e) {
+    cleanup(resolution);
+    request.acceptError(e);
+}</code></pre>
+  <p>这段说明了 runtime 内的异常会触发 error consumer。相反，handler 开头的 <code>parseDispatchRequest()</code> 不在这个 <code>try</code> 里，所以它不是同一类边界。</p>
+
+  <h2>四种现象速判</h2>
+  <table>
+    <thead>
+      <tr><th>现象</th><th>源码结论</th><th>排查入口</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>body 解析失败</td><td>未进入 runtime，无 <code>ChatStreamResponse.error()</code> 包装。</td><td><code>ChatDispatchStreamingHandler.handle()</code> 第 39-41 行。</td></tr>
+      <tr><td>模型或工具启动失败</td><td>runtime catch 后 cleanup，再调用 error consumer。</td><td><code>ChatSessionRuntime.execute()</code> catch 分支。</td></tr>
+      <tr><td>text/thinking chunk 发送失败</td><td><code>handleTextChunk()</code>、<code>handleThinkingChunk()</code> 只 log warn，不抛回 Reactor，流会继续。</td><td>handler 第 58-83 行。</td></tr>
+      <tr><td>completion 发送失败</td><td><code>onNext()</code> 与 <code>onCompleted()</code> 在同一个 <code>try</code> 内；发送失败只 log，不会继续调用 <code>onCompleted()</code>。</td><td><code>handleCompletion()</code> 第 86-111 行。</td></tr>
+    </tbody>
+  </table>
+  <p class="note danger">error 回写本身也遵循同类边界：<code>handleError()</code> 内部先 <code>onNext()</code>，再 <code>onCompleted()</code>，如果发送 error 响应失败，同样只记录 warn。</p>
+
+  <h2>检索练习</h2>
+  <p>判断题：前端没有收到错误消息，就能说明模型调用没有失败吗？</p>
+  <div class="answer">
+    <strong>参考答案：</strong>不能。请求 body 解析异常发生在 runtime 前，不会被包装成 <code>ChatStreamResponse.error()</code>；completion/error 的 observer 发送失败也可能只留下 warn，且不会完成 gRPC 流。只有进入 runtime 后并成功写回 error，Server 才能收到标准错误事件。
+  </div>
+  <p>横向背景可查 <a href="../../module-agent-client/reference/agent-client-overview.html"><code>../module-agent-client/reference/agent-client-overview.html</code></a>。L3 API 参考暂待后续覆盖率扫描生成；本课先把异常归类练熟。主要来源建议读 <code>ChatDispatchStreamingHandler.java</code>、<code>ChatSessionRuntime.java</code> 和 <code>ActiveChatCounter.java</code>。</p>
+</main>
+</body>
+</html>

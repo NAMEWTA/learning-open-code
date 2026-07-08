@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>移动端后台恢复链路地图</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="lesson">
+      <header>
+        <div class="kicker">L2 垂直切片 · 15 分钟短课</div>
+        <h1>移动端后台恢复链路地图</h1>
+        <p>
+          本课只练一个判断：看到“从后台回来后时间、数据或同步不对”，先沿哪条主链路追。完整源码索引见
+          <a href="../reference/mobile-background-flush-flow-reference.html">参考文档</a>。
+        </p>
+      </header>
+
+      <section>
+        <h2>一眼路径图</h2>
+        <p>
+          主路径不是“原生层直接写业务数据”，而是原生层发出生命周期/服务读数，Angular Web 层完成补时、op-log 落盘和同步补偿。
+        </p>
+        <div class="diagram">Android Activity onPause/onResume
+  -> window.SUPAndroid.onPause$/onResume$
+  -> AndroidForegroundTrackingEffects
+  -> TaskService.flushAccumulatedTimeSpent()
+  -> OperationWriteFlushService.flushPendingWrites()
+  -> SUP_OPS IndexedDB
+  -> SyncTriggerService / SyncWrapperService
+
+iOS Capacitor appStateChange
+  -> iosInterface.onResume$
+  -> IosBackgroundTrackingEffects
+  -> TaskService.flushAccumulatedTimeSpent()
+  -> OperationWriteFlushService.flushPendingWrites()
+
+PWA / Web visibilitychange
+  -> visible: HydrationStateService.openSyncWindow()
+  -> hidden: SyncTriggerService emits I_VISIBILITY_HIDDEN
+  -> other triggers: Android resume / user activity / online / interval / initial sync
+  -> SyncEffects.triggerSync$
+  -> downloadRemoteOps() then uploadPendingOps()</div>
+        <p>
+          三个锚点文件先记住：
+          <span class="where">src/main.ts:472-526</span> 负责后台前 drain，
+          <span class="where">src/app/features/android/store/android-foreground-tracking.effects.ts:327-397</span>
+          负责 Android 恢复补时，
+          <span class="where">src/app/imex/sync/sync-trigger.service.ts:63-79</span>
+          负责 visible 恢复时打开 sync window；真正触发 sync 的入口还包括 hidden、Android resume、用户活动、online、interval 和 initial sync。
+        </p>
+      </section>
+
+      <section>
+        <h2>三个判断点</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>现象</th>
+              <th>先查哪里</th>
+              <th>判断</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>后台回来少记时间</td>
+              <td><code>android-foreground-tracking.effects.ts</code> 或 <code>ios-background-tracking.effects.ts</code></td>
+              <td>是否先补 wall-clock gap，再 flush 累积时间。</td>
+            </tr>
+            <tr>
+              <td>关闭/杀进程后本地改动丢失</td>
+              <td><code>src/main.ts</code> 与 <code>operation-write-flush.service.ts</code></td>
+              <td>是否进入 `BackgroundTask.beforeExit`，并等 pending counter 归零和写锁释放。</td>
+            </tr>
+            <tr>
+              <td>恢复后同步状态长期不对</td>
+              <td><code>sync-trigger.service.ts</code> 与 <code>sync-wrapper.service.ts</code></td>
+              <td>是否先 download remote ops，再 upload pending ops；失败时是否保持可重试状态。</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="note">
+          PWA cache 不写业务数据。<code>ngsw-config.json</code> 只定义资源缓存和少量 API freshness；真正的数据一致性仍由 op-log、hydration 和 sync 负责。
+        </div>
+      </section>
+
+      <section>
+        <h2>60 秒判断题</h2>
+        <div class="question">
+          <p>
+            用户在 Android 上开始计时，切后台 20 分钟后回来，任务时间补上了，但另一台设备没有看到这 20 分钟。你先查哪一段？
+          </p>
+          <p>A. service worker cache 配置；B. Android 恢复补时后的 op-log flush/upload；C. iOS AppDelegate 生命周期。</p>
+          <div class="answer">
+            <strong>答案：B。</strong>
+            Android 恢复补时只说明本地 NgRx/TaskService 已被修正；跨设备可见还要确认
+            <code>syncTimeSpent</code> 是否被捕获成 op、<code>flushPendingWrites()</code> 是否完成，以及后续
+            <code>uploadPendingOps()</code> 是否把 unsynced ops 推到 provider。
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>下一步</h2>
+        <p>
+          复习时按这条口令回忆：生命周期信号先到 Web 层，Web 层先补时，再 flush 到
+          <code>SUP_OPS</code>，同步先下载再上传，PWA cache 只管壳和静态资源。
+        </p>
+        <p>
+          主要来源：
+          <a href="../reference/mobile-background-flush-flow-reference.html#source-index">源码索引与排障表</a>。
+          如果某一段不清楚，直接追问 agent，让它从对应文件继续下钻到 L3。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

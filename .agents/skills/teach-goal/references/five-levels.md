@@ -4,13 +4,13 @@
 
 ## 层级总览
 
-| 层级 | 内容 | 产出粒度 | teach 主题目录 | 产出位置 |
+| 层级 | 内容 | 产出粒度 | teach 主题目录 | 必备产出 |
 |---|---|---|---|---|
-| **L0** | 项目整体：定位、技术栈、总体架构图、目录结构、核心设计哲学 | 1 篇总览 | `teach/<project>/00-overview/` | `reference/00-overview.html` |
-| **L1** | 每个模块 / 子系统的职责、对外接口、内部分层 | 每模块 1 篇 | `teach/<project>/module-<slug>/` | `reference/<slug>-overview.html` |
-| **L2（垂直切片）** | 一个具体功能从"触发点"到"落地"的完整链路 | 每个核心功能 1 篇 | `teach/<project>/slice-<slug>/` | `lessons/<slug>.html` |
-| **L3（微观）** | 具体文件 / 类 / 函数的实现细节、参数、边界条件、异常处理 | 按需，覆盖所有公共接口 | 复用父 L1 的 `teach/<project>/module-<slug>/` | `reference/<slug>-api.html` |
-| **L4（深度剖析）** | 关键算法、设计模式、性能权衡、"为什么这么设计" | 按复杂度触发 | `teach/<project>/deep-dive-<slug>/` | `lessons/<slug>.html` |
+| **L0** | 项目整体：定位、技术栈、总体架构图、目录结构、核心设计哲学 | 1 个总览主题 | `teach/<project>/00-overview/` | `lessons/0001-project-map.html` + `reference/00-overview.html` |
+| **L1** | 每个模块 / 子系统的职责、对外接口、内部分层 | 每模块 1 个主题 | `teach/<project>/module-<slug>/` | `lessons/0001-<slug>-module-tour.html` + `reference/<slug>-overview.html` |
+| **L2（垂直切片）** | 一个具体功能从"触发点"到"落地"的完整链路 | 每个核心功能 1 个主题，可多节短课 | `teach/<project>/slice-<slug>/` | `lessons/0001-*.html` 起，必要时 `reference/<slug>-flow-map.html` |
+| **L3（微观）** | 具体文件 / 类 / 函数的实现细节、参数、边界条件、异常处理 | 按需，覆盖所有公共接口 | 复用父 L1 的 `teach/<project>/module-<slug>/` | `reference/<slug>-api.html`；该模块主题仍必须有 lesson |
+| **L4（深度剖析）** | 关键算法、设计模式、性能权衡、"为什么这么设计" | 每个深度主题可多节短课 | `teach/<project>/deep-dive-<slug>/` | `lessons/0001-*.html` 起，必要时 `reference/<slug>-notes.html` |
 
 ## L0 — 项目总览
 
@@ -24,7 +24,9 @@
 - 核心设计哲学 / 架构决策（2-5 条）
 - 源码文件豁免清单（vendor / 自动生成 / 二进制资源，含豁免理由）
 
-**产出**：1 篇 `teach/<project>/00-overview/reference/00-overview.html`
+**产出**：
+- `teach/<project>/00-overview/lessons/0001-project-map.html`：15 分钟内完成的项目导览短课。
+- `teach/<project>/00-overview/reference/00-overview.html`：项目总览速查参考。
 
 ## L1 — 模块总览
 
@@ -38,7 +40,9 @@
 - 关键依赖（本模块依赖谁、谁依赖本模块）
 - 至少一个简单的调用示例
 
-**产出**：每个顶层目录 / 子系统 1 篇 `teach/<project>/module-<slug>/reference/<slug>-overview.html`
+**产出**：
+- `teach/<project>/module-<slug>/lessons/0001-<slug>-module-tour.html`：模块导览短课。
+- `teach/<project>/module-<slug>/reference/<slug>-overview.html`：模块职责、接口、依赖速查参考。
 
 ## L2 — 垂直切片
 
@@ -46,7 +50,12 @@
 
 详见 [vertical-slice.md](vertical-slice.md)。
 
-**产出**：每个核心功能 1 篇 `teach/<project>/slice-<slug>/lessons/<slug>.html`
+**产出**：每个核心功能 1 个 `slice-<slug>/` 主题，主题内至少 1 节短课。复杂链路必须拆成多节短课，例如：
+- `lessons/0001-flow-map.html`：链路地图和入口点。
+- `lessons/0002-main-path.html`：主成功路径。
+- `lessons/0003-error-path.html`：异常与边界路径。
+
+长接口清单、源码索引和流程速查写入 `reference/`，不得塞入单节 lesson。
 
 ## L3 — 微观 API 参考
 
@@ -63,7 +72,7 @@
 
 **简化规则**：内部私有工具函数（`private`、`_` 前缀、未导出）可归类简述，但不能完全不提。标准：至少给出函数名 + 一句话用途 + 所在文件。
 
-**产出**：按模块归入 `teach/<project>/module-<slug>/reference/<slug>-api.html`（与 L1 同目录）
+**产出**：按模块归入 `teach/<project>/module-<slug>/reference/<slug>-api.html`（与 L1 同目录）。如果该模块主题尚无 lesson，必须同时补 `lessons/0001-<slug>-module-tour.html` 或 `lessons/0002-<slug>-api-reading.html`，禁止 reference-only 主题。
 
 ## L4 — 深度剖析
 
@@ -81,7 +90,7 @@
 - 性能特征（时间/空间复杂度，如适用）
 - 已知局限与改进方向
 
-**产出**：`teach/<project>/deep-dive-<slug>/lessons/<slug>.html`
+**产出**：`teach/<project>/deep-dive-<slug>/` 主题内至少 1 节短课；复杂算法/设计必须拆成多节短课，参考表、长伪代码和源码索引写入 `reference/`。
 
 ## 优先级顺序
 

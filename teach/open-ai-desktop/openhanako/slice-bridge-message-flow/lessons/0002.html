@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · BridgeManager 与防抖聚合</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · BridgeManager 与防抖聚合 <span class="tag">消息中枢</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能解释 <code>_handleMessage()</code> 的完整消息处理流程，理解 Slash 命令拦截的 gate 设计原理，说清 debounce + abort 防抖机制在私聊和群聊中的不同策略。
+</div>
+
+<p>上一课我们追踪了消息从平台到达 Adapter 并被规范化的过程。本课聚焦 BridgeManager——它是整个 Bridge 子系统的<strong>消息总入口</strong>，处理所有五个平台的消息，负责角色判定、命令拦截、防抖聚合和附件下载。</p>
+
+<h2>一、_handleMessage：消息总入口的 4 步检查</h2>
+
+<p><code>BridgeManager._handleMessage()</code>（位于 <code>lib/bridge/bridge-manager.ts</code>）处理<strong>所有五个平台</strong>的消息，依次执行以下检查：</p>
+
+<pre><code>async _handleMessage(platform, msg) {
+  const { sessionKey, text, senderName, userId, isGroup, chatId,
+          attachments, agentId: msgAgentId, messageThreadId } = msg;
+
+  // 0. 解析 agentId：消息自带 > platform entry 绑定 > 丢弃
+  const entry = this._platforms.get(this._getPlatformKey(platform, msgAgentId));
+  const agentId = msgAgentId || entry?.agentId || null;
+
+  // 1. 判定 owner/guest
+  const isOwner = this._isOwner(platform, userId, agentId,
+    { isGroup, aliases: identityAliases });
+  const bridgeRole = isGroup ? "guest" : isOwner ? "owner" : "guest";
+
+  // 2. Slash 命令拦截（仅 owner）
+  if (text.startsWith("/") && isOwner) {
+    const dispatchResult = await dispatcher.tryDispatch(text.trim(), { ... });
+    if (dispatchResult.handled) return;  // 命令已处理，不进入 LLM
+  }
+
+  // 3. RC Pending 拦截
+  if (rcState?.isPending(sessionKey) && text && isOwner) {
+    const r = await handleRcPendingInput({ engine, sessionKey, text, ... });
+    if (r?.handled) return;  // /rc 模式下的选择回复
+  }
+
+  // 4. 群聊 vs 私聊：不同缓冲策略
+  if (isGroup) {
+    pending.batches.push(batch);
+    this._triggerPendingFlush(sessionKey);  // 立即入队
+  } else {
+    pending.lines.push(line);
+    this._schedulePendingFlush(sessionKey, isActive ? 1000 : 2000);
+  }
+}</code></pre>
+
+<h2>二、Slash 命令拦截：gate before LLM</h2>
+
+<p>斜杠命令（<code>/stop</code>、<code>/compact</code>、<code>/rc</code> 等）在消息进入 LLM <strong>之前</strong>被拦截处理，由 <code>slashDispatcher.tryDispatch()</code> 统一分发。避免将管理命令当作普通聊天内容喂给模型。</p>
+
+<div class="step"><span class="num">1</span><b>触发条件</b>：消息以 <code>/</code> 开头 + 发送者是 owner<br>
+<span class="where">bridge-manager.ts · _handleMessage() 第 2 步</span></div>
+
+<div class="step"><span class="num">2</span><b>分发机制</b>：<code>slashDispatcher.tryDispatch(text, { platform, sessionKey, ... })</code> 内部维护命令注册表，匹配后执行对应 handler<br>
+<span class="where">lib/bridge/slash-dispatcher.ts</span></div>
+
+<div class="step"><span class="num">3</span><b>返回值</b>：<code>{ handled: true/false }</code> — handled=true 表示命令已处理，消息不进入 LLM；handled=false 则继续走正常流程<br>
+<span class="where">保证：命令执行失败也不阻塞正常消息流</span></div>
+
+<div class="danger">
+⚠️ <b>纪律约束：只有 owner 能触发斜杠命令。</b><br>
+Guest 发 <code>/foo</code> 会直接进入 LLM——原因是所有 bridge 命令都是 owner-only。若 dispatcher 对 guest 返回"静默拒绝"，消息会被完全吞掉，群聊里其他成员甚至 Agent 都看不到这条发言。所以 guest 的命令被视为普通文本发送给 LLM，由模型自行理解。
+</div>
+
+<h2>三、debounce + abort 防抖聚合机制</h2>
+
+<p>用户在 IM 中经常快速连发多条消息（如"帮我写周报" / "加上昨天的数据" / "用表格格式"）。如果每条消息都立即触发一次 LLM 调用，不仅浪费 token，还会因并发导致上下文混乱。</p>
+
+<table>
+<thead><tr><th>场景</th><th>缓冲策略</th><th>触发时机</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>私聊（DM）</td><td>debounce 聚合</td><td>正在 streaming 则 1s 后，否则 2s 后 flush</td><td>用户可能连续发多条消息，等待 1-2 秒再批量发送可合并上下文</td></tr>
+<tr><td>群聊（Group）</td><td>立即入 batch queue</td><td>即时串行处理</td><td>群聊消息来自不同用户，无需等待聚合；同一 sessionKey 串行保证顺序</td></tr>
+</tbody>
+</table>
+
+<pre><code>// 私聊 debounce 调度逻辑
+_schedulePendingFlush(sessionKey, delayMs) {
+  // 取消之前同一 sessionKey 的定时器
+  clearTimeout(this._flushTimers.get(sessionKey));
+
+  // 设置新的延时 flush
+  const timer = setTimeout(() => {
+    this._flushPending(sessionKey);
+  }, delayMs);
+
+  this._flushTimers.set(sessionKey, timer);
+}</code></pre>
+
+<div class="side">
+💡 <b>设计巧思：steer 注入</b><br>
+如果 Agent 正在 streaming 回复期间用户又发了新消息，BridgeManager 不会启动新的 session，而是通过 <code>engine.steerBridgeSession()</code> 将新消息<b>注入到正在进行的 streaming 中</b>。Agent 会在当前回复中自然地包含新消息的内容，而不是另起一个对话。这避免了两个并发 session 争抢上下文的问题。
+</div>
+
+<h2>四、_flushPending：消息冲洗的 7 个步骤</h2>
+
+<p>debounce 定时器到期后，<code>_flushPending()</code> 从缓冲中取出所有消息，进行最终处理并发送：</p>
+
+<pre><code>async _flushPending(sessionKey) {
+  // 1. 防并发：同一 sessionKey 正在处理中则跳过
+  if (this._processing.has(sessionKey)) return;
+
+  // 2. 取出缓冲的所有消息
+  const batch = this._takePendingBatch(sessionKey);
+  const { lines, attachments, platform, chatId, ... } = batch;
+
+  // 3. 解析附件（图片/语音/视频/文件）
+  const { images, textNotes, inboundFiles } =
+    await this._resolveAttachments(platform, attachments, agentId);
+
+  // 4. 拼装完整 prompt — 时间标记 + 文本 + 附件说明
+  const prompt = textNotes
+    ? `${lines.join("\n")}\n${textNotes}`
+    : lines.join("\n");
+  const merged = `&lt;t&gt;MM-DD HH:mm&lt;/t&gt; ${prompt}`;
+
+  // 5. steer 注入（适用于 streaming 中的新消息）
+  if (!isGroup && !images.length &&
+      this.engine.steerBridgeSession(sessionKey, merged, { role })) {
+    return;
+  }
+
+  // 6. 启动 LLM 等待回执（"正在输入..."）
+  receiptDelivery = await this._startLlmWaitingReceipt({ ... });
+
+  // 7. 通过 Hub 发送消息
+  const result = await this._hub.send(merged, {
+    sessionKey, agentId, role, meta, onDelta: delivery.onDelta,
+    images, inboundFiles, displayMessage, ...
+  });
+}</code></pre>
+
+<div class="step"><span class="num">→</span><b>防并发保护</b>：<code>this._processing.has(sessionKey)</code> 确保同一 sessionKey 不会有两个并发的 flush 在进行。这是通过一个 Set 实现的简单互斥锁。<br>
+<span class="where">bridge-manager.ts · _flushPending() 第 1 步</span></div>
+
+<h2>五、消息广播与环形缓冲</h2>
+
+<p>每条收到的消息立即通过 <code>_pushMessage()</code> 写入<strong>环形缓冲</strong>（per-agent 最多 200 条），供 UI "消息日志"面板展示。这个缓冲是独立于 debounce buffer 的——即使消息因 debounce 被合并或丢弃，日志面板仍能看到原始到达记录。</p>
+
+<div class="side">
+💡 <b>关键设计：双缓冲结构</b><br>
+BridgeManager 维护两套缓冲：（1）<b>debounce buffer</b>（pending.lines / pending.batches）用于聚合后发送给 LLM；（2）<b>环形缓冲</b>（per-agent 200 条）用于 UI 日志展示。两套缓冲独立运作，互不干扰。日志缓冲容量有上限，防止内存泄漏。
+</div>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 为什么只有 owner 能触发 Slash 命令？</p>
+<span class="opt">A. 因为 guest 的权限不够——dispatcher 返回"静默拒绝"后消息被吞掉，群聊里其他人看不到</span>
+<span class="opt">B. 因为 guest 没有安装斜杠命令插件</span>
+<span class="opt">C. 因为数据库中没有 guest 的命令权限记录</span>
+<span class="opt">D. 因为 WebSocket 协议限制了 guest 的消息类型</span>
+<details><summary>看答案</summary><b>A</b>。所有 bridge 命令都是 owner-only，若 dispatcher 对 guest 返回"静默拒绝"，消息会被完全吞掉，群聊里其他成员甚至 Agent 都看不到这条发言。因此 guest 的命令被视为普通文本发送给 LLM。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 私聊消息的 debounce 延迟是多少？为什么 streaming 中更短？</p>
+<span class="opt">A. 固定 3 秒，与 streaming 状态无关</span>
+<span class="opt">B. 正在 streaming 时 1 秒，空闲时 2 秒——streaming 中用户的消息更可能是对当前回复的追问，需要更快响应</span>
+<span class="opt">C. 固定 500 毫秒，所有场景相同</span>
+<span class="opt">D. 随机 1-5 秒，避免服务器峰值</span>
+<details><summary>看答案</summary><b>B</b>。正在 streaming 时延迟 1 秒（因为新消息很可能与当前对话相关），空闲时延迟 2 秒（等待用户可能的连发）。更短的延迟让 steering 注入更及时。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. _flushPending 中第 5 步的 steer 注入解决了什么问题？</p>
+<span class="opt">A. 解决了多平台消息格式不兼容的问题</span>
+<span class="opt">B. 解决了 Agent 正在回复时用户发新消息的并发问题——新消息注入到当前 streaming 而非启动新 session</span>
+<span class="opt">C. 解决了 WebSocket 连接超时的问题</span>
+<span class="opt">D. 解决了附件下载失败的问题</span>
+<details><summary>看答案</summary><b>B</b>。steer 注入将新消息合并到正在进行的 streaming 回复中，避免两个并发 session 争抢上下文。Agent 会在当前回复中自然地响应新消息。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. BridgeManager 的双缓冲结构分别用于什么目的？</p>
+<span class="opt">A. 一个用于文本消息，一个用于附件消息</span>
+<span class="opt">B. debounce buffer 用于聚合发送给 LLM；环形缓冲用于 UI 日志展示（per-agent 200 条上限）</span>
+<span class="opt">C. 一个用于钉钉平台，一个用于 Telegram 平台</span>
+<span class="opt">D. 一个用于 owner 消息，一个用于 guest 消息</span>
+<details><summary>看答案</summary><b>B</b>。两套缓冲独立运作：debounce buffer 负责消息聚合和去重后发送给 LLM；环形缓冲（per-agent 200 条）负责 UI "消息日志"面板展示。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>lib/bridge/bridge-manager.ts</code>，搜索 <code>_handleMessage</code> 和 <code>_flushPending</code>，逐行阅读这两个方法。然后搜索 <code>_schedulePendingFlush</code> 理解 debounce 定时器的调度逻辑。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果 debounce 期间用户发了 5 条消息，它们是如何合并成一条 prompt 的？」「steer 注入失败后会怎样降级？」下一课我们聚焦 <strong>Hub 路由与 Session 匹配</strong>——消息如何通过 4 条规则路由到正确的处理器。</div>
+
+<div class="nav">课程 0002 / 桥接消息流全链路 · <a href="0001.html">← 上一课：架构总览</a> · 下一课预告：Hub 路由与 Session 匹配——owner vs guest Prompt 构建的差异</div>
+
+</body>
+</html>

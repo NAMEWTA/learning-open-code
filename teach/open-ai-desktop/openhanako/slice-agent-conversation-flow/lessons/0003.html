@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · Agent 初始化与 System Prompt 拼装</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  ol li { margin-bottom: 0.3rem; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · Agent 初始化与 System Prompt 拼装 <span class="tag">Agent & Prompt</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能列出 Agent.init() 的 7 个初始化步骤，能背出 System Prompt 的 10 段来源及其加载顺序，能解释 SessionCoordinator 的 promptSession() 在前半段（请求路径）中做的 6 项准备工作。
+</div>
+
+<p>消息经过 Hub 路由和防重入检查后，到达 SessionCoordinator。但在此之前，Agent（助手实例）必须已经完成初始化——包括 System Prompt 的拼装。这一课聚焦 Agent 初始化（L5）和 SessionCoordinator 的请求准备（L6 前半段）。</p>
+
+<h2>一、Agent 初始化——7 步启动助手实例</h2>
+
+<p><code>core/agent.ts</code> 中的 <code>Agent</code> 类代表一个助手实例。每个 Agent 有独立的数据目录（<code>~/.hanako/agents/{id}/</code>），包含配置、记忆、工具和自定义 System Prompt：</p>
+
+<pre><code>// core/agent.ts -- Agent.init()（真实代码片段，约 500 行初始化核心）
+async init(log, sharedModels, resolveModel) {
+  if (this._runtimeInitialized) return;
+
+  // 0. 兼容性检查（目录结构、数据库文件、配置文件完整性）
+  await runCompatChecks({ agentDir: this.agentDir, factoriesDir: ... });
+
+  // 1. 加载 config.yaml
+  this._config = loadConfig(this.configPath);
+
+  // 2. 身份 + 语言
+  const isZh = String(this._config.locale || "").startsWith("zh");
+  this.userName = this._config.user?.name || (isZh ? "用户" : "User");
+  this.agentName = this._config.agent?.name || "Hanako";
+
+  // 3. 记忆系统：FactStore（DuckDB）+ SessionSummaryManager
+  this._factStore = new FactStore(this.factsDbPath);
+  this._summaryManager = new SessionSummaryManager(this.summariesDir);
+
+  // 4. Memory Ticker（定期触发记忆整理，默认每 5 分钟）
+  this._memoryTicker = createMemoryTicker({
+    factStore: this._factStore, summaryManager: this._summaryManager,
+    getConfig: () => this._config, ...
+  });
+
+  // 5. 构建工具集（20+ 工具，按 agent.tools 配置开关）
+  this._buildTools(sharedModels, resolveModel);
+
+  // 6. 组装 System Prompt
+  this._systemPrompt = this.buildSystemPrompt({ ... });
+
+  // 7. Desk 系统（定时任务 CronStore + DeskManager）
+  if (this._cronEnabled) {
+    this._cronStore = new CronStore(this.cronsDir);
+    this._deskManager = createDeskManager({ ... });
+  }
+  this._runtimeInitialized = true;
+}</code></pre>
+
+<div class="step"><span class="num">0</span><b>兼容性检查</b>——确保目录结构、数据库文件、配置文件完整，旧版本迁移。<br><span class="where">runCompatChecks()</span></div>
+<div class="step"><span class="num">1</span><b>加载配置</b>——<code>config.yaml</code> 中定义 agent 身份、语言、启用的工具、模型偏好等。<br><span class="where">loadConfig(this.configPath)</span></div>
+<div class="step"><span class="num">2</span><b>身份解析</b>——从配置中提取 userName/agentName/locale，后续注入 System Prompt。<br><span class="where">this._config.user / agent</span></div>
+<div class="step"><span class="num">3</span><b>记忆初始化</b>——FactStore（DuckDB 存事实）和 SessionSummaryManager（JSONL 存摘要）。<br><span class="where">FactStore + SessionSummaryManager</span></div>
+<div class="step"><span class="num">4</span><b>Memory Ticker</b>——后台定时器，每 5 分钟触发记忆整理（事实提取 + 摘要生成）。<br><span class="where">createMemoryTicker()</span></div>
+<div class="step"><span class="num">5</span><b>工具注册</b>——20+ 工具（文件读写、命令执行、浏览器、搜索、Subagent 等），按配置过滤。<br><span class="where">this._buildTools()</span></div>
+<div class="step"><span class="num">6</span><b>System Prompt 拼装</b>——10 段来源合并为最终 System Prompt（下一节详解）。<br><span class="where">this.buildSystemPrompt()</span></div>
+
+<h2>二、System Prompt 10 段拼装——对话质量的基石</h2>
+
+<p>Agent 的 <code>buildSystemPrompt()</code> 从 10 个来源拼装最终发送给 LLM 的 System Prompt。这是决定对话质量和 Agent 行为的核心：</p>
+
+<ol>
+<li><b>Identity（身份）</b>——来自 <code>identity.md</code> 或 <code>identity-templates/{yuan}.md</code>，定义 Agent 人格</li>
+<li><b>Yuan（能力元）</b>——来自 <code>yuan/{yuan}.md</code>，定义输出协议和能力边界</li>
+<li><b>Ishiki（意识）</b>——来自 <code>ishiki.md</code> 或 <code>ishiki-templates/{yuan}.md</code>，定义行为准则</li>
+<li><b>平台提示</b>——操作系统、Shell、时区、当前日期</li>
+<li><b>工作区指令</b>——<code>CLAUDE.md</code>、<code>AGENTS.md</code>、<code>CODEBUDDY.md</code> 等项目规则文件</li>
+<li><b>工具列表 + 使用说明</b>——20+ 工具的名称、参数、用法说明</li>
+<li><b>用户档案</b>——<code>user.md</code>（用户偏好、背景信息）</li>
+<li><b>记忆注入</b>——FactStore 最近事实 + SessionSummary 历史摘要</li>
+<li><b>团队花名册</b>——多 Agent 场景下其他 Agent 的描述</li>
+<li><b>Provider 补丁</b>——针对特定模型/Provider 的提示词修正</li>
+</ol>
+
+<pre><code>// core/agent.ts -- personality getter（真实代码片段）
+get personality() {
+  const isZh = String(this._config.locale || "").startsWith("zh");
+  const fill = (text) => text
+    .replace(/\{\{userName\}\}/g, this.userName)
+    .replace(/\{\{agentName\}\}/g, this.agentName);
+  const yuanType = this._config?.agent?.yuan || "hanako";
+
+  const identityMd = readFile(path.join(this.agentDir, "identity.md"))
+    || readFile(path.join(this.productDir, "identity-templates", `${yuanType}.md`));
+  const yuanMd = this._readYuan();
+  const ishikiMd = readFile(path.join(this.agentDir, "ishiki.md"))
+    || readFile(path.join(this.productDir, "ishiki-templates", `${yuanType}.md`));
+
+  return fill(identityMd) + "\n\n" + fill(yuanMd || "")
+       + "\n\n" + fill(ishikiMd);
+}</code></pre>
+
+<div class="side">
+💡 <b>模板优先级：</b>Agent 目录下的自定义文件优先级高于 productDir 下的模板。identity.md → identity-templates/{yuan}.md 的回退链允许用户覆盖默认人格。模板中的 <code>{{userName}}</code> 和 <code>{{agentName}}</code> 占位符在运行时填充。
+</div>
+
+<h2>三、SessionCoordinator promptSession——LLM 调用前的 6 项准备</h2>
+
+<p><code>core/session-coordinator.ts</code>（5220 行）是对话链路的真正执行者。<code>promptSession()</code> 在提交到 Pi SDK 之前做 6 项准备工作：</p>
+
+<pre><code>// core/session-coordinator.ts -- promptSession 流程（真实逻辑简化）
+async promptSession(sessionPath, text, opts) {
+  // 1. 确保 session 已加载（延迟加载/缓存命中）
+  let entry = this._getSessionEntryByPath(sessionPath);
+  if (!entry) {
+    await this.ensureSessionLoaded(sessionPath);
+    entry = this._getSessionEntryByPath(sessionPath);
+  }
+
+  // 2. 视觉预处理——图片 to 文本模型适配（Vision Bridge）
+  const visionResult = await prepareVisionInputForTextOnlyModel({
+    targetModel: entry.session.model, text, opts, sessionPath,
+    getVisionBridge: () => engine?.getVisionBridge?.(),
+  });
+
+  // 3. 图片预处理——resize/格式转换/压缩
+  const imageResult = await prepareModelImageInputsForPrompt({ text, opts });
+
+  // 4. 模态校验——视频/音频输入是否被当前模型支持
+  assertVideoInputSupported(entry.session.model, opts?.videos);
+  assertAudioInputSupported(entry.session.model, opts?.audios);
+
+  // 5. 构建 Pi SDK prompt 参数
+  const promptOpts = buildPromptMediaOptions(opts);
+
+  // 6. ★ 提交到 Pi SDK——LLM 调用入口
+  await entry.session.prompt(text, promptOpts);
+}</code></pre>
+
+<div class="danger">
+⚠️ <b>Vision Bridge 的作用：</b>当用户使用的模型不支持视觉输入（如纯文本模型），Vision Bridge 会将图片发送给支持视觉的模型做描述，然后将描述文本注入到消息中替代原始图片。这使纯文本模型也能「看」图片——但代价是额外的 API 调用和 token 消耗。
+</div>
+
+<blockquote>
+<b>Pi SDK 的角色：</b>SessionManager（来自 <code>lib/pi-sdk</code>）负责实际的 LLM 对话管道——消息历史 JSONL 持久化、上下文窗口 token 计数、Compaction 摘要生成、流式 SSE 事件解析。SessionCoordinator 是 Pi SDK 的「适配层」，将 Hana 的配置翻译为 Pi SDK 的调用参数。
+</blockquote>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. Agent.init() 中，System Prompt 是在哪一步拼装的？</p>
+<span class="opt">A. 第 1 步——加载 config.yaml 时</span>
+<span class="opt">B. 第 5 步——构建工具集时</span>
+<span class="opt">C. 第 6 步——在所有依赖（配置、工具、记忆）就绪后</span>
+<span class="opt">D. 第 7 步——Desk 系统初始化时</span>
+<details><summary>看答案</summary><b>C</b>。System Prompt 拼装是第 6 步，放在配置加载（步骤 1）、工具注册（步骤 5）之后。因为 Prompt 需要引用工具列表和使用说明，所以必须在工具注册完成后才能拼装。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 以下哪个不是 System Prompt 的 10 段来源之一？</p>
+<span class="opt">A. Identity（身份定义）——identity.md</span>
+<span class="opt">B. Yuan（能力元）——yuan/{yuan}.md</span>
+<span class="opt">C. 数据库 Schema——db/schema.sql</span>
+<span class="opt">D. 记忆注入——FactStore + SessionSummary</span>
+<details><summary>看答案</summary><b>C</b>。数据库 Schema 不是 System Prompt 的来源。10 段来源是：Identity、Yuan、Ishiki、平台提示、工作区指令、工具列表、用户档案、记忆注入、团队花名册、Provider 补丁。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. Vision Bridge 的作用是什么？</p>
+<span class="opt">A. 加速图片加载</span>
+<span class="opt">B. 将图片发送给视觉模型生成描述，让纯文本模型也能处理图片输入</span>
+<span class="opt">C. 压缩图片以减少传输带宽</span>
+<span class="opt">D. 将图片转为 base64 编码</span>
+<details><summary>看答案</summary><b>B</b>。当用户使用的模型不支持视觉输入时，Vision Bridge 调用视觉模型生成图片描述，注入到消息中替代原始图片。这实现了纯文本模型对图片的「间接理解」。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. promptSession() 在调用 Pi SDK 之前做的最后一项检查是什么？</p>
+<span class="opt">A. 用户权限校验</span>
+<span class="opt">B. 模态校验——检查视频/音频是否被当前模型支持</span>
+<span class="opt">C. 网络连接测试</span>
+<span class="opt">D. 数据库连接检查</span>
+<details><summary>看答案</summary><b>B</b>。在构建 promptOpts 之前，<code>assertVideoInputSupported</code> 和 <code>assertAudioInputSupported</code> 检查当前模型是否支持视频/音频输入。不支持时直接抛错，避免请求到达 LLM Provider 后才失败。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>core/agent.ts</code>，搜索 <code>buildSystemPrompt</code>，追踪 10 段 Prompt 的加载顺序。再打开 <code>core/session-coordinator.ts</code>，搜索 <code>async promptSession</code>，看 Vision Bridge 和模态校验的具体实现。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果用户同时发送了图片和视频，但模型只支持图片，会发生什么？」「Memory Ticker 每 5 分钟触发一次，如果对话很密集会不会导致过多 API 调用？」下一课我们深入 <strong>LLM 调用与流式处理</strong>——4 种协议适配 + ThinkTag/Mood/Card 三重解析器。</div>
+
+<div class="nav">课程 0003 / openhanako 对话链路由浅入深 · <a href="0002.html">← 上一课：Hub 路由</a> · 下一课预告：LLM 调用与流式处理</div>
+
+</body>
+</html>

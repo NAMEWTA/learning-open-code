@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Server 模块 POM 与构建微观参考</title>
+  <link rel="stylesheet" href="../assets/docs-deploy.css" />
+</head>
+<body>
+  <h1>Server 模块 POM 与构建微观参考</h1>
+  <p class="summary"><strong>L3 速查：</strong>从 <code>snail-ai-server</code>、<code>snail-ai-server-features</code>、<code>snail-ai-feature-common</code> 三个 POM 还原 Maven 模块树、artifact 坐标、继承的 profile/插件，以及它们如何汇入可部署 JAR。返回 <a href="docs-deploy-overview.html">L1 部署速查</a> · <a href="../lessons/0001-docs-deploy-module-tour.html">短课</a> · <a href="../../module-server-entry/reference/server-entry-overview.html">Server 入口模块</a>。</p>
+  <div class="meta">
+    <span class="pill">3 个目标 POM</span>
+    <span class="pill">packaging: pom × 2 · jar × 1</span>
+    <span class="pill">版本: ${revision} → 1.0.0</span>
+    <span class="pill">JDK 21 · Spring Boot 4.1.0</span>
+  </div>
+
+  <nav class="toc" aria-label="分节导航">
+    <a href="#reactor">Reactor 位置</a>
+    <a href="#coordinates">Artifact 坐标</a>
+    <a href="#parent-chain">Parent 继承链</a>
+    <a href="#module-tree">模块依赖树</a>
+    <a href="#feature-common">feature-common 依赖</a>
+    <a href="#plugins">构建插件</a>
+    <a href="#profiles">Profile</a>
+    <a href="#deploy-link">与部署产物</a>
+  </nav>
+
+  <p class="warn"><strong>Parent 易错点：</strong><code>snail-ai-server-features</code> 在目录上位于 <code>snail-ai-server/</code> 内，但 POM 的 <code>&lt;parent&gt;</code> 直接指向根 <code>snail-ai</code>，<strong>不是</strong> <code>snail-ai-server</code>。判断版本与插件继承时看 parent 声明，不要只看文件夹嵌套。</p>
+
+  <h2 id="reactor">Reactor 位置</h2>
+  <p>根 <code>pom.xml</code> 把 <code>snail-ai-server</code> 列为五大顶层模块之一。执行 <code>mvn package</code> 时，Maven 按 reactor 顺序编译整棵子树；Docker/CI 最终只关心 <code>snail-ai-starter</code> 产出的 <code>snail-ai-server-exec.jar</code>，但 Server 业务 JAR 均来自本树。</p>
+  <div class="filetree">snail-ai/                                    ← 根 reactor（com.aizuda:snail-ai）
+├── pom.xml                                    ← dependencyManagement、build 插件、release profile
+└── snail-ai-server/
+    ├── pom.xml                                ← 聚合 pom，列出 4 个子模块
+    ├── snail-ai-server-persistence/
+    ├── snail-ai-server-features/
+    │   ├── pom.xml                            ← 聚合 pom，列出 7 个 feature 子模块
+    │   └── snail-ai-feature-common/
+    │       └── pom.xml                        ← 可发布 jar，依赖 model + grpc
+    ├── snail-ai-server-admin/
+    └── snail-ai-server-openapi/</div>
+
+  <h2 id="coordinates">Artifact 坐标</h2>
+  <table>
+    <thead><tr><th>模块</th><th>groupId</th><th>artifactId</th><th>version</th><th>packaging</th><th>本地路径</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Snail AI 根</td>
+        <td><code>com.aizuda</code></td>
+        <td><code>snail-ai</code></td>
+        <td><code>${revision}</code>（当前 1.0.0）</td>
+        <td><code>pom</code></td>
+        <td><code>open-java/snail-ai/pom.xml</code></td>
+      </tr>
+      <tr>
+        <td>Server 聚合</td>
+        <td><code>com.aizuda</code></td>
+        <td><code>snail-ai-server</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>pom</code></td>
+        <td><code>snail-ai-server/pom.xml</code></td>
+      </tr>
+      <tr>
+        <td>Features 聚合</td>
+        <td><code>com.aizuda</code></td>
+        <td><code>snail-ai-server-features</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>pom</code></td>
+        <td><code>snail-ai-server/snail-ai-server-features/pom.xml</code></td>
+      </tr>
+      <tr>
+        <td>Feature 公共层</td>
+        <td><code>com.aizuda</code></td>
+        <td><code>snail-ai-feature-common</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>jar</code></td>
+        <td><code>.../snail-ai-feature-common/pom.xml</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>三个目标 POM 均未重写 <code>groupId</code> 或 <code>version</code>，全部继承根 POM 的 <code>com.aizuda:${revision}</code>。子模块在 <code>dependencyManagement</code> 中已登记，互相引用时可省略 <code>&lt;version&gt;</code>。</p>
+
+  <h2 id="parent-chain">Parent 继承链</h2>
+  <table>
+    <thead><tr><th>模块</th><th>parent artifactId</th><th>relativePath</th><th>继承内容</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>snail-ai-server</code></td>
+        <td><code>snail-ai</code></td>
+        <td><code>../pom.xml</code></td>
+        <td>Java 21、BOM 版本、compiler/flatten/source 插件、全局 lombok/guava</td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-server-features</code></td>
+        <td><code>snail-ai</code></td>
+        <td><code>../../pom.xml</code></td>
+        <td>同上；<strong>跳过</strong> <code>snail-ai-server</code> 作为 parent</td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-feature-common</code></td>
+        <td><code>snail-ai-server-features</code></td>
+        <td><code>../pom.xml</code></td>
+        <td>features 聚合 pom 本身无额外 build 配置，实质仍继承根 POM 的插件栈</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="module-tree">模块依赖树</h2>
+  <h3>snail-ai-server 子模块（聚合）</h3>
+  <div class="filetree">snail-ai-server/                    packaging=pom
+├── snail-ai-server-persistence/     持久化：biz/vector/search 存储
+├── snail-ai-server-features/        业务 feature 聚合（见下）
+├── snail-ai-server-admin/           Admin REST + 静态后台依赖入口
+└── snail-ai-server-openapi/         OpenAPI 对外接口</div>
+
+  <h3>snail-ai-server-features 子模块（聚合）</h3>
+  <div class="filetree">snail-ai-server-features/           packaging=pom
+├── snail-ai-feature-common/         跨 feature 公共能力（jar）
+├── snail-ai-feature-model/          模型配置与管理
+├── snail-ai-feature-agent/          智能体业务
+├── snail-ai-feature-rag/            RAG 知识库
+├── snail-ai-feature-skill/          Skill 管理
+├── snail-ai-feature-memory/         记忆
+└── snail-ai-feature-resource/       资源与存储</div>
+  <p><span class="tag">Reactor 顺序</span> <code>&lt;modules&gt;</code> 列表中 <code>feature-common</code> 排在 <code>feature-model</code> 之前，但 common 的 POM 声明依赖 model。Maven 按<strong>依赖图</strong>而非列表顺序编译，不会因此失败。</p>
+
+  <h3>汇入可执行 JAR 的路径（部署相关）</h3>
+  <pre class="diagram">snail-ai-feature-common (+ 其他 feature-*)
+  -> snail-ai-server-admin / snail-ai-server-openapi
+  -> snail-ai-starter（spring-boot-maven-plugin repackage）
+  -> target/snail-ai-server-exec.jar
+  -> Dockerfile ADD 为 app.jar
+  -> Compose opensnail/snail-ai:latest</pre>
+
+  <h2 id="feature-common">snail-ai-feature-common 编译依赖</h2>
+  <p>这是三个目标 POM 中唯一声明 <code>&lt;dependencies&gt;</code> 的模块，也是 Server 侧 feature 层的“薄公共层”。</p>
+  <table>
+    <thead><tr><th>依赖 artifactId</th><th>scope</th><th>版本来源</th><th>部署含义</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>snail-ai-feature-model</code></td>
+        <td>compile（默认）</td>
+        <td><code>dependencyManagement</code> → <code>${revision}</code></td>
+        <td>拉入模型 starter、MyBatis-Plus、Spring AI 等；最终进入 fat JAR</td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-commons-grpc</code></td>
+        <td>compile（默认）</td>
+        <td><code>dependencyManagement</code> → <code>${revision}</code></td>
+        <td>gRPC 服务端/客户端基础设施；对应运行时 <code>18888</code> 端口能力</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><code>snail-ai-server-admin</code> 同时直接依赖全部 7 个 feature 模块；common 提供跨 feature 共享类型与配置，不是唯一入口，但改 common 会影响 admin/openapi 编译 classpath。</p>
+
+  <h2 id="plugins">根 POM 构建插件（三模块均继承）</h2>
+  <p>目标 POM 自身未声明 <code>&lt;build&gt;</code>，以下插件均来自根 <code>open-java/snail-ai/pom.xml</code>。</p>
+  <table>
+    <thead><tr><th>插件</th><th>版本属性</th><th>关键配置</th><th>对本地构建的影响</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>maven-compiler-plugin</code></td>
+        <td><code>3.15.0</code></td>
+        <td><code>&lt;release&gt;21&lt;/release&gt;</code>；注解处理器：lombok、spring-boot-configuration-processor</td>
+        <td>所有 jar 模块统一 Java 21；与 CI/Docker 的 JDK 21 一致</td>
+      </tr>
+      <tr>
+        <td><code>flatten-maven-plugin</code></td>
+        <td><code>1.7.3</code></td>
+        <td><code>flattenMode=oss</code>；<code>process-resources</code> 阶段 flatten；<code>clean</code> 阶段 clean</td>
+        <td>发布前把 <code>${revision}</code> 解析为字面版本，生成可发布的扁平 POM</td>
+      </tr>
+      <tr>
+        <td><code>maven-source-plugin</code></td>
+        <td><code>3.4.0</code></td>
+        <td>默认配置；<code>release</code> profile 下 attach-sources</td>
+        <td>本地 <code>package</code> 不强制附加源码；Central 发布时附加</td>
+      </tr>
+    </tbody>
+  </table>
+  <p><span class="tag">可执行 JAR</span> <code>spring-boot-maven-plugin</code> 仅配置在 <code>snail-ai-starter/pom.xml</code>：<code>finalName=snail-ai-server</code>、<code>classifier=exec</code>、主类 <code>SnailAiSpringbootApplication</code>。三目标 POM 产出的是库 JAR，不是可直接 <code>java -jar</code> 的产物。</p>
+
+  <h2 id="profiles">Profile：release</h2>
+  <table>
+    <thead><tr><th>元素</th><th>id / 命令</th><th>行为</th><th>与部署关系</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Profile</td>
+        <td><code>release</code></td>
+        <td>仅在显式 <code>-P release</code> 时激活</td>
+        <td>本地学习/CI 构建镜像通常<strong>不需要</strong>此 profile</td>
+      </tr>
+      <tr>
+        <td><code>maven-gpg-plugin</code></td>
+        <td><code>verify</code> → <code>sign</code></td>
+        <td>GPG 签名，<code>--pinentry-mode loopback</code></td>
+        <td><code>maven-publish.yml</code> 在 tag 推送后执行</td>
+      </tr>
+      <tr>
+        <td><code>maven-javadoc-plugin</code></td>
+        <td><code>attach-javadocs</code></td>
+        <td><code>doclint=none</code></td>
+        <td>Maven Central 要求 javadoc 附件</td>
+      </tr>
+      <tr>
+        <td><code>central-publishing-maven-plugin</code></td>
+        <td><code>ossrh</code></td>
+        <td><code>autoPublish=false</code></td>
+        <td><code>mvn deploy -P release</code> 上传 staging</td>
+      </tr>
+      <tr>
+        <td><code>distributionManagement</code></td>
+        <td>—</td>
+        <td>snapshot / release 仓库指向 Sonatype OSSRH</td>
+        <td>与 Docker 镜像发布并行、独立</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="deploy-link">与部署产物的命令对照</h2>
+  <table>
+    <thead><tr><th>场景</th><th>命令</th><th>Profile</th><th>关键产物</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>本地/CI 打可运行包</td>
+        <td><code>mvn -B package -Dmaven.test.skip=true</code></td>
+        <td>无（默认 <code>skipTests=true</code> 在 properties）</td>
+        <td><code>snail-ai-starter/target/snail-ai-server-exec.jar</code></td>
+      </tr>
+      <tr>
+        <td>Docker 镜像构建</td>
+        <td>同上 package → <code>docker build snail-ai-starter/</code></td>
+        <td>无</td>
+        <td>镜像内 <code>app.jar</code></td>
+      </tr>
+      <tr>
+        <td>Maven Central 发布</td>
+        <td><code>mvn deploy -P release</code></td>
+        <td><code>release</code></td>
+        <td>含 <code>snail-ai-feature-common</code> 在内的各模块 GAV</td>
+      </tr>
+      <tr>
+        <td>只编译 Server 子树</td>
+        <td><code>mvn package -pl snail-ai-server -am</code></td>
+        <td>无</td>
+        <td>缩短迭代；仍需 starter 才能得 exec JAR</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>根 POM 关键属性（版本锁定）</h2>
+  <table>
+    <thead><tr><th>属性</th><th>值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>revision</code></td><td><code>1.0.0</code></td><td>全仓统一版本号；tag 发布与 Docker 镜像 tag 对齐</td></tr>
+      <tr><td><code>java.version</code></td><td><code>21</code></td><td>compiler release</td></tr>
+      <tr><td><code>spring-boot.version</code></td><td><code>4.1.0</code></td><td>BOM import</td></tr>
+      <tr><td><code>spring-ai.version</code></td><td><code>2.0.0</code></td><td>Spring AI BOM</td></tr>
+      <tr><td><code>skipTests</code></td><td><code>true</code></td><td>默认跳过测试；CI 同样传 <code>-Dmaven.test.skip=true</code></td></tr>
+    </tbody>
+  </table>
+
+  <p class="practice"><strong>速查练习：</strong>① <code>snail-ai-server-features</code> 的 parent 是谁？② 哪个模块产出 <code>snail-ai-server-exec.jar</code>？③ 发布到 Maven Central 需要哪个 profile？<br><strong>答案：</strong>① 根 <code>snail-ai</code>（不是 server 聚合 pom）；② <code>snail-ai-starter</code>；③ <code>release</code>。</p>
+</body>
+</html>

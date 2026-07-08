@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Capacitor 移动端与 PWA 宿主</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 模块总览 · 预计 15 分钟 · 目标：能判断移动端/PWA 问题应该落在哪个边界</p>
+    <h1>Capacitor 移动端与 PWA 宿主</h1>
+    <p class="lead">一句话：super-productivity 复用 <a href="../../module-angular-app-shell/lessons/0001-angular-app-shell-module-tour.html">Angular renderer</a>，再分别放进浏览器 PWA、Android WebView/Capacitor activity、iOS Capacitor view controller；它和 <a href="../../module-electron-host/lessons/0001-electron-host-module-tour.html">Electron 宿主</a>一样是平台边界层，但系统能力来自 Capacitor、WebView、AlarmManager、Widget、Swift plugin 和 service worker。全局定位先回到 <a href="../../00-overview/lessons/0001-project-map.html">L0 地图</a>。</p>
+
+    <h2>1. 先分五层</h2>
+    <p>读移动端代码时，第一步不是问“是不是 Capacitor”，而是问“当前行为在哪一层发生”。<span class="where">src/main.ts</span> 启动 Angular app，也在同一文件里接 service worker、Android back button、Android/iOS appStateChange flush。<span class="where">capacitor.config.ts</span> 决定 native shell 如何包装 <code>dist/browser</code>。<span class="where">android/</span> 和 <span class="where">ios/</span> 才拥有真正系统能力。</p>
+    <pre class="diagram">Angular app
+  → routes / NgRx / effects / op-log
+Capacitor native shell
+  → webDir=dist/browser + App lifecycle + plugin config
+PWA / service worker
+  → ngsw-config.json + manifest.json, only Web production/stage
+Android / iOS feature
+  → platform-specific NgRx effects and services
+platform bridge
+  → window.SUPAndroid or Capacitor plugin method</pre>
+
+    <h2>2. PWA 不是 native</h2>
+    <p>当前源码把 PWA 和 native 明确分开：<code>ServiceWorkerModule.register()</code> 只有在非 Electron、非 native 且 production/stage 时启用；bootstrap 后还会在 Electron/native 环境注销已有 service worker。也就是说，浏览器 PWA 的离线缓存看 <span class="where">ngsw-config.json</span> 和 <span class="where">src/manifest.json</span>；移动壳的后台保存、回退键、提醒权限不在 PWA 层。</p>
+    <pre class="diagram">if (!IS_ELECTRON && !IS_NATIVE_PLATFORM) {
+  register ngsw-worker.js
+} else {
+  unregister existing service workers
+}</pre>
+    <p><code>ngsw-config.json</code> 预取 app shell、关键图标/字体/英文翻译，懒缓存 assets/media，并对 GitHub、GitLab、Atlassian API 用 freshness cache。<code>manifest.json</code> 则声明 standalone、portrait、scope、start_url 和图标。</p>
+
+    <h2>3. Native 能力要过桥</h2>
+    <p>Android 的关键边界是 <code>window.SUPAndroid</code>：<span class="where">android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</span> 注入 <span class="where">android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</span>，TypeScript 侧 <span class="where">src/app/features/android/android-interface.ts</span> 给它补类型和 RxJS subject。Android share、widget、foreground tracking、focus mode、native reminder、startup overlay、SuperSync credential 都沿这座桥走。</p>
+    <p>iOS 边界更偏 Capacitor plugin：<span class="where">ios/App/App/CustomViewController.swift</span> 注册 <code>WebDavHttpPlugin</code> 和 <code>StoreReviewPlugin</code>；<span class="where">src/app/features/ios/ios-interface.ts</span> 只提供 resume subject。通用 mobile 层在 <span class="where">src/app/features/mobile/store/mobile-notification.effects.ts</span>，它只在 <code>IS_NATIVE_PLATFORM</code> 时注册，负责把任务提醒调度给 <code>CapacitorReminderService</code>。</p>
+
+    <h2>4. 检索练习</h2>
+    <p>暂停 90 秒判断：A. 用户说“安装成 PWA 后刷新仍显示旧图标”。B. Android 用户说“通知 Done 按钮点了，打开 app 后任务状态才变化”。C. iOS WebDAV 同步读到缓存旧数据。分别先看哪一层？</p>
+    <div class="answer">参考答案：A 先看 PWA 层：<code>src/manifest.json</code>、<code>ngsw-config.json</code> 和 <code>src/main.ts</code> 的 service worker 条件。B 先看 Android bridge：Manifest receiver/widget/service 声明、<code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code>、<code>src/app/features/android/android-interface.ts</code> 与 Android effects 的队列 drain。C 先看 iOS native plugin：<code>ios/App/App/CustomViewController.swift</code> 注册的 <code>ios/App/App/WebDavHttpPlugin.swift</code>。完整入口和边界表见 <a href="../reference/mobile-pwa-host-overview.html">模块参考</a>。主要来源：<code>src/main.ts</code>、<code>capacitor.config.ts</code>、<code>android/</code>、<code>ios/</code>。</div>
+    <p>如果某条桥接链路仍不清楚，可以直接向 agent 追问下一跳源码。</p>
+  </article>
+</main>
+</body>
+</html>

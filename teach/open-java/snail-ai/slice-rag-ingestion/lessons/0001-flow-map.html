@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 文档上传摄入流程地图</title>
+  <link rel="stylesheet" href="../assets/rag-ingestion.css" />
+</head>
+<body>
+  <h1>RAG 文档上传摄入流程地图</h1>
+  <p class="lead">这一课只做一件事：把“Admin 上传或导入文档”到“向量库和搜索索引可用”的主链路画清楚。学完后，你应该能快速判断一个摄入问题卡在入口、资源、文档记录、解析切块、embedding、双写还是状态更新。</p>
+  <div class="meta">
+    <span class="pill">学习目标：画出摄入主链路</span>
+    <span class="pill">预计 13 分钟</span>
+    <span class="pill">主来源：<span class="where">DocumentPipeline.java</span></span>
+    <span class="pill"><a href="../reference/rag-ingestion-flow-map.html">摄入参考图谱</a></span>
+  </div>
+
+  <h2>1. 上传入口不会立刻解析</h2>
+  <p>Admin 文档入口都在 <code>RagDocumentController</code>。直传 <code>POST /document/upload</code> 和 URL 导入 <code>POST /document/import/url</code> 会进入 <code>RagDocumentService</code>，先得到文件字节、文件类型和内容 hash，再写资源和文档行。二次确认上传分两步：<code>/upload/preview</code> 先把文件写成 <code>DOCUMENT_PREVIEW</code> 临时资源并返回冲突决策；<code>/upload/commit</code> 重新检查冲突，选择新建、跳过或覆盖。无论哪条成功新建文档，落库时状态都是 <code>PENDING</code>，chunk 数是 0。</p>
+
+  <h2>2. 资源和文档记录先汇合</h2>
+  <pre class="diagram">Admin API
+  ↓
+RagDocumentService / DocumentUploadPreviewService
+  ↓
+ResourceService.upload(...) 写 sai_resource
+  ↓
+RagDocumentPO(status=PENDING, resourceId=...)
+  ↓
+DocumentProcessingTask 每 10 秒取 5 个 PENDING</pre>
+  <p>这里的关键不是文件路径，而是 <code>resourceId</code>。后续 pipeline 解析时调用 <code>ResourceService.load(document.resourceId)</code> 重新打开文件流。预览取消会删除临时资源；预览 token 过期后，另有孤儿资源任务清理仍停留在 <code>DOCUMENT_PREVIEW</code> 的资源。</p>
+
+  <h2>3. Pipeline 负责解析、切块和双写</h2>
+  <pre class="diagram">sequenceDiagram
+  participant Admin as Admin
+  participant Ctrl as RagDocumentController
+  participant Task as DocumentProcessingTask
+  participant Pipe as DocumentPipeline
+  participant Parser as parseContent/parser
+  participant Chunk as DocumentChunkingService
+  participant Biz as sai_rag_chunk
+  participant Vec as VectorStoreFactory/向量库
+  participant Search as SearchEngine
+  participant Doc as sai_rag_document
+  Admin->>Ctrl: upload/import/commit/reprocess
+  Ctrl->>Doc: 新建或重置 status=PENDING
+  Task->>Pipe: processDocument(documentId)
+  Pipe->>Doc: 抢占 PENDING 为 PROCESSING
+  Pipe->>Parser: ResourceService.load + parser.parse
+  alt 解析结果为空或 parser 失败
+    Pipe->>Doc: status=FAILED，旧 chunk 可能仍在
+  else 解析结果非空
+    Pipe->>Pipe: cleanExistingData(旧 chunk 和未共享向量)
+    Pipe->>Chunk: chunk(content, config.chunkParams)
+    Pipe->>Biz: dualWrite 前先插入新 chunk
+    Pipe->>Vec: create(RagPO)，构建 embedding 并写向量
+    opt 启用全文搜索
+      Pipe->>Search: insert BM25 docs
+    end
+    Pipe->>Doc: status=SUCCESS, chunkCount=N
+  end</pre>
+  <p><code>DocumentPipeline</code> 先用条件更新把文档从 <code>PENDING</code> 抢占为 <code>PROCESSING</code>，防止重复处理。parser 只负责把 PDF、DOCX、Excel、Markdown、HTML 或 TXT 变成纯文本；解析结果非空后才会清理旧 chunk 和未共享向量，然后切块并先插入 <code>sai_rag_chunk</code>，再进入 <code>dualWrite</code>。向量写入前会按 chunk 内容 hash 复用同一知识库里已有的 <code>vectorId</code>。全文搜索只有在知识库启用搜索引擎时写入，写失败只记录 warning，不阻断文档成功。</p>
+
+  <h2>4. 状态更新是排障入口</h2>
+  <p>失败通常会把文档更新为 <code>FAILED</code> 并写入 <code>errorMsg</code>：知识库不存在、解析后为空、没有生成 chunk、parser 不支持、向量库或 embedding 构建失败都会落到这里。重处理接口不立即重跑，它只把文档改回 <code>PENDING</code>，等待下一轮定时任务；如果重处理时解析失败，旧 chunk 还没有被清理，可能仍在；如果向量或 embedding 失败，新 chunk 可能已经插入业务库，但文档会转为 <code>FAILED</code>。删除或覆盖会尽力清理资源、chunk 和没有被其他 chunk 引用的向量。</p>
+  <div class="practice"><strong>暂停回忆：</strong>不看流程图，判断三件事：上传成功后文档第一状态是什么？embedding 是在 parser 阶段发生的吗？搜索索引写入失败会让文档必然失败吗？<br><strong>参考答案：</strong>第一状态是 <code>PENDING</code>；embedding 不在 parser 阶段，而是在向量库 <code>add</code> 链路中由 Spring AI 触发；搜索索引写入失败当前只 warning，向量写入成功后文档仍可进入 <code>SUCCESS</code>。</div>
+  <p>主要推荐来源：先读 <code>DocumentPipeline.java</code>，再对照 <a href="../reference/rag-ingestion-flow-map.html">摄入参考图谱</a> 查入口 API、状态字段、表和调试 checklist。遇到“表里有 chunk 但检索不到”这类问题时，继续向 agent 追问向量库或搜索索引的具体后端实现。</p>
+</body>
+</html>

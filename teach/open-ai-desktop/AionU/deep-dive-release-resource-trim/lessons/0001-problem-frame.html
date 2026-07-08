@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 发布资源裁剪：先定义误删边界</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .decision {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+      margin: 16px 0;
+    }
+    .decision .panel {
+      min-height: 130px;
+    }
+    .rule {
+      border-left: 4px solid #335c93;
+      background: #f5f8fc;
+      padding: 0.85rem 1rem;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>发布资源裁剪：先定义误删边界</h1>
+    <p class="subtitle">学习目标：15 分钟内建立 AionU 发布包资源裁剪的判断框架，知道哪些文件可以裁、哪些必须被校验保留。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析 01</span>
+      <span class="pill">预计 12 分钟</span>
+      <span class="pill">主来源：electron-builder.yml</span>
+    </div>
+  </section>
+
+  <h2>1. 裁剪的真实问题</h2>
+  <p>发布包裁剪不是为了“越小越好”，而是在三个约束之间取平衡：安装包不能带源码、测试、文档和无关 vendor；Electron 运行时又必须能读到主进程、preload、renderer、native modules、Web/PWA 静态资源和后端 runtime；macOS 签名、公证还会被未签名 native/JNI/JAR 文件拖累。AionU 把这个边界主要写在 <span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span>，发布脚本再从 CI 产物中整理用户真正下载的文件。</p>
+  <p>所以读这组配置时不要先背字段名，而要问一个更稳定的问题：这个文件属于“应用代码”“外层运行资源”“必须解包执行的二进制”，还是“发布页资产”？四类资源失败形态不同，校验点也不同。</p>
+  <p><strong>性能维度也在这里：</strong>包体越大，下载和自动更新成本越高；CI 整理越复杂，发布等待和失败重试成本越高；<code>asarUnpack</code> 会影响磁盘布局和运行时文件访问；native rebuild 与预打包资源校验会直接拉长构建时间。裁剪不是只追求体积，而是把包体、启动路径、磁盘访问和构建时间放在同一张表里取舍。</p>
+
+  <h2>2. 四类资源</h2>
+  <div class="decision">
+    <div class="panel"><h3>应用代码</h3><p><code>out/main</code>、<code>out/preload</code>、<code>out/renderer</code> 和少量 runtime 依赖进入 app bundle。它们由 <code>files</code> 白名单控制。</p></div>
+    <div class="panel"><h3>外层资源</h3><p><code>public</code>、<code>app.png</code>、<code>bundled-aioncore</code>、<code>hub</code> 放入 Electron resources 目录，供运行时按文件系统路径访问。</p></div>
+    <div class="panel"><h3>解包执行</h3><p>native modules、tree-sitter WASM、内置 MCP server 脚本需要在 <code>app.asar.unpacked</code> 或外层资源中可执行/可读取。</p></div>
+    <div class="panel"><h3>发布资产</h3><p>dmg、zip、exe、deb、updater yml、WebCLI tarball、checksum、install script 被整理到 <code>release-assets/</code>。</p></div>
+  </div>
+
+  <h2>3. 源码里的边界</h2>
+  <p><code>files</code> 的策略是显式包含构建输出和必要依赖，再用排除规则砍掉源码、测试、文档、source map、大 vendor、tree-sitter native 二进制、JAR/JNI 等风险文件。关键片段如下：</p>
+  <pre><code class="language-yaml">files:
+  - out/main/**/*
+  - out/preload/**/*
+  - out/renderer/**/*
+  - public/**/*
+  - package.json
+  - node_modules/better-sqlite3/**/*
+  - '!packages/web-host/**'
+  - '!packages/web-cli/**'
+  - '!packages/shared-scripts/**'
+  - '!packages/desktop/src/**'
+  - '!**/*.map'</code></pre>
+  <p>真正不能进 asar 的资源走 <code>extraResources</code>：<code>resources/bundled-aioncore</code> 被复制为 <code>bundled-aioncore</code>，<code>resources/hub</code> 被复制为 <code>hub</code>。这解释了为什么“误删 bundled-aioncore”不是普通静态资源缺失，而是后端进程无法启动。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>判断题：</strong>看到一个新目录想放进发布包时，第一反应应该是把它加入 <code>files</code>，因为这样最简单。对还是错？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>错。先判断运行时访问方式：如果代码可被 asar 内 require/import 读取，才考虑 <code>files</code>；如果是外部进程、后端 binary、Hub 离线包或需要文件系统路径的资源，应考虑 <code>extraResources</code> 或 <code>asarUnpack</code>。裁剪的目标是让每类资源进入正确位置，而不是统一塞进一个白名单。</p>
+    </details>
+  </div>
+  <p class="muted">继续学习：下一节读 <a href="0002-core-mechanism.html">bundled-aioncore 的准备与打包后校验</a>。速查表见 <a href="../reference/release-resource-trim-notes.html">发布资源裁剪参考</a>。</p>
+</main>
+</body>
+</html>

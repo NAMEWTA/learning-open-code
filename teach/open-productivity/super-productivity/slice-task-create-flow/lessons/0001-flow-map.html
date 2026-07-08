@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 新增任务链路地图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断一次新增任务会在哪一层改变状态</p>
+    <h1>新增任务与短语法解析全链路</h1>
+    <p class="lead">新增任务不是“输入框直接写 task”。它先把输入解析成临时状态，再由 `TaskService` 组装任务实体，最后通过带持久化元数据的 action 进入 meta-reducer 和 op-log。</p>
+
+    <h2>1. 路径图</h2>
+    <pre class="diagram">快捷入口 / 按钮
+  ├─ src/app/core-ui/shortcut/shortcut.service.ts
+  ├─ src/app/core-ui/main-header/main-header.component.html
+  └─ src/app/core-ui/mobile-bottom-nav/mobile-bottom-nav.component.html
+      ↓ showAddTaskBar()
+<span class="where">src/app/app.component.html</span> 挂载全局 add-task-bar
+      ↓ 输入变化
+src/app/features/tasks/add-task-bar/add-task-bar-parser.service.ts
+      ↓ 更新 AddTaskBarState
+src/app/features/tasks/add-task-bar/add-task-bar.component.ts
+      ↓ addTask()
+src/app/features/tasks/task.service.ts
+      ↓ TaskSharedActions.addTask(meta.isPersistent=true)
+src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts
+      ↓ task/project/tag/planner 一致性
+src/app/op-log/capture/operation-log.effects.ts
+      ↓
+src/app/op-log/persistence/operation-log-store.service.ts</pre>
+    <p>这张图要记住两个分叉：UI 侧解析只改输入条状态；非 UI 调用如果仍带短语法，会由 <span class="where">src/app/features/tasks/store/short-syntax.effects.ts</span> 后处理，并用 `applyShortSyntax` 做一次原子更新。</p>
+
+    <h2>2. 关键判断表</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>问题</th><th>首查位置</th><th>判断结果</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>按下快捷键或点加号后谁打开输入框？</td><td><span class="where">src/app/core-ui/layout/layout.service.ts</span></td><td>派发 layout action 显示全局 `add-task-bar`。</td></tr>
+          <tr><td>`+project #tag @tomorrow !friday 30m` 谁解析？</td><td><span class="where">src/app/features/tasks/short-syntax.ts</span></td><td>解析器返回 title、projectId、tagIds、新 tag、due/deadline、估时、附件。</td></tr>
+          <tr><td>Today 归属看 `task.tagIds` 吗？</td><td><span class="where">src/app/features/work-context/store/work-context.selectors.ts</span></td><td>不看。Today 是虚拟标签，优先由 `dueWithTime`，其次由 `dueDay` 推导。</td></tr>
+          <tr><td>Project/Tag 列表谁维护？</td><td><span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span></td><td>新增主任务时同时写 task 实体、project.taskIds/backlogTaskIds、tag.taskIds。</td></tr>
+          <tr><td>哪些内容会进 op-log？</td><td><span class="where">src/app/op-log/core/persistent-action.interface.ts</span></td><td>只有 `meta.isPersistent === true` 的本地 action 会被捕获。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. 字段与持久化边界</h2>
+    <p>提交时，<span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.ts</span> 把临时状态折叠成 `taskData`：`date/time` 变为 `dueDay` 或 `dueWithTime`，`deadlineDate/deadlineTime` 变为 `deadlineDay` 或 `deadlineWithTime`，`estimate` 变为 `timeEstimate`，`spent` 变为 `timeSpentOnDay`，note 写入 `notes`。如果存在 timed due，组件随后调用 `scheduleTask` 补上 `remindAt` 并维护 Today 顺序；如果是重复任务，则交给 <span class="where">src/app/features/task-repeat-cfg/task-repeat-cfg.service.ts</span> 创建 repeat cfg。</p>
+    <p>op-log 捕获的是 action，不是输入框状态。`TaskSharedActions.addTask` 是 Create op；`TaskSharedActions.applyShortSyntax`、`scheduleTaskWithTime` 是 Update op；新 tag 和 repeat cfg 各自生成自己的 persistent action。参考清单见 <a href="../reference/task-create-flow-reference.html">新增任务链路速查</a>。</p>
+
+    <h2>4. 暂停 60 秒判断</h2>
+    <p>场景：用户在 Today 视图输入 `Write report +Client #urgent @tomorrow !friday 45m` 并回车。请先不看答案，判断它是否还属于 Today，Project/Tag 从哪里来，op-log 至少会捕获哪类 action。</p>
+    <div class="answer">参考答案：如果 `@tomorrow` 被解析为日期而非具体时间，最终 `dueDay` 是明天，因此不属于 Today，会进入 planner 的明天列表。Project 来自 `+Client` 匹配到的项目；Tag 来自已存在的 `#urgent`，若不存在会先确认创建 tag。op-log 至少捕获 `TaskSharedActions.addTask`；如果新建 tag、补提醒、创建 repeat cfg 或由 store effect 应用短语法，还会有对应的 persistent action。</div>
+    <p>主要来源：<span class="where">src/app/features/tasks/add-task-bar/add-task-bar.component.ts</span>、<span class="where">src/app/features/tasks/short-syntax.ts</span>、<span class="where">src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</span>。如果某个字段的优先级仍不清楚，向 agent 追问一个具体输入样例。</p>
+  </article>
+</main>
+</body>
+</html>

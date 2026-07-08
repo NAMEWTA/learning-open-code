@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subagent 公共 API 参考（L3）</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .sig { font-family:"SF Mono",Consolas,monospace; font-size:.88rem; background:#f4f7fa; border-left:4px solid var(--accent); padding:10px 12px; margin:10px 0; }
+    .where { color:#6f42c1; font-weight:600; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Subagent 公共 API 参考（L3）</h1>
+  <p class="lead">本页是 L3 微观 API 速查：精确到签名、参数约束、返回值、边界条件与测试锚点。模块地图见 <a href="subagents-overview.html">subagents-overview.html</a>；短课入口 <a href="../lessons/0001-subagents-module-tour.html">0001-subagents-module-tour.html</a>。</p>
+
+  <h2>包级导出</h2>
+  <table>
+    <tr><th>包</th><th>导出符号</th><th>说明</th></tr>
+    <tr><td><code>deerflow.subagents</code></td><td><code>SubagentConfig</code>、<code>get_subagent_config</code>、<code>get_available_subagent_names</code>、<code>list_subagents</code></td><td>配置与 registry（<span class="where"><code>subagents/__init__.py</code></span>）。</td></tr>
+    <tr><td><code>deerflow.subagents</code></td><td><code>SubagentExecutor</code>、<code>SubagentResult</code></td><td>懒加载导出；避免 import 环（<span class="where"><code>subagents/executor.py</code></span>）。</td></tr>
+    <tr><td><code>deerflow.subagents.executor</code></td><td><code>MAX_CONCURRENT_SUBAGENTS</code>、<code>request_cancel_background_task</code>、<code>get_background_task_result</code>、<code>cleanup_background_task</code></td><td>后台任务表与并发常量。</td></tr>
+    <tr><td><code>deerflow.subagents.status_contract</code></td><td>状态键常量、<code>make_subagent_additional_kwargs</code>、<code>read_subagent_result_metadata</code></td><td>ToolMessage 结构化终态契约。</td></tr>
+    <tr><td><code>deerflow.tools.builtins.task_tool</code></td><td><code>task_tool</code>、<code>pop_cached_subagent_usage</code></td><td>lead agent 对外委托入口。</td></tr>
+  </table>
+
+  <h2>task_tool</h2>
+  <p class="sig">@tool("task") async def task_tool(runtime: Runtime, description: str, prompt: str, subagent_type: str, tool_call_id: Annotated[str, InjectedToolCallId]) -&gt; str | Command</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code></span> — lead agent 的 <code>task</code> tool。解析 subagent 配置、继承 runtime context、以 <code>tool_call_id</code> 作为 <code>task_id</code> 启动后台执行、每 5s 轮询 <code>SubagentResult</code>、写出 <code>task_*</code> stream chunk，终态返回带结构化 metadata 的 <code>Command(update={"messages": [ToolMessage(...)]})</code>。</p>
+
+  <h3>参数</h3>
+  <table>
+    <tr><th>参数</th><th>含义与约束</th></tr>
+    <tr><td><code>description</code></td><td>3–5 词短描述；写入 <code>task_started</code>，供前端 subtask card 标题。</td></tr>
+    <tr><td><code>prompt</code></td><td>传给 subagent 的完整任务说明（<code>HumanMessage</code> 内容）。</td></tr>
+    <tr><td><code>subagent_type</code></td><td>registry 名称；未知类型返回 <code>status="failed"</code> 并列出 <code>get_available_subagent_names()</code>。</td></tr>
+    <tr><td><code>tool_call_id</code></td><td>LangChain 注入；同时作为后台 <code>task_id</code>，保证 trace 与前端卡片一致。</td></tr>
+    <tr><td><code>runtime</code></td><td>提供 <code>state</code>（sandbox/thread_data）、<code>context</code>（身份、run_id、channel_user_id）、<code>config.metadata</code>（model、tool_groups、available_skills）。</td></tr>
+  </table>
+
+  <h3>编排要点</h3>
+  <pre><code>config = get_subagent_config(subagent_type, app_config=runtime_app_config)
+tools = get_available_tools(groups=parent_tool_groups, model_name=effective_model, subagent_enabled=False)
+executor = SubagentExecutor(config=config, tools=tools, thread_id=..., trace_id=..., ...)
+task_id = executor.execute_async(prompt, task_id=tool_call_id)
+max_poll_count = (config.timeout_seconds + 60) // 5   # 每 5s 一次</code></pre>
+
+  <h3>终态与 stream 事件</h3>
+  <table>
+    <tr><th><code>SubagentStatus</code></th><th>stream chunk</th><th><code>subagent_status</code></th></tr>
+    <tr><td><code>COMPLETED</code></td><td><code>task_completed</code></td><td><code>completed</code></td></tr>
+    <tr><td><code>FAILED</code></td><td><code>task_failed</code></td><td><code>failed</code></td></tr>
+    <tr><td><code>CANCELLED</code></td><td><code>task_cancelled</code></td><td><code>cancelled</code></td></tr>
+    <tr><td><code>TIMED_OUT</code></td><td><code>task_timed_out</code></td><td><code>timed_out</code></td></tr>
+    <tr><td><code>MAX_TURNS_REACHED</code></td><td><code>task_failed</code>（卡片退出 running）</td><td><code>max_turns_reached</code></td></tr>
+    <tr><td>轮询安全网超时</td><td><code>task_timed_out</code></td><td><code>polling_timed_out</code></td></tr>
+  </table>
+  <p class="callout">精确终态原因以 <code>ToolMessage.additional_kwargs.subagent_status</code> 为准，不以 stream event type 推断。<code>max_turns_reached</code> 与 <code>polling_timed_out</code> 都可能在 UI 上表现为 failed/timed_out 样式，但 ledger 与复用逻辑读结构化字段。</p>
+
+  <h3>边界与异常</h3>
+  <table>
+    <tr><th>场景</th><th>行为</th></tr>
+    <tr><td>未知 <code>subagent_type</code></td><td>立即 <code>_task_result_command(status="failed")</code>，不启动 executor。</td></tr>
+    <tr><td><code>subagent_type=="bash"</code> 且 host bash 禁止</td><td>返回 <code>LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE</code>。</td></tr>
+    <tr><td>后台任务从表中消失</td><td><code>task_failed</code> + <code>cleanup_background_task</code> + <code>status="failed"</code>。</td></tr>
+    <tr><td>轮询超过 <code>max_poll_count</code></td><td><code>request_cancel_background_task</code> + 延迟清理 + <code>polling_timed_out</code>。</td></tr>
+    <tr><td>父 run <code>CancelledError</code></td><td>协作取消 subagent；shield 等待终态后上报 token usage；可能调度 deferred cleanup。</td></tr>
+    <tr><td>skills allowlist</td><td>父 <code>metadata.available_skills</code> 与 subagent 配置取交集后写入 config override。</td></tr>
+  </table>
+
+  <h3>辅助函数</h3>
+  <p class="sig">def pop_cached_subagent_usage(tool_call_id: str) -&gt; dict | None</p>
+  <p>按 <code>tool_call_id</code> 弹出 subagent token usage 缓存，供 <code>TokenUsageMiddleware</code> 写回触发 AIMessage 的 <code>usage_metadata</code>。仅在 <code>token_usage.enabled</code> 时缓存。</p>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_task_tool_core_logic.py</code></span>、<span class="where"><code>backend/tests/test_task_tool_usage_recorder.py</code></span></p>
+
+  <h2>Registry 与配置</h2>
+
+  <h3>SubagentConfig</h3>
+  <p class="sig">@dataclass class SubagentConfig: name, description, system_prompt=None, tools=None, disallowed_tools=["task"], skills=None, model="inherit", max_turns=50, timeout_seconds=900</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/subagents/config.py</code></span></p>
+  <table>
+    <tr><th>字段</th><th>语义</th><th>边界</th></tr>
+    <tr><td><code>tools</code></td><td>allowlist；<code>None</code> 继承父 agent 过滤后的全集。</td><td>在 executor 构造时与 <code>disallowed_tools</code> 叠加过滤。</td></tr>
+    <tr><td><code>skills</code></td><td><code>None</code> 加载全部 enabled；<code>[]</code> 不加载；列表为白名单。</td><td>与父 <code>available_skills</code> 取交集（task_tool 层）。</td></tr>
+    <tr><td><code>model</code></td><td><code>"inherit"</code> 继承父模型；否则用指定模型名。</td><td>见 <code>resolve_subagent_model_name</code>。</td></tr>
+    <tr><td><code>max_turns</code></td><td>写入 <code>run_config["recursion_limit"]</code>。</td><td>内置 general-purpose=150、bash=60；可被全局/ per-agent 覆盖。</td></tr>
+    <tr><td><code>timeout_seconds</code></td><td>后台线程 <code>Future.result(timeout=...)</code> 上限。</td><td>内置默认 900；全局默认 1800 覆盖 built-in。</td></tr>
+  </table>
+
+  <h3>resolve_subagent_model_name</h3>
+  <p class="sig">def resolve_subagent_model_name(config: SubagentConfig, parent_model: str | None, *, app_config: AppConfig | None = None) -&gt; str</p>
+  <p>解析顺序：<code>config.model</code>（非 inherit）→ <code>parent_model</code> → <code>app_config.models[0].name</code>。无配置模型时 <code>ValueError</code>。</p>
+
+  <h3>get_subagent_config</h3>
+  <p class="sig">def get_subagent_config(name: str, *, app_config: Any | None = None) -&gt; SubagentConfig | None</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/subagents/registry.py</code></span></p>
+  <table>
+    <tr><th>阶段</th><th>行为</th></tr>
+    <tr><td>查找</td><td><code>BUILTIN_SUBAGENTS</code> → <code>custom_agents</code>；均未命中返回 <code>None</code>。</td></tr>
+    <tr><td>timeout 覆盖</td><td>per-agent override &gt; 全局 <code>subagents.timeout_seconds</code>（仅 built-in）&gt; 配置自身值。</td></tr>
+    <tr><td>max_turns 覆盖</td><td>per-agent override &gt; 全局 <code>subagents.max_turns</code>（仅 built-in）&gt; 配置自身值。</td></tr>
+    <tr><td>model/skills 覆盖</td><td>仅 per-agent；无全局默认。</td></tr>
+  </table>
+
+  <h3>列表辅助函数</h3>
+  <table>
+    <tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+    <tr><td><code>get_subagent_names</code></td><td><code>(*, app_config=None) -&gt; list[str]</code></td><td>built-in + custom 名称并集。</td></tr>
+    <tr><td><code>get_available_subagent_names</code></td><td><code>(*, app_config=None) -&gt; list[str]</code></td><td>host bash 禁止时剔除 <code>bash</code>；判定失败则暴露全部。</td></tr>
+    <tr><td><code>list_subagents</code></td><td><code>(*, app_config=None) -&gt; list[SubagentConfig]</code></td><td>对每个 name 调用 <code>get_subagent_config</code>（含覆盖）。</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_subagent_timeout_config.py</code></span>、<span class="where"><code>backend/tests/test_subagent_skills_config.py</code></span></p>
+
+  <h2>SubagentExecutor</h2>
+  <p class="sig">class SubagentExecutor(config, tools, app_config=None, parent_model=None, sandbox_state=None, thread_data=None, thread_id=None, trace_id=None, user_id=None, user_role=None, oauth_provider=None, oauth_id=None, run_id=None, channel_user_id=None, deerflow_trace_id=None)</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/subagents/executor.py</code></span> — 后台执行引擎。构造时按 config 过滤 tools；<code>checkpointer=False</code> 编译一次性 LangGraph agent。</p>
+
+  <h3>公开方法</h3>
+  <table>
+    <tr><th>方法</th><th>签名</th><th>行为</th></tr>
+    <tr><td><code>execute_async</code></td><td><code>(task: str, task_id: str | None = None) -&gt; str</code></td><td>登记 <code>SubagentResult(PENDING)</code> 到全局表，提交 <code>_scheduler_pool</code>，在隔离事件循环运行 <code>_aexecute</code>；返回 <code>task_id</code>。</td></tr>
+    <tr><td><code>execute</code></td><td><code>(task: str, result_holder=None) -&gt; SubagentResult</code></td><td>同步包装；有运行中 loop 时走隔离 loop，否则 <code>asyncio.run</code>。</td></tr>
+    <tr><td><code>_aexecute</code></td><td><code>async (task, result_holder=None) -&gt; SubagentResult</code></td><td>加载 skills → 组装 state → <code>agent.astream(..., stream_mode="values")</code> → 捕获 step → 写终态。</td></tr>
+  </table>
+
+  <h3>执行配置</h3>
+  <pre><code>run_config = {
+    "recursion_limit": config.max_turns,
+    "callbacks": [SubagentTokenCollector(...), *build_tracing_callbacks()],
+    "configurable": {"thread_id": thread_id},  # 若存在
+}
+context = {
+    "thread_id", "app_config", "user_id", "user_role",
+    "oauth_provider", "oauth_id", "run_id", "channel_user_id",
+    "deerflow_trace_id", "is_subagent": True,
+}</code></pre>
+
+  <h3>终态写入</h3>
+  <p><code>SubagentResult.try_set_terminal(status, *, result, error, ...)</code> — 仅首次 terminal 写入生效；超时/取消与 worker 竞态时后到者丢弃。</p>
+  <table>
+    <tr><th>异常/条件</th><th><code>SubagentStatus</code></th><th>result 字段</th></tr>
+    <tr><td>正常 stream 结束</td><td><code>COMPLETED</code></td><td><code>_extract_final_result(final_state)</code></td></tr>
+    <tr><td><code>GraphRecursionError</code></td><td><code>MAX_TURNS_REACHED</code></td><td>最后 chunk 的 partial result</td></tr>
+    <tr><td>其他 Exception</td><td><code>FAILED</code></td><td><code>error=str(e)</code></td></tr>
+    <tr><td><code>cancel_event</code> 已设</td><td><code>CANCELLED</code></td><td>—</td></tr>
+    <tr><td><code>Future.result</code> 超时</td><td><code>TIMED_OUT</code></td><td>—</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_subagent_executor.py</code></span></p>
+
+  <h2>后台任务表 API</h2>
+  <table>
+    <tr><th>符号</th><th>签名</th><th>说明</th></tr>
+    <tr><td><code>MAX_CONCURRENT_SUBAGENTS</code></td><td><code>int = 3</code></td><td>与 <code>SubagentLimitMiddleware</code> 默认一致。</td></tr>
+    <tr><td><code>request_cancel_background_task</code></td><td><code>(task_id: str) -&gt; None</code></td><td>设置 <code>cancel_event</code>；仅在 <code>astream</code> 迭代边界生效。</td></tr>
+    <tr><td><code>get_background_task_result</code></td><td><code>(task_id: str) -&gt; SubagentResult | None</code></td><td>task_tool 轮询入口。</td></tr>
+    <tr><td><code>cleanup_background_task</code></td><td><code>(task_id: str) -&gt; None</code></td><td>仅当 status 已 terminal 或 <code>completed_at</code> 已设时删除表项。</td></tr>
+    <tr><td><code>list_background_tasks</code></td><td><code>() -&gt; list[SubagentResult]</code></td><td>诊断/测试用。</td></tr>
+  </table>
+
+  <h2>status_contract</h2>
+  <p><span class="where"><code>backend/packages/harness/deerflow/subagents/status_contract.py</code></span> — 与 <span class="where"><code>contracts/subagent_status_contract.json</code></span> 对齐的跨语言契约。</p>
+
+  <h3>常量</h3>
+  <table>
+    <tr><th>键</th><th>值</th></tr>
+    <tr><td><code>SUBAGENT_STATUS_KEY</code></td><td><code>"subagent_status"</code></td></tr>
+    <tr><td><code>SUBAGENT_ERROR_KEY</code></td><td><code>"subagent_error"</code></td></tr>
+    <tr><td><code>SUBAGENT_RESULT_BRIEF_KEY</code></td><td><code>"subagent_result_brief"</code></td></tr>
+    <tr><td><code>SUBAGENT_RESULT_SHA256_KEY</code></td><td><code>"subagent_result_sha256"</code></td></tr>
+    <tr><td><code>SUBAGENT_METADATA_TEXT_MAX_CHARS</code></td><td><code>2000</code></td></tr>
+  </table>
+
+  <h3>make_subagent_additional_kwargs</h3>
+  <p class="sig">def make_subagent_additional_kwargs(status: SubagentStatusValue, *, result: str | None = None, error: str | None = None) -&gt; dict[str, str]</p>
+  <table>
+    <tr><th>规则</th><th>细节</th></tr>
+    <tr><td>非法 status</td><td><code>ValueError</code>；不接受任意字符串。</td></tr>
+    <tr><td>result-bearing</td><td><code>completed</code>、<code>max_turns_reached</code> 且 result 非空 → brief + sha256。</td></tr>
+    <tr><td>error</td><td>非 <code>completed</code> 且 error 非空 → <code>subagent_error</code>；空白 error 省略键。</td></tr>
+    <tr><td>文本截断</td><td><code>_bound_metadata_text</code> 首尾保留式截断至 2000 字符。</td></tr>
+  </table>
+
+  <h3>format_subagent_result_message</h3>
+  <p class="sig">def format_subagent_result_message(status, *, result=None, error=None) -&gt; tuple[str, str | None]</p>
+  <p>返回 <code>(ToolMessage.content, normalized_error)</code>。模型可见文本与 metadata 分离：<code>max_turns_reached</code> 的 content 含 partial result 前缀。</p>
+
+  <h3>read_subagent_result_metadata</h3>
+  <p class="sig">def read_subagent_result_metadata(additional_kwargs: Mapping[str, object] | None) -&gt; StructuredSubagentResult | None</p>
+  <p>读取并校验 <code>subagent_status</code>；sha256 须匹配 <code>[0-9a-f]{64}</code>。供 <code>delegation_ledger</code> 与前端 <code>subtask-result.ts</code> 消费。</p>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_subagent_status_contract.py</code></span></p>
+
+  <h2>SubagentLimitMiddleware</h2>
+  <p class="sig">class SubagentLimitMiddleware(AgentMiddleware): __init__(max_concurrent: int = MAX_CONCURRENT_SUBAGENTS)</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py</code></span></p>
+  <table>
+    <tr><th>行为</th><th>细节</th></tr>
+    <tr><td>钩子</td><td><code>after_model</code> / <code>aafter_model</code> 检查最后一条 AIMessage。</td></tr>
+    <tr><td>截断规则</td><td>统计 <code>tool_calls</code> 中 <code>name=="task"</code> 的索引；保留前 N 个，丢弃其余。</td></tr>
+    <tr><td>限制范围</td><td><code>max_concurrent</code> 钳制到 <code>[2, 4]</code>（<code>MIN_SUBAGENT_LIMIT</code> / <code>MAX_SUBAGENT_LIMIT</code>）。</td></tr>
+    <tr><td>状态更新</td><td><code>clone_ai_message_with_tool_calls</code> 替换 AIMessage（同 id 触发 reducer 替换）。</td></tr>
+  </table>
+  <p>仅在 lead agent <code>subagent_enabled=True</code> 时装配（<code>build_middlewares</code>）。</p>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_subagent_limit_middleware.py</code></span></p>
+
+  <h2>step_events（数据塑形层）</h2>
+  <p><span class="where"><code>backend/packages/harness/deerflow/subagents/step_events.py</code></span> — 纯函数；streaming 与 persistence 共享一步定义。</p>
+  <table>
+    <tr><th>函数</th><th>签名</th><th>用途</th></tr>
+    <tr><td><code>capture_new_step_messages</code></td><td><code>(messages, captured, seen_ids, processed_count) -&gt; int</code></td><td>按 values chunk 新增尾部捕获 AIMessage/ToolMessage。</td></tr>
+    <tr><td><code>build_subagent_step</code></td><td><code>(message, *, task_id, message_index, max_chars=8192) -&gt; dict</code></td><td>生成 <code>task_running</code> / <code>subagent.step</code> payload。</td></tr>
+    <tr><td><code>subagent_run_event</code></td><td><code>(chunk) -&gt; dict | None</code></td><td><code>task_*</code> → <code>subagent.start|step|end</code> run event kwargs。</td></tr>
+    <tr><td><code>SUBAGENT_STEP_MAX_CHARS</code></td><td><code>8192</code></td><td>step text 与 tool args 序列化上限。</td></tr>
+    <tr><td><code>SUBAGENT_EVENT_CATEGORY</code></td><td><code>"subagent"</code></td><td>与 thread message feed 隔离。</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_subagent_step_events.py</code></span>、<span class="where"><code>backend/tests/test_worker_subagent_persistence.py</code></span></p>
+
+  <h2>调用示例</h2>
+  <pre><code class="language-python">from deerflow.subagents import SubagentExecutor, get_subagent_config
+from deerflow.tools import get_available_tools
+
+config = get_subagent_config("general-purpose")
+tools = get_available_tools(subagent_enabled=False)
+executor = SubagentExecutor(config=config, tools=tools, thread_id="thread-1")
+task_id = executor.execute_async("调查 run events 持久化", task_id="call_abc")
+
+# lead agent 路径（模型 tool call）
+# await task_tool(runtime, "调查 events", "检查 subagent.step", "general-purpose", tool_call_id="call_abc")</code></pre>
+
+  <p class="callout">阅读顺序：先对照 <a href="subagents-overview.html#call-flow">overview 主链路</a>，再在本页查具体签名；排查终态异常时优先读 <code>status_contract</code> 与 <code>test_subagent_status_contract.py</code>。</p>
+</main>
+</body>
+</html>

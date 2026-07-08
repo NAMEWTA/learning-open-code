@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Worktree 创建链路导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Worktree Create Flow：从 New Workspace 到可用工作区</h1>
+        <p class="meta">目标：15 分钟内能从 renderer 提交追到 Git 创建和终端交接。</p>
+
+        <h2>先抓三段主路径</h2>
+        <p>
+          Orca 的 New Workspace quick/background 创建不是一个同步 IPC 调用。读这条链路时先分三段：
+          <code>src/renderer/src/hooks/useComposerState.ts</code> 负责把用户输入、setup 决策、base branch、
+          review metadata 和 Agent 启动计划收束成请求；
+          <code>src/renderer/src/lib/worktree-creation-flow.ts</code> 把请求转成后台 pending creation，并在成功后处理
+          激活、终端和 note 写回；
+          <code>src/main/ipc/worktree-remote.ts</code> 负责本地/SSH helper 的 Git 创建、metadata 和 setup/default tabs；
+          startup terminal 只有本地 helper 直接生成，managed SSH 则由 runtime 包装层生成。
+        </p>
+        <div class="filetree">renderer submit
+  └─ useComposerState.ts           ← 生成 WorktreeCreationRequest
+background handoff
+  └─ worktree-creation-flow.ts     ← pending surface、store create、成功/失败交接
+main create helper
+  └─ worktree-remote.ts            ← base/ref、git worktree add、metadata、setup/startup</div>
+
+        <h2>提交点：先决策，再后台创建</h2>
+        <p>
+          quick create 会进入 <code>submitQuick()</code>。这里先确认 repo 可用、workspace name 可用、setup hook 是否需要用户决策、
+          sparse checkout 是否有效，再解析 smart GitHub 或 linked work item 带来的 base、compare base、push target 和分支名。
+          Agent 也在这里被判定：如果启动命令是自包含的，就作为 <code>startup</code> 交给 backend 尽早生成终端；
+          如果还需要 draft paste 或 follow-up prompt，就保留 <code>startupPlan</code> 给 renderer 在激活后投递。
+        </p>
+        <pre><code class="language-typescript">const request: WorktreeCreationRequest = {
+  repoId,
+  name: workspaceName,
+  baseBranch: submitBaseBranch,
+  setupDecision: effectiveSetupDecision,
+  sparseCheckout,
+  agent,
+  startup: backendStartup,
+  startupPlan,
+  quickPrompt
+}
+
+runBackgroundWorktreeCreation(request)</code></pre>
+        <p>
+          这个切点很重要：modal 关闭时 Git 还没完成。请求必须是可序列化的，因为 pending panel 的 Retry 会复用它。
+          因此 hook 里不能把 React ref、闭包或临时 UI 状态塞进创建请求。
+        </p>
+
+        <h2>后台层：pending surface 是用户看到的进度</h2>
+        <p>
+          <code>runBackgroundWorktreeCreation()</code> 生成 <code>creationId</code>，立即显示 pending creation surface，
+          然后异步调用 store 的 <code>createWorktree()</code>。本地 main helper 会发两类 Git 阶段进度：
+          <code>fetching</code> 和 <code>creating</code>；SSH、远端 runtime 或 VM 创建可能没有细分 phase，而使用 indeterminate 状态。
+          成功后，后台层不会盲目抢焦点：用户仍在看 pending panel 时才激活并 reveal 新 worktree；用户已经离开时只在后台补初始终端。
+        </p>
+        <p>
+          还有一个 no-double-spawn 规则：如果 backend 已经返回 <code>startupTerminal.spawned</code>，
+          renderer 不再用 <code>startupPlan</code> 创建第二个 Agent 终端。否则 renderer 会在新 worktree 的 primary tab 就绪后调用
+          <code>ensureAgentStartupInTerminal()</code>。
+        </p>
+
+        <h2>main helper：Git 成功后才交给终端</h2>
+        <p>
+          本地 helper 的顺序是固定的：解析 base ref，必要时刷新 remote tracking base，验证 sparse checkout，
+          循环找可用的分支名和 worktree 路径，执行 <code>addWorktree()</code> 或 sparse 版本，然后重新
+          <code>listWorktrees()</code> 找到真实路径。只有 Git worktree 已经存在后，才写 metadata、lineage、registered roots、
+          symlink、setup runner，并尝试创建 startup/setup terminal。
+        </p>
+        <p>
+          SSH helper 在 Git/base/metadata/setup/default tabs 上做同构事情，但走 relay provider：先注册 repo root 和目标
+          worktree root，再用 <code>provider.addWorktree()</code> 在远端创建。desktop SSH IPC helper 不直接 spawn startup terminal；
+          managed SSH runtime 会在 <code>src/main/runtime/orca-runtime.ts</code> 包装层处理 startup/setup terminal。远端路径不会复用
+          本地 symlink 功能，因为那需要额外 relay 授权面。
+        </p>
+
+        <h3>检索练习</h3>
+        <p>
+          如果用户点 Create 后 modal 关了，但 pending panel 一直停在 Fetching，你会先查哪三处？
+        </p>
+        <div class="answer">
+          参考路径：先看 <code>worktree-creation-flow.ts</code> 是否已创建 pending entry 和 correlation id；
+          再看 store create 是否走到本地 IPC 还是 runtime RPC；最后看 main helper 是否在 base ref refresh 或 fetch 阶段卡住。
+          如果 main 已经发出 <code>creating</code>，再进入 Git helper 和路径/分支冲突逻辑。完整调用表见
+          <a href="../reference/worktree-create-flow-overview.html">创建链路总览参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/renderer/src/hooks/useComposerState.ts</code>、
+          <code>src/renderer/src/lib/worktree-creation-flow.ts</code>、
+          <code>src/main/ipc/worktree-remote.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

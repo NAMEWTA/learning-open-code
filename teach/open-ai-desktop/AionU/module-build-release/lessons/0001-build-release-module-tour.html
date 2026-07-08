@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU 构建与发布模块导览</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .flow {
+      display: grid;
+      gap: 0.7rem;
+      margin: 1rem 0;
+    }
+    .step {
+      border-left: 4px solid #2f6fed;
+      background: #f7f9ff;
+      padding: 0.8rem 1rem;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>构建与发布模块：从一个 dist 命令读懂发布边界</h1>
+    <p class="subtitle">学习目标：15 分钟内说清 AionU 如何把源码变成桌面包和 WebCLI 发布资产，并知道失败时从哪里开始排查。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 12 分钟</span>
+      <span class="pill">主来源：构建脚本 + electron-builder</span>
+    </div>
+  </section>
+
+  <h2>1. 模块职责</h2>
+  <p>构建与发布模块的职责不是“编译 TypeScript”这么窄，而是把 AionU 的多运行形态变成可分发、可更新、可校验的产物。它位于 <a href="../../00-overview/reference/00-overview.html#deploy">L0 构建与部署</a> 之后，向上承接 <span class="where">open-ai-desktop/AionU/package.json</span> 的脚本入口，向下调用 Electron Vite、Electron Builder、aioncore 资源准备、Hub 离线资源、WebCLI 打包和发布资产校验。</p>
+  <p>读这个模块时先记住两个边界：桌面包由 <span class="where">open-ai-desktop/AionU/scripts/build-with-builder.js</span> 驱动，最终受 <span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span> 约束；WebCLI 包由独立脚本生成 tarball，再交给发布资产整理脚本统一校验。</p>
+
+  <h2>2. 一条主线</h2>
+  <p>以 <code>bun run dist:mac</code> 为例，入口不是直接调用 electron-builder，而是先进入构建协调脚本：</p>
+  <pre><code class="language-json">{
+  "dist:mac": "node scripts/build-with-builder.js auto --mac",
+  "build-mac": "node scripts/build-with-builder.js auto --mac --arm64 --x64",
+  "package": "electron-vite build --config packages/desktop/electron.vite.config.ts"
+}</code></pre>
+  <div class="flow">
+    <div class="step"><strong>第一步：</strong>计算源码 hash，必要时执行 <code>electron-vite build</code>，生成 <code>out/main</code>、<code>out/preload</code>、<code>out/renderer</code>。</div>
+    <div class="step"><strong>第二步：</strong>打包内置 MCP server，并检查 main 与 renderer 输出是否存在。</div>
+    <div class="step"><strong>第三步：</strong>准备 aioncore 和 Hub 离线资源，确保运行时不只依赖前端 bundle。</div>
+    <div class="step"><strong>第四步：</strong>调用 <code>electron-builder</code>，由配置文件决定 dmg/zip、nsis、deb、asar、extraResources、afterPack 与 afterSign。</div>
+  </div>
+
+  <h2>3. 分层地图</h2>
+  <div class="filetree">module-build-release/
+├── package.json                         ← 用户与 CI 可调用命令
+├── packages/
+│   ├── desktop/
+│   │   ├── electron.vite.config.ts      ← main/preload/renderer 编译
+│   │   └── electron-builder.yml         ← 桌面分发物与资源白名单
+│   └── shared-scripts/
+│       └── src/                         ← aioncore 准备与校验
+├── scripts/                             ← 构建、发布、安装、冒烟脚本
+├── homebrew/                            ← Homebrew cask 模板
+└── tests/
+    └── unit/                            ← 构建脚本与资源校验断言</div>
+  <p>这张地图也说明了依赖方向：构建脚本依赖桌面编译配置和共享资源脚本；<code>afterPack</code> 反过来调用共享校验，确认打进包内的 runtime 可用。桌面运行时怎么启动这些资源，属于 <a href="../../module-main-entry/lessons/0001-main-entry-module-tour.html">module-main-entry</a>；WebCLI 运行起来后如何服务 WebUI，属于 <a href="../../module-web-runtime/lessons/0001-web-runtime-module-tour.html">module-web-runtime</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果 macOS 构建已经生成 `.app`，但没有生成 `.dmg`，你应该先查哪个脚本里的哪类逻辑？如果打包后缺少 `managed-resources`，又该查哪里？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先查 <code>scripts/build-with-builder.js</code> 的 DMG retry 逻辑，它会在 `.app` 存在但 `.dmg` 缺失时尝试用 <code>electron-builder --prepackaged</code> 重建分发物。若缺少 <code>managed-resources</code>，先看 <code>packages/shared-scripts/src/prepare-aioncore.js</code> 是否生成 bundle，再看 <code>verify-bundled-aioncore-resources.js</code> 和 <code>scripts/afterPack.js</code> 的校验失败信息。</p>
+    </details>
+  </div>
+  <p class="muted">完整接口清单、平台产物、调用示例和风险清单见 <a href="../reference/build-release-overview.html">构建与发布模块参考</a>。建议追问 agent：请带我沿着 <code>bun run build-win:x64:fast</code> 追一次 Windows 本地快速构建。</p>
+</main>
+</body>
+</html>

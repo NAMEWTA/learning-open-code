@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>远端 operation apply 全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 参考文档 · 下载、过滤、full-state gate、LWW、remote apply、store 写入与校验边界</p>
+    <h1>远端 operation apply 全链路参考</h1>
+    <p>父级 L1：<a href="../../module-op-log-sync/reference/op-log-sync-overview.html">Operation Log 与同步模块参考</a>。相关 L2：<a href="../../slice-op-log-sync-flow/reference/op-log-sync-flow-reference.html">Operation Log 同步全链路参考</a>。</p>
+
+    <h2 id="source-anchors">源码锚点</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>锚点</th><th>源码路径</th><th>先读对象</th><th>职责</th></tr>
+        </thead>
+        <tbody>
+          <tr id="src-download"><td>下载 I/O</td><td><code>src/app/op-log/sync/operation-log-download.service.ts</code></td><td><code>downloadRemoteOps()</code></td><td>分页下载、gap reset、applied id 去重、解密、返回 `newOps` / snapshot / latest seq。</td></tr>
+          <tr id="src-sync-orchestrator"><td>下载编排</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td><td><code>downloadRemoteOps()</code></td><td>file snapshot hydration、fresh client、incoming full-state gate、调用 `processRemoteOps()`、成功后推进游标。</td></tr>
+          <tr id="src-process"><td>远端处理</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></td><td><code>processRemoteOps()</code></td><td>schema migration、clean-slate 过滤、full-state 分支、冲突检测、direct apply、校验。</td></tr>
+          <tr id="src-filter"><td>clean-slate 过滤</td><td><code>src/app/op-log/sync/sync-import-filter.service.ts</code><br><code>packages/sync-core/src/sync-import-filter.ts</code></td><td><code>filterOpsInvalidatedBySyncImport()</code><br><code>classifyOpAgainstSyncImport()</code></td><td>用 vector clock 判断普通 ops 是否知道最新 full-state import。</td></tr>
+          <tr id="src-gate"><td>incoming gate</td><td><code>src/app/op-log/sync/sync-import-conflict-gate.service.ts</code></td><td><code>checkIncomingFullStateConflict()</code></td><td>full-state op 到达前检查本地 pending 是否会被丢弃，必要时构造 dialog 数据。</td></tr>
+          <tr id="src-remote-apply"><td>remote apply</td><td><code>packages/sync-core/src/remote-apply.ts</code></td><td><code>applyRemoteOperations()</code></td><td>通用 crash-safety 顺序：pending 写入、replay、mark applied、merge clocks、失败标记。</td></tr>
+          <tr id="src-applier"><td>NgRx replay</td><td><code>src/app/op-log/apply/operation-applier.service.ts</code></td><td><code>applyOperations()</code></td><td>调用 `replayOperationBatch()`，用 `bulkApplyOperations()` 单次 dispatch。</td></tr>
+          <tr id="src-converter"><td>operation 转 action</td><td><code>src/app/op-log/apply/operation-converter.util.ts</code></td><td><code>convertOpToAction()</code></td><td>full-state payload 包装、LWW id 修正、写入 `meta.isRemote`。</td></tr>
+          <tr id="src-bulk"><td>bulk meta-reducer</td><td><code>src/app/op-log/apply/bulk-hydration.meta-reducer.ts</code></td><td><code>bulkOperationsMetaReducer()</code></td><td>逐 op 转 action 并穿过 reducer 链，处理同批 archive 与 LWW 的安全过滤。</td></tr>
+          <tr id="src-store"><td>本地 op-log store</td><td><code>src/app/op-log/persistence/operation-log-store.service.ts</code></td><td><code>appendBatchSkipDuplicates()</code><br><code>markApplied()</code><br><code>mergeRemoteOpClocks()</code></td><td>写 `SUP_OPS.ops`、状态标记、full-state meta、vector clock。</td></tr>
+          <tr id="src-conflict"><td>LWW 冲突服务</td><td><code>src/app/op-log/sync/conflict-resolution.service.ts</code></td><td><code>autoResolveConflictsLWW()</code></td><td>远端胜出 apply，本地胜出生成新的 local LWW update op，最后校验。</td></tr>
+          <tr id="src-core-conflict"><td>LWW 纯算法</td><td><code>packages/sync-core/src/conflict-resolution.ts</code></td><td><code>planLwwConflictResolutions()</code><br><code>partitionLwwResolutions()</code></td><td>决定 winner、分区 remote-wins / local-wins / reject 集合。</td></tr>
+          <tr id="src-lww-reducer"><td>LWW 落地</td><td><code>src/app/root-store/meta/task-shared-meta-reducers/lww-update.meta-reducer.ts</code></td><td><code>lwwUpdateMetaReducer()</code></td><td>将 `[ENTITY] LWW Update` 替换或重建实体，并修正 task/project/tag 关系。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="flow">四条路径分流图</h2>
+    <pre class="diagram">A. 普通 remote ops
+download service → operation-log-sync service → processRemoteOps()
+  → migration → clean-slate filter → vector clock detect
+  → no conflict: applyNonConflictingOps()
+  → conflict: autoResolveConflictsLWW()
+
+B. incoming SYNC_IMPORT / BACKUP_IMPORT / REPAIR
+download 或 upload piggyback → SyncImportConflictGateService
+  → no meaningful pending: 静默接受，继续 processRemoteOps()
+  → meaningful pending: dialog
+     → USE_LOCAL: forceUploadLocalState()
+     → USE_REMOTE: forceDownloadRemoteState()
+     → CANCEL: 不推进
+
+C. batch 内 SYNC_IMPORT / BACKUP_IMPORT
+processRemoteOps() → migration → clean-slate filter
+  → hasFullStateOp 只匹配 SYNC_IMPORT/BACKUP_IMPORT
+  → applyNonConflictingOps()，跳过普通冲突检测
+  → validateAfterSync()
+
+D. REPAIR
+ValidateStateService 生成或远端下载 REPAIR 时属于 full-state op 类型
+  → 可触发 clean-slate 过滤与 full-state store 清理
+  → 但 processRemoteOps() 的 direct full-state 分支不以 REPAIR 为条件</pre>
+
+    <h2 id="download-to-process">下载、排序、过滤与转换</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>做什么</th><th>源码</th><th>关键边界</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>分页下载</td><td>按 `lastServerSeq` / `sinceSeq` 调 `provider.downloadOps()`；gap 只允许一次 reset to 0。</td><td><code>src/app/op-log/sync/operation-log-download.service.ts</code></td><td>这里不写本地 op-log，也不推进游标。</td></tr>
+          <tr><td>重复过滤</td><td>读取 `getAppliedOpIds()`，过滤已存在的 op id。</td><td><code>src/app/op-log/persistence/operation-log-store.service.ts</code></td><td>过滤基于本地 op-log，不靠远端 seq。</td></tr>
+          <tr><td>解密与转换</td><td>必要时解密 `SyncOperation.payload`，再用 `syncOpToOperation()` 转为 App `Operation`。</td><td><code>src/app/op-log/sync/operation-log-download.service.ts</code></td><td>缺 key 抛 `DecryptNoPasswordError`，不能进入 apply。</td></tr>
+          <tr><td>file snapshot 分支</td><td>`fileSnapshotOps` 且有 `snapshotState` 时走 `hydrateFromRemoteSync()`。</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td><td>这是 state hydration，不是普通 remote op replay；不会创建 `SYNC_IMPORT`。</td></tr>
+          <tr><td>schema migration</td><td>接收端把旧 schema op 迁移到当前版本；太旧或太新会停止。</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></td><td>migration 可能 drop op 或拆分 op。</td></tr>
+          <tr><td>clean-slate 过滤</td><td>找 batch 或本地 store 最新 full-state op，对普通 ops 做 vector clock 分类。</td><td><code>src/app/op-log/sync/sync-import-filter.service.ts</code></td><td>`GREATER_THAN` / `EQUAL` 保留；无 import causal knowledge 的 `CONCURRENT` / `LESS_THAN` 过滤。</td></tr>
+          <tr><td>转换为 action</td><td>apply 阶段用 `convertOpToAction()` 转 NgRx action。</td><td><code>src/app/op-log/apply/operation-converter.util.ts</code></td><td>full-state payload 包成 `appDataComplete`；action 带 `meta.isRemote`。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="decision-points">判断点速查</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>问题</th><th>是</th><th>否</th><th>证据</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>下载失败了吗？</td><td>抛错，不处理 ops，不推进游标。</td><td>继续判断 `needsFullStateUpload` / snapshot / newOps。</td><td><code>OperationLogSyncService.downloadRemoteOps()</code></td></tr>
+          <tr><td>server migration 需要 full-state upload 吗？</td><td>调用 `handleServerMigration()`，返回 `server_migration_handled`。</td><td>继续下载处理。</td><td><code>planDownloadFullStateUpload()</code></td></tr>
+          <tr><td>这是 file snapshot 吗？</td><td>可能 hydrate snapshot，之后把 recentOps 写入 IndexedDB 防重复。</td><td>走普通 `newOps` 分支。</td><td><code>planSnapshotHydration()</code></td></tr>
+          <tr><td>incoming full-state 会丢 pending 吗？</td><td>弹 `SYNC_IMPORT` conflict dialog。</td><td>静默接受，必要时 reject example-task ops。</td><td><code>SyncImportConflictGateService</code></td></tr>
+          <tr><td>batch 内有 `SYNC_IMPORT` / `BACKUP_IMPORT` 吗？</td><td>跳过普通 conflict detection，直接 full-state apply。</td><td>继续 vector clock conflict detection。</td><td><code>RemoteOpsProcessingService.processRemoteOps()</code></td></tr>
+          <tr><td>远端 op 与本地 frontier 并发吗？</td><td>交给 LWW。</td><td>非冲突 apply、跳过 duplicate 或跳过 superseded。</td><td><code>detectConflicts()</code></td></tr>
+          <tr><td>LWW 是本地胜出吗？</td><td>reject 旧冲突 ops，创建新的 local LWW update op，下一轮上传。</td><td>remote winner 写 remote/pending 并 replay。</td><td><code>ConflictResolutionService.autoResolveConflictsLWW()</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="store-writes">哪些路径会写本地 store/op-log</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>路径</th><th>写入/变更</th><th>方法</th><th>说明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>普通 direct apply</td><td>远端 ops 写入 `SUP_OPS.ops`，`source='remote'`，`applicationStatus='pending'`。</td><td><code>appendBatchSkipDuplicates()</code></td><td>只写新 op，duplicate 会跳过。</td></tr>
+          <tr><td>普通 direct apply 成功</td><td>pending 变为 `applied`，合并远端 vector clock。</td><td><code>markApplied()</code><br><code>mergeRemoteOpClocks()</code></td><td>之后才允许推进 `lastServerSeq`。</td></tr>
+          <tr><td>普通 direct apply 部分失败</td><td>失败 op 及其后续 op 标 `failed`。</td><td><code>markFailed()</code></td><td>session validation latch 会阻止误报 `IN_SYNC`。</td></tr>
+          <tr><td>batch 内 `SYNC_IMPORT` / `BACKUP_IMPORT` apply 成功</td><td>写入新的 full-state op，清旧 full-state ops，clock 以 full-state op 为基准重置/合并。</td><td><code>clearFullStateOpsExcept()</code><br><code>mergeRemoteOpClocks()</code></td><td>避免旧 import 继续过滤新 ops。</td></tr>
+          <tr><td>LWW 远端胜出</td><td>remote winner 和 piggyback non-conflicting ops 写 `remote/pending`，成功后 `applied`。</td><td><code>_filterAndAppendOpsWithRetry()</code><br><code>markApplied()</code></td><td>本地 pending 中被远端胜出覆盖的 ops 会先标 rejected。</td></tr>
+          <tr><td>LWW 本地胜出</td><td>冲突双方旧 ops 标 rejected；新 local LWW update op 写为 `source='local'`。</td><td><code>markRejected()</code><br><code>appendWithVectorClockUpdate()</code></td><td>新 op 会在下一轮上传，把本地胜出状态传播出去。</td></tr>
+          <tr><td>incoming full-state 选择 USE_REMOTE</td><td>先 capture import backup；清本地 full-state ops；unsynced ops 标 rejected；下载后按 force apply 写远端 ops。</td><td><code>captureImportBackup()</code><br><code>clearFullStateOps()</code><br><code>clearUnsyncedOps()</code></td><td>这是 destructive replace，不是普通 remote apply。</td></tr>
+          <tr><td>file snapshot hydration</td><td>替换 NgRx state；成功后 recentOps 写 `remote` 防止下次重复 apply。</td><td><code>hydrateFromRemoteSync()</code><br><code>appendBatchSkipDuplicates()</code></td><td>snapshot state 是主数据，recentOps 写入是去重账本。</td></tr>
+          <tr><td>post-sync validation 失败并可修复</td><td>可能创建 `REPAIR` operation。</td><td><code>validateAndRepairCurrentState()</code></td><td>`REPAIR` 属于 full-state op 类型，但它不是普通 remote ops 分支。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="lww">LWW 路径展开</h2>
+    <pre class="diagram">RemoteOpsProcessingService.detectConflicts()
+  → ConflictResolutionService.checkOpForConflicts()
+  → CONCURRENT: EntityConflict
+  → autoResolveConflictsLWW(conflicts, nonConflicting)
+       ├─ planLwwConflictResolutions()
+       ├─ partitionLwwResolutions()
+       ├─ remote wins: append remote/pending → applyOperations()
+       ├─ local wins: createLWWUpdateOp() → appendWithVectorClockUpdate(local)
+       ├─ markRejected(local old ops + remote obsolete ops)
+       └─ validateAndRepairCurrentState('conflict-resolution')</pre>
+    <p>LWW 的核心不是“直接保留本地状态”。本地胜出时必须创建一条新的 local op，它的 vector clock 合并冲突双方并递增当前 client，下一轮上传后其他客户端才能知道本地胜出的状态。</p>
+
+    <h2 id="full-state-boundary">full-state 边界</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>类型</th><th>何时出现</th><th>本主题中的路径</th><th>不要误判为</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>普通 remote ops</td><td>其他客户端上传的 create/update/delete。</td><td>下载后进入 `processRemoteOps()`，做 migration、filter、conflict detection。</td><td>不要跳过冲突检测。</td></tr>
+          <tr><td>`SYNC_IMPORT`</td><td>用户导入、server migration、密码变更 clean slate、force upload local state。</td><td>incoming 阶段先 conflict gate；进入 `processRemoteOps()` 后 direct full-state apply。</td><td>不要当作普通 update。</td></tr>
+          <tr><td>`BACKUP_IMPORT`</td><td>备份恢复或完整状态恢复。</td><td>与 `SYNC_IMPORT` 一样可触发 direct full-state apply。</td><td>不要与 file snapshot hydration 混同。</td></tr>
+          <tr><td>`REPAIR`</td><td>Checkpoint D 校验发现状态不一致并修复。</td><td>属于 full-state op 类型，可参与 clean-slate filter 和 full-state store 清理。</td><td>不要说它触发 `hasFullStateOp` direct 分支；该分支只检查 `SYNC_IMPORT` / `BACKUP_IMPORT`。</td></tr>
+          <tr><td>file snapshot state</td><td>文件型 provider 从 seq 0 下载完整 state。</td><td>走 `hydrateFromRemoteSync(..., false)`，再写 recentOps 防重复。</td><td>不要创建或套用 `SYNC_IMPORT` clean-slate 语义。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="troubleshooting">故障排查入口</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>现象</th><th>先查</th><th>判断</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>日志显示下载成功，但下轮又下载同一批 ops。</td><td><code>operation-log-sync.service.ts</code></td><td>确认 ops 是否写入/应用后才 `setLastServerSeq()`；失败路径不能推进游标。</td></tr>
+          <tr><td>导入后其他设备的旧任务更新消失。</td><td><code>sync-import-filter.service.ts</code></td><td>这是 clean-slate 语义还是误判？看 op clock 是否知道 import client counter。</td></tr>
+          <tr><td>远端 update 复活了已删除 task。</td><td><code>conflict-resolution.service.ts</code><br><code>lww-update.meta-reducer.ts</code></td><td>确认 DELETE vs UPDATE 是否被转换为 LWW Update，以及 fallback 是否补齐 required fields。</td></tr>
+          <tr><td>full-state op 到达后本地 pending 被静默丢了。</td><td><code>sync-import-conflict-gate.service.ts</code></td><td>确认 pending 是否在 gate 前 flush；meaningful pending 是否正确识别。</td></tr>
+          <tr><td>apply 过程中崩溃，重启后状态不一致。</td><td><code>remote-apply.ts</code><br><code>operation-log-store.service.ts</code></td><td>查 remote ops 是否停在 `applicationStatus='pending'` 或 `failed`，以及 recovery 是否重放。</td></tr>
+          <tr><td>LWW 后仍不断冲突。</td><td><code>mergeRemoteOpClocks()</code><br><code>createLWWUpdateOp()</code></td><td>确认 remote clocks 是否合并，本地胜出 op 的 clock 是否支配冲突双方。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="next-goals">新 L3/L4 候选 goal</h2>
+    <ul>
+      <li>L3：`remote-apply-crash-safety`，从 `appendBatchSkipDuplicates()` 到 `markApplied()` / `markFailed()` 逐状态讲远端 apply 的崩溃恢复。</li>
+      <li>L3：`sync-import-clean-slate-filter`，用 vector clock 案例拆解 `classifyOpAgainstSyncImport()` 的 keep/filter 判断。</li>
+      <li>L3：`lww-conflict-resolution-path`，拆解 LWW winner 规划、远端胜出、本地胜出和新 local update op 的传播。</li>
+      <li>L4：`lww-update-meta-reducer-task-relations`，深入 task/project/tag/TODAY_TAG 在 LWW Update 后如何保持关系一致。</li>
+    </ul>
+  </article>
+</main>
+</body>
+</html>

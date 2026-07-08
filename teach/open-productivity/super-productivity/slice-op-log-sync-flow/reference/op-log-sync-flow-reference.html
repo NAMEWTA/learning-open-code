@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operation Log 同步全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 参考文档 · 本地捕获、持久化、flush、上传、下载、provider、加密、冲突与校验边界</p>
+    <h1>Operation Log 同步全链路参考</h1>
+
+    <h2>入口清单</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>源码路径</th><th>职责</th><th>先看什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>action 标记</td><td><code>src/app/root-store/meta/task-shared.actions.ts</code></td><td>给用户意图写入 <code>meta.isPersistent</code>、<code>entityType</code>、<code>entityId/entityIds</code>、<code>opType</code>。</td><td><code>TaskSharedActions.updateTask</code>、bulk delete / move 示例</td></tr>
+          <tr><td>capture 开关</td><td><code>src/app/op-log/capture/operation-capture.meta-reducer.ts</code></td><td>本地 action 增加 pending 计数；remote action 过滤；远端 apply 窗口内缓冲本地 action。</td><td><code>operationCaptureMetaReducer</code>、<code>bufferDeferredAction</code></td></tr>
+          <tr><td>pending 计数</td><td><code>src/app/op-log/capture/operation-capture.service.ts</code></td><td>用 counter 替代旧 FIFO，避免写失败时 flush 永远等不到出队。</td><td><code>incrementPending</code>、<code>decrementPending</code>、<code>extractEntityChanges</code></td></tr>
+          <tr><td>operation 生成</td><td><code>src/app/op-log/capture/operation-log.effects.ts</code></td><td>顺序处理 persistent action，生成 operation、校验 payload、写入本地、触发 immediate upload。</td><td><code>persistOperation$</code>、<code>writeOperation</code></td></tr>
+          <tr><td>本地数据库</td><td><code>src/app/op-log/persistence/operation-log-store.service.ts</code></td><td>管理 <code>SUP_OPS</code> 的 ops、state_cache、vector_clock、client_id、meta。</td><td><code>appendWithVectorClockUpdate</code>、<code>getUnsynced</code>、<code>markSynced</code></td></tr>
+          <tr><td>数据库 schema</td><td><code>src/app/op-log/persistence/op-log-db-schema.ts</code><br><code>src/app/op-log/persistence/db-upgrade.ts</code></td><td>定义 IndexedDB / SQLite 共享目标结构和 IndexedDB 分版本升级。</td><td><code>OP_LOG_DB_SCHEMA</code>、<code>runDbUpgrade</code></td></tr>
+          <tr><td>flush</td><td><code>src/app/op-log/sync/operation-write-flush.service.ts</code></td><td>上传或冲突检测前，等待本地 capture effect 写完。</td><td><code>flushPendingWrites</code></td></tr>
+          <tr><td>主同步编排</td><td><code>src/app/imex/sync/sync-wrapper.service.ts</code></td><td>用户触发/周期触发一轮 sync：拿 provider，先下载，再上传，处理 LWW 重传和最终状态。</td><td><code>sync</code>、<code>_syncBody</code></td></tr>
+          <tr><td>op-log 同步门面</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td><td>封装 upload/download gate、fresh-client gate、SYNC_IMPORT conflict gate、file snapshot hydrate。</td><td><code>downloadRemoteOps</code>、<code>uploadPendingOps</code></td></tr>
+          <tr><td>上传 I/O</td><td><code>src/app/op-log/sync/operation-log-upload.service.ts</code></td><td>读 unsynced ops，处理 full-state snapshot，payload 加密，批量 upload，收集 piggyback 和 rejected ops。</td><td><code>uploadPendingOps</code>、<code>_uploadFullStateOpAsSnapshot</code></td></tr>
+          <tr><td>下载 I/O</td><td><code>src/app/op-log/sync/operation-log-download.service.ts</code></td><td>分页下载、gap reset、过滤 applied ops、解密、返回 latestServerSeq 和 snapshotState。</td><td><code>downloadRemoteOps</code></td></tr>
+          <tr><td>远端处理</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></td><td>schema migration、SYNC_IMPORT 过滤、冲突检测、remote apply、Checkpoint D 校验。</td><td><code>processRemoteOps</code>、<code>applyNonConflictingOps</code></td></tr>
+          <tr><td>冲突</td><td><code>src/app/op-log/sync/conflict-resolution.service.ts</code></td><td>用 vector clock 找冲突，用 LWW 自动决定本地或远端胜出；本地胜出会生成新 update op。</td><td><code>autoResolveConflictsLWW</code></td></tr>
+          <tr><td>replay</td><td><code>src/app/op-log/apply/operation-applier.service.ts</code><br><code>src/app/op-log/apply/operation-converter.util.ts</code></td><td>把 operation 批量 apply 到 NgRx；转换出的 action 带 <code>meta.isRemote</code>。</td><td><code>applyOperations</code>、<code>convertOpToAction</code></td></tr>
+          <tr><td>provider 包装</td><td><code>src/app/op-log/sync-providers/wrapped-provider.service.ts</code></td><td>SuperSync 原样返回；文件型 provider 包装为 <code>OperationSyncCapable</code>。</td><td><code>getOperationSyncCapable</code></td></tr>
+          <tr><td>provider 合同</td><td><code>packages/sync-providers/src/provider-types.ts</code></td><td>定义 <code>OperationSyncCapable</code>、<code>SyncOperation</code>、<code>superSyncOps</code>、<code>fileSnapshotOps</code>。</td><td><code>OperationSyncCapable</code></td></tr>
+          <tr><td>加密</td><td><code>src/app/op-log/sync/operation-encryption.service.ts</code><br><code>src/app/op-log/encryption/encrypt-and-compress-handler.service.ts</code></td><td>SuperSync operation payload 加密；文件型 sync 文件压缩/加密。</td><td><code>encryptOperations</code>、<code>compressAndEncryptData</code></td></tr>
+          <tr><td>校验</td><td><code>src/app/op-log/validation/validate-operation-payload.ts</code><br><code>src/app/op-log/validation/validate-state.service.ts</code></td><td>Checkpoint A 校验 operation payload；Checkpoint D 校验/修复应用后的状态。</td><td><code>validateOperationPayload</code>、<code>validateAndRepairCurrentState</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>本地捕获、持久化与 flush 时序</h2>
+    <pre class="diagram">1. src/app/root-store/meta/task-shared.actions.ts
+   action.meta.isPersistent = true
+
+2. src/app/op-log/capture/operation-capture.meta-reducer.ts
+   本地 action：OperationCaptureService pending +1
+   remote action：meta.isRemote=true，跳过 capture
+   remote apply 窗口：deferredActions 缓冲
+
+3. src/app/op-log/capture/operation-log.effects.ts
+   concatMap 顺序处理
+   生成 uuidv7 / clientId / vectorClock / MultiEntityPayload
+   validateOperationPayload()
+   appendWithVectorClockUpdate(op, "local")
+   finally pending -1
+   immediateUploadService.trigger()
+
+4. src/app/op-log/persistence/operation-log-store.service.ts
+   同一事务写 SUP_OPS.ops 与 SUP_OPS.vector_clock
+
+5. src/app/op-log/sync/operation-write-flush.service.ts
+   Phase 1: 等 pending counter 归零
+   Phase 2: 拿 LOCK_NAMES.OPERATION_LOG
+   之后 upload / conflict detection 才能读完整本地队列</pre>
+
+    <h2>上传时序</h2>
+    <pre class="diagram">src/app/imex/sync/sync-wrapper.service.ts
+  ↓ 先 downloadRemoteOps()，再 uploadPendingOps()
+src/app/op-log/sync/operation-log-sync.service.ts
+  ↓ flushPendingWrites()
+  ↓ isWhollyFreshClient() 阻止空白新客户端上传
+  ↓ serverMigrationService.checkAndHandleMigration()
+src/app/op-log/sync/operation-log-upload.service.ts
+  ↓ getUnsynced()
+  ↓ full-state ops 走 uploadSnapshot()
+  ↓ regular ops 转 SyncOperation；local-only sync settings 先剥离
+  ↓ SuperSync 且有 key：OperationEncryptionService.encryptOperations()
+  ↓ provider.uploadOps()
+  ↓ accepted seq 标记 synced
+  ↓ piggybacked ops 返回给 OperationLogSyncService 先处理
+  ↓ rejected ops 最后交给 RejectedOpsHandlerService</pre>
+    <p>上传路径的关键边界：server rejected ops 不能先标记 rejected，因为 piggybacked ops 可能正是冲突另一侧；必须先处理 piggybacked remote ops，让冲突检测还能看到本地 pending ops。</p>
+
+    <h2>下载与远端 apply 时序</h2>
+    <pre class="diagram">src/app/op-log/sync/operation-log-download.service.ts
+  ↓ provider.downloadOps(sinceSeq, clientId, pageSize)
+  ↓ gapDetected 时只允许一次 reset to 0
+  ↓ 用 SUP_OPS applied op ids 过滤重复
+  ↓ encrypted ops 需要 getEncryptKey()，否则 DecryptNoPasswordError
+  ↓ 返回 newOps + latestServerSeq，但不直接推进游标
+
+src/app/op-log/sync/operation-log-sync.service.ts
+  ↓ fileSnapshotOps + snapshotState：必要时 hydrate snapshot
+  ↓ fresh client 有 meaningful local data：LocalDataConflictError
+  ↓ incoming SYNC_IMPORT：先跑 conflict gate
+  ↓ processRemoteOps()
+  ↓ newOps 已存入/应用后才 setLastServerSeq()
+
+src/app/op-log/sync/remote-ops-processing.service.ts
+  ↓ schema migration
+  ↓ SYNC_IMPORT filter
+  ↓ full-state op 直接 apply
+  ↓ flushPendingWrites()
+  ↓ vector clock conflict detection
+  ↓ LWW 或 direct apply
+  ↓ validateAfterSync()</pre>
+
+    <h2>provider 边界</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>维度</th><th>SuperSync: <code>superSyncOps</code></th><th>文件型 provider: <code>fileSnapshotOps</code></th></tr>
+        </thead>
+        <tbody>
+          <tr><td>入口</td><td><code>src/app/op-log/sync-providers/super-sync/super-sync.ts</code> 创建 package provider。</td><td><code>src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</code> 包装 Dropbox/WebDAV/Nextcloud/OneDrive/LocalFile。</td></tr>
+          <tr><td>远端形态</td><td>服务端 append-only operation API；上传返回 accepted/rejected 和可能的 piggybacked ops。</td><td>单个远端同步文件，含 state snapshot、archive、recentOps、vectorClock、syncVersion。</td></tr>
+          <tr><td>游标</td><td><code>packages/sync-providers/src/super-sync/super-sync.ts</code> 按 baseUrl + access token 派生 lastServerSeq storage key。</td><td>adapter 在 localStorage 中维护 provider 级 <code>syncVersion</code> / synthetic last seq。</td></tr>
+          <tr><td>加密</td><td>mandatory E2EE；<code>src/app/op-log/sync/operation-log-upload.service.ts</code> 上传前加密单条 operation payload。</td><td>文件型 provider 允许明文或加密；adapter 用 <code>src/app/op-log/encryption/encrypt-and-compress-handler.service.ts</code> 处理整个 sync 文件。</td></tr>
+          <tr><td>压缩</td><td><code>packages/sync-providers/src/super-sync/super-sync.ts</code> 对 HTTP upload body gzip，设置 <code>Content-Encoding: gzip</code>。</td><td>sync 文件可 gzip 后再加密；prefix 记录压缩/加密/模型版本。</td></tr>
+          <tr><td>冲突信号</td><td>server 可返回 rejected ops、existingClock、piggybacked ops。</td><td>rev mismatch、syncVersion reset、snapshot replacement、partial trimming 会触发重试或 gap。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>加密与压缩边界</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>路径</th><th>处理对象</th><th>格式与错误</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>src/app/op-log/sync/operation-encryption.service.ts</code></td><td>SuperSync 的 <code>SyncOperation.payload</code> 或 snapshot state。</td><td>payload 先 JSON stringify，再用 <code>packages/sync-core/src/encryption.ts</code> 的 Argon2id + AES-GCM；结果设置 <code>isPayloadEncrypted=true</code>。解密失败抛 <code>DecryptError</code>。</td></tr>
+          <tr><td><code>src/app/op-log/encryption/encrypt-and-compress-handler.service.ts</code></td><td>文件型 provider 的整个远端同步文件字符串。</td><td>prefix 标记压缩、加密和 modelVersion；缺密码抛 <code>DecryptNoPasswordError</code>，JSON parse 失败抛 <code>JsonParseError</code>。</td></tr>
+          <tr><td><code>packages/sync-core/src/compression.ts</code></td><td>gzip 原语。</td><td>SuperSync HTTP body 使用 raw gzip bytes；文件型 sync 文件使用 base64 gzip 字符串。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>冲突、校验和游标安全</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>边界</th><th>规则</th><th>源码</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>operation payload</td><td>本地写入前执行 Checkpoint A；结构非法时跳过持久化并提示 reload。</td><td><code>src/app/op-log/validation/validate-operation-payload.ts</code></td></tr>
+          <tr><td>vector clock conflict</td><td><code>LESS_THAN</code> 表示远端更新；<code>GREATER_THAN</code> 表示本地已支配；<code>CONCURRENT</code> 进入冲突。</td><td><code>packages/sync-core/src/vector-clock.ts</code></td></tr>
+          <tr><td>LWW</td><td>时间戳较新者胜；本地胜出时生成新的 local-win update op，下一轮上传。</td><td><code>src/app/op-log/sync/conflict-resolution.service.ts</code></td></tr>
+          <tr><td>full-state import</td><td><code>SYNC_IMPORT</code> / <code>BACKUP_IMPORT</code> 会走直接 full-state apply，跳过普通逐条冲突检测；<code>REPAIR</code> 属于 full-state 分类，会被 conflict gate 识别，但在 remote processing 中不是同一个直接跳过分支。</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code><br><code>src/app/op-log/sync/sync-import-conflict-gate.service.ts</code></td></tr>
+          <tr><td>post-sync validation</td><td>Checkpoint D 失败会翻转 session latch，wrapper 不能宣称 <code>IN_SYNC</code>。</td><td><code>src/app/op-log/sync/sync-session-validation.service.ts</code></td></tr>
+          <tr><td>lastServerSeq</td><td>下载和 piggyback 路径只有在远端 ops 已被写入/应用后才推进游标，防止崩溃后跳过未应用数据。</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>故障排查</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>现象</th><th>先查</th><th>判断</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>刚操作后立即同步，远端缺变更。</td><td><code>src/app/op-log/sync/operation-write-flush.service.ts</code></td><td>看 pending counter 是否卡住；再查 <code>src/app/op-log/capture/operation-log.effects.ts</code> 是否写失败或 lock timeout。</td></tr>
+          <tr><td>同步重复弹冲突，尤其是 Dropbox/WebDAV。</td><td><code>src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</code></td><td>检查 syncVersion reset、snapshot replacement、partial trimming；再看 <code>src/app/op-log/sync/operation-log-sync.service.ts</code> 是否正确跳过 dominated snapshot hydration。</td></tr>
+          <tr><td>收到加密数据但没有密码。</td><td><code>src/app/op-log/sync/operation-log-download.service.ts</code></td><td>encrypted ops + no key 会抛 <code>DecryptNoPasswordError</code>；如果本地配置显示 encryption enabled 却没有 key，要按 dropped credential 处理。</td></tr>
+          <tr><td>SuperSync 初次设置时本地 ops 没上传。</td><td><code>src/app/op-log/sync/operation-log-upload.service.ts</code></td><td>SuperSync mandatory encryption 没有 key 时会跳过上传，避免明文泄露；wrapper 应报告 <code>UNKNOWN_OR_CHANGED</code> / <code>UpdateRemote</code>。</td></tr>
+          <tr><td>服务端 rejected ops 后本地变更丢失。</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td><td>确认 piggybacked ops 是否先处理；rejected ops 是否只在冲突检测后标记 rejected。</td></tr>
+          <tr><td>远端 apply 后又生成新本地 operation。</td><td><code>src/app/op-log/apply/operation-converter.util.ts</code></td><td>确认 replay action 有 <code>meta.isRemote=true</code>；capture meta-reducer 应过滤它。</td></tr>
+          <tr><td>状态校验失败却显示已同步。</td><td><code>src/app/op-log/sync/sync-session-validation.service.ts</code></td><td>检查入口是否包在 <code>withSession</code> 内；side channels 包括 <code>src/app/op-log/sync/immediate-upload.service.ts</code> 和 <code>src/app/op-log/sync/ws-triggered-download.service.ts</code>。</td></tr>
+          <tr><td>文件型 provider 发现旧同步文件。</td><td><code>src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</code></td><td>如果没有新协议同步文件但有 legacy <code>__meta_</code>，抛 <code>LegacySyncFormatDetectedError</code>，避免新旧协议 silent divergence。</td></tr>
+          <tr><td>存储空间不足或 IndexedDB 写失败。</td><td><code>src/app/op-log/capture/operation-log.effects.ts</code></td><td>普通写失败提示 reload；quota exceeded 会尝试 emergency compaction，再失败则提示 storage quota 错误。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>持久化与存储适配模块参考</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:32px;margin-bottom:6px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px}
+    th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .warn{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+  </style>
+</head>
+<body>
+  <h1>持久化与存储适配模块参考</h1>
+  <p class="summary"><strong>一句话：</strong>persistence 模块把 Snail AI 的业务数据、向量索引和全文索引分成三套适配边界；业务功能通过 mapper、<code>SnailAiVectorStore</code> 和 <code>SearchEngine</code> 编程，而不是直接依赖具体数据库客户端。</p>
+  <p class="warn"><strong>源码优先：</strong><code>StoreInstanceTypeEnum</code> 中存在 <code>PG_FULLTEXT</code>，<code>VectorStoreType</code> 中存在 <code>MONGO</code>，但当前模块只看到 PgVector、Milvus、Elasticsearch 三种向量实现，以及 Elasticsearch 一种搜索实现。</p>
+
+  <h2>可信来源</h2>
+  <table>
+    <thead><tr><th>来源</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/pom.xml</span></td><td>持久化顶层聚合模块，确认业务库、向量库、搜索库三分法。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-biz-storage/pom.xml</span></td><td>业务库存储模板和 MySQL、PostgreSQL、达梦方言模块。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/pom.xml</span></td><td>向量存储模板和 PgVector、Milvus、Elasticsearch 实现模块。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-search-storage/pom.xml</span></td><td>搜索存储模板和 Elasticsearch 实现模块。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/StoreInstanceController.java</span></td><td>存储实例管理 HTTP 入口。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/sql/snail_ai_schema.sql</span></td><td>MySQL 初始化脚本，确认 <code>sai_store_instance</code> 和 RAG 关联字段。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/sql/snail_ai_schema_pgsql.sql</span></td><td>PostgreSQL 初始化脚本，确认 PgVector 本地依赖场景。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/docker/docker-compose.yaml</span></td><td>本地依赖服务：MySQL、PgVector、Milvus、Elasticsearch、MinIO。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>模块骨架</h2>
+  <div class="filetree">snail-ai-server-persistence/
+├── snail-ai-biz-storage/
+│   ├── snail-ai-biz-template/       ← PO、Mapper、自动配置
+│   ├── snail-ai-mysql-storage/      ← MySQL mapper XML
+│   ├── snail-ai-postgres-storage/   ← PostgreSQL mapper XML
+│   └── snail-ai-dm-storage/         ← 达梦 mapper XML
+├── snail-ai-vector-storage/
+│   ├── snail-ai-vector-template/    ← SnailAiVectorStore、Factory、DTO
+│   ├── snail-ai-vector-pg-storage/  ← PgVector 实现
+│   ├── snail-ai-vector-milvus-storage/
+│   └── snail-ai-vector-es-storage/
+└── snail-ai-search-storage/
+    ├── snail-ai-search-template/    ← SearchEngine、Factory、DTO
+    └── snail-ai-search-elasticsearch-storage/</div>
+
+  <h2>业务库存储</h2>
+  <table>
+    <thead><tr><th>区域</th><th>代表文件</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>自动配置</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-biz-storage/snail-ai-biz-template/src/main/java/com/aizuda/snail/ai/persistence/config/SnailAiBizStorageAutoConfiguration.java</span></td><td>扫描 <code>com.aizuda.snail.ai.persistence</code> mapper，按数据库类型选择 <code>mysql/mapper</code>、<code>postgresql/mapper</code>、<code>dm/mapper</code> 和 template XML；配置分页与防全表更新插件。</td></tr>
+      <tr><td>Admin 表</td><td><code>StoreInstancePO</code>、<code>UserPO</code></td><td>后台用户、存储实例等管理数据。</td></tr>
+      <tr><td>Agent 表</td><td><code>AgentPO</code>、<code>AgentConversationPO</code>、<code>AgentUsageStatPO</code></td><td>Agent 定义、会话、记录、Skill/MCP 关联和使用统计。</td></tr>
+      <tr><td>RAG 表</td><td><code>RagPO</code>、<code>RagDocumentPO</code>、<code>RagChunkPO</code></td><td>知识库配置、文档、chunk、向量 ID、搜索实例 ID 等。</td></tr>
+      <tr><td>模型与资源</td><td><code>AiModelConfigPO</code>、<code>ResourcePO</code></td><td>模型供应商、模型配置、上传资源和资源元数据。</td></tr>
+      <tr><td>方言 XML</td><td><code>snail-ai-mysql-storage/src/main/resources/mysql/mapper/*</code>、<code>snail-ai-postgres-storage/src/main/resources/postgresql/mapper/*</code>、<code>snail-ai-dm-storage/src/main/resources/dm/mapper/*</code></td><td>MySQL、PostgreSQL、达梦各自维护少量 SQL 差异；通用 CRUD 主要依赖 MyBatis-Plus。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>StoreInstance 数据模型</h2>
+  <table>
+    <thead><tr><th>对象</th><th>字段或接口</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-biz-storage/snail-ai-biz-template/src/main/java/com/aizuda/snail/ai/persistence/admin/po/StoreInstancePO.java</span></td><td><code>name</code>、<code>category</code>、<code>type</code>、<code>config</code>、<code>status</code>、<code>isDefault</code></td><td>一条外部存储实例配置；连接参数以 JSON 文本保存。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/enums/rag/StoreInstanceCategoryEnum.java</span></td><td><code>VECTOR_STORE=1</code>、<code>SEARCH_ENGINE=2</code></td><td>先按用途分组，避免把向量库和全文搜索混用。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common/enums/rag/StoreInstanceTypeEnum.java</span></td><td><code>PG_VECTOR</code>、<code>MILVUS</code>、<code>ELASTICSEARCH</code>、<code>PG_FULLTEXT</code></td><td>业务层可见的存储类型枚举；实现注册清单需另看 factory。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/StoreInstanceController.java</span></td><td><code>/store-instance</code></td><td>管理实例、分页、详情、维度约束、创建、更新、删除、连接测试；完整路由见下表。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/StoreInstanceService.java</span></td><td><code>validateCategoryType</code>、<code>delete</code>、<code>testConnection</code></td><td>向量分类允许 PG_VECTOR、MILVUS、ELASTICSEARCH；搜索分类当前只允许 ELASTICSEARCH；删除时防止被知识库引用。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/VectorDimensionConstraintService.java</span></td><td><code>PG_VECTOR=2000</code>、<code>MILVUS=4096</code>、<code>ELASTICSEARCH=4096</code></td><td>知识库向量维度需同时满足 embedding 模型上限和后端上限。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>StoreInstanceController endpoint</h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>控制器方法</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/store-instance</code></td><td><code>list</code></td><td>按 <code>category</code> 查询实例列表。</td></tr>
+      <tr><td>GET</td><td><code>/store-instance/page</code></td><td><code>page</code></td><td>分页查询存储实例。</td></tr>
+      <tr><td>GET</td><td><code>/store-instance/{id}</code></td><td><code>get</code></td><td>查询单个存储实例详情，不存在时返回失败。</td></tr>
+      <tr><td>GET</td><td><code>/store-instance/{id}/dimension-constraint</code></td><td><code>getDimensionConstraint</code></td><td>结合 <code>embeddingModelId</code> 返回向量维度约束。</td></tr>
+      <tr><td>POST</td><td><code>/store-instance</code></td><td><code>create</code></td><td>创建存储实例。</td></tr>
+      <tr><td>PUT</td><td><code>/store-instance/{id}</code></td><td><code>update</code></td><td>更新存储实例。</td></tr>
+      <tr><td>DELETE</td><td><code>/store-instance/{id}</code></td><td><code>delete</code></td><td>删除存储实例，服务层会检查知识库引用。</td></tr>
+      <tr><td>POST</td><td><code>/store-instance/test</code></td><td><code>testConnection</code></td><td>测试连接配置是否可用。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>向量存储模板</h2>
+  <table>
+    <thead><tr><th>接口或类</th><th>职责</th><th>关键点</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-template/src/main/java/com/aizuda/snail/ai/vector/storage/vector/api/SnailAiVectorStore.java</span></td><td>向量后端统一接口。</td><td><code>add</code>、<code>delete</code>、<code>deleteByIndexName</code>、<code>search</code>、<code>test</code>。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-template/src/main/java/com/aizuda/snail/ai/vector/storage/vector/VectorStoreFactory.java</span></td><td>按 <code>vectorStoreInstanceId</code>、embedding 模型和维度创建后端。</td><td>读取 <code>StoreInstancePO.config</code>，调用已注册构造器，并用实例更新时间 + 模型更新时间做缓存失效。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-template/src/main/java/com/aizuda/snail/ai/vector/storage/vector/core/AbstractSnailAiVectorStore.java</span></td><td>Spring AI <code>VectorStore</code> 适配基类。</td><td>把 Snail AI 的 <code>VectorDocument</code> 转为 Spring AI <code>Document</code>，写入和相似度搜索交给具体后端。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-template/src/main/java/com/aizuda/snail/ai/vector/storage/vector/api/IndexNameBuilder.java</span></td><td>索引命名集中管理。</td><td>RAG 使用 <code>rag_{ragId}</code>，Memory 使用 <code>memory_agent_{agentId}</code>。</td></tr>
+      <tr><td><code>VectorAddRequest</code>、<code>VectorSearchRequest</code></td><td>向量写入和搜索请求。</td><td>都显式传入 <code>indexName</code>，避免从 metadata 隐式推导。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>向量实现注册</h3>
+  <table>
+    <thead><tr><th>后端</th><th>注册类</th><th>Settings</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>PgVector</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-pg-storage/src/main/java/com/aizuda/snail/ai/vector/storage/vector/pgvector/PgVectorLifecycle.java</span></td><td><code>PgVectorSettings</code></td><td><code>PgVectorSettings.vectorTableName</code> 有默认值 <code>vector_store</code>；但当前 <code>PgSnailAiVectorStore.createStore</code> 构建 Spring AI <code>PgVectorStore</code> 时使用传入的 <code>indexName</code> 作为 <code>vectorTableName</code>，RAG 通常是 <code>rag_{ragId}</code>。</td></tr>
+      <tr><td>Milvus</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-milvus-storage/src/main/java/com/aizuda/snail/ai/vector/storage/vector/milvus/MilvusVectorLifecycle.java</span></td><td><code>MilvusVectorSettings</code></td><td>连接 Milvus gRPC；默认 collection 前缀 <code>snail_rag_vector</code>，支持 metric 和 index type 参数。</td></tr>
+      <tr><td>Elasticsearch Vector</td><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-es-storage/src/main/java/com/aizuda/snail/ai/vector/storage/vector/elasticsearch/EsVectorLifecycle.java</span></td><td><code>ElasticsearchVectorSettings</code></td><td>作为向量存储使用 ES；默认索引前缀 <code>snail_ai_vector</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>搜索存储模板</h2>
+  <table>
+    <thead><tr><th>接口或类</th><th>职责</th><th>关键点</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-search-storage/snail-ai-search-template/src/main/java/com/aizuda/snail/ai/search/storage/search/api/SearchEngine.java</span></td><td>全文搜索后端统一接口。</td><td><code>insert</code>、<code>search</code>、<code>delete</code>。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-search-storage/snail-ai-search-template/src/main/java/com/aizuda/snail/ai/search/storage/search/SearchEngineFactory.java</span></td><td>按 <code>searchEngineInstanceId</code> 创建搜索后端。</td><td>读取 <code>StoreInstancePO.config</code>，转换为 <code>SearchEngineEnum</code> 后查注册表。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-search-storage/snail-ai-search-elasticsearch-storage/src/main/java/com/aizuda/snail/ai/search/storage/search/elasticsearch/EsSearchLifecycle.java</span></td><td>注册 Elasticsearch 搜索实现。</td><td>把 <code>SearchEngineEnum.ELASTICSEARCH</code> 绑定到 <code>ElasticsearchSearchEngine</code>。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-search-storage/snail-ai-search-elasticsearch-storage/src/main/java/com/aizuda/snail/ai/search/storage/search/elasticsearch/ElasticsearchSearchEngine.java</span></td><td>ES 全文索引创建、批量写入、查询和删除。</td><td><code>ElasticsearchVectorSettings.indexPrefix</code> 有默认值 <code>snail_ai_search</code>；但当前搜索写入、查询、删除都消费 request 的 <code>indexName</code>，RAG 调用方通过 <code>IndexNameBuilder.KNOWLEDGE</code> 传入 <code>rag_{ragId}</code>，该前缀未在当前搜索实现中生效。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>RAG 与 Memory 调用点</h2>
+  <table>
+    <thead><tr><th>调用点</th><th>依赖</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/knowledge/KnowledgeService.java</span></td><td><code>vectorStoreInstanceId</code>、<code>searchEngineEnable</code>、<code>searchEngineInstanceId</code></td><td>创建或更新知识库时把后端选择写入 <code>RagPO</code>。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/pipeline/DocumentPipeline.java</span></td><td><code>VectorStoreFactory</code>、<code>SearchEngineFactory</code></td><td>摄入 chunk 后先写向量库，搜索开启时再写全文索引；全文写入失败只记录 warning。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/search/pipeline/handler/VectorSearchHandler.java</span></td><td><code>VectorStoreFactory.create(ctx.getKnowledge())</code></td><td>按知识库实例 ID 创建向量后端，搜索 <code>rag_{ragId}</code>。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/search/pipeline/handler/Bm25SearchHandler.java</span></td><td><code>SearchEngineFactory.forStoreInstance(...)</code></td><td>仅在知识库启用搜索引擎时执行 BM25 检索。</td></tr>
+      <tr><td><code>MemoryConfigRequestVO</code>、<code>ConversationMemoryUpdateRequestVO</code></td><td><code>vectorStoreInstanceId</code></td><td>记忆配置同样可选择向量存储实例；本 L1 只标出依赖，不展开 Memory 切片。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>部署与初始化脚本</h2>
+  <table>
+    <thead><tr><th>文件</th><th>覆盖内容</th><th>学习用途</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/docs/sql/snail_ai_schema.sql</span></td><td>MySQL 业务库表，包括 <code>sai_rag</code>、<code>sai_rag_chunk</code>、<code>sai_store_instance</code>。</td><td>确认业务库字段，不要误以为向量本体直接存在 MySQL 表中。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/sql/snail_ai_schema_pgsql.sql</span></td><td>PostgreSQL 业务库表和 <code>sai_store_instance</code> 注释。</td><td>适合 PostgreSQL/PgVector 同库部署时对照。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/sql/snail_ai_schema_dameng.sql</span></td><td>达梦业务库初始化脚本。</td><td>说明业务库层支持达梦，但不代表向量库由达梦实现。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/docs/docker/docker-compose.yaml</span></td><td><code>snail-ai</code>、<code>mysql</code>、<code>pgvector</code>、<code>milvus</code>、<code>elasticsearch</code>、<code>minio</code>。</td><td>本地运行依赖编排；Snail AI 应用默认用 MySQL 业务库，可另配 PgVector/Milvus/ES。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>常见判断</h2>
+  <table>
+    <thead><tr><th>问题</th><th>判断</th></tr></thead>
+    <tbody>
+      <tr><td>看到 <code>Mapper</code> 或 <code>PO</code> 应归哪层？</td><td>通常归业务库模板；再看是否有方言 XML 补 SQL 差异。</td></tr>
+      <tr><td>看到 <code>VectorStoreFactory.REGISTER</code> 应归哪层？</td><td>向量存储后端注册；具体类型由 lifecycle 在启动阶段放入注册表。</td></tr>
+      <tr><td>看到 <code>SearchEngineFactory.REGISTER</code> 应归哪层？</td><td>全文搜索后端注册；当前只有 Elasticsearch。</td></tr>
+      <tr><td>RAG 选择后端发生在哪里？</td><td>Admin 创建知识库时保存实例 ID；摄入和检索阶段再按 ID 创建具体后端。</td></tr>
+      <tr><td>PgVector 和 PostgreSQL 业务库是不是同一个概念？</td><td>不是。业务库保存配置和文档元数据；PgVector 是向量索引后端，可以与业务库同实例部署，也可以独立配置。</td></tr>
+    </tbody>
+  </table>
+
+  <p><span class="tag">后续 L2 候选</span> store-instance 管理切片、RAG 摄入双写切片、向量后端实现切片、搜索后端实现切片、业务库方言切片。</p>
+</body>
+</html>

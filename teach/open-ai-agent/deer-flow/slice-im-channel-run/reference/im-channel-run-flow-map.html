@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IM 入站执行 — 链路速查</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; font-size:.84rem; background:#fbfcfd; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <h1>IM 入站执行 — 链路速查</h1>
+  <p class="lead">
+    L2 垂直切片参考页。短课入口：
+    <a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。
+    横切模块：
+    <a href="../../module-channels/reference/channels-overview.html">channels</a> ·
+    <a href="../../module-gateway/reference/gateway-overview.html">gateway</a> ·
+    <a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">runtime-persistence</a> ·
+    <a href="../../slice-chat-streaming-run/reference/chat-streaming-run-flow-map.html">chat-streaming-run</a>
+  </p>
+
+  <h2>端到端分层</h2>
+  <table>
+    <tr><th>层</th><th>职责</th><th>关键文件</th></tr>
+    <tr><td>L0 平台入口</td><td>收 webhook / 长轮询，解析平台 payload</td><td><code>backend/app/channels/feishu.py</code> 等 adapter</td></tr>
+    <tr><td>L1 总线</td><td>入站队列、出站回调广播</td><td><code>backend/app/channels/message_bus.py</code></td></tr>
+    <tr><td>L2 服务编排</td><td>启停 adapter + manager 单例</td><td><code>backend/app/channels/service.py</code></td></tr>
+    <tr><td>L3 调度器</td><td>去重、身份校验、thread 映射、调 run</td><td><code>backend/app/channels/manager.py</code></td></tr>
+    <tr><td>L4 SDK 客户端</td><td>内部鉴权 + CSRF，调 LangGraph 兼容 API</td><td><code>manager.py</code> <code>_get_client()</code></td></tr>
+    <tr><td>L5 Gateway HTTP</td><td><code>threads</code> / <code>runs</code> 路由，embedded runtime</td><td><code>backend/app/gateway/routers/thread_runs.py</code> 等</td></tr>
+    <tr><td>L6 Agent</td><td>lead agent 图执行（与浏览器 run 相同）</td><td><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></td></tr>
+    <tr><td>L7 运维 API</td><td>查 channel 状态、管理员重启 worker</td><td><code>backend/app/gateway/routers/channels.py</code></td></tr>
+  </table>
+
+  <div class="diagram">IM 用户发消息
+  → platform adapter
+  → MessageBus.publish_inbound
+  → ChannelManager._dispatch_loop
+  → _handle_message → _handle_chat
+  → langgraph_sdk.threads.create | get
+  → langgraph_sdk.runs.wait | stream | create
+  → Gateway start_run / worker.run_agent
+  → make_lead_agent
+  → publish_outbound → adapter 回平台</div>
+
+  <h2>三种 run 触发模式</h2>
+  <table>
+    <tr><th>模式</th><th>SDK 调用</th><th>典型 channel</th><th>manager 出站</th></tr>
+    <tr><td>阻塞等待</td><td><code>client.runs.wait(...)</code></td><td>Slack、Discord、钉钉（非卡片流）</td><td>一次 <code>publish_outbound</code>（final）</td></tr>
+    <tr><td>流式增量</td><td><code>client.runs.stream(..., stream_mode=[messages-tuple, values])</code></td><td>Feishu、Telegram、WeCom</td><td>多次 <code>is_final=False</code> + 最终 final</td></tr>
+    <tr><td>fire-and-forget</td><td><code>client.runs.create(...)</code></td><td>GitHub webhook</td><td>不等待、通常不 publish 最终回复（agent 自行 gh 回写）</td></tr>
+  </table>
+  <p class="note">判断依据：<code>CHANNEL_CAPABILITIES</code> / channel 实例的 <code>supports_streaming</code>，以及 <code>CHANNEL_RUN_POLICY[channel].fire_and_forget</code>。</p>
+
+  <h2>主路径 SDK → Gateway</h2>
+  <table>
+    <tr><th>步骤</th><th>调用</th><th>说明</th></tr>
+    <tr><td>映射 thread</td><td><code>client.threads.create(metadata=channel_source)</code></td><td>首次聊天；<code>store</code> 或 <code>connection_repo</code> 缓存 <code>thread_id</code></td></tr>
+    <tr><td>合并 run 参数</td><td><code>_resolve_run_params</code></td><td><code>assistant_id</code>、<code>run_config</code>、<code>run_context</code>（含 <code>user_id</code>、<code>channel_name</code>）</td></tr>
+    <tr><td>创建 run</td><td><code>runs.wait|stream|create(thread_id, assistant_id, input, config, context, multitask_strategy=reject)</code></td><td>默认 <code>assistant_id=lead_agent</code></td></tr>
+    <tr><td>内部鉴权</td><td><code>create_internal_auth_headers(owner_user_id)</code></td><td>绑定用户的文件/memory 与浏览器一致</td></tr>
+  </table>
+
+  <h2>核心数据结构（入站）</h2>
+  <table>
+    <tr><th>字段</th><th>用途</th></tr>
+    <tr><td><code>channel_name</code></td><td>路由到 adapter 与 run policy</td></tr>
+    <tr><td><code>chat_id</code> / <code>topic_id</code></td><td>thread 映射键（<code>channel:chat[:topic]</code>）</td></tr>
+    <tr><td><code>connection_id</code> / <code>owner_user_id</code></td><td>用户绑定场景下的身份与 thread 作用域</td></tr>
+    <tr><td><code>msg_type</code></td><td><code>CHAT</code> 走 <code>_handle_chat</code>；<code>COMMAND</code> 走 <code>_handle_command</code></td></tr>
+    <tr><td><code>metadata</code></td><td>去重键（<code>message_id</code> 等）、GitHub <code>preferred_thread_id</code></td></tr>
+  </table>
+
+  <h2 id="errors">异常与边界路径</h2>
+  <table>
+    <tr><th>场景</th><th>行为</th><th>用户可见</th></tr>
+    <tr><td>未绑定身份</td><td><code>_get_bound_identity_rejection</code> → <code>_reject_unbound_channel_message</code></td><td>提示去设置页完成 connect</td></tr>
+    <tr><td>同 thread 并发 run</td><td>SDK <code>ConflictError</code> / "already running"</td><td><code>THREAD_BUSY_MESSAGE</code></td></tr>
+    <tr><td>平台重投同一 message_id</td><td><code>_is_duplicate_inbound</code> 10 分钟 TTL</td><td>静默忽略（不二次 run）</td></tr>
+    <tr><td>处理中意外失败</td><td><code>_release_inbound_dedupe_key</code> + <code>_send_error</code></td><td>generic internal error，允许重投恢复</td></tr>
+    <tr><td>无效 session assistant_id</td><td><code>InvalidChannelSessionConfigError</code></td><td>配置错误文案</td></tr>
+  </table>
+
+  <h2>时序图（流式 IM）</h2>
+  <pre class="mermaid">sequenceDiagram
+    participant P as Platform
+    participant A as Channel adapter
+    participant B as MessageBus
+    participant M as ChannelManager
+    participant G as Gateway runs API
+    participant W as run_agent
+
+    P->>A: user message
+    A->>B: publish_inbound
+    B->>M: get_inbound
+    M->>G: threads.create (if needed)
+    M->>G: POST runs/stream
+    G->>W: start_run + Task
+    loop SSE chunks
+        W-->>G: stream events
+        G-->>M: messages-tuple / values
+        M->>B: publish_outbound (partial)
+    end
+    M->>B: publish_outbound (final)
+    B->>A: outbound callback
+    A->>P: edit card / reply</pre>
+
+  <h2>源码索引</h2>
+  <table>
+    <tr><th>文件</th><th>关键符号</th></tr>
+    <tr><td><code>message_bus.py</code></td><td><code>InboundMessage</code>, <code>publish_inbound</code>, <code>publish_outbound</code></td></tr>
+    <tr><td><code>service.py</code></td><td><code>ChannelService.start</code>, <code>manager.start</code>, <code>start_channel_service</code></td></tr>
+    <tr><td><code>manager.py</code></td><td><code>_dispatch_loop</code>, <code>_handle_chat</code>, <code>_handle_streaming_chat</code>, <code>_get_or_create_thread</code></td></tr>
+    <tr><td><code>gateway/routers/channels.py</code></td><td><code>GET /api/channels/</code>, <code>POST /{name}/restart</code>（非消息路径）</td></tr>
+  </table>
+
+  <p class="note">
+    GitHub 变体：webhook → <code>fanout_event</code> → 同一 <code>publish_inbound</code>，无长轮询 adapter。
+    浏览器聊天对照：<a href="../../slice-chat-streaming-run/reference/chat-streaming-run-flow-map.html">chat-streaming-run 参考页</a>。
+  </p>
+</main>
+</body>
+</html>

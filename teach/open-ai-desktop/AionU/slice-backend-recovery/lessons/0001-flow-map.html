@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backend 启动失败恢复全链路短课</title>
+  <link rel="stylesheet" href="../assets/backend-recovery.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Backend 启动失败恢复全链路</h1>
+    <p class="subtitle">15 分钟短课：学会把一个 backend 启动失败从 main 的分类，追到 preload 注入、renderer 弹窗，以及可恢复数据库损坏的确认后重启。</p>
+    <div class="meta">
+      <span class="pill">L2：slice-backend-recovery</span>
+      <span class="pill">主入口：index.ts + backendStartupFailure.ts</span>
+      <span class="pill">练习：判断 reason 的 UI 去向</span>
+    </div>
+    <nav class="navlinks" aria-label="交叉链接">
+      <a href="../reference/backend-recovery-flow-map.html">参考图谱</a>
+      <a href="../../00-overview/reference/00-overview.html">L0 总览</a>
+      <a href="../../module-main-entry/reference/main-entry-overview.html">L1 main-entry</a>
+      <a href="../../module-process-infra/reference/process-infra-overview.html">L1 process-infra</a>
+      <a href="../../module-preload-ipc/reference/preload-ipc-overview.html">L1 preload-ipc</a>
+      <a href="../../module-renderer-core/reference/renderer-core-overview.html">L1 renderer-core</a>
+      <a href="../../slice-desktop-startup/reference/desktop-startup-flow-map.html">L2 desktop-startup</a>
+    </nav>
+  </section>
+
+  <h2>1. 学习目标与地图</h2>
+  <p>本节只训练一个判断：当 aioncore 在桌面启动期失败时，AionU 如何决定“显示什么、能否恢复、是否继续建窗口”。入口不在 renderer，而在 Electron main 的 backend 启动回调。失败会先被 `classifyBackendStartupFailure()` 转成 `BackendStartupFailureInfo`，再经 preload 暴露给 renderer。renderer 如果看到已知 reason，就不进入正常 `AppProviders -> App -> Router`，而是渲染 `BackendStartupFailureDialog`。</p>
+  <div class="callout">
+    <p><strong>主要来源：</strong>`packages/desktop/src/process/startup/backendStartupFailure.ts`。先读分类优先级，再读 `renderer/main.tsx` 的 UI 分流。</p>
+    <p>如果某段源码含义不清楚，可以继续向 agent 追问“这个 reason 为什么落到这个弹窗”。</p>
+  </div>
+
+  <h2>2. 真实入口片段</h2>
+  <p>入口片段一：main 在启动失败或 pending 退出时记录 failure；默认桌面模式失败后不会立刻退出，所以窗口仍会创建。</p>
+  <pre><code class="language-ts">function markBackendStartupFailed(error: unknown): void {
+  backendStartupFailed = true;
+  backendStartupFailureInfo = classifyBackendStartupFailure(error);
+  (globalThis as typeof globalThis &amp; { __backendStartupFailed?: boolean }).__backendStartupFailed = true;
+}</code></pre>
+  <p>入口片段二：分类器先识别架构和安装缺失，再看 GLIBC、本地数据修复、可恢复数据库损坏、迁移失败，最后兜底为 `backend_startup_failed`。下面是节选，省略位置只用 <code>// ...</code> 标明，不是完整函数逐字重排。</p>
+  <pre><code class="language-ts">export function classifyBackendStartupFailure(error: unknown): BackendStartupFailureInfo {
+  const details = getBackendStartupDetails(error);
+  const packageArchitectureMismatch = classifyPackageArchitectureMismatch(details);
+  if (packageArchitectureMismatch) return packageArchitectureMismatch;
+
+  const incompleteInstallation = classifyIncompleteInstallation(details);
+  if (incompleteInstallation) return incompleteInstallation;
+
+  const text = collectBackendStartupText(error);
+  const requiredVersions = extractMissingGlibcVersions(text);
+  if (requiredVersions.length &gt; 0) {
+    return {
+      reason: 'backend_incompatible_runtime',
+      runtime: 'glibc',
+      requiredVersions,
+    };
+  }
+  // ...
+}</code></pre>
+  <p>入口片段三：renderer 根入口根据 `window.__backendStartupFailure` 选择失败 UI 或正常应用。</p>
+  <pre><code class="language-ts">const backendStartupFailure = window.__backendStartupFailure;
+if (backendStartupFailure &amp;&amp; shouldShowBackendStartupFailureDialog) {
+  root.render(&lt;Config&gt;&lt;BackendStartupFailureDialog failure={backendStartupFailure} /&gt;&lt;/Config&gt;);
+} else {
+  root.render(&lt;AppProviders&gt;&lt;App /&gt;&lt;/AppProviders&gt;);
+}</code></pre>
+
+  <h2>3. 调用时序</h2>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  participant Main as Electron main
+  participant Backend as BackendLifecycleManager
+  participant Preload as preload
+  participant Renderer as React renderer
+  participant Dialog as Failure dialog
+  Main->>Backend: startBackendOrExit() / backendManager.start()
+  Backend-->>Main: error 或 pending exit
+  Main->>Main: classifyBackendStartupFailure(error)
+  Preload->>Main: sendSync('get-backend-startup-failure')
+  Main-->>Preload: backendStartupFailureInfo
+  Preload-->>Renderer: exposeInMainWorld('__backendStartupFailure')
+  Renderer->>Dialog: BackendStartupFailureDialog
+  alt recoverable database corruption
+    Dialog->>Preload: electronAPI.recoverCorruptedDatabase()
+    Preload->>Main: ipcRenderer.invoke('backend:recover-corrupted-database')
+    Main->>Backend: stop() 后以 recoverCorruptedDatabase 重启
+    Main-->>Renderer: markReady 后 reload mainWindow
+  else incomplete installation / migration / local repair
+    Dialog-->>Renderer: 诊断上报或下载提示，不直接重启 backend
+  end
+    </div>
+  </div>
+  <p>沿途层次是 main 启动编排、failure 分类器、preload 同步状态注入、renderer 根分流、InstallationIntegrityDialog 操作区、main IPC 恢复 handler。完整分类表与测试证据见 <a href="../reference/backend-recovery-flow-map.html">参考图谱</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <section class="quiz">
+    <p><strong>暂停回忆：</strong>看到 `BOOTSTRAP_DATA_INIT_FAILED` 且 stage 是 `database.recoverable_corruption`，UI 应该提供哪个动作？如果 stage 是 `database.migration` 呢？</p>
+    <p><strong>参考答案：</strong>`database.recoverable_corruption` 会落到 `recoverable_database_corruption`，弹窗提供“确认重建”按钮，并经 preload IPC 调 main 的恢复 handler。`database.migration` 会落到 `data_migration`，只走安装完整性弹窗的诊断上报文案，不提供重建按钮。</p>
+  </section>
+  <section class="callout warning">
+    <p><strong>边界：</strong>`installation-integrity.e2e.ts` 证明 debug 注入的 incomplete installation 弹窗和诊断上报，不证明所有真实二进制失败都被 E2E 覆盖；普通 app-launch 也不能证明 recovery 链路。</p>
+  </section>
+</main>
+<script>mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });</script>
+</body>
+</html>

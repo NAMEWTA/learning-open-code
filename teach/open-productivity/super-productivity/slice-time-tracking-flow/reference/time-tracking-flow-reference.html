@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>时间追踪全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · time tracking vertical slice</p>
+    <h1>开始追踪、空闲检测与时间记录全链路参考</h1>
+    <p class="lead">本参考用于快速定位入口、状态流、effect/service/reducer 边界、idle/focus 交互和故障排查。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <p>以下路径是本参考的源码依据，也用于生成主题快照：</p>
+    <div class="filetree">src/app/
+├── core/                                      ← tick 与通用同步工具
+│   ├── global-tracking-interval/
+│   │   └── global-tracking-interval.service.ts
+│   └── util/
+│       └── batched-time-sync-accumulator.ts
+├── features/                                  ← 用户可感知功能域
+│   ├── tasks/                                 ← task timeSpent 与 currentTaskId
+│   ├── time-tracking/                         ← work context s/e/b/bt
+│   ├── idle/                                  ← idle 检测与归属修正
+│   ├── focus-mode/                            ← focus/break 与 tracking 双向同步
+│   ├── metric/                                ← focus session metric
+│   └── worklog/                               ← task + timeTracking 合成 worklog
+└── op-log/                                    ← persistent action 到 SUP_OPS
+    ├── capture/                               ← persistent action 捕获
+    ├── sync/                                  ← flush 与上传前保护
+    ├── persistence/                           ← SUP_OPS 本地存储
+    └── validation/                            ← operation payload 验证</div>
+    <p>
+      <code>src/app/features/tasks/task/task-hover-controls/task-hover-controls.component.html</code>
+      <code>src/app/features/tasks/task/task.component.ts</code>
+      <code>src/app/features/tasks/task-context-menu/task-context-menu-inner/task-context-menu-inner.component.ts</code>
+      <code>src/app/features/tasks/task.service.ts</code>
+      <code>src/app/core/global-tracking-interval/global-tracking-interval.service.ts</code>
+      <code>src/app/core/util/batched-time-sync-accumulator.ts</code>
+      <code>src/app/features/tasks/store/task.actions.ts</code>
+      <code>src/app/features/tasks/store/task.reducer.ts</code>
+      <code>src/app/features/tasks/store/task.reducer.util.ts</code>
+      <code>src/app/features/tasks/store/task-internal.effects.ts</code>
+      <code>src/app/features/time-tracking/store/time-tracking.actions.ts</code>
+      <code>src/app/features/time-tracking/store/time-tracking.reducer.ts</code>
+      <code>src/app/features/time-tracking/time-tracking.model.ts</code>
+      <code>src/app/features/idle/store/idle.actions.ts</code>
+      <code>src/app/features/idle/store/idle.reducer.ts</code>
+      <code>src/app/features/idle/store/idle.effects.ts</code>
+      <code>src/app/features/idle/idle.service.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.actions.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.reducer.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.effects.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-main/focus-mode-main.component.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-break/focus-mode-break.component.ts</code>
+      <code>src/app/features/metric/metric.service.ts</code>
+      <code>src/app/features/metric/store/metric.actions.ts</code>
+      <code>src/app/features/metric/store/metric.reducer.ts</code>
+      <code>src/app/features/metric/store/metric.selectors.ts</code>
+      <code>src/app/features/worklog/worklog.service.ts</code>
+      <code>src/app/features/worklog/util/get-time-spent-for-day.util.ts</code>
+      <code>src/app/op-log/capture/operation-capture.meta-reducer.ts</code>
+      <code>src/app/op-log/capture/operation-capture.service.ts</code>
+      <code>src/app/op-log/capture/operation-log.effects.ts</code>
+      <code>src/app/op-log/sync/operation-write-flush.service.ts</code>
+      <code>src/app/op-log/sync/operation-log-sync.service.ts</code>
+      <code>src/app/op-log/persistence/operation-log-store.service.ts</code>
+      <code>src/app/op-log/persistence/op-log-db-schema.ts</code>
+      <code>src/app/op-log/persistence/db-keys.const.ts</code>
+      <code>src/app/op-log/validation/validate-operation-payload.ts</code>
+      <code>src/app/features/android/store/android-foreground-tracking.effects.ts</code>
+      <code>src/app/features/ios/store/ios-background-tracking.effects.ts</code>
+      <code>src/app/features/tasks/store/task.reducer.spec.ts</code>
+      <code>src/app/op-log/capture/operation-capture.service.spec.ts</code>
+      <code>src/app/op-log/sync/operation-write-flush.service.spec.ts</code>
+    </p>
+
+    <h2>入口清单</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>入口</th>
+            <th>完整相对路径</th>
+            <th>责任</th>
+            <th>进入下一层</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>任务行 play/pause</td>
+            <td class="path">src/app/features/tasks/task/task-hover-controls/task-hover-controls.component.html</td>
+            <td>按 current task 状态显示 play 或 pause 按钮。</td>
+            <td class="path">src/app/features/tasks/task/task.component.ts</td>
+          </tr>
+          <tr>
+            <td>任务组件 start/pause/toggle</td>
+            <td class="path">src/app/features/tasks/task/task.component.ts</td>
+            <td>把 UI 操作转为 `TaskService` 调用，并保持焦点。</td>
+            <td class="path">src/app/features/tasks/task.service.ts</td>
+          </tr>
+          <tr>
+            <td>任务上下文菜单 start/pause</td>
+            <td class="path">src/app/features/tasks/task-context-menu/task-context-menu-inner/task-context-menu-inner.component.ts</td>
+            <td>右键菜单中的同类入口。</td>
+            <td class="path">src/app/features/tasks/task.service.ts</td>
+          </tr>
+          <tr>
+            <td>全局/快捷键 toggle</td>
+            <td class="path">src/app/features/tasks/task.service.ts</td>
+            <td>在允许追踪时 dispatch `toggleStart`，由 internal effect 选下一任务或停止。</td>
+            <td class="path">src/app/features/tasks/store/task-internal.effects.ts</td>
+          </tr>
+          <tr>
+            <td>全局 tick</td>
+            <td class="path">src/app/core/global-tracking-interval/global-tracking-interval.service.ts</td>
+            <td>把真实 wall-clock delta 包装为 tick；后台恢复可补一笔 wake-up tick。</td>
+            <td class="path">src/app/features/tasks/task.service.ts</td>
+          </tr>
+          <tr>
+            <td>idle trigger</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>从 Electron 或扩展 idle API 接收空闲时长，达到阈值后进入 idle state。</td>
+            <td class="path">src/app/features/idle/store/idle.reducer.ts</td>
+          </tr>
+          <tr>
+            <td>focus session start/end/break</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</td>
+            <td>把 tracking 与 focus timer 双向同步，完成 session 后写 metric。</td>
+            <td class="path">src/app/features/metric/metric.service.ts</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>状态流</h2>
+    <pre class="diagram">setCurrentTask / unsetCurrentTask
+  → tasks.currentTaskId                 本地 UI 状态，不持久化
+
+tick(duration, date)
+  → [TimeTracking] Add time spent        本地 action，非 persistent
+  → task.timeSpentOnDay[date] += duration
+  → task.timeSpent = sum(timeSpentOnDay)
+  → subtask delta 可增量更新 parent task
+  → timeTracking.project/tag context     s/e 按分钟更新
+  → BatchedTimeSyncAccumulator           暂存 TASK duration
+  → _unsyncedContexts                    暂存 PROJECT/TAG/TODAY_TAG context
+
+idle 初始化
+  → [Task] Remove time spent              persistent TASK update，扣回 idleTime
+  → setCurrentTask(null)                  本地 current task 改变，触发 batch flush
+
+flush: 5 分钟 / currentTaskId 改变 / 显式后台恢复
+  → [TimeTracking] Sync time spent       persistent TASK update
+  → [TimeTracking] Sync sessions         persistent TIME_TRACKING update
+  → op-log capture
+  → SUP_OPS.ops + SUP_OPS.vector_clock</pre>
+    <div class="callout">本地 `syncTimeSpent` reducer 是 no-op，因为本地任务时间已经由 Add time spent 写过；远端回放时带 `meta.isRemote`，才会在 reducer 中累加 duration。</div>
+
+    <h2>Actions、reducers、services、effects 边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>边界</th>
+            <th>完整相对路径</th>
+            <th>关键行为</th>
+            <th>是否 persistent</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Current task actions</td>
+            <td class="path">src/app/features/tasks/store/task.actions.ts</td>
+            <td>`setCurrentTask`、`unsetCurrentTask`、`toggleStart` 表达当前追踪选择。</td>
+            <td>否</td>
+          </tr>
+          <tr>
+            <td>TaskService tick 消费</td>
+            <td class="path">src/app/features/tasks/task.service.ts</td>
+            <td>订阅 tick 和 current task，立即写本地耗时，累计待同步 duration 和 context。</td>
+            <td>本地写否；flush 后是</td>
+          </tr>
+          <tr>
+            <td>Task reducer 耗时写入</td>
+            <td class="path">src/app/features/tasks/store/task.reducer.ts</td>
+            <td>`Add time spent` 累加本地任务日耗时；remote `syncTimeSpent` 才累加同步回放。</td>
+            <td>取决于 action</td>
+          </tr>
+          <tr>
+            <td>Idle 扣回误计时间</td>
+            <td class="path">src/app/features/tasks/store/task.actions.ts<br>src/app/features/idle/store/idle.effects.ts</td>
+            <td>`removeTimeSpent` 是 persistent TASK update；idle effect 在清空 current task 前先派发它，用来把已误计的 idleTime 从任务上扣回。</td>
+            <td>是</td>
+          </tr>
+          <tr>
+            <td>父子任务耗时级联</td>
+            <td class="path">src/app/features/tasks/store/task.reducer.util.ts</td>
+            <td>子任务时间变化用日期 delta 增量更新父任务 `timeSpentOnDay` 和 `timeSpent`。</td>
+            <td>由调用 action 决定</td>
+          </tr>
+          <tr>
+            <td>TimeTracking reducer</td>
+            <td class="path">src/app/features/time-tracking/store/time-tracking.reducer.ts</td>
+            <td>维护项目/标签维度的 `s`、`e`、`b`、`bt`，用于 worklog 起止与 break 数据。</td>
+            <td>`syncTimeTracking` 和 `updateWorkContextData` 是</td>
+          </tr>
+          <tr>
+            <td>Metric service/actions</td>
+            <td class="path">src/app/features/metric/metric.service.ts<br>src/app/features/metric/store/metric.actions.ts</td>
+            <td>focus session 完成后记录 duration；metric reducer 把 duration 追加到当天 `focusSessions`。</td>
+            <td>是</td>
+          </tr>
+          <tr>
+            <td>Op-log capture meta-reducer</td>
+            <td class="path">src/app/op-log/capture/operation-capture.meta-reducer.ts</td>
+            <td>只捕获本地 persistent action；remote replay 与 sync replay deferred action 不直接写。</td>
+            <td>捕获层</td>
+          </tr>
+          <tr>
+            <td>Op-log persist effect</td>
+            <td class="path">src/app/op-log/capture/operation-log.effects.ts</td>
+            <td>为 action 构造 operation、提取特殊 entityChanges、增量 vector clock、写入 store。</td>
+            <td>写入层</td>
+          </tr>
+          <tr>
+            <td>Op-log store</td>
+            <td class="path">src/app/op-log/persistence/operation-log-store.service.ts</td>
+            <td>`appendWithVectorClockUpdate` 在同一事务写 `ops` 和 `vector_clock`。</td>
+            <td>持久化层</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Idle 与 Focus 交互</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>场景</th>
+            <th>主文件</th>
+            <th>行为</th>
+            <th>容易误判的点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>检测到 idle</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>满足阈值后 dispatch idle trigger；如果配置要求 current task 且当前无任务，则 reset idle。</td>
+            <td>idleTime 来自系统空闲 API，但 dialog 打开后显示值由内部 poll 维护。</td>
+          </tr>
+          <tr>
+            <td>idle 初始化</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>有 current task 时先 dispatch persistent <code>[Task] Remove time spent</code> 扣回 idleTime，再清空 current task，并打开 idle dialog。</td>
+            <td>这是避免重复计时的核心，不是 dialog 结束后才扣；清空 current task 还会触发 batch flush，flush 的是 accumulator 中的累计 duration，净效果由这笔扣回 operation 和后续同步 operation 共同形成。</td>
+          </tr>
+          <tr>
+            <td>idle 结果记任务</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>已有任务用 `TaskService.addTimeSpentAndSync`；新任务创建时直接带 `timeSpent` 和 `timeSpentOnDay`。</td>
+            <td>已有任务路径会同步；新任务路径依赖任务创建 action 的持久化。</td>
+          </tr>
+          <tr>
+            <td>idle 结果记 break</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>通过 work context break time 归属，focus session 可能 complete 并显示 overlay。</td>
+            <td>break 时间不是任务 `timeSpent`。</td>
+          </tr>
+          <tr>
+            <td>tracking start → focus</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</td>
+            <td>追踪开始时，work session 可 unpause；break 可被 skip；也可按配置静默 auto-start focus session。</td>
+            <td>这一层会跳过 remote ops，避免同步回放触发 UI 联动。</td>
+          </tr>
+          <tr>
+            <td>tracking stop → focus</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</td>
+            <td>current task 从有到无时，如果 focus/break timer 正在运行，则 pause focus session 并保存 paused task。</td>
+            <td>使用 pairwise 保留前一个 task id。</td>
+          </tr>
+          <tr>
+            <td>focus/break → tracking</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</td>
+            <td>session pause 可 unset current task；resume/start/break complete/skip 可恢复 paused task。</td>
+            <td>break 是否暂停 tracking 取决于 focus config。</td>
+          </tr>
+          <tr>
+            <td>focus 完成 → metric</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts<br>src/app/features/metric/metric.service.ts</td>
+            <td>complete focus session 后记录 duration，低于 1000ms 的 session 被忽略。</td>
+            <td>metric 记录的是 focus session duration，不是任务 `timeSpent`。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Persistence / op-log 速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Action 或数据</th>
+            <th>entityType</th>
+            <th>payload 特点</th>
+            <th>capture 说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>[TimeTracking] Sync time spent</td>
+            <td>TASK</td>
+            <td>{ taskId, date, duration }</td>
+            <td class="path">src/app/op-log/capture/operation-capture.service.ts 明确按 action type 提取 entityChanges。</td>
+          </tr>
+          <tr>
+            <td>[Task] Remove time spent</td>
+            <td>TASK</td>
+            <td>{ id, date, duration }</td>
+            <td class="path">src/app/features/tasks/store/task.actions.ts 带 persistent meta；idle 初始化扣回误计时间时会作为普通 TASK Update operation 被 capture。</td>
+          </tr>
+          <tr>
+            <td>[TimeTracking] Sync sessions</td>
+            <td>TIME_TRACKING</td>
+            <td>{ contextType, contextId, date, data }</td>
+            <td>用于项目/标签维度 `s/e/b/bt` 同步。</td>
+          </tr>
+          <tr>
+            <td>[TimeTracking] Update Work Context Data</td>
+            <td>TIME_TRACKING</td>
+            <td>{ ctx, date, updates }</td>
+            <td>用于手动 worklog 编辑等更新。</td>
+          </tr>
+          <tr>
+            <td>[Metric] Log Focus Session</td>
+            <td>METRIC</td>
+            <td>{ day, duration }</td>
+            <td class="path">src/app/op-log/validation/validate-operation-payload.ts 对 metric focus session 有专门 payload 形状。</td>
+          </tr>
+          <tr>
+            <td>currentTaskId</td>
+            <td>无</td>
+            <td>本地 store 字段</td>
+            <td>不持久化，不跨设备同步。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <pre class="diagram">persistent action
+  → src/app/op-log/capture/operation-capture.meta-reducer.ts
+      pending counter + remote/deferred guard
+  → src/app/op-log/capture/operation-log.effects.ts
+      Operation payload + vector clock + validation
+  → src/app/op-log/persistence/operation-log-store.service.ts
+      SUP_OPS.ops add + SUP_OPS.vector_clock put in one transaction
+  → src/app/op-log/sync/operation-write-flush.service.ts
+      sync 前等待 pending counter 归零并重新取得写锁</pre>
+
+    <h2>故障排查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>症状</th>
+            <th>优先检查</th>
+            <th>判断问题</th>
+            <th>后续深挖</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>任务时间本地增加，但另一设备没有增加</td>
+            <td class="path">src/app/features/tasks/task.service.ts<br>src/app/op-log/capture/operation-log.effects.ts</td>
+            <td>tick 写本地成功，但 batch flush 或 persistent capture 失败。</td>
+            <td>检查 `syncTimeSpent` 是否 dispatch、op-log pending counter 是否卡住。</td>
+          </tr>
+          <tr>
+            <td>同步刚触发时少上传一笔最新时间</td>
+            <td class="path">src/app/op-log/sync/operation-write-flush.service.ts<br>src/app/op-log/sync/operation-log-sync.service.ts</td>
+            <td>上传前必须等待 operation 写入完成。</td>
+            <td>看 `flushPendingWrites()` 是否 timeout，或写锁是否被长期占用。</td>
+          </tr>
+          <tr>
+            <td>idle 后任务时间重复计算</td>
+            <td class="path">src/app/features/idle/store/idle.effects.ts</td>
+            <td>idle 初始化应先扣回 current task 的 idleTime，再由 dialog 结果重新归属。</td>
+            <td>检查 `removeTimeSpent`、`setCurrentId(null)`、`addTimeSpentAndSync` 顺序。</td>
+          </tr>
+          <tr>
+            <td>focus break 开始后任务仍在计时</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</td>
+            <td>是否配置了 break 期间暂停 tracking；effect 是否 dispatch `unsetCurrentTask`。</td>
+            <td>重点查 Pomodoro `autoStartBreakOnSessionComplete` 与 Flowtime `autoStartFlowtimeBreakOnSessionEnd`。</td>
+          </tr>
+          <tr>
+            <td>focus session 完成但 metrics 没有记录</td>
+            <td class="path">src/app/features/focus-mode/store/focus-mode.effects.ts<br>src/app/features/metric/metric.service.ts</td>
+            <td>duration 是否大于 1000ms，`completeFocusSession` 是否真正触发。</td>
+            <td>检查 metric reducer 的 `focusSessions` 追加和 persistent action capture。</td>
+          </tr>
+          <tr>
+            <td>父任务耗时和子任务耗时不一致</td>
+            <td class="path">src/app/features/tasks/store/task.reducer.util.ts</td>
+            <td>子任务增量更新父任务时日期 delta 是否正确。</td>
+            <td>对比 `timeSpentOnDay` 旧值、新值、父任务当前值。</td>
+          </tr>
+          <tr>
+            <td>移动端后台恢复后时间跳变</td>
+            <td class="path">src/app/features/android/store/android-foreground-tracking.effects.ts<br>src/app/features/ios/store/ios-background-tracking.effects.ts</td>
+            <td>wake-up tick、reset tracking anchor、flush accumulated time 的顺序是否正确。</td>
+            <td>原生 foreground service 的权威计时与 Web 层 tick 是否重复入账。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>后续 L3/L4 建议</h2>
+    <p><span class="pill">L3 reducer</span> 拆 `src/app/features/tasks/store/task.reducer.ts` 与 `src/app/features/tasks/store/task.reducer.util.ts`，专讲 `timeSpentOnDay`、remote `syncTimeSpent`、父子任务增量更新。</p>
+    <p><span class="pill">L3 effects</span> 拆 `src/app/features/focus-mode/store/focus-mode.effects.ts`，专讲 tracking/focus/break 双向同步和 race guard。</p>
+    <p><span class="pill">L4 persistence</span> 深挖 `src/app/op-log/sync/operation-write-flush.service.ts`、`src/app/op-log/capture/operation-log.effects.ts`、`src/app/op-log/persistence/operation-log-store.service.ts` 的 lock、flush、vector clock 与 storage quota 失败路径。</p>
+    <p>相邻主题：<a href="../../module-planning-time/">module-planning-time</a> 解释规划与时间模型，<a href="../../module-task-domain/">module-task-domain</a> 解释任务实体边界，<a href="../../module-op-log-sync/">module-op-log-sync</a> 和 <a href="../../slice-op-log-sync-flow/">slice-op-log-sync-flow</a> 继续展开持久化与同步。</p>
+  </article>
+</main>
+</body>
+</html>

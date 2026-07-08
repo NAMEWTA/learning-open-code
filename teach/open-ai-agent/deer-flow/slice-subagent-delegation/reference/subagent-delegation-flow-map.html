@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subagent 委派链路参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.91rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .filetree, .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); white-space:pre-wrap; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; font-size:.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Subagent 委派链路参考</h1>
+  <p class="lead">
+    L2 垂直切片速查：从 <code>task</code> 工具到 executor、worker 持久化与 workspace Subtask 卡片。短课入口：
+    <a href="../lessons/0001-flow-map.html">0001-flow-map.html</a>。相关 L1：
+    <a href="../../module-subagents/reference/subagents-overview.html">subagents 模块</a>、
+    <a href="../../module-lead-agent/reference/lead-agent-overview.html">lead agent</a>、
+    <a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">runtime persistence</a>、
+    <a href="../../module-frontend-workspace/reference/frontend-workspace-overview.html">frontend workspace</a>。
+  </p>
+
+  <h2 id="layers">分层地图</h2>
+  <div class="filetree">backend/packages/harness/deerflow/
+├── tools/builtins/task_tool.py       ← 委派入口、轮询、SSE custom 事件
+├── subagents/
+│   ├── executor.py                   ← SubagentExecutor、线程池、astream
+│   ├── status_contract.py            ← ToolMessage.additional_kwargs 契约
+│   ├── step_events.py                ← task_* → subagent.* run event
+│   ├── config.py / registry.py       ← 类型解析与内置 agent
+│   └── builtins/                     ← general-purpose、bash
+├── runtime/runs/worker.py            ← _SubagentEventBuffer 批量写 events
+└── agents/middlewares/…              ← SubagentLimitMiddleware、DurableContext
+
+contracts/subagent_status_contract.json  ← 跨语言状态枚举 fixture
+
+frontend/src/
+├── core/tasks/                       ← subtask-result、steps、context、api
+├── core/threads/hooks.ts             ← onCustomEvent(task_running)
+└── components/workspace/messages/
+    ├── message-list.tsx              ← 从 tool_calls 注册 Subtask
+    └── subtask-card.tsx              ← 卡片 UI + fetchSubtaskSteps 回填</div>
+
+  <h2 id="sequence">主路径时序</h2>
+  <div class="diagram">sequenceDiagram
+    participant M as Lead agent (LLM)
+    participant T as task_tool
+    participant E as SubagentExecutor
+    participant W as run worker
+    participant S as SSE / StreamBridge
+    participant UI as SubtaskCard
+
+    M->>T: task(description, prompt, subagent_type)
+    T->>T: get_subagent_config（失败则立即 ToolMessage）
+    T->>E: execute_async(prompt, task_id=tool_call_id)
+    T->>S: task_started
+  loop 每 5s 轮询
+    E-->>T: SubagentResult（status + ai_messages）
+    T->>S: task_running（新 AI 消息）
+    W->>W: _SubagentEventBuffer → subagent.step
+  end
+    T->>S: task_completed / task_failed / …
+    T-->>M: ToolMessage(subagent_status, …)
+    S-->>UI: task_running 累积 steps
+    UI->>UI: parseSubtaskResult → 终态 pill</div>
+
+  <h2 id="contract">状态契约（后端 → 前端）</h2>
+  <p>
+    正文 <code>ToolMessage.content</code> 仅供模型阅读；UI 与 durable ledger 读
+    <code>additional_kwargs</code>。枚举由
+    <code>contracts/subagent_status_contract.json</code> 与
+    <code>test_subagent_status_contract.py</code> 双端锁定。
+  </p>
+  <table>
+    <tr><th>subagent_status（后端）</th><th>前端 Subtask.status</th><th>典型触发</th></tr>
+    <tr><td><code>completed</code></td><td>completed</td><td>子 agent 正常结束</td></tr>
+    <tr><td><code>failed</code></td><td>failed</td><td>执行异常、未知类型、bash 禁用</td></tr>
+    <tr><td><code>cancelled</code></td><td>failed（error 保留细节）</td><td>用户取消 run / 协作式停止</td></tr>
+    <tr><td><code>timed_out</code></td><td>failed</td><td>executor 线程池超时</td></tr>
+    <tr><td><code>polling_timed_out</code></td><td>failed</td><td>task_tool 轮询兜底超时</td></tr>
+    <tr><td><code>max_turns_reached</code></td><td>failed</td><td>达 recursion_limit；可带 partial result_brief</td></tr>
+  </table>
+  <p>附加键：<code>subagent_error</code>、<code>subagent_result_brief</code>、<code>subagent_result_sha256</code>（见 status_contract.py）。</p>
+
+  <h2 id="persistence">步骤持久化与回填</h2>
+  <table>
+    <tr><th>阶段</th><th>机制</th><th>源码</th></tr>
+    <tr><td>实时</td><td><code>task_running</code> custom 事件 → hooks 追加 <code>Subtask.steps</code></td><td><code>hooks.ts::onCustomEvent</code></td></tr>
+    <tr><td>落库</td><td><code>subagent.start/step/end</code>，<code>put_batch</code>，<code>FLUSH_THRESHOLD=25</code></td><td><code>worker.py::_SubagentEventBuffer</code></td></tr>
+    <tr><td>刷新后</td><td><code>GET …/events?event_types=subagent.step&amp;task_id=</code> 分页</td><td><code>core/tasks/api.ts::fetchSubtaskSteps</code></td></tr>
+  </table>
+
+  <h2 id="errors">常见边界路径</h2>
+  <h3>配置层（未启动后台任务）</h3>
+  <ul>
+    <li><span class="tag">Unknown subagent type</span> — <code>get_subagent_config</code> 返回 None</li>
+    <li><span class="tag">bash disabled</span> — <code>subagent_type=bash</code> 且 host bash 不允许</li>
+  </ul>
+  <h3>执行层</h3>
+  <ul>
+    <li><span class="tag">Task disappeared</span> — 轮询时 <code>_background_tasks</code> 无条目</li>
+    <li><span class="tag">max_turns_reached</span> — GraphRecursionError；保留 partial result</li>
+    <li><span class="tag">polling_timed_out</span> — 请求取消并 schedule deferred cleanup</li>
+  </ul>
+  <h3>前端契约层</h3>
+  <ul>
+    <li>有 structured key 但 status 无法映射 → 故意保持 <code>in_progress</code>，提示契约漂移</li>
+    <li>历史 run 无 live steps → 展开卡片触发 <code>fetchSubtaskSteps</code></li>
+  </ul>
+
+  <h2 id="config">运行时开关</h2>
+  <table>
+    <tr><th>开关</th><th>效果</th></tr>
+    <tr><td><code>config.configurable.subagent_enabled</code></td><td>是否向 lead agent 绑定 <code>task</code> 工具</td></tr>
+    <tr><td><code>subagents.enabled</code> / custom_agents</td><td>可用 <code>subagent_type</code> 列表与超时、max_turns</td></tr>
+    <tr><td><code>MAX_CONCURRENT_SUBAGENTS=3</code></td><td>SubagentLimitMiddleware 截断超额 tool_calls</td></tr>
+  </table>
+
+  <p class="callout">
+    委派时 <code>task_tool</code> 会把 <code>user_role</code>、<code>channel_user_id</code>、
+    <code>deerflow_trace_id</code> 等父上下文传入 executor，保证子 agent 工具调用与 lead agent 同一身份归因。
+  </p>
+</main>
+</body>
+</html>

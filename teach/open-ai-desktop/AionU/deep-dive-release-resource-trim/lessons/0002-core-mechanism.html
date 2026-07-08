@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU bundled-aioncore：从准备到 afterPack 校验</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .timeline {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .timeline div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      padding: 12px 14px;
+    }
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>bundled-aioncore：从准备到 afterPack 校验</h1>
+    <p class="subtitle">学习目标：看懂 bundled-aioncore 的最小可用结构，并能解释校验器为什么检查这些文件。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析 02</span>
+      <span class="pill">预计 13 分钟</span>
+      <span class="pill">主来源：verify-bundled-aioncore-resources.js</span>
+    </div>
+  </section>
+
+  <h2>1. bundled-aioncore 是运行时契约</h2>
+  <p>AionU 的桌面包不是只有 Electron 前端。后端 runtime 被准备到 <span class="where">open-ai-desktop/AionU/resources/bundled-aioncore/&lt;platform&gt;-&lt;arch&gt;</span>，再由 <span class="where">open-ai-desktop/AionU/packages/desktop/electron-builder.yml</span> 的 <code>extraResources</code> 复制到安装包资源目录。这个目录必须同时满足“目标平台可执行”和“托管工具资源完整”两个条件。</p>
+  <div class="filetree">bundled-aioncore/&lt;platform&gt;-&lt;arch&gt;/
+├── aioncore 或 aioncore.exe        ← 后端 binary
+├── manifest.json                   ← platform、arch、version、source
+└── managed-resources/              ← 由 aioncore 准备的托管运行资源
+    ├── node/                       ← Node runtime，Windows 与非 Windows 布局不同
+    └── acp/                        ← codex-acp 与 claude-agent-acp</div>
+
+  <h2>2. 打包前准备</h2>
+  <p>准备阶段由 <span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/prepare-aioncore.js</span> 完成。完整本地 bundle 如果存在且同时包含 binary 与 <code>managed-resources</code>，会先复制并短路返回；否则才按 <code>AIONUI_BACKEND_RUN_ID</code> 指向的 Actions artifact、GitHub release asset、显式本地 binary 继续解析。只拿到 binary 还不够，脚本会执行后端命令生成 managed resources，再写入 manifest。</p>
+  <pre><code class="language-js">execFileSync(binaryPath, [
+  '--data-dir',
+  dataDir,
+  'prepare-managed-resources',
+  '--bundle-out',
+  bundleOut,
+], {
+  stdio: 'inherit',
+  env: { ...process.env, AIONUI_BUNDLED_MANAGED_RESOURCES: '' },
+});</code></pre>
+  <p>这就是“必须保留 managed-resources”的原因：它不是构建缓存，而是打包时预生成的运行资源。WebCLI 打包脚本也复用同一准备逻辑，然后把对应平台的 bundle 复制进 tarball。</p>
+
+  <h2>3. 打包后校验</h2>
+  <p>打包完成后，electron-builder 的 <code>afterPack</code> hook 会在实际 app resources 目录里调用 <span class="where">open-ai-desktop/AionU/packages/shared-scripts/src/verify-bundled-aioncore-resources.js</span>。这一步比“源目录存在”更强，因为它检查的是 electron-builder 已经复制后的结果。</p>
+  <pre><code class="language-js">function verifyBundledAioncoreResources({ resourcesDir, electronPlatformName, targetArch }) {
+  const runtimeKey = `${electronPlatformName}-${targetArch}`;
+  const baseDir = path.join(resourcesDir, 'bundled-aioncore', runtimeKey);
+  const checked = [];
+  const missing = [];
+
+  requireRelativePath(baseDir, runtimeKey, [backendBinaryName(electronPlatformName)], checked, missing);
+  verifyBundleManifest(baseDir, runtimeKey, electronPlatformName, targetArch, checked, missing);
+  requireRelativeDirectory(baseDir, runtimeKey, ['managed-resources'], checked, missing);
+  requireManagedNode(baseDir, runtimeKey, electronPlatformName, checked, missing);
+  requireManagedAcpTool(baseDir, runtimeKey, electronPlatformName, 'codex-acp', checked, missing);
+  requireManagedAcpTool(baseDir, runtimeKey, electronPlatformName, 'claude-agent-acp', checked, missing);
+  return { runtimeKey, checked, missing };
+}</code></pre>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果某个 Windows 包里有 <code>aioncore.exe</code>，但缺少 <code>managed-resources/acp/codex-acp/.../manifest.json</code>，它应该通过 afterPack 吗？为什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>不应该。校验器不仅检查后端 binary，还会枚举 managed ACP 工具版本，要求每个工具在目标 runtimeKey 下有 <code>manifest.json</code>、manifest 指向的 entrypoint、<code>package.json</code>、<code>package-lock.json</code> 和 <code>node_modules</code>。Windows 对 codex-acp 与 claude-agent-acp 还会额外检查平台可执行文件。</p>
+    </details>
+  </div>
+  <p class="muted">继续学习：下一节读 <a href="0003-verification-and-tests.html">release-assets 脚本和测试证据</a>。关联 L1 可回看 <a href="../../module-build-release/reference/build-release-overview.html">构建发布模块参考</a>。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>REST/WS adapter：错误、事件与 E2E</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>错误、事件回流和 E2E helper 如何一起守住 contract</h1>
+    <p class="subtitle">学习目标：15 分钟内掌握 REST/WS adapter 的非成功路径：结构化错误、实时事件和测试复用。</p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：httpBridge.ts / adapter/main.ts / bridge/invoke.ts</span>
+    </div>
+  </section>
+
+  <p class="muted">上一课：<a href="./0002-provider-like-invoke.html">provider-like invoke</a>。参考页：<a href="../reference/adapter-rest-ws-notes.html#error-events">错误与事件速查</a>。关联切片：<a href="../../slice-conversation-send/reference/conversation-send-flow-map.html">发送会话消息</a>、<a href="../../slice-tool-permission/reference/tool-permission-flow-map.html">工具确认</a>、<a href="../../slice-team-run/reference/team-run-flow-map.html">Team 运行</a>。</p>
+
+  <h2>1. HTTP 错误必须保留机器可判定字段</h2>
+  <p>迁到 REST 后，失败不再是传统 IPC callback 里的任意异常。<code>httpRequest</code> 会读取非 2xx 响应体，优先按 JSON 解析，再抛 <code>BackendHttpError</code>。这个错误保留 <code>status</code>、<code>code</code>、<code>backendMessage</code>、<code>details</code> 和原始 <code>body</code>，让 renderer 不必解析字符串。源码里已经有实际消费：归档会话按 <code>CONVERSATION_ARCHIVED</code> 分支，预览错误按 <code>PATH_OUTSIDE_SANDBOX/NOT_FOUND/TIMEOUT</code> 分类，ACP 发送失败会把上游和 team assistant 错误映射成不同用户提示。</p>
+  <p>这也是 adapter 相比裸 <code>fetch</code> 的价值：错误对象成为 contract 的一部分。后端可以增加新的错误码，renderer 可以局部补分类器；如果只把错误压成字符串，UI 只能做脆弱的 substring 判断，国际化、遥测和重试策略都会变得不可靠。</p>
+
+  <pre><code class="language-typescript">if (!response.ok) {
+  const rawText = await response.text().catch(() =&gt; '');
+  let errorBody: unknown;
+  try {
+    errorBody = JSON.parse(rawText);
+  } catch {
+    errorBody = rawText;
+  }
+  if (options?.silentStatuses?.includes(response.status)) {
+    console.debug(`[httpBridge] ${method} ${path} → ${response.status} (silenced)`, errorBody);
+  } else {
+    console.error(`[httpBridge] ${method} ${path} → ${response.status}`, errorBody);
+  }
+  throw new BackendHttpError({ method, path, status: response.status, body: errorBody });
+}</code></pre>
+
+  <h2>2. 事件回流分清两条通道</h2>
+  <p>REST 适合命令和查询，但 conversation stream、confirmation、runtime status、cron 触发、team run、extension 状态都需要异步回流。<code>httpBridge.ts</code> 为 renderer 维护一个 WS singleton：订阅时 <code>ensureWs()</code>，收到消息后取 <code>name/event</code> 和 <code>data/payload</code> 分派给 <code>wsEmitter</code> 注册的 listener；断线后指数退避，并在重连时派发 <code>realtime.reconnected</code>。这条通道面向 backend <code>/ws</code>。另一条是 <code>adapter/main.ts</code> 的传统 bridge 事件：main 把 <code>bridge.adapter.emit</code> 序列化后发给所有 BrowserWindow，<code>emit</code> 末尾还会调用 <code>broadcastToAll(name, data)</code> 转发给 WS 客户端。排查时不要把 backend 实时事件和 Electron main 本地事件混为一谈。</p>
+  <p>还有一个相邻边界：无 preload 的 WebUI 浏览器运行时也会连接同源 <code>/ws</code>，但它服务的是 browser runtime bridge，不等同于 <code>httpBridge.ts</code> 的业务事件 singleton。该分支带发送队列、登录后重连、ping/pong 和认证过期停止重连；细节放在参考页，避免本节把三条通道揉在一起。</p>
+  <p>判断事件归属的办法也很直接：如果事件名来自 <code>message.stream</code>、<code>turn.completed</code>、<code>team.runUpdated</code>、<code>cron.job-executed</code> 这类业务状态变化，优先查 backend WS 和 <code>wsEmitter</code> 订阅；如果事件来自窗口、主题、通知或本地 bridge provider，则查 <code>adapter/main.ts</code> 到 BrowserWindow 的广播链。</p>
+
+  <pre><code class="language-typescript">export function wsEmitter&lt;Params = undefined&gt;(eventName: string): EmitterLike&lt;Params&gt; {
+  return {
+    on: (callback: (params: Params) =&gt; void) =&gt; {
+      ensureWs();
+      if (!wsListeners.has(eventName)) {
+        wsListeners.set(eventName, new Set());
+      }
+      const cb = callback as WsCallback;
+      wsListeners.get(eventName)!.add(cb);
+      return () =&gt; {
+        wsListeners.get(eventName)?.delete(cb);
+      };
+    },
+    emit: (() =&gt; {}) as EmitterLike&lt;Params&gt;['emit'],
+  };
+}</code></pre>
+
+  <h2>3. E2E helper 复用同一条网络路径</h2>
+  <p>E2E 的重点不是在 Node 进程里伪造 HTTP，而是在 Playwright 的 renderer context 中读取 <code>window.__backendPort</code> 再 fetch backend。测试 helper 明确这么做是为了使用和 app 相同的端口、base URL、响应解包规则；<code>helpers/bridge/invoke.ts</code> 则把 legacy dotted key 先映射到 HTTP route，找不到才回退到旧 <code>subscribe-*</code> IPC 协议。这证明范围也要说清：这些 helper 能证明 renderer 可见网络路径、端口注入、route mapping 和响应 shape；它们不能单独证明 backend 内部业务逻辑一定正确，仍要结合具体 feature test 的 UI 断言和后端状态断言。</p>
+  <p>因此测试失败时不要只看断言文本。先看 helper 走的是 HTTP route 还是 fallback IPC；再看测试侧映射是否和生产 <code>ipcBridge.ts</code> 同步；最后看响应转换是否把 backend DTO 修成测试期望的旧前端形状。这个顺序通常比直接改等待时间更有效。</p>
+
+  <div class="diagram"><pre><code class="language-text">E2E 调用
+  -> page.evaluate()
+  -> window.__backendPort
+  -> fetch(http://127.0.0.1:{port}/api/...)
+  -> 解包 { data }
+  -> 必要时 RESPONSE_MAPPERS 修回旧 camelCase contract
+
+fallback
+  -> electronAPI.emit('subscribe-{key}')
+  -> electronAPI.on('subscribe.callback-{key}{id}')</code></pre></div>
+
+  <h2>4. 出问题时先定位 contract 断点</h2>
+  <p>HTTP 失败先看错误体是否有 <code>code/error/details</code>，再看 renderer 是否用 <code>isBackendHttpError</code> 分流。流式 UI 不更新时，先看 backend 是否发出正确事件名，再看 <code>wsEmitter</code> 订阅名和 mapper。E2E 间歇失败时，先确认测试是否在 renderer context 取端口，而不是宿主侧硬编码端口；再确认 legacy key 是否已加入 <code>HTTP_ROUTES</code>，否则它会走旧 IPC fallback。</p>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>性能 / 可靠性特征</th><th>改进方向</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>HTTP request</td><td>每次调用直发 <code>fetch</code>，没有内建 retry、abort timeout 或请求去重；失败依赖结构化错误让调用方分流。</td><td>为长耗时 route 增加显式超时和可取消信号。</td></tr>
+      <tr><td>backend WS</td><td>单例连接减少重复订阅；断线指数退避，重连后派发 <code>realtime.reconnected</code>。</td><td>补重连后的状态刷新策略和订阅健康指标。</td></tr>
+      <tr><td>main bridge</td><td>传统事件广播有 50 MB payload 上限，超限会发 <code>bridge:error</code> 而不是阻塞 main process。</td><td>大 payload 改走文件、分页或 backend 查询。</td></tr>
+      <tr><td>E2E route map</td><td>只覆盖测试当前需要的 legacy key，不是全量 contract 清单。</td><td>增加 route drift 检测或集中 contract 校验。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="quiz">
+    <p><strong>检索练习：</strong>为什么 E2E helper 不直接从 Node 测试进程请求 backend？再用 2 分钟在源码里找一个仍走旧 IPC fallback 的能力，判断它是否依赖 Electron main 副作用。</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>因为 adapter contract 的一部分就是 renderer 运行时如何拿端口、拼 base URL、解包响应和处理 route mapping。放在 <code>page.evaluate()</code> 里请求，才能验证测试路径和 app 路径一致；Node 侧请求只能证明 backend 某端口可访问。</p>
+    </details>
+  </div>
+
+  <p class="muted">推荐主来源：<code>packages/desktop/src/common/adapter/httpBridge.ts</code> 的错误与 WS 段，以及 <code>tests/e2e/helpers/bridge/invoke.ts</code>。继续追问 agent：请拿一个失败的 E2E 日志，按 HTTP、WS、fallback 三类断点帮我定位。</p>
+</main>
+</body>
+</html>

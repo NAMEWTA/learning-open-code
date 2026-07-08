@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 插件系统、插件 API 与运行时加载</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 模块总览 · 预计 15 分钟 · 目标：能把插件问题分到发现、运行时、桌面能力或 issue provider 扩展</p>
+    <h1>插件系统、插件 API 与运行时加载</h1>
+    <p class="lead">一句话：插件系统让外部代码通过受控 API 扩展 super-productivity 的任务、UI、hooks、OAuth、Node 执行和 issue provider 能力。它连接 <a href="../../00-overview/lessons/0001-project-map.html">L0 全局地图</a>、<a href="../../module-angular-app-shell/lessons/0001-angular-app-shell-module-tour.html">Angular L1</a>、<a href="../../module-electron-host/lessons/0001-electron-host-module-tour.html">Electron L1</a> 和 <a href="../../module-issue-integrations/lessons/0001-issue-integrations-module-tour.html">Issue L1</a>，但边界各不相同。</p>
+
+    <h2>1. 先分清两条初始化线</h2>
+    <p><span class="where">src/main.ts</span> 里有 <code>PLUGIN_INITIALIZER_PROVIDER</code>，但它只是把 <code>'PLUGIN_INITIALIZER'</code> token 放进 Angular DI provider 表；当前插件运行时并不是靠 Angular <code>APP_INITIALIZER</code> 执行。真正链路在 <span class="where">src/app/core/startup/startup.service.ts</span> 的 _initPlugins：根组件触发 <code>StartupService.init()</code> 后，延迟任务等待初始数据加载和当前同步结束，再调用 <code>PluginService.initializePlugins()</code>。</p>
+    <pre class="diagram">Angular provider token
+  src/main.ts → PLUGIN_INITIALIZER_PROVIDER
+  作用：DI 接线点
+
+runtime plugin 初始化
+  AppComponent → StartupService.init()
+  → deferred init → _initPlugins()
+  → wait data init + sync done
+  → PluginService.initializePlugins()</pre>
+
+    <h2>2. 发现、加载、执行不是一回事</h2>
+    <p><code>PluginService.initializePlugins()</code> 先发现内置插件和上传插件，只读取 manifest、icon、缓存元数据和 enabled 状态；随后只激活 enabled 插件。激活时才由 <code>PluginLoaderService</code> 拉取插件 manifest、plugin.js、可选 index.html、icon 与 i18n，再交给 <code>PluginRunner</code> 用 <code>new Function</code> 执行代码。插件拿到的不是 Angular service，而是 <code>PluginAPI</code>；它再通过 <code>PluginBridgeService</code> 访问任务、项目、标签、UI、同步、OAuth、secret 和白名单 NgRx action。</p>
+
+    <h2>3. 桌面能力要回主进程</h2>
+    <p>OAuth 和 Node 执行最容易误判。OAuth 的 token 管理由 renderer 服务协调，但 Electron 桌面上 loopback server、系统浏览器打开和回调转发在 <code>electron/plugin-oauth.ts</code>。Node 执行更严格：preload 只暴露一次性 <code>consumePluginNodeExecutionApi()</code>，renderer 的 <code>PluginBridgeService</code> 先取得主进程 grant token，真正脚本执行在 <code>electron/plugin-node-executor.ts</code>，并绑定 webContents、native consent dialog、session grant 和可选上传插件持久 consent。</p>
+    <pre class="diagram">plugin code
+  → PluginAPI.startOAuthFlow() / executeNodeScript()
+  → PluginBridgeService / PluginOAuthBridgeService
+  → window.ea controlled bridge
+  → Electron main process
+  → loopback OAuth server or Node executor</pre>
+
+    <h2>4. Issue provider 是适配层</h2>
+    <p>插件扩展外部工作项时，不会绕过 Issue L1 的通用链路。插件调用 <code>registerIssueProvider()</code> 后，<code>PluginIssueProviderRegistryService</code> 生成 <code>plugin:&lt;id&gt;</code> 或迁移用 key；<code>PluginIssueProviderAdapterService</code> 把 definition 适配成 <code>IssueServiceInterface</code>，让搜索、导入、刷新继续走 issue feature。桥接阶段只在 definition 提供 <code>createIssue</code>、<code>deleteIssue</code> 或 <code>fieldMappings + updateIssue</code> 时立即注册 two-way sync adapter；Issue L1 的 <code>IssueSyncAdapterResolverService</code> 还会为只有 <code>updateIssue</code> 的 provider 按需懒创建 adapter，因此排查时要分清“是否有 adapter”和“是否有可同步字段”。</p>
+    <p>暂停 60 秒判断：一个 Google Calendar 插件无法完成授权，另一个 GitHub issue 插件能搜索但不会写回本地任务改动。你先查哪两条链路？</p>
+    <div class="answer">参考答案：授权失败先查 <code>PluginOAuthBridgeService</code> → <code>PluginOAuthService</code> → Electron <code>plugin-oauth.ts</code> 或平台弹窗路径；不要先查 issue polling。能搜索但不写回，先看插件 definition 是否声明可映射的 <code>fieldMappings</code>，再看是否有 <code>updateIssue</code> 支持字段推送；如果只是 calendar/event 类直接写回，<code>IssueSyncAdapterResolverService</code> 可能会为 <code>updateIssue</code>-only provider 懒创建 adapter。完整入口清单见 <a href="../reference/plugin-system-overview.html">插件系统参考</a>。主要来源：<code>src/app/core/startup/startup.service.ts</code>、<code>src/app/plugins/plugin.service.ts</code>、<code>src/app/plugins/plugin-bridge.service.ts</code>。如果某个边界仍不清楚，直接向 agent 追问下一跳源码。</div>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 对话检索注入流程地图</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:1040px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;margin:0 0 8px}
+    h2{font-size:21px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    a{color:#2563eb;text-decoration:none}
+    .lead{font-size:17px;color:#374151}
+    .meta{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 22px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:4px 10px;background:#fafafa;font-size:13px}
+    .flow{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;margin:14px 0 18px}
+    .step{border:1px solid #d8dee4;border-radius:8px;padding:10px;background:#fbfbfb;min-height:86px}
+    .step strong{display:block;margin-bottom:5px}
+    .xrefs{border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;padding:10px 14px;margin:16px 0}
+    .xrefs a{display:inline-block;margin:3px 10px 3px 0}
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+    .panel{border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px;background:#fcfcfd}
+    .sequence{border:1px solid #e5e7eb;border-radius:8px;background:#fbfbfb;padding:12px 14px;margin:14px 0;font-family:"SF Mono",Consolas,monospace;font-size:13px;line-height:1.8}
+    .practice{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:22px 0}
+    @media (max-width:820px){.flow,.split{grid-template-columns:1fr}.step{min-height:auto}}
+  </style>
+</head>
+<body>
+  <h1>RAG 对话检索注入流程地图</h1>
+  <p class="lead">这一课只做一件事：从一次 Agent 对话进入 RAG 判断开始，画清检索如何被触发、如何经过向量/BM25、融合、rerank 和 finalize，最后怎样进入模型上下文。学完后，你应该能判断问题卡在调用模式、检索 pipeline，还是 prompt/tool 注入。</p>
+  <div class="meta">
+    <span class="pill">学习目标：画出检索注入主链路</span>
+    <span class="pill">预计 14 分钟</span>
+    <span class="pill">主来源：<code>RagHandler.java</code></span>
+    <span class="pill"><a href="../reference/rag-retrieval-flow-map.html">检索注入参考图谱</a></span>
+  </div>
+  <nav class="xrefs" aria-label="相关主题">
+    <strong>相关主题：</strong>
+    <a href="../../module-rag/lessons/0001-rag-module-tour.html">RAG 模块总览</a>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 责任链</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Agent Client</a>
+    <a href="../../module-persistence/lessons/0001-persistence-module-tour.html">持久化模块</a>
+    <a href="../../module-models/lessons/0001-models-module-tour.html">模型模块</a>
+  </nav>
+
+  <h2>1. 对话先进入 RAG 判断</h2>
+  <p><code>AgentChatService.chat</code> 创建上下文后交给有序责任链。<code>SystemPromptHandler</code> 先把 Agent 指令放进 <code>systemPrompt</code>，随后 <code>RagHandler</code> 检查 <code>ragEnabled</code>、<code>ragIds</code> 和 <code>ragCallMode</code>。这里的核心判断只有两个：<code>FORCED</code> 直接服务端检索，<code>SMART</code> 只写入可用知识库说明，让 Client 端模型自己决定是否调用工具。</p>
+  <div class="flow" aria-label="RAG 判断流程图">
+    <div class="step"><strong>Agent 对话</strong><code>AgentChatService.chat</code></div>
+    <div class="step"><strong>提示词基础</strong><code>SystemPromptHandler</code></div>
+    <div class="step"><strong>RAG 开关</strong><code>ragEnabled</code> 与 <code>ragIds</code></div>
+    <div class="step"><strong>模式分流</strong><code>RagCallModeEnum</code></div>
+    <div class="step"><strong>LLM 分发</strong><code>LlmCallHandler</code></div>
+  </div>
+
+  <h2>2. 强制模式立即检索</h2>
+  <p>强制调用时，<code>RagHandler.parallelSearch</code> 用虚拟线程并行遍历绑定知识库。每个知识库都会构造 <code>RagSearchRequestDTO</code>：<code>ragId</code> 来自 Agent 绑定列表，<code>query</code> 直接使用本轮用户消息 <code>ctx.getContent()</code>。随后进入统一的 <code>RagSearchService.search</code>。</p>
+  <div class="flow" aria-label="检索 pipeline 流程图">
+    <div class="step"><strong>配置</strong><code>ConfigResolveHandler</code></div>
+    <div class="step"><strong>向量召回</strong><code>VectorSearchHandler</code></div>
+    <div class="step"><strong>BM25 召回</strong><code>Bm25SearchHandler</code></div>
+    <div class="step"><strong>融合/重排</strong><code>HybridFusionHandler</code><br><code>RerankHandler</code></div>
+    <div class="step"><strong>补全输出</strong><code>FinalizeHandler</code></div>
+  </div>
+  <p><code>QueryRewriteHandler</code> 当前是空实现，所以不要把问题改写当成已生效能力。向量检索使用索引名 <code>rag_{ragId}</code>，BM25 只有在 <code>searchEngineEnable=true</code> 时执行。BM25 有结果才触发融合；rerank 只有 <code>rerankEnabled=true</code> 且存在模型 ID 才调用模型。最终 <code>FinalizeHandler</code> 补齐 chunk 内容、文档名、邻近切片，并做 lost-in-the-middle 重排。真实源码片段见 <a href="../reference/rag-retrieval-flow-map.html#source-snippets">参考图谱的源码片段</a>。</p>
+
+  <h2>3. 注入有两条路径</h2>
+  <div class="split">
+    <div class="panel">
+      <strong>强制调用</strong>
+      <p><code>RagHandler</code> 把检索结果格式化成编号资料，追加到 <code>systemPrompt</code> 的 <code>Knowledge Base Reference</code> 段落。<code>LlmCallHandler</code> 把它放进 <code>ChatDispatchRequest.systemPrompt</code>，Client 的 <code>DefaultPromptFactory</code> 再转成 <code>SystemMessage</code>。</p>
+    </div>
+    <div class="panel">
+      <strong>智能调用</strong>
+      <p><code>RagHandler</code> 只追加 <code>Available Knowledge Bases</code>。Client 的 <code>ClientRagToolResolver</code> 在非强制模式注册 <code>RagSearchTool</code>，模型调用 <code>rag_search</code> 后，经 <code>RpcClient.searchRag</code> 回到 <code>RagSearchCallbackHandler</code>。</p>
+    </div>
+  </div>
+  <div class="sequence" aria-label="智能调用时序图">
+    Server: <code>RagHandler.buildSmartPrompt</code> 写知识库清单<br>
+    Server: <code>LlmCallHandler</code> 分发 <code>ChatDispatchRequest</code><br>
+    Client: <code>ToolRuntime</code> 解析并注册 <code>rag_search</code><br>
+    Model: 按需调用 <code>rag_search</code>，工具 schema 参数是 <code>ragId</code> 与 <code>queryQuestion</code><br>
+    Client: <code>RagSearchTool</code> 调用 <code>RpcClient.searchRag</code><br>
+    Server: <code>RagSearchCallbackHandler</code> 执行同一套检索 pipeline<br>
+    Model: 工具返回编号资料，继续生成回答
+  </div>
+
+  <h2>4. 快速练习</h2>
+  <div class="practice">
+    <strong>暂停回忆：</strong>不看上面的图，判断三件事：<code>FORCED</code> 模式会不会在 Client 注册 <code>rag_search</code>？智能调用的工具参数名是什么？如果 BM25 没有结果，是否还会执行融合？<br>
+    <strong>参考答案：</strong><code>FORCED</code> 不注册工具，因为服务端已经预检索并写入 <code>systemPrompt</code>；智能调用的自然语言提示可以称为 query，但 Java 工具 schema 的参数名是 <code>queryQuestion</code>，工具会 trim 后回调 Server；BM25 结果为空时 <code>HybridFusionHandler</code> 直接跳过，最终主要沿用向量结果。
+  </div>
+  <p>主要推荐来源：先读 <code>RagHandler.java</code> 和 <code>ClientRagToolResolver.java</code>，再对照 <a href="../reference/rag-retrieval-flow-map.html">检索注入参考图谱</a> 查 pipeline、DTO、配置字段和排障 checklist。遇到配置空指针、rerank 降级或工具不触发时，继续向 agent 追问对应源码段。</p>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>15 分钟摸清 subagent 委派链路</title>
+    <link rel="stylesheet" href="../assets/slice-lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>15 分钟摸清 subagent 委派链路</h1>
+        <p class="lead">
+          本课只教一个目标：当 lead agent 调用 <code>task</code> 工具把子任务委派出去时，你能从 workspace 里的
+          Subtask 卡片一路追到后台线程、SSE 事件与结构化状态契约，并说出数据在哪一层落地。
+        </p>
+        <div class="meta">
+          <span class="pill">L2 垂直切片</span>
+          <span class="pill">入口：task 工具调用</span>
+          <span class="pill">参考：<a href="../reference/subagent-delegation-flow-map.html">完整链路图</a></span>
+        </div>
+
+        <h2>1. 触发点：lead agent 选中 task 工具</h2>
+        <p>
+          用户在聊天里发出复杂请求后，lead agent（<code>subagent_enabled=true</code> 时）可绑定
+          <span class="where">task_tool.py</span> 定义的 <code>task</code> 工具。模型一次调用携带
+          <code>description</code>、<code>prompt</code>、<code>subagent_type</code>（如
+          <code>general-purpose</code> 或 <code>bash</code>）。前端
+          <span class="where">message-list.tsx</span> 扫描 AIMessage 的 <code>tool_calls</code>，为每个
+          <code>task</code> 预注册一条 <code>Subtask</code>，状态先标为 <code>in_progress</code>。
+        </p>
+        <pre>用户消息 → lead agent 推理
+  → tool_call: task(description, prompt, subagent_type)
+  → message-list 创建 Subtask(id=tool_call_id)
+  → SubtaskCard 渲染「执行中」</pre>
+
+        <h2>2. 后端主路径：配置 → 执行器 → 轮询 → SSE</h2>
+        <p>
+          <code>task_tool</code> 先解析 subagent 配置（未知类型直接返回
+          <code>status=failed</code> 的 ToolMessage，不启动后台任务）。通过后创建
+          <code>SubagentExecutor</code>，用 <code>tool_call_id</code> 作为 <code>task_id</code> 调用
+          <code>execute_async</code> 丢进线程池。工具本体不阻塞事件循环，而是每 5 秒轮询
+          <code>get_background_task_result</code>，并通过 <code>get_stream_writer()</code> 推送
+          <code>task_started</code> / <code>task_running</code> / 终态事件。终态时
+          <code>_task_result_command</code> 写入带 <code>subagent_status</code> 元数据的 ToolMessage。
+        </p>
+        <pre>task_tool
+  → get_subagent_config + SubagentExecutor.execute_async
+  → 后台线程 agent.astream（executor.py）
+  → 轮询 SubagentResult.status
+  → writer: task_running（新步骤消息，含 AI 与 ToolMessage）
+  → 终态: task_completed / task_failed / …
+  → ToolMessage(additional_kwargs.subagent_status)</pre>
+        <p>
+          同一 run 的 <span class="where">worker.py</span> 里
+          <code>_SubagentEventBuffer</code> 把 custom 事件批量写成
+          <code>subagent.start</code> / <code>subagent.step</code> / <code>subagent.end</code>，供刷新后按
+          <code>task_id</code> 回填步骤。详见
+          <a href="../reference/subagent-delegation-flow-map.html#persistence">参考 · 持久化</a>。
+        </p>
+
+        <h2>3. 前端收尾：SSE 步骤 + 结构化结果解析</h2>
+        <p>
+          <span class="where">hooks.ts</span> 的 <code>onCustomEvent</code> 监听
+          <code>task_running</code>，把每条子 agent 消息追加到 <code>Subtask.steps</code>（不覆盖）。
+          当对应 ToolMessage 到达，<code>parseSubtaskResult</code>（
+          <span class="where">subtask-result.ts</span>）只读
+          <code>additional_kwargs.subagent_status</code>，映射为卡片三态
+          <code>completed</code> / <code>failed</code> / <code>in_progress</code>。用户展开历史卡片时，
+          <code>SubtaskCard</code> 可调用 <code>fetchSubtaskSteps</code> 从 events API 补全步骤。
+        </p>
+
+        <h2>练习：未知 subagent 类型算哪一层失败？</h2>
+        <div class="callout">
+          <p>
+            Network 里看到 <code>task</code> 的 ToolMessage 正文含
+            <code>Unknown subagent type 'researcher'</code>，但 Subtask 卡片立刻变红。这是前端 bug 还是预期行为？
+          </p>
+        </div>
+        <div class="answer">
+          <p>
+            <strong>预期行为。</strong><code>task_tool</code> 在配置校验阶段就返回
+            <code>_task_result_command(status="failed")</code>，从未启动后台线程；前端收到 ToolMessage 后按
+            <code>subagent_status=failed</code> 标记终态。应检查 <code>config.yaml</code> 的
+            <code>subagents.custom_agents</code> 或内置类型名，而不是查 executor 线程池。
+          </p>
+        </div>
+
+        <p>
+          主要来源：本地
+          <span class="where">open-ai-agent/deer-flow/backend/packages/harness/deerflow/tools/builtins/task_tool.py</span>
+          与
+          <span class="where">open-ai-agent/deer-flow/frontend/src/core/tasks/subtask-result.ts</span>。想继续深挖可让
+          agent 讲 <code>max_turns_reached</code> 的部分结果语义，或对照
+          <a href="../../module-subagents/lessons/0001-subagents-module-tour.html">Subagent 模块导览</a>、
+          <a href="../../slice-chat-streaming-run/lessons/0001-flow-map.html">聊天流式执行切片</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

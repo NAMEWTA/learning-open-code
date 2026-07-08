@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 开始追踪到时间记录路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断一次追踪动作会改哪些状态、哪些状态会进入 op-log</p>
+    <h1>从“开始追踪”到时间记录的主路径</h1>
+    <p class="lead">这条链路的核心判断是：<strong>当前追踪任务是本地 UI 状态，累计时间才是可同步事实</strong>。用户点击开始后，应用先只设置当前任务；每个 tick 才把 wall-clock delta 写进任务耗时和 work context；停止、5 分钟间隔、后台恢复或 idle 修正会把累计时间 flush 成 persistent action。</p>
+
+    <h2>1. 路径图</h2>
+    <pre class="diagram">任务行按钮
+  src/app/features/tasks/task/task-hover-controls/task-hover-controls.component.html
+    ↓ start/pause 调用
+任务组件
+  src/app/features/tasks/task/task.component.ts
+    ↓ setCurrentId() / pauseCurrent()
+任务状态
+  src/app/features/tasks/store/task.reducer.ts
+    ├─ currentTaskId：本地当前任务
+    └─ addTimeSpent：写 task.timeSpentOnDay 与 task.timeSpent
+    ↓ 每秒 wall-clock tick
+追踪服务
+  src/app/features/tasks/task.service.ts
+    ├─ 立即 dispatch Add time spent
+    ├─ batch 累积 syncTimeSpent
+    └─ 标记 PROJECT / TAG / TODAY_TAG 的 timeTracking context
+    ↓ 5 分钟或 currentTaskId 改变
+persistent actions
+  src/app/features/time-tracking/store/time-tracking.actions.ts
+    ├─ [TimeTracking] Sync time spent        → TASK operation
+    └─ [TimeTracking] Sync sessions          → TIME_TRACKING operation
+    ↓ capture + persist
+op-log
+  src/app/op-log/capture/operation-log.effects.ts
+  src/app/op-log/persistence/operation-log-store.service.ts</pre>
+    <p>注意两条并行事实：任务时间来自 <code>task.timeSpentOnDay[date]</code> 的毫秒累加；work context 时间来自 <code>timeTracking.project/tag[contextId][date]</code> 的 <code>s/e/b/bt</code> 摘要。后者的 <code>s</code> 和 <code>e</code> 在 <code>src/app/features/time-tracking/store/time-tracking.reducer.ts</code> 中按分钟取整，服务于 worklog 起止时间展示。</p>
+
+    <h2>2. 四个关键判断</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>发生了什么</th>
+            <th>立即改状态吗</th>
+            <th>立即进 op-log 吗</th>
+            <th>判断依据</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>点击任务行 play/pause</td>
+            <td>改 <code>currentTaskId</code> 或清空它</td>
+            <td>不会</td>
+            <td><span class="path">src/app/features/tasks/store/task.actions.ts</span> 的 current task action 没有 persistent meta。</td>
+          </tr>
+          <tr>
+            <td>每秒 tick 命中当前任务</td>
+            <td>会，累加 <code>task.timeSpentOnDay</code> 和 <code>task.timeSpent</code></td>
+            <td>不会马上进；先进入 batch accumulator</td>
+            <td><span class="path">src/app/features/tasks/task.service.ts</span> 先 dispatch Add time spent，再累积等待 flush。</td>
+          </tr>
+          <tr>
+            <td>5 分钟到、停止追踪、切任务或后台恢复</td>
+            <td>本地时间已经在 tick 时更新</td>
+            <td>会，dispatch <code>[TimeTracking] Sync time spent</code> 和可能的 <code>[TimeTracking] Sync sessions</code></td>
+            <td><span class="path">src/app/features/tasks/task.service.ts</span> 的 flush 把累计毫秒和 context 摘要转换为 persistent action。</td>
+          </tr>
+          <tr>
+            <td>idle 初始化先扣回误计时间</td>
+            <td>会，从当前任务扣掉 idleTime，再清空 current task</td>
+            <td>会，先 dispatch persistent <code>[Task] Remove time spent</code>，随后 current task 变化触发 batch flush</td>
+            <td><span class="path">src/app/features/idle/store/idle.effects.ts</span> 先调用 <code>TaskService.removeTimeSpent()</code>，再调用 <code>setCurrentId(null)</code>。</td>
+          </tr>
+          <tr>
+            <td>远端同步回放 <code>[TimeTracking] Sync time spent</code></td>
+            <td>会，只在 remote action 上累加任务时间</td>
+            <td>不会二次写本地 op-log</td>
+            <td><span class="path">src/app/features/tasks/store/task.reducer.ts</span> 过滤本地 sync action；<span class="path">src/app/op-log/capture/operation-capture.meta-reducer.ts</span> 过滤 remote action。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. idle、focus、metric 怎么插进来</h2>
+    <p>Idle 不是另一个计时器，而是修正已经发生的计时。<span class="path">src/app/features/idle/store/idle.effects.ts</span> 检测到空闲后，如果有 current task，会先按 idleTime 从任务中扣回，这一步是带 persistent meta 的 <code>[Task] Remove time spent</code> operation；然后才清空 current task 并打开 dialog，清空动作会让 batch accumulator flush 其中已累计的 duration。最终净效果由扣回 operation 和后续 <code>[TimeTracking] Sync time spent</code> operation 共同形成。用户确认后，空闲时间要么通过任务路径重新记到某个 task，要么作为 break 写到 work context。这样做能避免“离开电脑的时间既算任务又算休息”。</p>
+    <p>Focus mode 与 tracking 是双向同步。<span class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</span> 会在追踪开始时恢复或自动启动 session，在追踪停止时 pause session；session pause/resume/start/break 也可能反向清空或恢复 current task。完成 focus session 后，<span class="path">src/app/features/metric/metric.service.ts</span> 会记录 focus session duration，<span class="path">src/app/features/metric/store/metric.actions.ts</span> 让它作为 METRIC operation 进入 op-log。</p>
+
+    <h2>4. 暂停 60 秒判断</h2>
+    <p>场景：用户追踪任务 A 30 秒后离开电脑 4 分钟；idle dialog 弹出，用户选择“把这 4 分钟记为 break”，随后回到任务 A。请暂停 60 秒，判断下面三件事：</p>
+    <ol>
+      <li>离开前那 30 秒最后会不会进 op-log？</li>
+      <li>离开电脑的 4 分钟会不会留在任务 A 的 <code>timeSpent</code> 里？</li>
+      <li>focus session 如果当时在运行，会发生什么方向的联动？</li>
+    </ol>
+    <div class="answer">
+      <strong>参考答案：</strong>1. 会。tick 已经更新本地任务时间，idle 初始化先生成 persistent <code>[Task] Remove time spent</code> 扣回误计 idleTime；随后清空 current task 触发 batch flush，生成 <code>[TimeTracking] Sync time spent</code>。2. 不应该留在任务 A：idle 初始化会从当前任务扣回 idleTime，用户选 break 后通过 work context 的 break 路径归属。3. <span class="path">src/app/features/focus-mode/store/focus-mode.effects.ts</span> 监听 <code>openIdleDialog</code> 并 pause focus session；如果用户把 idle 归为 break，idle 结果路径会完成或展示 focus overlay。
+    </div>
+    <p>主要来源：<a href="../reference/time-tracking-flow-reference.html">全链路参考表</a>。相邻主题可继续读 <a href="../../module-planning-time/">规划与时间模块</a>、<a href="../../module-task-domain/">任务领域模块</a> 和 <a href="../../slice-op-log-sync-flow/">op-log 同步切片</a>。如果某一步不清楚，可以向 agent 追问：“请从指定 action 反查它在哪些 reducer/effect 中被处理”。</p>
+  </article>
+</main>
+</body>
+</html>

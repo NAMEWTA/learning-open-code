@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · manifest 扫描与加载决策：双层去重 + 10 步解析 + accessLevel 矩阵</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · manifest 扫描与加载决策：双层去重 + 10 步解析 + accessLevel 矩阵 <span class="tag">扫描 & 解析</span></h1>
+
+<div class="mission">
+  <b>本节目标：</b>学完你能解释 <code>scan()</code> 的双层去重逻辑，能列出 <code>_readPluginDescriptor()</code> 的 10 步解析过程，能根据 source + trust + 用户开关三要素判定任意插件的最终 accessLevel。
+</div>
+
+<p>上一课我们了解了插件系统的整体架构和安装入口。这一课深入插件发现的起点——<code>scan()</code> 如何从文件系统发现插件，以及 <code>_readPluginDescriptor()</code> 如何将文件目录转化为结构化的 <code>PluginDescriptor</code>。</p>
+
+<h2>一、scan()：启动时批量发现 + 双层去重</h2>
+
+<p><code>scan()</code> 遍历多个 <code>pluginsDirs</code>（靠前的优先，如先 builtin 后 community），对每个子目录调用 <code>_readPluginDescriptor()</code>。</p>
+
+<pre><code>scan() {
+  const results = [];
+  const seen = new Set&lt;string&gt;();
+  for (let i = 0; i &lt; this._pluginsDirs.length; i++) {
+    const dir = this._pluginsDirs[i];
+    const source = i === 0 ? "builtin" : "community"; // 第一个目录 = builtin
+    if (!fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+
+      // 第一层去重：同 source + 同目录名
+      const dirKey = `${source}:${entry.name}`;
+      if (seen.has(dirKey)) continue;
+      seen.add(dirKey);
+
+      const pluginDir = path.join(dir, entry.name);
+      const desc = this._readPluginDescriptor(pluginDir, entry.name);
+      desc.source = source;
+      desc.pluginKey = createPluginKey(source, desc.id);
+
+      // 第二层去重：同 source + 同 id（目录名可能不同于 manifest.id）
+      const idKey = `${source}:id:${desc.id}`;
+      if (seen.has(idKey)) {
+        log.warn(`plugin id "${desc.id}" 冲突，跳过`);
+        continue;
+      }
+      seen.add(idKey);
+      results.push(desc);
+    }
+  }
+  this._scanned = results;
+  return results;
+}</code></pre>
+
+<div class="step"><span class="num">1</span><b>第一层去重（dirKey）：</b><code>source:目录名</code> 组合——防止同 source 下出现同名目录的重复扫描。<br><span class="where">core/plugin-manager.ts:502-504</span></div>
+
+<div class="step"><span class="num">2</span><b>第二层去重（idKey）：</b><code>source:id:manifest.id</code> 组合——目录名可能不同于 manifest.json 中的 id，防止同一 id 多次注册。<br><span class="where">core/plugin-manager.ts:509-514</span></div>
+
+<div class="side">
+  <b>关键设计：跨 source 的同 id 插件不会被去重</b>——这正是 shadow 机制的基础。当一个插件同时存在于 builtin 和 community 目录时，优先级规则 dev (0) > community (1) > builtin (2) 决定哪个生效，被 shadow 的插件贡献点会被 <code>_isPluginKeyRuntimeActive()</code> 过滤掉。
+</div>
+
+<h2>二、_readPluginDescriptor()：10 步解析过程</h2>
+
+<div class="step"><span class="num">1</span><b>格式检测：</b><code>detectIncompatiblePluginFormat(pluginDir)</code> — 检测 OpenClaw 格式。如果是则标记 <code>formatIssue</code> 但仍允许读取 manifest 中的 id/name/version。</div>
+
+<div class="step"><span class="num">2</span><b>manifest.json 读取：</b><code>fs.readFileSync(manifestPath, "utf-8")</code> + <code>JSON.parse</code>。</div>
+
+<div class="step"><span class="num">3</span><b>ID/名称/版本：</b>优先从 manifest 取，fallback 到 formatIssue 中的值，最后 fallback 到目录名。</div>
+
+<div class="step"><span class="num">4</span><b>UI 能力归一化：</b><code>normalizeUiHostCapabilities()</code> — 只保留 6 个已知能力名（external.open / clipboard.writeText / sessionFile.open / resource.open / resource.pick / resource.requestAccess），未知名被忽略并 warn。</div>
+
+<div class="step"><span class="num">5</span><b>配置 Schema：</b><code>normalizePluginConfigSchema()</code> — 解析 <code>manifest.contributes.configuration</code>，归一化为 <code>{ type: "object", properties: {...}, required: [...] }</code>。</div>
+
+<div class="step"><span class="num">6</span><b>目录扫描：</b>遍历 <code>KNOWN_CONTRIBUTION_DIRS = ["tools", "routes", "skills", "agents", "commands", "providers"]</code>，检查目录是否存在。</div>
+
+<div class="step"><span class="num">7</span><b>生命周期检测：</b><code>resolvePluginEntry()</code> 搜索 <code>index.ts</code> 或 <code>index.js</code> 入口文件。存在则 <code>hasLifecycle: true</code>。</div>
+
+<div class="step"><span class="num">8</span><b>trust 字段：</b>只有显式写 <code>"full-access"</code> 才为 full-access，其他值或省略均默认 restricted。<br><span class="where">关键规则：trust 是唯一进入高权限的钥匙</span></div>
+
+<div class="step"><span class="num">9</span><b>激活事件：</b><code>normalizeActivationEvents()</code> — 如果 manifest 声明了 <code>activationEvents[]</code> 则取声明值（去重）；如果没声明但有 lifecycle，默认注入 <code>["onStartup"]</code>。</div>
+
+<div class="step"><span class="num">10</span><b>能力列表：</b><code>normalizeCapabilityList()</code> 区分"字段缺失"（返回 null，legacy 模式——视为声明全部）与"显式空数组"（返回 []——不需要任何敏感能力）。<br><span class="where">这是 legacy 兼容的关键设计</span></div>
+
+<div class="danger">
+  <b>注意 legacy 兼容陷阱：</b><code>capabilities</code> 为 <code>null</code>（老插件未声明）与 <code>[]</code>（新插件显式空数组）语义完全不同。null 在 bus 权限校验时走 legacy 模式放行；[] 表示不需要任何能力，bus 请求敏感能力时会被拒绝。升级老插件时必须补上 <code>capabilities: []</code> 声明。
+</div>
+
+<h2>三、loadAll() 的四道前置筛选</h2>
+
+<p><code>loadAll()</code> 在扫描完成后，对每个插件描述符执行四道筛选（沿顺序短路），决定是否进入加载：</p>
+
+<pre><code>async loadAll() {
+  const descriptors = this._scanned.length > 0 ? this._scanned : this.scan();
+  for (const desc of descriptors) {
+    const entry = this._entryFromDescriptor(desc);
+
+    // ① disabled 列表检查（builtin 不受影响）
+    if (entry.source === "community" && disabledList.includes(entry.id)) {
+      entry.status = "disabled"; continue;
+    }
+    // ② 格式问题检查（OpenClaw 等）
+    if (desc.formatIssue) {
+      entry.status = "incompatible"; continue;
+    }
+    // ③ 社区 full-access 需用户授权
+    if (desc.source === "community" && desc.trust === "full-access") {
+      if (!preferencesManager?.getAllowFullAccessPlugins()) {
+        entry.status = "restricted"; continue;
+      }
+    }
+    // ④ minAppVersion 检查
+    if (minVer && !semverGte(this._appVersion, minVer)) {
+      entry.status = "incompatible"; continue;
+    }
+    // 通过全部筛选 → 进入 _loadPluginWithBoundary()
+    await this._loadPluginWithBoundary(entry);
+  }
+}</code></pre>
+
+<h2>四、accessLevel 决策矩阵（6 种组合）</h2>
+
+<p><code>_loadPlugin()</code> 内部根据 source 和 trust 计算最终 accessLevel：</p>
+
+<pre><code>const accessLevel = (entry.source === "builtin" || entry.trust === "full-access")
+  ? "full-access"
+  : "restricted";</code></pre>
+
+<table>
+<tr><th>Source</th><th>trust</th><th>用户开关</th><th>最终 accessLevel</th><th>状态</th></tr>
+<tr><td>builtin</td><td>任意</td><td>不适用</td><td>full-access</td><td>loaded</td></tr>
+<tr><td>community</td><td>restricted</td><td>不适用</td><td>restricted</td><td>loaded</td></tr>
+<tr><td>community</td><td>full-access</td><td>已开启</td><td>full-access</td><td>loaded</td></tr>
+<tr><td>community</td><td>full-access</td><td>未开启</td><td>restricted</td><td>restricted</td></tr>
+<tr><td>dev</td><td>full-access</td><td>allowFullAccess=true</td><td>full-access</td><td>loaded</td></tr>
+<tr><td>dev</td><td>full-access</td><td>allowFullAccess=false</td><td>restricted</td><td>restricted</td></tr>
+</table>
+
+<div class="side">
+  <b>关键洞察：</b>builtin 插件不经过任何筛选——不检查 disabled 列表、不检查用户开关、不检查 minAppVersion。它们是系统的"可信基"（Trusted Computing Base），假设随 App 打包分发时已经过审核。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. scan() 为什么要做两层去重？</p>
+<span class="opt">A. 没有特别原因，只是代码冗余</span>
+<span class="opt">B. 第一层防止同目录名重复扫描；第二层防止同 id 重复注册（目录名可能不同于 manifest 中的 id）</span>
+<span class="opt">C. 第一层是性能优化，第二层是安全检查</span>
+<span class="opt">D. 两层都是为了防止跨 source 的同 id 冲突</span>
+<details><summary>看答案</summary><b>B</b>。第一层用 <code>source:目录名</code> 去重，第二层用 <code>source:id:manifest.id</code> 去重。因为目录名不一定等于 manifest 中的 id（用户可以重命名目录），两层去重覆盖了两种冲突场景。注意跨 source 的同 id 不会被去重——这是 shadow 机制的基础。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. _readPluginDescriptor() 第 10 步中，capabilities 为 null 和 [] 有什么区别？</p>
+<span class="opt">A. 没有区别，都表示不需要任何能力</span>
+<span class="opt">B. null 表示老插件未声明字段（legacy 模式，bus 权限校验放行）；[] 表示显式不需要任何敏感能力（bus 请求敏感能力时会被拒绝）</span>
+<span class="opt">C. null 表示需要所有能力，[] 表示不需要任何能力</span>
+<span class="opt">D. null 是 JSON 解析错误，[] 是正常值</span>
+<details><summary>看答案</summary><b>B</b>。这是 <code>normalizeCapabilityList()</code> 的核心设计：<code>null</code>（字段缺失）→ 老插件兼容模式，视为声明了全部能力；<code>[]</code>（显式空数组）→ 新插件明确声明不需要任何敏感能力。升级老插件时必须补上声明。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 社区插件 trust: "full-access" 但用户未开启全权开关，最终状态是什么？</p>
+<span class="opt">A. disabled — 完全不可用</span>
+<span class="opt">B. incompatible — 不兼容</span>
+<span class="opt">C. restricted — 基础功能（tools/skills/commands/agents/configuration）仍可用，但不能注册 routes/extensions/providers 等</span>
+<span class="opt">D. failed — 加载失败</span>
+<details><summary>看答案</summary><b>C</b>。Restricted 不是错误状态——插件的核心价值（工具、技能、命令、Agent 模板、配置）仍然可用。只有 routes、extensions、providers、page、widget、slash commands 这些高权限贡献点被限制。这确保用户在未授权情况下仍能使用插件的基础能力。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. loadAll() 的四道筛选中，builtin 插件不受哪几道的约束？</p>
+<span class="opt">A. 只不受 disabled 列表约束</span>
+<span class="opt">B. 不受 disabled 列表、用户授权开关、minAppVersion 全部三道约束</span>
+<span class="opt">C. 只不受 minAppVersion 约束</span>
+<span class="opt">D. 全部受约束，没有例外</span>
+<details><summary>看答案</summary><b>B</b>。builtin 插件是系统的可信基，不经过任何筛选——不检查 disabled 列表、不检查用户全权开关、不检查 minAppVersion。它们随 App 打包分发，假设已经过审核且版本匹配。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>core/plugin-manager.ts</code> 第 491-556 行阅读 <code>scan()</code> 和 <code>_readPluginDescriptor()</code> 的完整实现。然后对比第 558-611 行的 <code>loadAll()</code> 前置筛选逻辑，理解四道筛选的短路顺序设计。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：如果两个社区插件有相同的 id 但不同的目录名，系统如何处理？activationEvents 的 onToolCall 和 onBusRequest 触发时机有什么区别？下一课我们聚焦 <strong>PluginContext 注入与工具注册</strong>——7 大隔离能力组件如何构建，命名空间前缀如何避免冲突。</div>
+
+<div class="nav">课程 0002 / 插件安装与加载全链路 · <a href="0001.html">← 上一课：架构总览</a> · <a href="0003.html">下一课：PluginContext 注入与工具注册 →</a></div>
+
+</body>
+</html>

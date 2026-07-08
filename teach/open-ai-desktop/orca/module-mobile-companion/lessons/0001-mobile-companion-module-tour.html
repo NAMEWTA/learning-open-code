@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>移动端 Companion 模块导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Mobile Companion：手机只是控制面，不是第二个桌面</h1>
+        <p class="meta">目标：15 分钟内能说清移动端入口、host 首页和 RPC client 的分工。</p>
+
+        <h2>先看三层</h2>
+        <p>
+          Orca Mobile 是桌面 runtime 的 companion。它不在手机上跑 Git、PTY 或 agent，而是把 paired desktop 当作 host，
+          通过 WebSocket RPC 查看 worktree、打开 session、发送 terminal input、读文件和驱动任务。读源码时先分三层：
+          根布局负责路由和连接池，首页负责 host/worktree 聚合，RPC client 负责加密传输和重连。
+        </p>
+        <div class="filetree">mobile/
+├── app/
+│   ├── _layout.tsx  ← Expo Router 根布局、deep link、通知跳转、RpcClientProvider
+│   └── index.tsx    ← host 列表、resume card、账号用量、任务入口
+└── src/
+    └── transport/
+        └── rpc-client.ts ← E2EE WebSocket RPC、请求/订阅、重连和 stream replay</div>
+
+        <h2>入口先装连接池</h2>
+        <p>
+          <code>_layout.tsx</code> 把整个 Stack 包在 <code>RpcClientProvider</code> 里，所以所有页面都共享同一套 per-host
+          连接池。它还处理 <code>orca://pair</code> deep link：冷启动时读 initial URL，热启动时监听 URL event，
+          解析到 pairing code 后跳到 confirm screen。通知点击也在这里转成 host/worktree 路径。
+        </p>
+        <p>
+          这个设计让 pairing、首页、host detail 和 session screen 不需要各自开 WebSocket。页面只通过 hook acquire host client，
+          provider 负责复用、重连和前后台恢复。
+        </p>
+
+        <h2>首页是 host 状态聚合器</h2>
+        <p>
+          <code>index.tsx</code> 从本地存储读 paired hosts，用 <code>useAllHostClients()</code> 获取每个 host 的共享 client。
+          连接后它请求 <code>stats.summary</code>、<code>worktree.ps</code>、<code>accounts.list</code>，
+          同时读取 settings、preflight 和 Linear 状态来决定 Tasks 入口。首页还会把 worktree 和账号快照缓存下来，
+          让冷启动先显示上一次数据，再用桌面新响应覆盖。
+        </p>
+        <pre><code class="language-typescript">const allClients = useAllHostClients(hostIds)
+const lastActive = pickResumeWorktree(worktrees)</code></pre>
+        <p>
+          Resume card 的选择也不是随便拿第一个 worktree：先看首页外层记录的手机本地 last visited；没有命中时再交给
+          <code>pickResumeWorktree()</code>，由它优先选桌面 active worktree，最后按最近 terminal output 兜底。
+        </p>
+
+        <h2>RPC client 是真实边界</h2>
+        <p>
+          <code>rpc-client.ts</code> 连接桌面 endpoint 后先发 E2EE hello，收到 ready 后用 device token 认证。
+          <code>sendRequest()</code> 会等待 connected，再发带 id、method、params 的加密 RPC；<code>subscribe()</code>
+          保存 streaming listener，断线重连后会重放还没取消的订阅。它还处理 terminal/browser 二进制帧、连接超时、activity probe、
+          授权重试和有限 backoff。
+        </p>
+        <p>
+          如果你在 session 页看到终端输入没反应，第一步不是看按钮样式，而是判断：host 是否 connected、订阅是否 replay、
+          <code>terminal.send</code> 是否被加密发出、桌面 runtime 是否返回错误。
+        </p>
+
+        <p>
+          <strong>检索练习：</strong>手机扫码后提示连接超时，你会先查哪里？A. 首页 host card；B. pairing confirm；C. RPC client；
+          D. desktop runtime server。
+        </p>
+        <div class="answer">
+          参考路径：先看 pairing confirm 是否正确解析 offer 并调用 <code>connect()</code>，再看 RPC client 的 WebSocket open、
+          E2EE handshake 和 pairing overall timeout。确认手机端 endpoint/token/public key 都正确后，再进入 desktop runtime server。
+          更完整的 pairing、host storage、session route 和测试佐证见
+          <a href="../reference/mobile-companion-overview.html">模块总览参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>mobile/app/_layout.tsx</code>、<code>mobile/app/index.tsx</code>、
+          <code>mobile/src/transport/rpc-client.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

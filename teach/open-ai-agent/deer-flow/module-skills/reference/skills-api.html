@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills 公共 API 参考（L3）</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.92rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .sig { font-family:"SF Mono",Consolas,monospace; font-size:.88rem; background:#f4f7fa; border-left:4px solid var(--accent); padding:10px 12px; margin:10px 0; }
+    .where { color:#6f42c1; font-weight:600; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Skills 公共 API 参考（L3）</h1>
+  <p class="lead">本页是 L3 微观 API 速查：精确到签名、参数约束、返回值、边界条件与测试锚点。模块地图见 <a href="skills-overview.html">skills-overview.html</a>；短课入口 <a href="../lessons/0001-skills-module-tour.html">0001-skills-module-tour.html</a>。</p>
+
+  <h2>包级导出</h2>
+  <table>
+    <tr><th>包</th><th>导出符号</th><th>说明</th></tr>
+    <tr><td><code>deerflow.skills</code></td><td><code>Skill</code>、<code>SkillCatalog</code>、<code>SkillSearchSetup</code>、<code>build_describe_skill_tool</code>、<code>build_skill_search_setup</code>、<code>SkillStorage</code>、<code>LocalSkillStorage</code>、<code>get_or_new_skill_storage</code>、<code>SkillAlreadyExistsError</code>、<code>SkillSecurityScanError</code></td><td>公开面（<span class="where"><code>skills/__init__.py</code></span>）。slash、tool policy、storage factory 等更多符号需从子模块直接导入。</td></tr>
+    <tr><td><code>deerflow.skills.storage</code></td><td><code>get_or_new_skill_storage</code>、<code>get_or_new_user_skill_storage</code>、<code>reset_skill_storage</code>、<code>reset_user_skill_storage</code></td><td>registry 工厂与测试用 reset（<span class="where"><code>skills/storage/__init__.py</code></span>）。</td></tr>
+    <tr><td><code>deerflow.skills.slash</code></td><td><code>parse_slash_skill_reference</code>、<code>resolve_slash_skill</code>、<code>RESERVED_SLASH_SKILL_NAMES</code></td><td>slash 解析与解析（<span class="where"><code>skills/slash.py</code></span>）。</td></tr>
+    <tr><td><code>deerflow.skills.tool_policy</code></td><td><code>allowed_tool_names_for_skills</code>、<code>filter_tools_by_skill_allowed_tools</code>、<code>SKILL_LOADING_TOOL_NAMES</code></td><td>allowed-tools 策略（<span class="where"><code>skills/tool_policy.py</code></span>）。</td></tr>
+  </table>
+
+  <h2>Registry — 配置与发现</h2>
+
+  <h3>SkillsConfig</h3>
+  <p class="sig">class SkillsConfig(BaseModel): use: str; path: str | None; container_path: str; deferred_discovery: bool</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/config/skills_config.py</code></span> — <code>AppConfig.skills</code> 子段；决定 storage 实现类、host 路径、容器挂载路径与 deferred discovery 开关。</p>
+  <table>
+    <tr><th>字段 / 方法</th><th>含义与约束</th></tr>
+    <tr><td><code>use</code></td><td>反射路径，默认 <code>deerflow.skills.storage.local_skill_storage:LocalSkillStorage</code>；由 <code>resolve_class(..., SkillStorage)</code> 实例化。</td></tr>
+    <tr><td><code>path</code></td><td>显式 host skills 根目录；为 <code>None</code> 时走 <code>get_skills_path()</code> 解析链。</td></tr>
+    <tr><td><code>container_path</code></td><td>沙箱内虚拟路径前缀，默认 <code>/mnt/skills</code>；写入 prompt 与 slash 激活路径。</td></tr>
+    <tr><td><code>deferred_discovery</code></td><td><code>True</code> 时 prompt 只渲染 <code>&lt;skill_index&gt;</code> 并注册 <code>describe_skill</code>；默认 <code>False</code>（完整 metadata 注入）。</td></tr>
+    <tr><td><code>get_skills_path()</code> → <code>Path</code></td><td>解析顺序：显式 <code>path</code> → <code>DEER_FLOW_SKILLS_PATH</code> → <code>project_root()/skills</code> → legacy monorepo <code>repo_root/skills</code>；均不存在时仍返回 project 默认路径（不抛错）。</td></tr>
+    <tr><td><code>get_skill_container_path(name, category)</code> → <code>str</code></td><td>返回 <code>{container_path}/{category}/{name}</code> 形式的目录路径。</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skills_loader.py</code></span></p>
+
+  <h3>get_or_new_skill_storage</h3>
+  <p class="sig">def get_or_new_skill_storage(**kwargs) -&gt; SkillStorage</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/storage/__init__.py</code></span></p>
+  <table>
+    <tr><th>调用方式</th><th>行为</th></tr>
+    <tr><td><code>skills_path=...</code></td><td>总是新建实例（不缓存）；用显式 host 路径覆盖配置。</td></tr>
+    <tr><td><code>app_config=...</code></td><td>总是新建实例；尊重该请求的 <code>app_config.skills</code>（Gateway per-request 路径）。</td></tr>
+    <tr><td>无参数</td><td>进程单例；<code>get_app_config()</code> 身份变化时重建；测试手动注入且 <code>_default_skill_storage_config is None</code> 时跳过读盘。</td></tr>
+  </table>
+  <p>用户隔离 custom 操作用 <code>get_or_new_user_skill_storage(user_id, **kwargs)</code>；LRU 缓存上限 64，键为 <code>make_safe_user_id(user_id)</code>。</p>
+  <pre><code class="language-python">from deerflow.skills.storage import get_or_new_skill_storage
+
+storage = get_or_new_skill_storage()
+skills = storage.load_skills(enabled_only=True)</code></pre>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skill_storage_lifecycle.py</code></span>、<span class="where"><code>backend/tests/test_user_scoped_skill_storage.py</code></span></p>
+
+  <h3>SkillStorage.load_skills</h3>
+  <p class="sig">def load_skills(self, *, enabled_only: bool = False) -&gt; list[Skill]</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/storage/skill_storage.py</code></span> — 模板方法：遍历 <code>_iter_skill_files()</code> → <code>parse_skill_file</code> → 按 <code>name</code> 去重（后者覆盖前者）→ 合并 <code>ExtensionsConfig</code> 启用状态 → 可选过滤 → 按名字排序。</p>
+  <table>
+    <tr><th>边界</th><th>行为</th></tr>
+    <tr><td>frontmatter 缺 <code>name</code>/<code>description</code></td><td><code>parse_skill_file</code> 返回 <code>None</code>，该文件被跳过。</td></tr>
+    <tr><td>同名 public 与 custom</td><td>后遍历到的覆盖前者；<code>LocalSkillStorage</code> 顺序为 public → custom → legacy。</td></tr>
+    <tr><td>extensions 读取失败</td><td>记录 <code>warning</code>，保留解析时的默认 <code>enabled=False</code>（CUSTOM 在 extensions 无条目时由 <code>is_skill_enabled</code> 默认 true）。</td></tr>
+    <tr><td><code>enabled_only=True</code></td><td>只返回 <code>skill.enabled</code> 为真的项；slash、prompt、tool policy 均在此基础上再过滤 agent 白名单。</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skills_loader.py</code></span>（嵌套发现、hidden 目录、custom shadow public）</p>
+
+  <h3>Skill 与 SkillCatalog（deferred registry）</h3>
+  <p class="sig">@dataclass(frozen=True) class Skill: name, description, license, skill_dir, skill_file, relative_path, category, allowed_tools, enabled, required_secrets, secrets_autonomous</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/types.py</code></span> — <code>get_container_file_path(base)</code> 返回沙箱内 <code>SKILL.md</code> 完整路径。</p>
+  <p class="sig">@dataclass(frozen=True) class SkillCatalog: skills: tuple[Skill, ...]</p>
+  <p class="sig">def search(self, query: str) -&gt; list[Skill]</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/catalog.py</code></span></p>
+  <table>
+    <tr><th>查询形式</th><th>语义</th><th>结果上限</th></tr>
+    <tr><td><code>select:a,b</code></td><td>按名字精确选取</td><td>无上限</td></tr>
+    <tr><td><code>+prefix rest</code></td><td>名字须含 <code>prefix</code>；可选 <code>rest</code> 做 regex 排序</td><td><code>MAX_RESULTS=5</code></td></tr>
+    <tr><td>自由文本</td><td>对 name+description 做 case-insensitive regex；无效 regex 降级为字面量子串</td><td>5</td></tr>
+    <tr><td>空串 / 裸 <code>+</code></td><td>返回 <code>[]</code></td><td>—</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skill_catalog.py</code></span></p>
+
+  <h2>Install — 归档安装</h2>
+
+  <h3>ainstall_skill_from_archive / install_skill_from_archive</h3>
+  <p class="sig">async def ainstall_skill_from_archive(self, archive_path: str | Path) -&gt; dict</p>
+  <p class="sig">def install_skill_from_archive(self, archive_path: str | Path) -&gt; dict</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/storage/skill_storage.py</code></span>（抽象）→ <span class="where"><code>storage/local_skill_storage.py</code></span>、<span class="where"><code>storage/user_scoped_skill_storage.py</code></span>（用户 custom 目录）。同步包装经 <code>installer._run_async_install</code>：若当前线程已有 event loop 则在线程池中 <code>asyncio.run</code>。</p>
+  <h3>返回值</h3>
+  <pre><code class="language-python">{
+    "success": True,
+    "skill_name": "&lt;frontmatter name&gt;",
+    "message": "Skill '&lt;name&gt;' installed successfully",
+}</code></pre>
+  <h3>前置与边界</h3>
+  <table>
+    <tr><th>检查</th><th>失败时</th></tr>
+    <tr><td>路径须为存在的 <code>.skill</code> 文件</td><td><code>FileNotFoundError</code> / <code>ValueError</code>（非文件、非 .skill、坏 ZIP）</td></tr>
+    <tr><td><code>safe_extract_skill_archive</code></td><td>拒绝绝对路径、<code>..</code>、符号链接、可执行 magic、总解压 &gt; 512MB → <code>ValueError</code></td></tr>
+    <tr><td>frontmatter 校验</td><td><code>ValueError</code>（缺字段、name 与目录不一致）</td></tr>
+    <tr><td>目标 <code>custom/&lt;name&gt;</code> 已存在</td><td><code>SkillAlreadyExistsError</code>（<code>ValueError</code> 子类）</td></tr>
+    <tr><td>LLM 安全扫描</td><td><code>SkillSecurityScanError</code>；嵌套 <code>SKILL.md</code> 亦拒绝</td></tr>
+    <tr><td>安装成功</td><td>写入 <code>custom/&lt;name&gt;/</code>，<code>make_skill_tree_sandbox_readable</code> 调整权限</td></tr>
+  </table>
+  <pre><code class="language-python">from deerflow.skills.storage import get_or_new_skill_storage
+
+storage = get_or_new_skill_storage()
+result = storage.install_skill_from_archive("/path/to/my-skill.skill")
+# Gateway: POST /api/skills/install 最终也调用同一 storage 方法</code></pre>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skills_installer.py</code></span>、<span class="where"><code>backend/tests/test_skill_storage_lifecycle.py</code></span></p>
+
+  <h3>安装相关纯函数（installer 模块）</h3>
+  <table>
+    <tr><th>符号</th><th>用途</th></tr>
+    <tr><td><code>is_unsafe_zip_member</code></td><td>检测 ZIP 路径遍历</td></tr>
+    <tr><td><code>resolve_skill_dir_from_archive</code></td><td>从解压目录定位 skill 根；过滤 <code>__MACOSX</code>、点文件</td></tr>
+    <tr><td><code>safe_extract_skill_archive</code></td><td>带 zip bomb / 可执行体防护的安全解压</td></tr>
+  </table>
+
+  <h2>Slash — 显式激活</h2>
+
+  <h3>parse_slash_skill_reference</h3>
+  <p class="sig">def parse_slash_skill_reference(text: str) -&gt; SlashSkillReference | None</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/slash.py</code></span> — 正则 <code>^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)</code>；必须从行首匹配。</p>
+  <table>
+    <tr><th>场景</th><th>结果</th></tr>
+    <tr><td>合法 <code>/data-analysis task</code></td><td><code>SlashSkillReference(name="data-analysis", remaining_text="task")</code></td></tr>
+    <tr><td>仅 <code>/data-analysis</code></td><td><code>remaining_text=""</code></td></tr>
+    <tr><td>前导空白、句中 <code>/skill</code>、大写/下划线名</td><td><code>None</code></td></tr>
+    <tr><td><code>RESERVED_SLASH_SKILL_NAMES</code></td><td><code>bootstrap</code>、<code>goal</code>、<code>help</code>、<code>memory</code>、<code>models</code>、<code>new</code>、<code>status</code> → <code>None</code></td></tr>
+  </table>
+
+  <h3>resolve_slash_skill</h3>
+  <p class="sig">def resolve_slash_skill(text, skills, *, available_skills=None, container_base_path=DEFAULT_SKILLS_CONTAINER_PATH) -&gt; ResolvedSlashSkill | None</p>
+  <table>
+    <tr><th>门闩</th><th>未通过时</th></tr>
+    <tr><td>parse 失败</td><td><code>None</code></td></tr>
+    <tr><td><code>available_skills</code> 给定且名字不在集合</td><td><code>None</code></td></tr>
+    <tr><td>skills 中无同名且 <code>enabled</code> 的项</td><td><code>None</code>（disabled 亦拒绝）</td></tr>
+    <tr><td>全部通过</td><td><code>ResolvedSlashSkill(skill, remaining_text, container_file_path)</code></td></tr>
+  </table>
+  <pre><code class="language-python">from deerflow.skills.slash import resolve_slash_skill
+
+resolved = resolve_slash_skill(
+    "/data-analysis analyze uploads/foo.csv",
+    storage.load_skills(enabled_only=False),
+    available_skills={"data-analysis"},
+)</code></pre>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_slash_skills.py</code></span></p>
+
+  <h3>SkillActivationMiddleware</h3>
+  <p class="sig">class SkillActivationMiddleware(AgentMiddleware)</p>
+  <p class="sig">def __init__(self, *, available_skills: set[str] | None = None, app_config: AppConfig | None = None, user_id: str | None = None)</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/skill_activation_middleware.py</code></span> — 在 <code>wrap_model_call</code> / <code>awrap_model_call</code> 中运行；读取经 <code>get_original_user_content_text</code> 还原的原始用户文本（绕过 InputSanitization 改写）。</p>
+  <table>
+    <tr><th>阶段</th><th>行为</th></tr>
+    <tr><td>目标消息</td><td>自后向前找最近真实 <code>HumanMessage</code>（排除 summary、<code>hide_from_ui</code>）</td></tr>
+    <tr><td>去重</td><td>同一 target 已有 <code>slash_skill_activation</code> 隐藏消息则跳过</td></tr>
+    <tr><td>解析失败</td><td>非 slash 输入 → 无操作；已安装但 disabled / 不在 agent 白名单 / 读盘失败 → 返回 <code>AIMessage</code> 错误说明</td></tr>
+    <tr><td>成功</td><td>在 target 前插入隐藏 <code>HumanMessage</code>（<code>hide_from_ui</code>、<code>slash_skill_activation</code>），内含完整 XML 转义后的 <code>SKILL.md</code></td></tr>
+    <tr><td>审计</td><td><code>__run_journal</code> 记录 <code>middleware:skill_activation</code>（name、path、content_hash，无正文）</td></tr>
+    <tr><td>secrets</td><td>同次调用内 <code>_resolve_secret_bindings</code>：slash 路径写入 <code>__slash_skill_secret_source</code>，与 <code>context.secrets</code> 求交后注入 <code>__active_skill_secrets</code></td></tr>
+  </table>
+  <p class="callout"><code>resolve_slash_skill</code> 只做纯解析；middleware 额外负责读盘、注入消息与 secrets。两者对 enabled / whitelist 的检查语义一致。</p>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_slash_skills.py</code></span>、<span class="where"><code>backend/tests/test_skill_request_scoped_secrets.py</code></span></p>
+
+  <h2>allowed-tools — 工具过滤</h2>
+
+  <h3>parse_allowed_tools（frontmatter）</h3>
+  <p class="sig">def parse_allowed_tools(raw: object, skill_file: Path) -&gt; tuple[str, ...] | None</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/parser.py</code></span></p>
+  <table>
+    <tr><th><code>raw</code></th><th>返回值</th></tr>
+    <tr><td>字段省略</td><td><code>None</code>（legacy allow-all 语义）</td></tr>
+    <tr><td>YAML 字符串列表（可含空列表）</td><td><code>tuple[str, ...]</code>；空元组表示显式禁止所有工具</td></tr>
+    <tr><td>非 list、非字符串项、空工具名</td><td><code>ValueError</code>；安装/编辑校验失败</td></tr>
+  </table>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_skills_parser.py</code></span>、<span class="where"><code>backend/tests/test_skills_validation.py</code></span></p>
+
+  <h3>allowed_tool_names_for_skills</h3>
+  <p class="sig">def allowed_tool_names_for_skills(skills: list[Skill]) -&gt; set[str] | None</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/skills/tool_policy.py</code></span></p>
+  <table>
+    <tr><th>输入</th><th>返回值</th></tr>
+    <tr><td>空列表</td><td><code>None</code></td></tr>
+    <tr><td>所有 skill 的 <code>allowed_tools is None</code></td><td><code>None</code>（不收紧）</td></tr>
+    <tr><td>至少一个 skill 显式声明（含空列表）</td><td>所有非 <code>None</code> 声明的并集；<code>allowed_tools=()</code> 的 skill 不贡献任何名字</td></tr>
+  </table>
+  <p class="callout">混合 legacy（未声明）与 explicit skill 时，未声明者<strong>不会</strong>把策略恢复成 allow-all；只有 explicit 声明参与并集。</p>
+
+  <h3>filter_tools_by_skill_allowed_tools</h3>
+  <p class="sig">def filter_tools_by_skill_allowed_tools(tools, skills, *, always_allowed_tool_names=frozenset()) -&gt; list[ToolT]</p>
+  <table>
+    <tr><th>场景</th><th>行为</th></tr>
+    <tr><td><code>allowed_tool_names_for_skills</code> 为 <code>None</code></td><td>原样返回 <code>tools</code></td></tr>
+    <tr><td>有 explicit 策略</td><td>只保留 <code>tool.name in allowed ∪ always_allowed_tool_names</code></td></tr>
+    <tr><td>lead agent 装配</td><td><code>always_allowed_tool_names</code> 含 <code>SKILL_LOADING_TOOL_NAMES</code>（当前仅 <code>read_file</code>）及 infrastructure 工具（如 <code>describe_skill</code> 在 deferred 模式下于过滤后追加）</td></tr>
+    <tr><td>subagent</td><td>默认不传 <code>always_allowed_tool_names</code>；显式 allowed-tools 会去掉 <code>read_file</code></td></tr>
+  </table>
+  <pre><code class="language-python">from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+
+filtered = filter_tools_by_skill_allowed_tools(
+    all_tools,
+    enabled_skills_for_agent,
+    always_allowed_tool_names={"read_file", "describe_skill"},
+)</code></pre>
+  <p><span class="tag">测试</span> <span class="where"><code>backend/tests/test_lead_agent_skills.py</code></span>、<span class="where"><code>backend/tests/test_subagent_executor.py</code></span>（mixed legacy/explicit）、<span class="where"><code>backend/tests/test_deferred_tool_crosscontext.py</code></span></p>
+
+  <h2>装配顺序速记</h2>
+  <pre><code>load_skills(enabled_only=True)
+  → filter by custom agent skills whitelist
+  → apply_prompt_template (full metadata or skill_index + describe_skill)
+  → get_available_tools(...)
+  → filter_tools_by_skill_allowed_tools(..., always_allowed=read_file + infra)
+  → SkillActivationMiddleware(available_skills=whitelist names)</code></pre>
+  <p>slash 与 allowed-tools 共用同一套「enabled + agent 白名单」后的 skill 集合；slash 在 middleware 层再次校验，不能绕过白名单或 disabled 状态。</p>
+
+  <p class="callout">需要 Gateway HTTP 路由、custom skill CRUD 或 durable <code>skill_context</code> 细节时，回到 <a href="skills-overview.html">skills-overview.html</a> 的接口表与测试索引。</p>
+</main>
+</body>
+</html>

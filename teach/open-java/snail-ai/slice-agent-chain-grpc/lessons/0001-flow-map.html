@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>责任链状态如何变成 gRPC streaming 调用</title>
+  <link rel="stylesheet" href="../assets/slice-agent-chain-grpc.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../module-agent-chain/lessons/0001-agent-chain-module-tour.html">Agent 责任链 L1</a>
+    <a href="../../module-commons-grpc/lessons/0001-commons-grpc-module-tour.html">gRPC L1</a>
+    <a href="../../module-agent-client/lessons/0001-agent-client-module-tour.html">Client L1</a>
+    <a href="../reference/agent-chain-grpc-flow-map.html">切片速查</a>
+  </nav>
+
+  <h1>责任链状态如何变成 gRPC streaming 调用</h1>
+  <p class="lead">本课只完成一个目标：把 Server 端 <code>AgentChatContext</code> 的字段接力，追到 <code>ChatDispatchRequest</code>、gRPC 统一信封，再追到 Client 的 <code>ChatDispatchStreamingHandler</code>。</p>
+  <div class="meta">
+    <span class="pill">层级：L2 垂直切片</span>
+    <span class="pill">预计 15 分钟</span>
+    <span class="pill">主线：Server → gRPC → Client</span>
+  </div>
+
+  <h2>1. 先把状态接力画出来</h2>
+  <p>一次 Agent 对话不是直接调用模型。Server 端先让 Handler Chain 逐段填充 <code>AgentChatContext</code>：初始化用户和 Agent，保存用户消息，解析模型，收集 MCP、RAG、Skill、历史消息和目标 Client。<code>LlmCallHandler</code> 只在最后统一读取这些状态。</p>
+  <div class="flow">
+    <div class="step"><strong>10-30</strong><small>user、agent、modelId、modelConfig</small></div>
+    <div class="step"><strong>40-70</strong><small>mcpServers、systemPrompt、skills</small></div>
+    <div class="step"><strong>75</strong><small>targetClient、historyMessages</small></div>
+    <div class="step"><strong>80</strong><small>ChatDispatchRequest、/chat/dispatch</small></div>
+  </div>
+  <p><span class="where">open-java/snail-ai/.../feature/agent/chain/AgentChatContext.java</span></p>
+  <pre><code class="language-java">private ChatDispatchRequest.ModelConfig modelConfig;
+private List&lt;ChatDispatchRequest.McpServerDescriptor&gt; mcpServerDescriptors;
+private List&lt;ChatDispatchRequest.SkillDescriptor&gt; skillDescriptors;
+private List&lt;ChatDispatchRequest.HistoryMessage&gt; historyMessages;
+private String memoryContext;
+private ClientInstanceManager.ClientInstanceInfo targetClient;</code></pre>
+
+  <h2>2. DTO 边界在 <code>LlmCallHandler</code></h2>
+  <p><code>LlmCallHandler</code> 是 Server 端责任链终点。它先校验 <code>targetClient</code> 和 <code>modelConfig</code>；缺失时直接写 <code>[ERROR]</code> 并结束前端流。校验通过后，它把上下文重新打包：Agent 元数据进 <code>agentConfig</code>，用户输入进 <code>userMessage</code>，模型、MCP、Skill、历史和 <code>systemPrompt</code> 原样成为 Client 可执行的请求负载。</p>
+  <p><span class="where">open-java/snail-ai/.../feature/agent/chain/LlmCallHandler.java</span></p>
+  <pre><code class="language-java">ChatDispatchRequest request = ChatDispatchRequest.builder()
+        .requestId(UUID.randomUUID().toString())
+        .sid(ctx.getSid())
+        .agentConfig(agentConfig)
+        .conversationId(ctx.getConversationId())
+        .userMessage(ctx.getContent())
+        .modelConfig(ctx.getModelConfig())
+        .mcpServers(ctx.getMcpServerDescriptors())
+        .skills(ctx.getSkillDescriptors())
+        .historyMessages(ctx.getHistoryMessages())
+        .memoryContext(ctx.getMemoryContext())
+        .systemPrompt(ctx.getSystemPrompt())
+        .serverHttpPort(serverHttpPort)
+        .build();
+
+GrpcChannelUtil.sendServerStreaming(
+        ctx.getTargetClient().getChannel(),
+        UriConstants.CHAT_DISPATCH,
+        JsonUtil.toJsonString(request),
+        Map.of(),
+        new ChatStreamObserver(ctx, chatResultPersistService, shortTermWindow));</code></pre>
+  <p>这里要分清两层 DTO：<code>ChatDispatchRequest</code> 是 JSON 业务体；gRPC proto 只提供 <code>GrpcSnailAiRequest(reqId, metadata, body)</code>。业务路由不是 proto 方法名，而是 <code>metadata.uri=/chat/dispatch</code>。</p>
+
+  <h2>3. Client streaming handler 消费它</h2>
+  <p>Client 启动时注册 server-streaming service，<code>ClientRequestDispatcher</code> 从 metadata 取 URI，再交给共用的 <code>GrpcRequestDispatcher</code>。当 URI 命中 <code>/chat/dispatch</code>，<code>ChatDispatchStreamingHandler</code> 解析 body，调用 <code>ChatSessionRuntime</code>，并把 runtime 的四个回调翻译为 <code>GrpcSnailAiResult.data</code> 中的 <code>ChatStreamResponse</code>。</p>
+  <p><span class="where">open-java/snail-ai/.../agent/core/grpc/handler/ChatDispatchStreamingHandler.java</span></p>
+  <pre><code class="language-java">ChatDispatchRequest dispatchRequest = JsonUtil.parseObject(body, ChatDispatchRequest.class);
+chatSessionRuntime.execute(ChatSessionRequest.builder()
+        .dispatchRequest(dispatchRequest)
+        .textConsumer(text -&gt; handleTextChunk(reqId, sid, text, observer))
+        .thinkingConsumer(thinking -&gt; handleThinkingChunk(reqId, sid, thinking, observer))
+        .completionConsumer(done -&gt; handleCompletion(reqId, requestId, sid, done, observer))
+        .errorConsumer(error -&gt; handleError(reqId, sid, error, observer))
+        .build());</code></pre>
+  <p>回程也分两层：Client 连续 <code>onNext</code> 业务 JSON；Server 端 <code>ChatStreamObserver</code> 再把 text/thinking 写给前端，把 completion 交给异步持久化，最后在 <code>onCompleted</code> 关闭前端流。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：如果前端收到“没有可用的客户端实例”，这次请求已经走到了 gRPC 吗？你应该先查 <code>ChatDispatchStreamingHandler</code>，还是先查 Server 的哪两个位置？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>没有走到 gRPC。这个错误由 <code>ContextCollectorHandler</code> 在 order 75 选择 Client 前后产生，<code>LlmCallHandler</code> 看到 <code>ctx.terminated=true</code> 会直接返回。优先查 <code>ContextCollectorHandler</code> 的 appId/app 状态/候选 Client 逻辑，再查 <code>ClientInstanceManager</code> 是否因心跳、token、40 秒过期阈值或 channel 状态导致没有 alive instance。</p>
+    </details>
+  </div>
+
+  <p class="note">主要阅读来源：<code>LlmCallHandler.java</code>、<code>GrpcChannelUtil.java</code>、<code>ChatDispatchStreamingHandler.java</code>。下一步打开 <a href="../reference/agent-chain-grpc-flow-map.html">切片速查</a>，按 Handler 顺序、字段映射和调试 checklist 复盘。遇到 <code>sid</code>、metadata 或 completion 持久化不清楚的地方，可以继续向 agent 追问具体调用栈。</p>
+</main>
+</body>
+</html>

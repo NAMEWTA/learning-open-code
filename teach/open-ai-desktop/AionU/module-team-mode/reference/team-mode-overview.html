@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 模块总览参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .route {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.88em;
+      color: var(--color-text-2);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode 模块总览参考</h1>
+    <p class="subtitle">L1 速查文档：模块职责、架构位置、接口清单、内部分层、关键依赖、调用示例、测试证据与已知空白。</p>
+    <div class="meta">
+      <span class="pill">主题：module-team-mode</span>
+      <span class="pill">核心入口：TeamSiderSection / TeamIndex / TeamPage / TeamChatView</span>
+      <span class="pill">桥接域：ipcBridge.team</span>
+    </div>
+  </section>
+
+  <p class="muted">L0 回链：<a href="../../00-overview/reference/00-overview.html">AionU 项目总览参考</a>。交叉主题：<a href="../../module-renderer-core/reference/renderer-core-overview.html">renderer-core</a>、<a href="../../module-common-adapter/reference/common-adapter-overview.html">common-adapter</a>、<a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">conversation-runtime</a>。</p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#role">1. 模块职责与位置</a>
+    <a href="#layers">2. 内部分层</a>
+    <a href="#interfaces">3. 接口清单</a>
+    <a href="#deps">4. 关键依赖</a>
+    <a href="#examples">5. 调用示例</a>
+    <a href="#tests">6. 测试证据</a>
+    <a href="#gaps">7. 空白与风险</a>
+  </nav>
+
+  <h2 id="role">1. 模块职责与位置</h2>
+  <p><strong>一句话职责：</strong>Team Mode 是 AionU renderer 中的多 Agent 团队工作台，它把 Team 记录、成员 tab、权限模式、Team run 状态、workspace 和现有 conversation runtime 组装成一个用户可操作的团队页。</p>
+  <table>
+    <thead>
+      <tr><th>职责面</th><th>主文件</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>侧栏入口</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Sider/TeamSiderSection.tsx</code></td><td>展示 Team 列表、创建按钮、pin / rename / delete 菜单和待确认徽标。</td></tr>
+      <tr><td>路由入口</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/index.tsx</code></td><td>从 <code>/team/:id</code> 读取 team id，并调用 <code>ipcBridge.team.get</code> 加载团队记录。</td></tr>
+      <tr><td>页面总装</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/TeamPage.tsx</code></td><td>组装 ChatLayout、workspace、TeamTabs、TeamPermissionProvider 和每个 assistant slot。</td></tr>
+      <tr><td>会话复用</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code></td><td>按 conversation type 复用 ACP / aionrs Chat，只注入 team send 与 team runtime。</td></tr>
+      <tr><td>Team 契约</td><td><code>open-ai-desktop/AionU/packages/desktop/src/common/types/team/teamTypes.ts</code></td><td>定义 <code>TTeam</code>、<code>TeamAssistant</code>、Team run ack / event / slot work 等共享类型。</td></tr>
+      <tr><td>字段映射</td><td><code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/teamMapper.ts</code></td><td>把后端 <code>lead</code>、<code>working</code>、<code>thinking</code>、legacy agent 字段映射到前端 assistant-first 模型。</td></tr>
+      <tr><td>REST / WS 桥接</td><td><code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</code></td><td>导出 <code>team</code> 域所有 HTTP provider 和 WebSocket emitter。</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>架构位置：</strong>Team Mode 位于 renderer-core 的页面层之内，向下依赖 common-adapter 的 <code>ipcBridge.team</code>，向旁边复用 conversation-runtime 的 Chat、SendBox、MessageList、模型选择和 workspace 壳层。它不直接实现 aioncore 的 Team 调度算法。</p>
+  </div>
+
+  <h2 id="layers">2. 内部分层</h2>
+  <h3>2.1 Team 页面域</h3>
+  <div class="filetree">packages/desktop/src/renderer/pages/team/
+├── index.tsx                               ← 路由落点：team id → TTeam
+├── TeamPage.tsx                            ← 页面总装、workspace、slot 布局
+├── hooks/
+│   ├── TeamTabsContext.tsx                 ← active slot、排序、重命名、本地持久化
+│   ├── TeamPermissionContext.tsx           ← team-only 权限模式和 session warmup
+│   ├── useTeamList.ts                      ← 侧栏 Team 列表与删除清理
+│   ├── useTeamSession.ts                   ← team 事件订阅、成员增删改、状态 map
+│   ├── useTeamRunView.ts                   ← team run / child turn 状态视图
+│   ├── useTeamPendingPermissions.ts        ← 每个会话待确认数量
+│   └── useSiderTeamBadges.ts               ← 侧栏 Team 待确认徽标
+├── components/
+│   ├── TeamCreateModal.tsx                 ← 创建 Team，选择 leader assistant 和 workspace
+│   ├── TeamTabs.tsx                        ← tab、状态点、重命名、拖拽排序、删除
+│   ├── TeamChatView.tsx                    ← ACP / aionrs Chat 复用与 team send 注入
+│   ├── teamSendRuntime.ts                  ← slot 级发送闸门和 stop handler
+│   ├── teamCreateModelResolver.ts          ← 创建 leader 时解析默认 model
+│   ├── assistantSelectUtils.tsx            ← assistant catalog → Team 选项
+│   ├── TeamChatEmptyState.tsx              ← leader 空状态与建议填充
+│   ├── TeamAgentIdentity.tsx               ← 成员头像、名称、leader 标识
+│   └── AgentStatusBadge.tsx                ← pending / idle / active / failed 状态点
+└── utils/
+    ├── removeTeamAssistantWithCronCleanup.ts ← 删除前清理关联 Cron job
+    └── teamWorkspaceView.ts                  ← team workspace / leader 临时 workspace 视图</div>
+
+  <h3>2.2 跨模块挂点</h3>
+  <table>
+    <thead>
+      <tr><th>挂点</th><th>文件</th><th>Team Mode 相关职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>路由表</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Router.tsx</code></td><td><code>TEAM_MODE_ENABLED</code> 为真时启用 <code>/team/:id</code>。</td></tr>
+      <tr><td>主布局</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Layout.tsx</code></td><td>把 <code>/team/</code> 视为 workspace 可用页面。</td></tr>
+      <tr><td>标题栏</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx</code></td><td>识别 team route，提供返回、上下文和窗口级行为。</td></tr>
+      <tr><td>会话 ACP</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpChat.tsx</code></td><td>接收 <code>teamSendMessage</code> 与 <code>teamRuntime</code>，跳过部分单会话 warmup。</td></tr>
+      <tr><td>会话 aionrs</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/conversation/platforms/aionrs/AionrsChat.tsx</code></td><td>接收相同 team 注入点，保持发送框和模型状态复用。</td></tr>
+      <tr><td>发送框</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpSendBox.tsx</code> / <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/conversation/platforms/aionrs/AionrsSendBox.tsx</code></td><td>在 team context 下 warmup team session，发送时调用注入的 team send override。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="interfaces">3. 接口清单</h2>
+  <p>接口以 <code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/ipcBridge.ts</code> 的 <code>export const team</code> 为准；类型主要来自 <code>open-ai-desktop/AionU/packages/desktop/src/common/types/team/teamTypes.ts</code>，创建和新增成员 payload 映射来自 <code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/teamMapper.ts</code>。</p>
+
+  <h3>3.1 HTTP provider</h3>
+  <table>
+    <thead>
+      <tr><th>前端接口</th><th>HTTP</th><th>参数 / 返回</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>team.create</code></td><td><span class="route">POST /api/teams</span></td><td><code>ICreateTeamParams → TTeam</code></td><td>创建 Team；body 由 <code>toBackendAssistant()</code> 转成 assistant-first payload。</td></tr>
+      <tr><td><code>team.list</code></td><td><span class="route">GET /api/teams?user_id=...</span></td><td><code>{ user_id } → TTeam[]</code></td><td>侧栏 Team 列表。</td></tr>
+      <tr><td><code>team.get</code></td><td><span class="route">GET /api/teams/:id</span></td><td><code>{ id } → TTeam | null</code></td><td>Team 页面入口和测试探针。</td></tr>
+      <tr><td><code>team.remove</code></td><td><span class="route">DELETE /api/teams/:id</span></td><td><code>{ id } → void</code></td><td>删除 Team；renderer 删除前会清理关联 Cron。</td></tr>
+      <tr><td><code>team.addAgent</code></td><td><span class="route">POST /api/teams/:team_id/agents</span></td><td><code>IAddTeamAssistantParams → TeamAssistant</code></td><td>向团队添加 teammate。</td></tr>
+      <tr><td><code>team.removeAgent</code></td><td><span class="route">DELETE /api/teams/:team_id/agents/:slot_id</span></td><td><code>{ team_id, slot_id } → void</code></td><td>删除成员 slot；renderer 删除前会清理该成员 Cron。</td></tr>
+      <tr><td><code>team.stop</code></td><td><span class="route">DELETE /api/teams/:team_id/session</span></td><td><code>{ team_id } → void</code></td><td>停止 Team session。</td></tr>
+      <tr><td><code>team.ensureSession</code></td><td><span class="route">POST /api/teams/:team_id/session</span></td><td><code>{ team_id } → void</code></td><td>Team sendbox warmup；由 <code>TeamPermissionContext</code> 去重。</td></tr>
+      <tr><td><code>team.activeLease</code></td><td><span class="route">POST /api/teams/:team_id/active-lease</span></td><td><code>{ team_id } → void</code></td><td>团队页 active lease，上层 hook 使用。</td></tr>
+      <tr><td><code>team.renameAgent</code></td><td><span class="route">PATCH /api/teams/:team_id/agents/:slot_id/name</span></td><td><code>{ team_id, slot_id, new_name } → void</code></td><td>重命名成员 tab。</td></tr>
+      <tr><td><code>team.renameTeam</code></td><td><span class="route">PATCH /api/teams/:id/name</span></td><td><code>{ id, name } → void</code></td><td>重命名团队标题或侧栏项。</td></tr>
+      <tr><td><code>team.setSessionMode</code></td><td><span class="route">POST /api/teams/:team_id/session-mode</span></td><td><code>{ team_id, session_mode } → void</code></td><td>leader 改权限模式后写回 Team record，后续成员继承。</td></tr>
+      <tr><td><code>team.getRunState</code></td><td><span class="route">GET /api/teams/:team_id/run-state</span></td><td><code>{ team_id } → ITeamRunStateResponse</code></td><td>页面加载、重连、事件丢失后 reconcile。</td></tr>
+      <tr><td><code>team.sendMessage</code></td><td><span class="route">POST /api/teams/:team_id/messages</span></td><td><code>ISendTeamMessageParams → ITeamRunAck</code></td><td>leader 输入发送给 Team run。</td></tr>
+      <tr><td><code>team.sendMessageToAgent</code></td><td><span class="route">POST /api/teams/:team_id/agents/:slot_id/messages</span></td><td><code>ISendTeamAgentMessageParams → ITeamRunAck</code></td><td>成员 tab 直接发送给指定 slot。</td></tr>
+      <tr><td><code>team.cancelRun</code></td><td><span class="route">POST /api/teams/:team_id/runs/:team_run_id/cancel</span></td><td><code>ICancelTeamRunParams → void</code></td><td>取消团队级 run。</td></tr>
+      <tr><td><code>team.cancelChildTurn</code></td><td><span class="route">POST /api/teams/:team_id/runs/:team_run_id/agents/:slot_id/cancel</span></td><td><code>ICancelTeamChildTurnParams → void</code></td><td>取消指定成员 child turn。</td></tr>
+      <tr><td><code>team.pauseSlotWork</code></td><td><span class="route">POST /api/teams/:team_id/runs/:team_run_id/agents/:slot_id/pause</span></td><td><code>IPauseTeamSlotParams → void</code></td><td>发送框 stop 按钮对应的 slot 级暂停。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 WebSocket emitter</h3>
+  <table>
+    <thead>
+      <tr><th>前端事件</th><th>payload 类型</th><th>主要消费者</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>team.agentStatusChanged</code></td><td><code>ITeamAgentStatusEvent</code></td><td><code>useTeamSession</code></td><td>更新 slot 状态点和 last message。</td></tr>
+      <tr><td><code>team.agentSpawned</code></td><td><code>ITeamAgentSpawnedEvent</code></td><td><code>useTeamSession</code>、<code>useTeamRunView</code></td><td>成员被创建后刷新 Team 并 reconcile run。</td></tr>
+      <tr><td><code>team.agentRemoved</code></td><td><code>ITeamAgentRemovedEvent</code></td><td><code>useTeamSession</code>、<code>useTeamRunView</code></td><td>成员删除后刷新 Team 并修正 active slot。</td></tr>
+      <tr><td><code>team.agentRenamed</code></td><td><code>ITeamAgentRenamedEvent</code></td><td><code>useTeamSession</code>、<code>useTeamRunView</code></td><td>成员名称变更。</td></tr>
+      <tr><td><code>team.listChanged</code></td><td><code>ITeamListChangedEvent</code></td><td><code>useTeamList</code>、<code>useTeamRunView</code></td><td>Team 列表或成员结构发生变化。</td></tr>
+      <tr><td><code>team.created</code></td><td><code>ITeamCreatedEvent</code></td><td><code>useTeamList</code></td><td>后端创建团队后刷新侧栏。</td></tr>
+      <tr><td><code>team.removed</code></td><td><code>ITeamRemovedEvent</code></td><td><code>useTeamList</code></td><td>后端删除团队后刷新侧栏。</td></tr>
+      <tr><td><code>team.renamed</code></td><td><code>ITeamRenamedEvent</code></td><td><code>useTeamList</code></td><td>团队重命名后刷新侧栏。</td></tr>
+      <tr><td><code>team.teammateMessage</code></td><td><code>ITeamTeammateMessageEvent</code></td><td>本轮未定位到 renderer 直接订阅；消息渲染侧处理 <code>teammateMessage</code> 标记</td><td>事件由 adapter 导出，当前可核到的前端消费点是 <code>chatLib</code> 归一化与 <code>MessageText</code> 的 teammate 样式判断。</td></tr>
+      <tr><td><code>team.mcpStatus</code></td><td><code>ITeamMcpStatusEvent</code></td><td><code>useTeamSession</code></td><td>MCP 注入阶段状态；当前 hook 过滤后未产生 UI 副作用。</td></tr>
+      <tr><td><code>team.taskChanged</code></td><td><code>ITeamTaskChangedEvent</code></td><td><code>useTeamSession</code></td><td>Team task board 变更后刷新 Team。</td></tr>
+      <tr><td><code>team.sessionChanged</code></td><td><code>ITeamSessionChangedEvent</code></td><td><code>useTeamSession</code>、<code>useTeamRunView</code></td><td>session 生命周期变化。</td></tr>
+      <tr><td><code>team.runAccepted</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>Team run 被接受。</td></tr>
+      <tr><td><code>team.runStarted</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>Team run 开始。</td></tr>
+      <tr><td><code>team.runUpdated</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>pending wake、child 数量或 slot work 更新。</td></tr>
+      <tr><td><code>team.runCompleted</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>run 完成后清空 activeRun。</td></tr>
+      <tr><td><code>team.runCancelled</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>run 取消后清空 activeRun。</td></tr>
+      <tr><td><code>team.runFailed</code></td><td><code>ITeamRunEvent</code></td><td><code>useTeamRunView</code></td><td>run 失败后清空 activeRun。</td></tr>
+      <tr><td><code>team.childTurnStarted</code></td><td><code>ITeamChildTurnEvent</code></td><td><code>useTeamRunView</code></td><td>slot child turn 开始，标记该 slot busy。</td></tr>
+      <tr><td><code>team.childTurnCompleted</code></td><td><code>ITeamChildTurnEvent</code></td><td><code>useTeamRunView</code></td><td>slot child turn 完成，移除 active turn。</td></tr>
+      <tr><td><code>team.childTurnCancelled</code></td><td><code>ITeamChildTurnEvent</code></td><td><code>useTeamRunView</code></td><td>slot child turn 取消，移除 active turn。</td></tr>
+      <tr><td><code>realtime.reconnected</code></td><td><code>IRealtimeReconnectedEvent</code></td><td><code>useTeamRunView</code></td><td>WebSocket 重连后主动拉 <code>getRunState</code> 校准状态。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.3 关键类型</h3>
+  <table>
+    <thead>
+      <tr><th>类型</th><th>用途</th><th>注意点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>TTeam</code></td><td>Team 记录</td><td>包含 <code>assistants</code>，并为旧调用保留 <code>agents</code> alias。</td></tr>
+      <tr><td><code>TeamAssistant</code></td><td>slot 记录</td><td>包含 <code>slot_id</code>、<code>conversation_id</code>、role、backend、assistant identity、pending confirmations。</td></tr>
+      <tr><td><code>TeamAssistantInput</code></td><td>创建 Team / 添加成员输入</td><td>后端从 <code>assistant_id</code> 派生 runtime backend；<code>toBackendAssistant()</code> 要求 <code>assistant_id</code> 必填。</td></tr>
+      <tr><td><code>TeammateStatus</code></td><td>UI 状态点</td><td><code>working</code>、<code>thinking</code>、<code>tool_use</code> 都归一为 <code>active</code>。</td></tr>
+      <tr><td><code>ITeamRunAck</code></td><td>发送后即时 ack</td><td><code>useTeamRunView</code> 会把 ack 转成 run event，避免等待 WebSocket 才显示 busy。</td></tr>
+      <tr><td><code>ITeamRunEvent</code></td><td>团队 run 快照</td><td>包含 active child 数、pending wake 数、starting child 数和 slot work 列表。</td></tr>
+      <tr><td><code>ITeamSlotWork</code></td><td>slot 级工作状态</td><td>决定某个成员的 sendbox 是否被 gate、stop 是否可触发。</td></tr>
+      <tr><td><code>ITeamChildTurnEvent</code></td><td>成员 child turn 状态</td><td>用于把 slot 的 active turn 加入或移出 <code>childTurnsBySlot</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="deps">4. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>类型</th><th>为什么关键</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>React Router</td><td>页面入口</td><td><code>/team/:id</code> 是 Team 工作台的唯一路由入口。</td></tr>
+      <tr><td>SWR</td><td>数据缓存</td><td>Team list、Team detail、成员 conversation 都通过 SWR 缓存和 mutate 刷新。</td></tr>
+      <tr><td><code>ipcBridge.team</code></td><td>业务桥</td><td>所有 Team CRUD、session、run、消息、事件都从这里进入 REST / WS。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/packages/desktop/src/common/adapter/teamMapper.ts</code></td><td>字段映射</td><td>消除 backend wire contract 和 renderer 模型之间的字段差异。</td></tr>
+      <tr><td>Conversation runtime</td><td>UI 复用</td><td>Team Mode 复用 ACP / aionrs Chat 和 SendBox，只注入 Team send 与 runtime gate。</td></tr>
+      <tr><td>Assistants catalog</td><td>创建入口</td><td><code>TeamCreateModal</code> 从统一助手目录选择 leader，并解析默认 model。</td></tr>
+      <tr><td>Cron 模块</td><td>清理依赖</td><td>删除成员或 Team 前必须删除成员会话关联的 Cron job，避免悬挂任务。</td></tr>
+      <tr><td>Workspace 组件</td><td>项目上下文</td><td>Team workspace 可来自用户选择目录，也可回退到 leader conversation 的临时 workspace。</td></tr>
+      <tr><td>localStorage</td><td>轻量持久化</td><td>保存 Team section 展开状态、pin、active slot、成员排序、pending permission 计数快照。</td></tr>
+      <tr><td>Arco Design / i18next</td><td>UI 与文案</td><td>modal、message、tooltip、表单、按钮、错误文案和多语言依赖它们。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="examples">5. 调用示例</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>示例 A：创建 Team</h3>
+      <p><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Sider/TeamSiderSection.tsx</code> 打开 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamCreateModal.tsx</code>。modal 校验名称和 leader assistant，调用 <code>resolveDefaultTeamAgentModel()</code>，最后执行 <code>ipcBridge.team.create.invoke({ name, workspace, assistants })</code>。创建成功后侧栏 <code>refreshTeams()</code>，并导航到 <code>/team/{id}</code>。</p>
+    </section>
+    <section class="panel">
+      <h3>示例 B：打开 Team 页面</h3>
+      <p><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Router.tsx</code> 命中 <code>/team/:id</code> 后进入 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/index.tsx</code>，用 <code>ipcBridge.team.get.invoke({ id })</code> 读取 <code>TTeam</code>。<code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/TeamPage.tsx</code> 再用 <code>TeamTabsProvider</code> 和 <code>TeamPermissionProvider</code> 包住团队工作台。</p>
+    </section>
+    <section class="panel">
+      <h3>示例 C：leader 发送消息</h3>
+      <p><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamChatView.tsx</code> 给 <code>AcpChat</code> / <code>AionrsChat</code> 注入 <code>teamSendMessage</code>。leader slot 调用 <code>ipcBridge.team.sendMessage</code>，收到 <code>ITeamRunAck</code> 后调用 <code>useTeamRunView.applyAck()</code>，随后继续用 WebSocket 事件校准。</p>
+    </section>
+    <section class="panel">
+      <h3>示例 D：成员 stop</h3>
+      <p><code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/teamSendRuntime.ts</code> 先判断当前 <code>slot_id</code> 是否有 active turn、pending wake 或 starting child。若有，stop handler 调用 <code>ipcBridge.team.pauseSlotWork</code>；若 backend 报 “no active team run to pause”，则触发 <code>getRunState</code> reconcile。</p>
+    </section>
+  </div>
+
+  <pre><code class="language-text">用户在 leader tab 输入
+  → TeamChatView.teamSendMessage
+  → ipcBridge.team.sendMessage.invoke
+  → team.sendMessage HTTP provider
+  → ITeamRunAck 立即更新 useTeamRunView
+  → team.run* / team.childTurn* WebSocket 事件持续校准 slot 状态
+  → teamRuntime.runtimeGate 控制每个 slot 的 sendbox 是否可继续发送</code></pre>
+
+  <h2 id="tests">6. 测试证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试文件</th><th>证明什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/common-adapter/teamMapper.test.ts</code></td><td>验证状态归一、assistant-first 字段、legacy alias hydration、<code>assistant_id</code> 必填和 backend 字段省略。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/common-adapter/ipcBridgeTeam.test.ts</code></td><td>验证 <code>team.getRunState</code> 路由到 <span class="route">GET /api/teams/{team_id}/run-state</span>。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/useTeamRunView.dom.test.tsx</code></td><td>验证 run-state reconcile、run 事件、child turn、WebSocket reconnect 后的 slot 状态校准。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/teamSendRuntime.test.ts</code></td><td>验证 Team send runtime 的 slot gate、active run 同步、stale pause error 和成员发送控制。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/team/useTeamListCronCleanup.dom.test.tsx</code></td><td>验证删除 Team 前先清理成员会话关联的 Cron job。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/team/useTeamSessionCronCleanup.dom.test.ts</code></td><td>验证删除成员前先清理该成员会话关联的 Cron job。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/renderer/team/TeamPageCronJobManager.dom.test.tsx</code></td><td>验证 TeamPage header 的 CronJobManager 和删除清理顺序。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-create.e2e.ts</code></td><td>验证侧栏 create 按钮、创建 modal、填写表单、创建后导航和侧栏刷新。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-create-ui.e2e.ts</code></td><td>验证完整 UI 流程，不在核心步骤使用 bridge shortcut。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-whitelist.e2e.ts</code></td><td>验证创建 modal 使用 backend 暴露的 <code>team_selectable</code> 助手选项。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-communication.e2e.ts</code></td><td>验证 leader tab 通过 UI textarea 发送消息后，Team 仍能通过 <code>team.get</code> 探测为有效。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-member-messaging.e2e.ts</code></td><td>验证成员 tab 可直接发送消息，并通过 member slot 的 textarea 和状态点观察结果。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-agent-lifecycle.e2e.ts</code></td><td>验证 assistant-first contract 下创建 Team、添加成员、成员 tab 出现、team record 保留 <code>assistant_id</code>。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-tab-context.e2e.ts</code></td><td>验证 leader 与 member tab 切换后，leader conversation history 仍保留。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-session-mode.e2e.ts</code></td><td>验证 leader 侧模式切换会写回 <code>team.get → session_mode</code>。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-delete.e2e.ts</code> / <code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-delete-ui.e2e.ts</code></td><td>验证删除 Team 后侧栏和路由不会保留 stale team 页面。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-ui-details.e2e.ts</code></td><td>验证折叠侧栏 team 图标导航和带 workspace folder 创建 Team。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-view-modes.e2e.ts</code></td><td>验证 slot 全屏切换和 ACP 模型选择器。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/helpers/teamHelpers.ts</code></td><td>说明测试创建 Team 推荐走真实侧栏 UI，以触发 <code>TeamCreateModal.onCreated → refreshTeams()</code> 和 SWR 缓存刷新。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="gaps">7. 空白与风险</h2>
+  <table>
+    <thead>
+      <tr><th>项目</th><th>观察</th><th>影响</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>PRD 空白</td><td><code>open-ai-desktop/AionU/docs/prds/teams/README.md</code> 当前为空文件。</td><td>本 L1 不引用 PRD 做产品动机依据，只引用源码和测试。</td></tr>
+      <tr><td>backend 不在本仓库</td><td>aioncore 的 Team 调度实现不在本 TypeScript 源码树中。</td><td>本主题只解释 AionU 侧接口和 UI 状态，backend 调度需要另开资源或子项目。</td></tr>
+      <tr><td>E2E selector 风险</td><td><code>open-ai-desktop/AionU/tests/e2e/cases/teams/team-workspace-migration.e2e.ts</code> 查找 <code>team-create-agent-card-*</code> 和 <code>team-create-agent-selected-badge-*</code>，而当前 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/components/TeamCreateModal.tsx</code> 使用 <code>team-create-agent-option-*</code>。</td><td>可能导致该 E2E 与当前 UI selector 脱节；本轮只记录，不修改源项目。</td></tr>
+      <tr><td>assistant 支持依赖环境</td><td>多项 E2E 根据本地安装的 claude / codex / gemini / aionrs 助手决定是否 skip。</td><td>测试结果需要结合本地 CLI/auth 状态解读，不能把 skip 当作功能通过。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

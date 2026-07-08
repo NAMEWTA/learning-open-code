@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Android 离线启动全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · android offline startup vertical slice</p>
+    <h1>Android 离线启动、legacy 迁移与 Activity 切换参考</h1>
+    <p class="lead">本参考用于快速定位 LAUNCHER 路由、LaunchDecider 模式判定、Capacitor Activity 装配、WebView 恢复与 Angular 冷启动桥接。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>；宿主边界见 <a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端宿主导览</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <div class="filetree">android/app/src/main/java/com/superproductivity/superproductivity/
+├── app/
+│   └── LaunchDecider.kt              ← MODE_ONLINE(1) / MODE_OFFLINE(2) 判定
+├── FullscreenActivity.kt             ← LAUNCHER；legacy 在线 WebView；可切 Capacitor
+├── CapacitorMainActivity.kt          ← 离线 Capacitor 宿主；插件 + SUPAndroid 注入
+├── webview/
+│   ├── WebViewRecovery.kt            ← 瞬态失败一次性自动重开
+│   ├── WebViewCompatibilityChecker.kt ← 版本预检、阻断、重试预算
+│   ├── WebViewBlockActivity.kt       ← 终端阻断屏
+│   └── JavaScriptInterface.kt        ← SUPAndroid 桥；flushPendingShareIntent
+├── widget/
+│   ├── StartupOverlayManager.kt      ← 冷启动原生添加任务 overlay
+│   └── ShareIntentQueue.kt           ← 分享 intent 跨进程持久化
+└── AndroidManifest.xml               ← FullscreenActivity=LAUNCHER；Capacitor=SEND/OAuth
+
+src/app/
+├── util/is-android-web-view.ts       ← IS_ANDROID_WEB_VIEW = !!SUPAndroid
+├── core/platform/
+│   └── capacitor-platform.service.ts ← legacy WebView 纳入 isNative
+├── core/startup-overlay/
+│   └── startup-overlay.service.ts    ← overlay 交接 + Widget 冷启动 drain
+├── features/android/
+│   ├── android-interface.ts          ← SUPAndroid 类型；冷启动队列 pull
+│   └── store/android.effects.ts      ← onResume 温启动 drain
+└── main.ts                           ← bootstrap 末尾 processAndDismiss()</div>
+    <p>
+      <code>android/app/src/main/AndroidManifest.xml</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/app/LaunchDecider.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/FullscreenActivity.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/WebViewRecovery.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/WebViewCompatibilityChecker.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/WebViewBlockActivity.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/StartupOverlayManager.kt</code>
+      <code>android/app/src/main/java/com/superproductivity/superproductivity/widget/ShareIntentQueue.kt</code>
+      <code>android/README_OFFLINE.md</code>
+      <code>capacitor.config.ts</code>
+      <code>src/app/util/is-android-web-view.ts</code>
+      <code>src/app/core/platform/capacitor-platform.service.ts</code>
+      <code>src/app/core/startup-overlay/startup-overlay.service.ts</code>
+      <code>src/app/features/android/android-interface.ts</code>
+      <code>src/app/features/android/store/android.effects.ts</code>
+      <code>src/main.ts</code>
+    </p>
+
+    <h2>LaunchDecider 模式速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>条件</th><th>结果</th><th>Activity</th><th>Web 内容来源</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>BuildConfig.LAUNCH_MODE=1</code></td>
+            <td>强制 <code>MODE_ONLINE</code></td>
+            <td><code>FullscreenActivity</code></td>
+            <td>在线 <code>ONLINE_SERVICE_HOST</code></td>
+          </tr>
+          <tr>
+            <td><code>BuildConfig.LAUNCH_MODE=2</code></td>
+            <td>强制 <code>MODE_OFFLINE</code></td>
+            <td><code>CapacitorMainActivity</code></td>
+            <td>APK 内离线 <code>www</code> bundle</td>
+          </tr>
+          <tr>
+            <td>全新安装（<code>firstInstallTime == lastUpdateTime</code>）</td>
+            <td><code>MODE_OFFLINE</code></td>
+            <td><code>CapacitorMainActivity</code></td>
+            <td>离线 bundle</td>
+          </tr>
+          <tr>
+            <td>升级 + 存在 <code>databases/SupKeyValStore</code></td>
+            <td><code>MODE_ONLINE</code>（首次判定后持久化）</td>
+            <td><code>FullscreenActivity</code></td>
+            <td>在线 URL</td>
+          </tr>
+          <tr>
+            <td>升级 + 无 legacy 数据</td>
+            <td><code>MODE_OFFLINE</code></td>
+            <td><code>CapacitorMainActivity</code></td>
+            <td>离线 bundle</td>
+          </tr>
+          <tr>
+            <td>SharedPreferences 已存 <code>launch_mode</code> 1 或 2</td>
+            <td>沿用已存值</td>
+            <td>对应 Activity</td>
+            <td>见上</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>启动阶段速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>入口</th><th>输出</th><th>失败时表现</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>LAUNCHER 路由</td>
+            <td>Manifest → <code>FullscreenActivity.onCreate</code></td>
+            <td>切 Capacitor 或继续 legacy</td>
+            <td>闪屏后消失 → 查 Activity 切换是否 <code>finish()</code> 过快</td>
+          </tr>
+          <tr>
+            <td>WebView 预检</td>
+            <td><code>WebViewCompatibilityChecker.evaluate</code></td>
+            <td>OK / WARN / BLOCK</td>
+            <td>阻断屏；瞬态失败走 <code>WebViewRecovery</code> 自动重开</td>
+          </tr>
+          <tr>
+            <td>Capacitor 装配</td>
+            <td><code>CapacitorMainActivity.onCreate</code></td>
+            <td>插件注册 + <code>SUPAndroid</code> 注入 + overlay</td>
+            <td><code>bridge.webView == null</code> → 恢复或阻断</td>
+          </tr>
+          <tr>
+            <td>Angular 冷启动</td>
+            <td><code>main.ts</code> bootstrap</td>
+            <td><code>android-interface</code> 队列 drain + overlay 交接</td>
+            <td>分享/Widget 丢事件 → 冷启动 pull 路径未执行</td>
+          </tr>
+          <tr>
+            <td>温启动补偿</td>
+            <td><code>android.effects.ts</code> <code>onResume$</code></td>
+            <td>提醒/Widget 队列再 drain</td>
+            <td>仅影响从后台恢复，不替代冷启动 pull</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>legacy vs Capacitor 平台检测</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>检测点</th><th>legacy WebView</th><th>Capacitor 宿主</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>window.SUPAndroid</code></td>
+            <td>存在</td>
+            <td>存在</td>
+          </tr>
+          <tr>
+            <td><code>Capacitor.isNativePlatform()</code></td>
+            <td>false</td>
+            <td>true</td>
+          </tr>
+          <tr>
+            <td><code>IS_ANDROID_WEB_VIEW</code></td>
+            <td>true</td>
+            <td>true</td>
+          </tr>
+          <tr>
+            <td><code>CapacitorPlatformService.isNative</code></td>
+            <td>true（显式包含 legacy）</td>
+            <td>true</td>
+          </tr>
+          <tr>
+            <td>数据持久化</td>
+            <td>原生 SQLite <code>SupKeyValStore</code></td>
+            <td>IndexedDB（Web 层）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>词汇表</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>术语</th><th>含义</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>MODE_OFFLINE</code></td><td>LaunchDecider 值 2；使用 CapacitorMainActivity 加载离线 bundle。</td></tr>
+          <tr><td><code>MODE_ONLINE</code></td><td>LaunchDecider 值 1；使用 FullscreenActivity 加载在线 SPA。</td></tr>
+          <tr><td><code>SUPAndroid</code></td><td>注入 WebView 的 JavaScriptInterface 全局名；Angular 通过它调用原生能力。</td></tr>
+          <tr><td><code>SupKeyValStore</code></td><td>legacy 在线版 SQLite 存储文件；存在即视为有 legacy 数据。</td></tr>
+          <tr><td><code>Connectivity-Free Mode</code></td><td>构建配置 <code>LAUNCH_MODE=2</code> 强制离线；见 <code>android/README_OFFLINE.md</code>。</td></tr>
+          <tr><td><code>WebViewRecovery</code></td><td>瞬态 WebView 初始化失败时经 FullscreenActivity 自动重开一次的恢复机制（#7518）。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>交叉引用</h2>
+    <ul>
+      <li><a href="../../slice-app-startup-flow/lessons/0001-flow-map.html">应用启动与数据初始化</a> — Angular bootstrap 后的 StartupService 与数据加载。</li>
+      <li><a href="../../slice-android-share-widget-flow/lessons/0001-flow-map.html">Android 分享与 Widget</a> — 分享 intent 与 Widget 队列 drain 细节。</li>
+      <li><a href="../../slice-mobile-background-flush-flow/lessons/0001-flow-map.html">移动端后台恢复</a> — <code>onResume$</code> 温启动与 op-log flush。</li>
+      <li><a href="../../slice-android-native-reminder-flow/lessons/0001-flow-map.html">Android 原生提醒</a> — 冷启动提醒队列 pull 路径。</li>
+    </ul>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime 与 persistence 公共 API</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; --warn:#9a3412; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.64; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; }
+    nav { margin-bottom:18px; font-size:.92rem; }
+    nav a { margin-right:14px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre { margin:12px 0; padding:14px 16px; overflow:auto; background:#0f172a; color:#e5eefb; border-radius:8px; font-size:.82rem; line-height:1.55; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 22px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin:14px 0; }
+    .panel { border:1px solid var(--line); border-radius:8px; padding:12px 14px; background:var(--soft); }
+    .where { display:block; font-family:"SF Mono",Consolas,monospace; font-size:.78rem; color:#475569; margin-top:4px; }
+    .note { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .warn { border-left:4px solid var(--warn); }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-runtime-persistence-module-tour.html">返回短课</a>
+    <a href="runtime-persistence-overview.html">模块地图 L1</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览</a>
+  </nav>
+
+  <h1>Runtime 与 persistence 公共 API</h1>
+  <p class="lead">L3 微观 API 字典，聚焦 <code>RunRepository</code>、<code>RunManager</code>、<code>run_agent</code>、<code>StreamBridge</code> 与 checkpointer provider 的签名、参数约束与边界行为。<a href="runtime-persistence-overview.html">runtime-persistence-overview.html</a> 负责模块地图与故障定位；本页只展开公共接口。</p>
+
+  <div class="grid">
+    <div class="panel"><strong>覆盖范围</strong>4 个公共面包：RunStore/SQL、RunManager、worker、stream + checkpointer</div>
+    <div class="panel"><strong>源码 commit</strong>eb5eb9c（<code>open-ai-agent/deer-flow</code> / main）</div>
+  </div>
+
+  <h2>1. 包级导出与装配关系</h2>
+  <table>
+    <tr><th>导入路径</th><th>导出</th><th>用途</th></tr>
+    <tr><td><code>deerflow.persistence.run</code></td><td><code>RunRepository</code>, <code>RunRow</code></td><td>SQLAlchemy 版 <code>RunStore</code></td></tr>
+    <tr><td><code>deerflow.runtime</code></td><td><code>RunManager</code>, <code>RunRecord</code>, <code>run_agent</code>, <code>RunContext</code>, <code>StreamBridge</code>, <code>make_stream_bridge</code>, <code>make_checkpointer</code>, <code>get_checkpointer</code></td><td>Gateway embedded runtime 主入口</td></tr>
+    <tr><td><code>deerflow.runtime.runs.store.base</code></td><td><code>RunStore</code>（抽象基类）</td><td><code>RunManager</code> 与 repository 的契约</td></tr>
+  </table>
+  <p class="note">装配顺序见 Gateway <code>langgraph_runtime()</code>：先 <code>make_stream_bridge</code> / <code>init_engine</code> / <code>make_checkpointer</code>，再构造 <code>RunRepository(session_factory)</code> 并注入 <code>RunManager(store=repo)</code>。</p>
+
+  <h2>2. RunRepository（<code>RunStore</code> 实现）</h2>
+  <p><span class="where">backend/packages/harness/deerflow/persistence/run/sql.py</span></p>
+  <p>每个方法各自获取短生命周期 <code>AsyncSession</code>，不在长任务执行期间持有连接。所有带 <code>user_id</code> 的读操作在 SQL 层做行级过滤；<code>user_id=AUTO</code> 时由 <code>resolve_user_id()</code> 解析当前请求用户。</p>
+
+  <h3>构造</h3>
+  <pre>RunRepository(session_factory: async_sessionmaker[AsyncSession])</pre>
+
+  <h3>CRUD 与状态</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名要点</th><th>返回值</th><th>约束 / 边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>put</code></td>
+        <td><code>put(run_id, *, thread_id, assistant_id=None, user_id=AUTO, model_name=None, status="pending", multitask_strategy="reject", metadata=None, kwargs=None, error=None, created_at=None, follow_up_to_run_id=None)</code></td>
+        <td><code>None</code></td>
+        <td><strong>幂等 upsert</strong>：同 <code>run_id</code> 重试不会主键冲突；<code>metadata</code>/<code>kwargs</code> 经 <code>_safe_json</code> 序列化；<code>model_name</code> strip 后截断至 128 字符。</td>
+      </tr>
+      <tr>
+        <td><code>get</code></td>
+        <td><code>get(run_id, *, user_id=AUTO)</code></td>
+        <td><code>dict | None</code></td>
+        <td>行不存在或 <code>user_id</code> 不匹配 → <code>None</code>；datetime 字段转为 ISO 字符串。</td>
+      </tr>
+      <tr>
+        <td><code>list_by_thread</code></td>
+        <td><code>list_by_thread(thread_id, *, user_id=AUTO, limit=100)</code></td>
+        <td><code>list[dict]</code></td>
+        <td>按 <code>created_at DESC</code>；默认最多 100 条。</td>
+      </tr>
+      <tr>
+        <td><code>update_status</code></td>
+        <td><code>update_status(run_id, status, *, error=None)</code></td>
+        <td><code>bool</code></td>
+        <td><code>False</code> = 无匹配行；<code>error</code> 非空时一并写入。</td>
+      </tr>
+      <tr>
+        <td><code>delete</code></td>
+        <td><code>delete(run_id, *, user_id=AUTO)</code></td>
+        <td><code>None</code></td>
+        <td>用户不匹配时静默 no-op。</td>
+      </tr>
+      <tr>
+        <td><code>update_model_name</code></td>
+        <td><code>update_model_name(run_id, model_name)</code></td>
+        <td><code>None</code></td>
+        <td>接受 <code>None</code> 清空；同样做 normalize/truncate。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>完成态与运行中快照</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>关键参数</th><th>返回值</th><th>约束</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>update_run_completion</code></td>
+        <td><code>status</code> + token 计数 + <code>token_usage_by_model</code> + <code>message_count</code> + <code>last_ai_message</code> / <code>first_human_message</code> + <code>error</code></td>
+        <td><code>bool</code></td>
+        <td>首尾消息各截断至 2000 字符；<code>False</code> = run 不存在。</td>
+      </tr>
+      <tr>
+        <td><code>update_run_progress</code></td>
+        <td>同上但各计数为 <code>None</code> 可跳过</td>
+        <td><code>None</code></td>
+        <td><strong>仅更新 <code>status=running</code> 的行</strong>；用于 journal 节流写 token。</td>
+      </tr>
+      <tr>
+        <td><code>aggregate_tokens_by_thread</code></td>
+        <td><code>thread_id</code>, <code>include_active=False</code></td>
+        <td><code>dict</code></td>
+        <td>默认只聚合 <code>success</code>/<code>error</code>；<code>include_active=True</code> 额外含 <code>running</code>；<code>by_model</code> 优先读 JSON 列，旧行回退 <code>model_name</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>恢复查询</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>list_pending</code></td><td><code>list_pending(*, before=None)</code></td><td><code>status=pending</code> 且 <code>created_at &lt;= before</code>（默认 now）</td></tr>
+      <tr><td><code>list_inflight</code></td><td><code>list_inflight(*, before=None)</code></td><td><code>status in (pending, running)</code>，供 startup orphan recovery</td></tr>
+    </tbody>
+  </table>
+
+  <h3>调用示例</h3>
+  <pre>from deerflow.persistence import init_engine, get_session_factory
+from deerflow.persistence.run import RunRepository
+
+await init_engine(db_config)
+repo = RunRepository(get_session_factory())
+
+await repo.put(
+    "run-abc",
+    thread_id="thread-1",
+    user_id="user-42",
+    status="pending",
+    metadata={"source": "gateway"},
+)
+row = await repo.get("run-abc", user_id="user-42")
+await repo.update_run_completion(
+    "run-abc",
+    status="success",
+    total_tokens=1200,
+    token_usage_by_model={"gpt-4": {"total_tokens": 1200}},
+)</pre>
+  <p>测试证据：<code>backend/tests/test_run_repository.py</code>、<code>backend/tests/test_token_usage_by_model.py</code>、<code>backend/tests/test_persistence_timezone.py</code>。</p>
+
+  <h2>3. RunManager 与 RunRecord</h2>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/runs/manager.py</span></p>
+  <p>进程内 registry + 可选 <code>RunStore</code> 双写。所有变更受 <code>asyncio.Lock</code> 保护；SQLite 写失败有有界指数退避重试（<code>PersistenceRetryPolicy</code>，默认 5 次）。</p>
+
+  <h3>构造</h3>
+  <pre>RunManager(store: RunStore | None = None, *, persistence_retry_policy: PersistenceRetryPolicy | None = None)</pre>
+
+  <h3>核心生命周期 API</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名要点</th><th>返回</th><th>异常 / 边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>create</code></td>
+        <td><code>create(thread_id, assistant_id=None, *, on_disconnect=DisconnectMode.cancel, metadata=None, kwargs=None, multitask_strategy="reject", user_id=None)</code></td>
+        <td><code>RunRecord</code></td>
+        <td>生成 UUID <code>run_id</code>；store 写入失败会回滚内存记录并 re-raise。</td>
+      </tr>
+      <tr>
+        <td><code>create_or_reject</code></td>
+        <td>同 <code>create</code> + <code>model_name</code></td>
+        <td><code>RunRecord</code></td>
+        <td><code>reject</code> 且线程有 inflight → <code>ConflictError</code>；<code>interrupt</code>/<code>rollback</code> 先取消旧 run 再插入；未知 strategy → <code>UnsupportedStrategyError</code>。</td>
+      </tr>
+      <tr>
+        <td><code>get</code> / <code>aget</code></td>
+        <td><code>get(run_id, *, user_id=None)</code></td>
+        <td><code>RunRecord | None</code></td>
+        <td>内存优先；store hydration 失败记 warning 并返回 <code>None</code>；hydrated 记录带 <code>store_only=True</code>（无本地 task）。</td>
+      </tr>
+      <tr>
+        <td><code>list_by_thread</code></td>
+        <td><code>list_by_thread(thread_id, *, user_id=None, limit=100)</code></td>
+        <td><code>list[RunRecord]</code></td>
+        <td>内存与 store 按 <code>run_id</code> 合并，内存覆盖同 id；按 <code>created_at</code> 降序截断。</td>
+      </tr>
+      <tr>
+        <td><code>set_status</code></td>
+        <td><code>set_status(run_id, status: RunStatus, *, error=None)</code></td>
+        <td><code>None</code></td>
+        <td>未知 run 记 warning；同步 <code>RunStore.update_status</code>。</td>
+      </tr>
+      <tr>
+        <td><code>cancel</code></td>
+        <td><code>cancel(run_id, *, action="interrupt")</code></td>
+        <td><code>bool</code></td>
+        <td><code>action</code> 为 <code>"interrupt"</code> 或 <code>"rollback"</code>；已 <code>interrupted</code> 幂等返回 <code>True</code>；终端态返回 <code>False</code>；store-only run 在本 worker 上可能无法取消。</td>
+      </tr>
+      <tr>
+        <td><code>update_run_completion</code></td>
+        <td><code>update_run_completion(run_id, **kwargs)</code></td>
+        <td><code>None</code></td>
+        <td>更新内存 + 调用 store；token 字段与 repository 对齐。</td>
+      </tr>
+      <tr>
+        <td><code>update_run_progress</code></td>
+        <td><code>update_run_progress(run_id, **kwargs)</code></td>
+        <td><code>None</code></td>
+        <td>仅当记录在内存且非 <code>store_only</code> 时更新内存；始终 best-effort 写 store。</td>
+      </tr>
+      <tr>
+        <td><code>reconcile_orphaned_inflight_runs</code></td>
+        <td><code>reconcile_orphaned_inflight_runs(bridge, *, before=None)</code></td>
+        <td><code>list[str]</code></td>
+        <td>将无本地 task 的 persisted inflight 标为 <code>error</code>；对 retained stream 发 <code>publish_end</code>；返回受影响 <code>run_id</code> 列表。</td>
+      </tr>
+      <tr>
+        <td><code>shutdown</code></td>
+        <td><code>shutdown(*, timeout=5.0)</code></td>
+        <td><code>None</code></td>
+        <td>等待活跃 task 完成或超时后取消。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>枚举与异常</h3>
+  <table>
+    <tr><th>类型</th><th>值 / 含义</th></tr>
+    <tr><td><code>RunStatus</code></td><td><code>pending</code> → <code>running</code> → <code>success</code> | <code>error</code> | <code>timeout</code> | <code>interrupted</code></td></tr>
+    <tr><td><code>DisconnectMode</code></td><td><code>cancel</code>（SSE 断开取消 run）| <code>continue</code>（后台继续）</td></tr>
+    <tr><td><code>ConflictError</code></td><td><code>multitask_strategy=reject</code> 时线程已有 active run</td></tr>
+    <tr><td><code>UnsupportedStrategyError</code></td><td>strategy 不在 <code>reject|interrupt|rollback</code></td></tr>
+  </table>
+  <p>测试证据：<code>backend/tests/test_run_manager.py</code>。</p>
+
+  <h2>4. run_agent 与 RunContext</h2>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/runs/worker.py</span></p>
+
+  <h3>RunContext</h3>
+  <pre>@dataclass(frozen=True)
+class RunContext:
+    checkpointer: Any
+    store: Any | None = None          # LangGraph Store
+    event_store: Any | None = None    # RunEventStore
+    run_events_config: Any | None = None
+    thread_store: Any | None = None   # ThreadMetaRepository
+    app_config: AppConfig | None = None
+    on_run_completed: Any | None = None # 完成回调 hook</pre>
+
+  <h3>run_agent</h3>
+  <pre>async def run_agent(
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    record: RunRecord,
+    *,
+    ctx: RunContext,
+    agent_factory: Any,
+    graph_input: dict,
+    config: dict,
+    stream_modes: list[str] | None = None,
+    stream_subgraphs: bool = False,
+    interrupt_before: list[str] | Literal["*"] | None = None,
+    interrupt_after: list[str] | Literal["*"] | None = None,
+) -> None</pre>
+
+  <table>
+    <thead>
+      <tr><th>参数</th><th>约束</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>bridge</code></td><td>worker 通过 <code>publish(run_id, event, data)</code> 推送 SSE；结束时必须 <code>publish_end</code>。</td></tr>
+      <tr><td><code>record</code></td><td>必须已注册于 <code>RunManager</code>；<code>record.task</code> 由 Gateway 在 <code>create_task</code> 后赋值。</td></tr>
+      <tr><td><code>ctx.checkpointer</code></td><td>LangGraph graph 编译与 checkpoint 读写；rollback 依赖 pre-run snapshot。</td></tr>
+      <tr><td><code>stream_modes</code></td><td>默认 <code>["values"]</code>；合法集 <code>values|updates|checkpoints|tasks|debug|messages|custom</code>；<strong><code>events</code> 在 Gateway 路径被跳过</strong>（需 <code>astream_events</code>）。</td></tr>
+      <tr><td><code>config</code></td><td>必须含 <code>configurable.thread_id</code>；worker 注入 <code>runtime.context</code>（<code>thread_id</code>、<code>run_id</code>、caller context、<code>app_config</code>）。</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>执行阶段（简化）：</strong></p>
+  <ol>
+    <li><code>wait_for_prior_finalizing</code> — interrupt/rollback 新 run 等待旧 run 收尾。</li>
+    <li><code>set_status(running)</code> + <code>bridge.publish(metadata)</code> + 捕获 pre-run checkpoint/workspace。</li>
+    <li><code>agent.astream(...)</code> — 按 mode 发布 values/updates/messages/custom；journal 写 event store。</li>
+    <li>goal continuation 循环（若线程有 active goal）。</li>
+    <li><code>finally</code> — flush journal、<code>update_run_completion</code>、sync thread_meta、<code>publish_end</code>、延迟 <code>bridge.cleanup</code>。</li>
+  </ol>
+
+  <p class="note warn"><strong>异常路径：</strong>try 块内任何失败都会走 except/finally，确保 SSE 收到 <code>end</code>；rollback 分支在 <code>abort_action=="rollback"</code> 时恢复 pre-run checkpoint。测试：<code>backend/tests/test_run_worker_rollback.py</code>、<code>backend/tests/test_worker_langfuse_metadata.py</code>、<code>backend/tests/test_goal_worker.py</code>。</p>
+
+  <h2>5. StreamBridge 协议</h2>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/base.py</span></p>
+
+  <h3>StreamEvent 与哨兵</h3>
+  <pre>@dataclass(frozen=True)
+class StreamEvent:
+    id: str      # SSE Last-Event-ID；单调递增
+    event: str   # "metadata" | "values" | "updates" | "messages" | "custom" | "error" | "end" | ...
+    data: Any    # JSON 可序列化载荷
+
+HEARTBEAT_SENTINEL  # event="__heartbeat__"
+END_SENTINEL        # event="__end__"</pre>
+
+  <h3>抽象方法</h3>
+  <table>
+    <thead>
+      <tr><th>方法</th><th>签名</th><th>生产者 / 消费者约束</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>publish</code></td>
+        <td><code>async publish(run_id: str, event: str, data: Any) -> None</code></td>
+        <td>worker 侧；必须线程/协程安全。</td>
+      </tr>
+      <tr>
+        <td><code>publish_end</code></td>
+        <td><code>async publish_end(run_id: str) -> None</code></td>
+        <td>标记 stream 结束；订阅方随后收到 <code>END_SENTINEL</code>。</td>
+      </tr>
+      <tr>
+        <td><code>subscribe</code></td>
+        <td><code>subscribe(run_id, *, last_event_id=None, heartbeat_interval=15.0) -> AsyncIterator[StreamEvent]</code></td>
+        <td>SSE 侧；超时发 heartbeat；<code>last_event_id</code> 支持断线重连 replay。</td>
+      </tr>
+      <tr>
+        <td><code>cleanup</code></td>
+        <td><code>async cleanup(run_id, *, delay=0) -> None</code></td>
+        <td><code>delay&gt;0</code> 时延迟释放，给晚到订阅者 drain 窗口。</td>
+      </tr>
+      <tr>
+        <td><code>close</code></td>
+        <td><code>async close() -> None</code></td>
+        <td>进程 shutdown 时释放全部 backend 资源。</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>类属性 <code>supports_cross_process</code>：<code>MemoryStreamBridge=False</code>，<code>RedisStreamBridge=True</code>。</p>
+
+  <h3>MemoryStreamBridge</h3>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/memory.py</span></p>
+  <table>
+    <tr><th>构造参数</th><th>默认</th><th>行为</th></tr>
+    <tr><td><code>queue_maxsize</code></td><td>256</td><td>每 run 环形缓冲；溢出时前移 <code>start_offset</code>，旧事件不可 replay。</td></tr>
+  </table>
+  <p>事件 id 格式 <code>{timestamp_ms}-{seq}</code>；<code>last_event_id</code> 用 seq 做 O(1) 定位，找不到则从最旧 retained 事件重放。</p>
+
+  <h3>make_stream_bridge</h3>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/stream_bridge/async_provider.py</span></p>
+  <pre>@contextlib.asynccontextmanager
+async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterator[StreamBridge]</pre>
+  <table>
+    <tr><th>配置</th><th>实现</th><th>回退</th></tr>
+    <tr><td><code>stream_bridge.type=memory</code> 或未配置</td><td><code>MemoryStreamBridge</code></td><td>可用 <code>DEER_FLOW_STREAM_BRIDGE_REDIS_URL</code> 环境变量强制 redis</td></tr>
+    <tr><td><code>stream_bridge.type=redis</code></td><td><code>RedisStreamBridge</code></td><td>URL 顺序：<code>config.redis_url</code> → env → <code>redis://localhost:6379/0</code></td></tr>
+  </table>
+  <p>未知 <code>type</code> → <code>ValueError</code>。测试：<code>backend/tests/test_stream_bridge.py</code>。</p>
+
+  <h2>6. Checkpointer Provider</h2>
+  <p>LangGraph 线程状态（messages、goal、title、checkpoint）与 DeerFlow ORM 表分离；checkpointer 表由 LangGraph 自己 <code>setup()</code>，不进 <code>Base.metadata</code>。</p>
+
+  <h3>异步（Gateway lifespan）</h3>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py</span></p>
+  <pre>@contextlib.asynccontextmanager
+async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]</pre>
+  <table>
+    <tr><th>优先级</th><th>配置源</th><th>后端</th></tr>
+    <tr><td>1</td><td>legacy <code>checkpointer:</code> 段（若存在）</td><td><code>memory</code> | <code>sqlite</code> | <code>postgres</code></td></tr>
+    <tr><td>2</td><td>unified <code>database.backend</code>（非 memory）</td><td>同上，Postgres 用 <code>database.postgres_url</code></td></tr>
+    <tr><td>3</td><td>默认</td><td><code>InMemorySaver</code></td></tr>
+  </table>
+  <table>
+    <tr><th>后端</th><th>依赖包</th><th>连接约束</th></tr>
+    <tr><td><code>sqlite</code></td><td><code>langgraph-checkpoint-sqlite</code></td><td>默认 <code>store.db</code>；父目录经 <code>asyncio.to_thread</code> 创建</td></tr>
+    <tr><td><code>postgres</code></td><td><code>langgraph-checkpoint-postgres</code> + <code>psycopg_pool</code></td><td>必须提供 connection string；池带 TCP keepalive</td></tr>
+  </table>
+  <p>缺失可选依赖 → <code>ImportError</code>（消息含安装提示）；Postgres 无 connection string → <code>ValueError</code>。</p>
+
+  <h3>同步（CLI / 单测）</h3>
+  <p><span class="where">backend/packages/harness/deerflow/runtime/checkpointer/provider.py</span></p>
+  <table>
+    <tr><th>函数</th><th>签名</th><th>语义</th></tr>
+    <tr><td><code>get_checkpointer()</code></td><td><code>() -> Checkpointer</code></td><td>进程级单例；首次调用创建并持有连接上下文。</td></tr>
+    <tr><td><code>reset_checkpointer()</code></td><td><code>() -> None</code></td><td>关闭连接并清缓存；测试或热重载边界用。</td></tr>
+    <tr><td><code>checkpointer_context()</code></td><td><code>() -> Iterator[Checkpointer]</code></td><td>每次 <code>with</code> 独立连接，不缓存。</td></tr>
+  </table>
+  <p>测试：<code>backend/tests/test_checkpointer_none_fix.py</code>。</p>
+
+  <h3>调用示例（Gateway 模式）</h3>
+  <pre>from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+from deerflow.runtime.stream_bridge import make_stream_bridge
+
+async with make_stream_bridge(app_config) as bridge, \
+           make_checkpointer(app_config) as checkpointer:
+    app.state.stream_bridge = bridge
+    app.state.checkpointer = checkpointer
+    run_mgr = RunManager(store=RunRepository(session_factory))</pre>
+
+  <h2>7. 跨组件约束速查</h2>
+  <table>
+    <tr><th>场景</th><th>约束</th><th>违反后果</th></tr>
+    <tr><td>同线程并发 run</td><td>默认 <code>multitask_strategy=reject</code></td><td><code>ConflictError</code> → HTTP 409</td></tr>
+    <tr><td>取消 store-only run</td><td>本 worker 无 <code>record.task</code></td><td><code>cancel()</code> 返回 <code>False</code> → API 409</td></tr>
+    <tr><td>SSE 断开后台</td><td><code>on_disconnect=cancel</code></td><td>客户端断开触发 run 取消；<code>continue</code> 则后台跑完</td></tr>
+    <tr><td>progress 写库</td><td><code>update_run_progress</code> 仅命中 <code>running</code> 行</td><td>已完成 run 的 progress 写被 SQL WHERE 忽略</td></tr>
+    <tr><td>checkpointer 热切换</td><td><code>checkpointer</code> / <code>database</code> 在 <code>STARTUP_ONLY_FIELDS</code></td><td>改 config 需重启 Gateway</td></tr>
+    <tr><td>Redis bridge 多 pod</td><td>orphan recovery 不充当跨 pod reaper</td><td>需 worker ownership/liveness 才能安全共享 DB</td></tr>
+  </table>
+
+  <p class="note">接口级问题可继续追问 Agent，例如：“<code>create_or_reject</code> 的 interrupt 与 rollback 在 checkpointer 层有何差异？”或“<code>MemoryStreamBridge</code> 缓冲溢出后 Last-Event-ID 会怎样？”</p>
+</main>
+</body>
+</html>

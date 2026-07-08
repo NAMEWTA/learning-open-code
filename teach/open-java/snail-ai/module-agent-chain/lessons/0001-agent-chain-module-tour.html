@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 责任链模块导览</title>
+  <link rel="stylesheet" href="../assets/agent-chain.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>
+    <a href="../reference/agent-chain-overview.html">责任链速查</a>
+    <a href="../reference/agent-chain-api.html">边缘 Handler API</a>
+  </nav>
+
+  <h1>Agent 责任链模块导览</h1>
+  <p class="lead">本课只完成一个目标：读懂 Server 端 Agent 对话请求如何沿 Handler Chain 被填充上下文，并在终点分发到 Client。</p>
+
+  <h2>1. 模块站位</h2>
+  <p>`snail-ai-feature-agent` 是 Server 端的业务编排层。浏览器通过 `POST /agent/{id}/chat` 建立 SSE 输出通道，`AgentChatService` 创建 `AgentChatContext`，随后交给 `AgentChatChainService` 依次执行 Spring 注入的 `AgentChatHandler`。这里的责任链不负责真正调用模型；它负责把用户、智能体、模型、MCP、Skill、RAG、短期记忆和目标 Client 汇总成一次远程分发请求。</p>
+  <p>因此读这个模块时要先分清边界：Server 端 Handler 处理业务上下文，Client 端 Advisor 处理模型执行期能力。本主题聚焦前者，Client 内部流水线只作为 gRPC 之后的黑盒边界。</p>
+
+  <h2>2. 上下文就是接力棒</h2>
+  <p>链路中的核心公共类是 `AgentChatHandler` 与 `AgentChatContext`。Handler 接口只有一个 `handle(ctx)` 方法；真正决定能否继续向后走的，是每个 Handler 对 `ctx.terminated` 的检查与设置。`AgentChatContext` 把输入字段和运行期字段分开：前者来自请求，后者由不同 Handler 逐步填充。</p>
+  <p><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/AgentChatContext.java</span></p>
+  <pre><code class="language-java">private final Long agentId;
+private final String conversationId;
+private final String content;
+private final ChatStreamWriter streamWriter;
+
+private boolean terminated;
+private ChatDispatchRequest.ModelConfig modelConfig;
+private List&lt;ChatDispatchRequest.McpServerDescriptor&gt; mcpServerDescriptors;
+private List&lt;ChatDispatchRequest.SkillDescriptor&gt; skillDescriptors;
+private List&lt;ChatDispatchRequest.HistoryMessage&gt; historyMessages;
+private ClientInstanceManager.ClientInstanceInfo targetClient;</code></pre>
+  <p>这解释了模块的内部分层：初始化阶段写入用户和 Agent；能力装配阶段写入模型、MCP、Skill、RAG prompt；上下文收集阶段选择 Client 并加载历史；分发阶段统一读取这些字段。</p>
+  <p>公共类可以按“谁被外层调用、谁被 Handler 共享”来记：`ChatStreamWriter` 是输出端口，`AgentChatContext` 是共享状态，`ChatStreamObserver` 是 gRPC 回流适配器。关键依赖则按能力来源识别：模型来自 Model 配置服务，MCP 与 Skill 来自各自管理服务，RAG 来自检索服务，Client 选择来自实例管理与路由策略。</p>
+
+  <h2>3. 调用示例</h2>
+  <p>当前源码的执行器是一个简单的有序循环，Spring 根据 `@Order` 注解把 Handler 列表排好。注意它不会在循环层面主动停止；短路依赖后续 Handler 自己检查 `ctx.isTerminated()`。</p>
+  <p><span class="where">snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/service/agent/AgentChatChainService.java</span></p>
+  <pre><code class="language-java">public void proceed(AgentChatContext ctx) {
+    for (AgentChatHandler handler : handlers) {
+        handler.handle(ctx);
+    }
+}</code></pre>
+  <p>当链路走到终点，`LlmCallHandler` 会校验 `targetClient` 和 `modelConfig`，再把上下文组装为 `ChatDispatchRequest`，通过 `GrpcChannelUtil.sendServerStreaming` 发往 Client。流式响应返回后，由 `ChatStreamObserver` 写回 `ChatStreamWriter`，并在 completion 消息中触发异步持久化。</p>
+  <p><span class="where">snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/LlmCallHandler.java</span></p>
+  <pre><code class="language-java">ChatDispatchRequest request = buildDispatchRequest(ctx);
+GrpcChannelUtil.sendServerStreaming(
+        ctx.getTargetClient().getChannel(),
+        UriConstants.CHAT_DISPATCH,
+        JsonUtil.toJsonString(request),
+        Map.of(),
+        new ChatStreamObserver(ctx, chatResultPersistService, shortTermWindow));</code></pre>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p>暂停回忆：如果一次请求没有可用 Client，应该由哪个阶段终止链路？它会影响模型配置、RAG 和持久化中的哪一段？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>应由 `ContextCollectorHandler` 在选择目标 Client 时写入错误并设置 `terminated=true`。模型配置和 RAG 可能已经执行过，因为它们在更早 order；`LlmCallHandler` 看到终止标记后返回，不会发起 gRPC，因此也不会产生 `ChatStreamObserver` 的 completion 持久化。</p>
+    </details>
+  </div>
+
+  <p class="note">主要阅读来源：`docs/architecture/agent-chain.md` 与当前源码。下一步查阅 <a href="../reference/agent-chain-overview.html">责任链速查</a>，用 Handler 顺序表把本课的分层模型落到具体类上。遇到 order、短路或持久化边界不清楚的地方，可以继续向 agent 追问源码路径和调用栈。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>插件系统、插件 API 与运行时加载参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · 插件发现、运行时加载、插件 API、OAuth、Node 执行与 issue provider 扩展速查</p>
+    <h1>插件系统、插件 API 与运行时加载参考</h1>
+    <p>职责一句话：在 Angular renderer 中发现、启用、加载和卸载插件，用公开 <code>@super-productivity/plugin-api</code> 合同隔离插件作者视角，并在需要桌面系统能力时通过受控 bridge 进入 Electron 主进程。</p>
+    <p>架构位置：本模块接在 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>的外部系统扩展层；<a href="../../module-angular-app-shell/reference/angular-app-shell-overview.html">Angular L1</a> 负责应用装配，<a href="../../module-electron-host/reference/electron-host-overview.html">Electron L1</a> 负责主进程和 IPC 边界，<a href="../../module-issue-integrations/reference/issue-integrations-overview.html">Issue L1</a> 负责外部工作项通用链路。</p>
+
+    <h2>模块骨架</h2>
+    <div class="filetree">super-productivity/
+├── src/
+│   ├── main.ts                                      ← Angular provider 接线
+│   ├── app/
+│   │   ├── core/
+│   │   │   └── startup/
+│   │   │       └── startup.service.ts               ← 运行时插件初始化入口
+│   │   └── plugins/                                 ← renderer 插件运行时
+│   │       ├── plugin.service.ts                    ← 发现、启用、加载、卸载
+│   │       ├── plugin-loader.service.ts             ← manifest/code/html/icon/i18n 加载
+│   │       ├── plugin-runner.ts                     ← PluginAPI 创建与 plugin.js 执行
+│   │       ├── plugin-api.ts                        ← 插件作者可见 API 包装
+│   │       ├── plugin-bridge.service.ts             ← 受控应用服务桥
+│   │       ├── oauth/                               ← renderer OAuth 协调
+│   │       ├── issue-provider/                      ← 插件 provider 适配层
+│   │       └── store/                               ← plugin metadata 与 user data
+│   └── assets/
+│       └── community-plugins.json                   ← Settings 社区插件清单
+├── packages/
+│   ├── plugin-api/                                  ← 插件作者 TypeScript 合同
+│   ├── plugin-dev/                                  ← 内置/示例插件开发区
+│   └── vite-plugin/                                 ← 插件构建输出辅助
+└── electron/
+    ├── preload.ts                                  ← window.ea 受控 bridge
+    ├── plugin-oauth.ts                             ← 桌面 OAuth loopback/server browser
+    └── plugin-node-executor.ts                     ← 主进程 Node 执行授权与执行</div>
+
+    <h2>入口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>职责</th><th>先判断什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular provider token</td><td><code>src/main.ts</code><br><code>src/app/plugins/plugin-initializer.ts</code></td><td>注册 <code>'PLUGIN_INITIALIZER'</code> token。</td><td>这是 DI 接线点，不是当前运行时插件初始化链，也不是 <code>APP_INITIALIZER</code>。</td></tr>
+        <tr><td>运行时初始化</td><td><code>src/app/core/startup/startup.service.ts</code></td><td>延迟等待初始数据加载和当前同步完成，再进入插件系统。</td><td>插件启动失败优先从 <code>_initPlugins()</code> 追。</td></tr>
+        <tr><td>插件主门面</td><td><code>src/app/plugins/plugin.service.ts</code></td><td>发现内置/上传插件，读取 enabled 状态，激活 enabled 插件，处理上传、卸载、reload、Node grant。</td><td>问题属于“有没有发现、有没有启用、有没有加载”。</td></tr>
+        <tr><td>资源加载</td><td><code>src/app/plugins/plugin-loader.service.ts</code></td><td>加载插件 manifest、plugin.js、index.html、icon、i18n，并校验 manifest。</td><td>插件包缺文件、路径错误、iframe-only 插件问题。</td></tr>
+        <tr><td>代码执行</td><td><code>src/app/plugins/plugin-runner.ts</code></td><td>创建 <code>PluginAPI</code>，执行插件入口脚本，注册 iframe 菜单/侧栏，触发 ready/unload。</td><td>插件代码是否真正运行、onReady/onUnload 是否触发。</td></tr>
+        <tr><td>插件 API</td><td><code>src/app/plugins/plugin-api.ts</code><br><code>packages/plugin-api/src/types.ts</code></td><td>插件作者可见的任务、项目、标签、UI、hooks、OAuth、secret、Node 执行合同。</td><td>这是公开 API 视角，不应直接注入 Angular service。</td></tr>
+        <tr><td>应用服务桥</td><td><code>src/app/plugins/plugin-bridge.service.ts</code></td><td>把 API 调用绑定到 pluginId，并桥接 app service、NgRx 白名单、OAuth、Node token、issue provider registry。</td><td>判断权限、数据命名空间、dispatch 白名单和 renderer→main bridge。</td></tr>
+        <tr><td>hooks 分发</td><td><code>src/app/plugins/plugin-hooks.ts</code><br><code>src/app/plugins/plugin-hooks.effects.ts</code></td><td>注册 hook handler，并由 NgRx effects 把 task/project/language 等事件分发给插件。</td><td>插件响应事件异常时看这里。</td></tr>
+        <tr><td>桌面 OAuth</td><td><code>src/app/plugins/oauth/</code><br><code>electron/plugin-oauth.ts</code></td><td>renderer 构建 PKCE/OAuth 流程；Electron 主进程开 127.0.0.1 loopback server 并打开系统浏览器。</td><td>loopback server 和系统浏览器是主进程能力。</td></tr>
+        <tr><td>桌面 Node 执行</td><td><code>src/app/plugins/plugin-bridge.service.ts</code><br><code>electron/preload.ts</code><br><code>electron/plugin-node-executor.ts</code></td><td>renderer 请求 grant token；主进程弹 native consent 并执行 VM/child process 脚本。</td><td>renderer 不能自行授予 Node 权限。</td></tr>
+        <tr><td>插件 issue provider</td><td><code>src/app/plugins/issue-provider/</code><br><code>packages/plugin-api/src/issue-provider-types.ts</code></td><td>把插件 definition 注册成 issue provider，并可选接入 two-way sync。</td><td>先区分 registry、IssueServiceInterface adapter 和 sync adapter。</td></tr>
+        <tr><td>社区插件目录</td><td><code>src/assets/community-plugins.json</code><br><code>src/app/plugins/ui/plugin-management/plugin-management.component.ts</code></td><td>Settings 插件页展示社区插件清单与风险提示。</td><td>它是发现/展示清单，不代表插件已安装或已审查。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>职责边界</h2>
+    <table>
+      <thead>
+        <tr><th>层级</th><th>负责什么</th><th>不负责什么</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular provider 接线</td><td><code>PLUGIN_INITIALIZER_PROVIDER</code> 把 token 放入 DI provider 表。</td><td>不等于实际插件初始化；不要把它当作当前 <code>APP_INITIALIZER</code> 执行链。</td></tr>
+        <tr><td>Startup runtime</td><td>等待数据和同步完成后调用 <code>PluginService.initializePlugins()</code>。</td><td>不读取 manifest 细节，也不执行插件代码。</td></tr>
+        <tr><td>PluginService</td><td>发现 manifest、维护状态、激活 enabled 插件、清理插件运行时。</td><td>不直接实现每个插件 API 的业务动作；那些在 bridge 或业务 service 中。</td></tr>
+        <tr><td>PluginLoader/Runner</td><td>加载资源并执行插件入口脚本，管理 ready/unload callback。</td><td>不判断 issue provider 业务语义，也不拥有 Electron 系统权限。</td></tr>
+        <tr><td>PluginAPI/Bridge</td><td>公开 API、绑定 pluginId、命名空间化持久化、限制 action dispatch。</td><td>不让插件直接访问 Angular DI 容器或任意 NgRx action。</td></tr>
+        <tr><td>Electron 主进程</td><td>OAuth loopback、系统浏览器、Node grant、VM/child process 执行。</td><td>不承载插件业务状态；renderer 通过 <code>window.ea</code> 受控进入。</td></tr>
+        <tr><td>Issue provider adapter</td><td>把插件 definition 翻译成 issue search/import/refresh/sync 能力。</td><td>不替代 Issue L1 的轮询、导入、two-way-sync effects。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖/机制</th><th>位置</th><th>作用</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular DI + standalone bootstrap</td><td><code>src/main.ts</code></td><td>注册插件 token、OAuth redirect handler、NgRx feature store 等应用级 provider。</td></tr>
+        <tr><td>NgRx Store / Effects</td><td><code>src/app/root-store/feature-stores.module.ts</code><br><code>src/app/plugins/store/</code></td><td>持久化 plugin metadata/user data，并通过 effects 分发 plugin hooks。</td></tr>
+        <tr><td><code>@super-productivity/plugin-api</code></td><td><code>packages/plugin-api/</code></td><td>插件作者侧类型合同；主 app 通过 <code>src/app/plugins/plugin-api.model.ts</code> 重导出。</td></tr>
+        <tr><td>IndexedDB / cache</td><td><code>PluginCacheService</code><br><code>PluginMetaPersistenceService</code><br><code>PluginUserPersistenceService</code></td><td>保存上传插件、enabled 状态、插件同步数据；secret/OAuth token 另走 local-only 存储。</td></tr>
+        <tr><td>Electron IPC</td><td><code>electron/preload.ts</code><br><code>electron/shared-with-frontend/ipc-events.const.ts</code></td><td>renderer 进入主进程 OAuth、Node 执行和其他桌面能力的唯一受控通道。</td></tr>
+        <tr><td>Vite 插件构建辅助</td><td><code>packages/vite-plugin/src/index.ts</code></td><td>将 manifest、icon、i18n、index.html 和 assets 输出到插件 dist，并可复制到目标目录。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>阅读示例</h2>
+    <ol>
+      <li>插件冷启动没出现：先看 <code>src/app/core/startup/startup.service.ts</code> 的 _initPlugins 是否等到数据加载和同步完成，再看 <code>PluginService.initializePlugins()</code> 是否发现 manifest，最后看 enabled 状态是否让 <code>activatePlugin()</code> 执行。</li>
+      <li>插件按钮存在但点击没效果：从 <code>PluginRunner</code> 的 menu/sidePanel 注册看起，再进 <code>PluginBridgeService</code> 的注册数组和 UI 组件读取 signal 的位置。</li>
+      <li>OAuth 失败：先看 <code>PluginOAuthBridgeService.startOAuthFlow()</code> 选择了 Electron、native 还是 web 分支；Electron 下继续查 <code>plugin-oauth.ts</code> 的 loopback port、HTTPS auth URL 和 <code>PLUGIN_OAUTH_CB</code>。</li>
+      <li>Node 执行失败：先确认 manifest 有 <code>nodeExecution</code> permission、运行在 Electron、renderer 持有 grant token；再查主进程 <code>PLUGIN_REQUEST_NODE_EXECUTION_GRANT</code> 和 <code>PLUGIN_EXEC_NODE_SCRIPT</code>。</li>
+      <li>插件 provider 搜索正常但不写回：先分辨是字段同步还是直接事件写回。任务字段写回需要 definition 同时提供可用的 <code>fieldMappings</code> 和 <code>updateIssue</code>；而只有 <code>updateIssue</code> 的 provider 仍可能由 <code>IssueSyncAdapterResolverService</code> 懒创建 adapter，用于 calendar move 这类直接推送。</li>
+    </ol>
+
+    <h2>边界判断表</h2>
+    <table>
+      <thead>
+        <tr><th>症状/问题</th><th>先读入口</th><th>判断标准</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>看到 <code>PLUGIN_INITIALIZER_PROVIDER</code>，是否代表插件已启动？</td><td><code>src/main.ts</code><br><code>src/app/plugins/plugin-initializer.ts</code></td><td>否。它只是 token provider；实际初始化看 <code>src/app/core/startup/startup.service.ts</code> 的 _initPlugins。</td></tr>
+        <tr><td>插件在设置页可见但没有运行。</td><td><code>PluginService.getAllPlugins()</code><br><code>activatePlugin()</code></td><td>发现 manifest 不等于 loaded；只有 enabled 且激活成功才执行插件入口脚本和 onReady。</td></tr>
+        <tr><td>iframe 插件没有入口脚本。</td><td><code>PluginLoaderService.loadPluginAssets()</code></td><td>只有 <code>iFrame: true</code> 且存在非空 index.html 时，iframe-only 插件可省略 plugin.js。</td></tr>
+        <tr><td>插件要派发 NgRx action。</td><td><code>src/app/plugins/allowed-plugin-actions.const.ts</code><br><code>PluginBridgeService._dispatchAction()</code></td><td>只能派发白名单 action；否则 bridge 抛错。</td></tr>
+        <tr><td>插件要存 API key 或密码。</td><td><code>PluginAPI.setSecret()</code><br><code>PluginSecretService</code></td><td>敏感值应进 local-only secret，不应放入 synced plugin data 或 issue provider config。</td></tr>
+        <tr><td>OAuth 桌面回调没有回来。</td><td><code>PluginOAuthService.prepareRedirectUri()</code><br><code>electron/plugin-oauth.ts</code></td><td>Electron 需要主进程 loopback server 和系统浏览器；renderer 只等待 bridge 回调。</td></tr>
+        <tr><td>Node 执行提示权限或 bridge 不可用。</td><td><code>PluginService._fireOnReady()</code><br><code>PluginBridgeService._executeNodeScript()</code><br><code>electron/plugin-node-executor.ts</code></td><td>必须 Electron、manifest 声明权限、主进程 grant 成功、webContents 未导航销毁。</td></tr>
+        <tr><td>插件 issue provider 出现在设置中。</td><td><code>PluginIssueProviderRegistryService.register()</code></td><td>registry 注册了 key；配置 UI 读取 provider 元数据，不代表已经能搜索或写回。</td></tr>
+        <tr><td>插件 provider 能拉 issue 但没有双向同步。</td><td><code>PluginBridgeService._registerIssueProvider()</code><br><code>IssueSyncAdapterResolverService.getAdapter()</code><br><code>src/app/plugins/issue-provider/plugin-sync-adapter.service.ts</code></td><td>桥接阶段立即注册 adapter 的条件是 <code>createIssue</code>、<code>deleteIssue</code> 或 <code>fieldMappings + updateIssue</code>；resolver 还会为 <code>updateIssue</code>-only provider 懒创建 adapter。任务字段写回仍需要可映射字段，单有 <code>fieldMappings</code> 不会产生推送能力。</td></tr>
+        <tr><td>社区插件出现在列表中。</td><td><code>src/assets/community-plugins.json</code><br><code>src/app/plugins/ui/plugin-management/plugin-management.component.html</code></td><td>这只是静态目录与风险提示；安装、缓存、启用仍由上传/插件服务链路处理。</td></tr>
+      </tbody>
+    </table>
+
+    <p>配套短课：<a href="../lessons/0001-plugin-system-module-tour.html">0001 插件系统、插件 API 与运行时加载</a>。</p>
+  </article>
+</main>
+</body>
+</html>

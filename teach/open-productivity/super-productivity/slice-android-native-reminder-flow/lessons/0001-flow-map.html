@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Android 原生提醒全链路路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断提醒从 Angular 调度到原生弹窗、再到 action 回写的完整路径</p>
+    <h1>Android 原生提醒：调度、触发与 action 回写</h1>
+    <p class="lead">Android 提醒不走 Capacitor LocalNotifications 定时，而是 NgRx 选出带 `remindAt` 的任务后，经 `SUPAndroid` 桥注册 `AlarmManager`；到点后 `ReminderAlarmReceiver` 弹通知，Snooze/Done 由 `ReminderActionReceiver` 在后台处理，Angular 下次启动或 `onResume` 时再消费队列写回状态。</p>
+
+    <h2>1. 时序路径图</h2>
+    <pre class="diagram">sequenceDiagram
+  participant FX as MobileNotificationEffects
+  participant CRS as CapacitorReminderService
+  participant JS as JavaScriptInterface
+  participant H as ReminderNotificationHelper
+  participant AM as AlarmManager
+  participant AR as ReminderAlarmReceiver
+  participant AC as ReminderActionReceiver
+  participant RM as ReminderModule
+
+  FX-&gt;&gt;CRS: scheduleReminder(notificationId, triggerAtMs)
+  CRS-&gt;&gt;JS: scheduleNativeReminder(...)
+  JS-&gt;&gt;H: scheduleReminder
+  H-&gt;&gt;AM: setExactAndAllowWhileIdle
+  H-&gt;&gt;H: ReminderAlarmStore.save
+
+  AM--&gt;&gt;AR: ACTION_SHOW_REMINDER
+  AR-&gt;&gt;AR: isTaskStale? (fail-open)
+  AR-&gt;&gt;H: showNotification (Done/Snooze actions)
+
+  AC-&gt;&gt;AC: Snooze: reschedule + SnoozeQueue
+  AC-&gt;&gt;AC: Done: cancel alarm + DoneQueue
+  RM-&gt;&gt;RM: onResume / cold start drain queues</pre>
+    <p>调度入口首查 <span class="where">src/app/features/mobile/store/mobile-notification.effects.ts</span> 的 `scheduleNotifications$`；平台分叉在 <span class="where">src/app/core/platform/capacitor-reminder.service.ts</span>，Android 分支调用 `androidInterface.scheduleNativeReminder`，最终落到 <span class="where">android/.../service/ReminderNotificationHelper.kt</span>。</p>
+
+    <h2>2. 三层边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层</th><th>关键组件</th><th>负责什么</th><th>不要误判</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Angular 调度</td><td>`MobileNotificationEffects` + `generateNotificationId`</td><td>根据 NgRx 任务列表增删原生闹钟；同一 `task.id` 始终映射同一 `notificationId`</td><td>它不是弹通知的地方，只负责注册/取消 Alarm。</td></tr>
+          <tr><td>原生闹钟</td><td>`ReminderNotificationHelper` + `ReminderAlarmStore` + `BootReceiver`</td><td>`AlarmManager` 精确唤醒；参数持久化；重启/更新后重注册</td><td>应用进程被杀不影响已注册闹钟；更新后靠 `BootReceiver` 恢复。</td></tr>
+          <tr><td>通知 action</td><td>`ReminderActionReceiver` + 三个 Queue + `ReminderModule`</td><td>Snooze 纯原生重调度；Done 清闹钟并入队；Angular  hydrated 后写回 NgRx</td><td>Snooze 不经过 Capacitor；冷启动靠 pull 队列，不是 push JS 回调。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>提醒到点没响，先查调度是否成功——<span class="where">mobile-notification.effects.ts</span> 是否因 `disableReminders`、权限或 `remindAt` 已过期而跳过；再查 <span class="where">ReminderNotificationHelper.scheduleReminder</span> 是否写入 `ReminderAlarmStore`。</p>
+    <p><strong>判断二：</strong>另一台设备已完成任务但本机仍弹窗，看 <span class="where">ReminderAlarmReceiver.isTaskStale</span>：它会用 SuperSync 快速拉取 `taskIdsToCancel` 与重排时间；任何网络/凭证错误都 fail-open 继续弹通知。</p>
+    <p><strong>判断三：</strong>通知上点 Done 任务没变，查 action 是否只入了 `ReminderDoneQueue`——需等 <span class="where">reminder.module.ts</span> 在数据加载后消费 `onReminderDone$`；温启动还要靠 <span class="where">android.effects.ts</span> 的 `checkReminderQueuesOnResume$` 再 drain 一次。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：用户在通知上点「Snooze 10m」，应用此时完全被杀。10 分钟后通知再次弹出，但任务 `remindAt` 在 Angular 里仍是旧值，直到用户手动打开应用才更新。这条链路里，哪两步是设计如此、哪一步若缺失才算 bug？</p>
+    <div class="answer">参考答案：设计如此的是（1）`ReminderActionReceiver` 在后台直接 `AlarmManager` 重调度，不依赖 WebView；（2）`ReminderSnoozeQueue` 只持久化 `{taskId, newRemindAt}`，Angular 冷启动或 `onResume` 时才由 `ReminderModule._handleSnoozeAction` 写回 NgRx。若 10 分钟后根本没再弹通知，才是 bug，应查 `ReminderNotificationHelper.scheduleReminder` 或 `ReminderAlarmStore`；若打开应用后 `remindAt` 仍不更新，才查 `onReminderSnooze$` 订阅与 hydration 守卫。</div>
+    <p>主要来源：<a href="../reference/android-native-reminder-flow-reference.html">Android 原生提醒全链路速查</a>。父模块：<a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端与 PWA 宿主导览</a>。相邻主题：<a href="../../slice-mobile-background-flush-flow/lessons/0001-flow-map.html">移动端后台恢复链路</a>。如果某一步不清楚，可以向 agent 追问：“请从 `scheduleNativeReminder` 跟到 `PendingIntent` 的 requestCode 规则”。</p>
+  </article>
+</main>
+</body>
+</html>

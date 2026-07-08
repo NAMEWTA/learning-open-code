@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 runs 执行模块边界导览</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; --warn:#b45309; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:900px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:1.95rem; margin:0 0 .45rem; letter-spacing:0; }
+    h2 { font-size:1.14rem; margin:1.8rem 0 .55rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    p, li { font-size:1rem; }
+    .meta, .source { color:var(--muted); font-size:.94rem; }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.9em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.84rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .callout { border-left:4px solid var(--accent); background:var(--soft); padding:.85rem 1rem; margin:1rem 0; }
+    .quiz { border-left:4px solid var(--warn); background:#fff8ed; padding:.85rem 1rem; margin:1rem 0; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>runs 执行模块边界导览</h1>
+  <p class="meta">学习目标：15 分钟内能判断一次 `subagent` 调用进入 foreground、background 还是 shared 支撑层。</p>
+
+  <h2>1. 一句话职责</h2>
+  <p>runs 目录是 `pi-subagents` 的执行内核：它把父 Pi 会话发来的结构化调用，分流成前台单次/并行/链式运行，或后台 detached async run，并把结果、进度、状态、日志和恢复入口统一整理给父会话。L0 已经说明 extension 入口负责注册工具，agent discovery 负责找角色；本课只看执行层边界，不进入每个 helper 的细节。</p>
+
+  <h2>2. 三层分工</h2>
+  <pre>src/runs/
+├── foreground/        ← 当前 turn 内等待结果
+│   ├── subagent-executor.ts
+│   ├── execution.ts
+│   └── chain-execution.ts
+├── background/        ← detached runner 与状态观测
+│   ├── async-execution.ts
+│   ├── run-status.ts
+│   └── wait.ts
+└── shared/            ← 两边复用的运行工具</pre>
+  <p>前台层处理“现在就把结果带回当前对话”。<code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code> 是门卫：它先识别 management action，再检查递归深度、spawn 限额、输入模式、model scope、预算、session/artifact 路径，然后进入 single、parallel、chain 或 async。<code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code> 才是真正的单 child Pi spawn；它解析 JSONL、累计 usage、更新 progress，并生成 <code>SingleResult</code>。后台层处理“先启动，稍后观察”：<code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code> 生成 runner config，用 `jiti` 启动 detached `subagent-runner.ts`，并发出 async started event。shared 层不拥有流程，它提供 model fallback、workflow graph、worktree、output、budget、control 等通用积木。</p>
+
+  <h2>3. 一个调用怎么分流</h2>
+  <pre>{
+  "agent": "reviewer",
+  "task": "Review src/runs/foreground/execution.ts",
+  "async": false,
+  "maxRuntimeMs": 300000
+}</pre>
+  <p>这个例子没有 <code>action</code>，没有 <code>tasks</code>，也没有 <code>chain</code>，所以 executor 视为 single foreground run。若改成 <code>tasks: [...]</code>，它会进入 top-level parallel；若改成 <code>chain: [...]</code>，它会进入 chain；若 <code>async: true</code> 或配置强制 top-level async，则前台不会调用 <code>runSync</code>，而是转给后台启动器，返回 run id、async dir 和“不要 sleep-poll，必要时用 wait”的提示。</p>
+  <div class="callout">
+    <p>判断口诀：先看 <code>action</code>，有 action 就是管理/观测路径；再看 <code>async</code>，为真则尝试后台；最后用 <code>chain</code>、<code>tasks</code>、<code>agent</code> 三选一决定 chain、parallel、single。真正的长清单见 <a href="../reference/runs-execution-overview.html">runs execution 参考页</a>。</p>
+  </div>
+
+  <h2>4. 测试佐证与下一步</h2>
+  <p>这个边界不是注释猜出来的。<code>test/integration/single-execution.test.ts</code> 验证 single alias、未知 action、重复调度防护、spawn 限额和前台输出；<code>test/integration/parallel-execution.test.ts</code> 验证并发、顺序保持、输出文件和 timeout；<code>test/integration/chain-execution.test.ts</code> 验证 `{previous}`、命名输出、parallel step、dynamic fanout 与 workflow graph；<code>test/integration/async-execution.test.ts</code> 验证 async runner、status 文件、后台事件、timeout、control state 和 live output。</p>
+  <div class="quiz">
+    <p><strong>检索练习：</strong>如果一次调用传入 <code>{ "chain": [...], "async": true }</code>，但用户想看即时结果，你应该优先检查哪两个位置？</p>
+    <p><strong>参考答案：</strong>先查 executor 是否把 <code>effectiveAsync</code> 算成 true，再查后台 <code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code> 是否成功创建 async dir 并发出 started event。即时结果不会来自前台 <code>runSync</code>。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code>。下一节 L2 建议从“single foreground run 垂直切片”开始；不清楚某个分流条件时，可以继续让 agent 顺着该源码做逐段讲解。</p>
+</main>
+</body>
+</html>

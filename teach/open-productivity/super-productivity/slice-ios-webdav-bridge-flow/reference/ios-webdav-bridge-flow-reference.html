@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>iOS WebDAV 桥接全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · iOS WebDAV bridge vertical slice</p>
+    <h1>iOS WebDAV 插件、URLSession no-cache 与同步 provider 参考</h1>
+    <p class="lead">本参考用于快速定位 iOS WebDAV HTTP 桥接、no-cache 防线与 sync provider 编排。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>；op-log 同步边界见 <a href="../../slice-op-log-sync-flow/reference/op-log-sync-flow-reference.html">op-log 同步参考</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <div class="filetree">ios/App/App/
+├── CustomViewController.swift          ← capacitorDidLoad 注册 WebDavHttpPlugin
+├── WebDavHttpPlugin.swift              ← URLSession no-cache、request 实现
+└── WebDavHttpPlugin.m                  ← Capacitor 方法导出桥
+
+src/app/op-log/sync-providers/file-based/webdav/
+├── webdav.ts                           ← createWebdavProvider 工厂
+├── capacitor-webdav-http/
+│   ├── index.ts                        ← registerPlugin('WebDavHttp')
+│   ├── app-webdav-native-http.ts       ← NativeHttpExecutor 适配
+│   ├── definitions.ts                  ← 插件 TS 契约
+│   └── web.ts                          ← web/Electron fetch 回退
+└── platform/
+    └── app-provider-platform-info.ts   ← isNativePlatform / isIosNative
+
+packages/sync-providers/src/file-based/webdav/
+├── webdav-base-provider.ts             ← 组装 WebDavHttpAdapter + WebdavApi
+├── webdav-http-adapter.ts              ← native/fetch 路由、NO_CACHE_HEADERS
+├── webdav-api.ts                       ← PROPFIND/GET/PUT、hash rev、冲突检测
+└── webdav.const.ts                     ← HTTP 方法与状态码常量
+
+src/app/op-log/sync-providers/
+├── wrapped-provider.service.ts         ← WebDAV → FileBasedSyncAdapter 包装
+└── file-based/file-based-sync-adapter.service.ts
+
+src/app/imex/sync/
+├── sync-wrapper.service.ts             ← download → upload 编排、冲突 UI
+├── sync-trigger.service.ts             ← 自动/手动同步触发
+└── sync.effects.ts                     ← triggerSync$ 等 NgRx 效应
+
+src/app/features/ios/
+├── ios-interface.ts                    ← appStateChange → onResume$
+└── store/ios-background-tracking.effects.ts</div>
+    <p>
+      <code>ios/App/App/CustomViewController.swift</code>
+      <code>ios/App/App/WebDavHttpPlugin.swift</code>
+      <code>ios/App/App/WebDavHttpPlugin.m</code>
+      <code>src/app/op-log/sync-providers/file-based/webdav/webdav.ts</code>
+      <code>src/app/op-log/sync-providers/file-based/webdav/capacitor-webdav-http/index.ts</code>
+      <code>src/app/op-log/sync-providers/file-based/webdav/capacitor-webdav-http/app-webdav-native-http.ts</code>
+      <code>src/app/op-log/sync-providers/file-based/webdav/capacitor-webdav-http/definitions.ts</code>
+      <code>src/app/op-log/sync-providers/file-based/webdav/capacitor-webdav-http/web.ts</code>
+      <code>src/app/op-log/sync-providers/platform/app-provider-platform-info.ts</code>
+      <code>packages/sync-providers/src/file-based/webdav/webdav-base-provider.ts</code>
+      <code>packages/sync-providers/src/file-based/webdav/webdav-http-adapter.ts</code>
+      <code>packages/sync-providers/src/file-based/webdav/webdav-api.ts</code>
+      <code>packages/sync-providers/src/file-based/webdav/webdav.const.ts</code>
+      <code>src/app/op-log/sync-providers/wrapped-provider.service.ts</code>
+      <code>src/app/op-log/sync-providers/file-based/file-based-sync-adapter.service.ts</code>
+      <code>src/app/imex/sync/sync-wrapper.service.ts</code>
+      <code>src/app/imex/sync/sync-trigger.service.ts</code>
+      <code>src/app/imex/sync/sync.effects.ts</code>
+      <code>src/app/features/ios/ios-interface.ts</code>
+      <code>src/app/features/ios/store/ios-background-tracking.effects.ts</code>
+    </p>
+
+    <h2>阶段速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>入口</th><th>输出</th><th>失败时表现</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>插件注册</td>
+            <td><code>CustomViewController.capacitorDidLoad</code></td>
+            <td><code>WebDavHttp</code> 插件实例挂到 Capacitor bridge</td>
+            <td>JS 调用 <code>WebDavHttp.request</code> 报插件未实现</td>
+          </tr>
+          <tr>
+            <td>Provider 工厂</td>
+            <td><code>createWebdavProvider()</code></td>
+            <td>注入 <code>APP_WEBDAV_NATIVE_HTTP</code>、平台信息、credential store</td>
+            <td>配置缺失时 <code>isReady()</code> 为 false，同步被跳过</td>
+          </tr>
+          <tr>
+            <td>HTTP 路由</td>
+            <td><code>WebDavHttpAdapter.request</code></td>
+            <td><code>isNativePlatform</code> 走插件；否则 <code>fetch cache:'no-store'</code></td>
+            <td>Web 端 CORS 失败抛 <code>PotentialCorsError</code>；native 抛 <code>WebDavNativeRequestError</code></td>
+          </tr>
+          <tr>
+            <td>Native 执行</td>
+            <td><code>APP_WEBDAV_NATIVE_HTTP</code> → <code>WebDavHttp.request</code></td>
+            <td>文本 body、status、headers 原样返回</td>
+            <td>网络/SSL/超时映射为 <code>NETWORK_ERROR</code>、<code>SSL_ERROR</code>、<code>TIMEOUT_ERROR</code></td>
+          </tr>
+          <tr>
+            <td>URLSession</td>
+            <td><code>WebDavHttpPlugin.request</code></td>
+            <td><code>reloadIgnoringLocalCacheData</code> + <code>urlCache=nil</code></td>
+            <td>若误用默认 session，GET 可能返回缓存副本（#7144）</td>
+          </tr>
+          <tr>
+            <td>下载</td>
+            <td><code>WebdavApi.download</code> GET</td>
+            <td>content-hash 作为 <code>rev</code> + <code>dataStr</code></td>
+            <td>空 body 抛 <code>EmptyRemoteBodySPError</code></td>
+          </tr>
+          <tr>
+            <td>上传冲突检测</td>
+            <td><code>WebdavApi.upload</code> 上传前 GET</td>
+            <td>hash 不等抛 <code>RemoteFileChangedUnexpectedly</code></td>
+            <td>GET 陈旧则静默覆盖；日志 <code>cacheHeaders</code> 可辅助诊断</td>
+          </tr>
+          <tr>
+            <td>同步编排</td>
+            <td><code>SyncWrapperService</code></td>
+            <td>先 <code>downloadRemoteOps</code> 再 <code>uploadPendingOps</code></td>
+            <td>transient 网络错误可重试；rev 不匹配弹冲突 UI</td>
+          </tr>
+          <tr>
+            <td>iOS 恢复（邻接）</td>
+            <td><code>ios-interface.onResume$</code></td>
+            <td>补时 + <code>flushPendingWrites</code>，间接影响同步时机</td>
+            <td>与 WebDAV HTTP 桥接无直接调用关系</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>no-cache 对照表</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>平台</th><th>机制</th><th>源码锚点</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>iOS native</td><td><code>URLSessionConfiguration.requestCachePolicy</code> + <code>urlCache = nil</code></td><td><code>WebDavHttpPlugin.swift:12-25</code></td></tr>
+          <tr><td>Capacitor native（JS）</td><td>请求头 <code>Cache-Control: no-cache, no-store</code></td><td><code>webdav-http-adapter.ts:59-62</code></td></tr>
+          <tr><td>Web / Electron</td><td><code>fetch({ cache: 'no-store' })</code></td><td><code>webdav-http-adapter.ts:130</code></td></tr>
+          <tr><td>Android native</td><td>OkHttp 无默认 HTTP 缓存（对比提及）</td><td><code>WebDavHttpPlugin.kt</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>错误码速查（iOS 插件）</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>code</th><th>含义</th><th>典型场景</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>NETWORK_ERROR</code></td><td>离线、DNS、无法连接</td><td>飞行模式、错误 baseUrl</td></tr>
+          <tr><td><code>TIMEOUT_ERROR</code></td><td>请求超时（30s）</td><td>慢速 WebDAV 服务器</td></tr>
+          <tr><td><code>SSL_ERROR</code></td><td>证书不受信或过期</td><td>自签证书 NAS</td></tr>
+          <tr><td><code>DECODE_ERROR</code></td><td>响应非 UTF-8</td><td>二进制误当文本下载</td></tr>
+          <tr><td><code>INVALID_RESPONSE</code></td><td>非 HTTPURLResponse</td><td>协议层异常</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>排障检查清单</h2>
+    <ol>
+      <li>确认 <code>CustomViewController</code> 已注册 <code>WebDavHttpPlugin</code>，且 iOS 工程包含 Swift 源文件。</li>
+      <li>在共享日志中搜索 <code>WebDavHttpAdapter.response()</code>，查看 <code>cacheHeaders</code> 是否含 <code>age</code> 或 <code>x-cache=HIT</code>。</li>
+      <li>对比上传前 GET 与独立下载的 body hash；不一致则怀疑缓存或代理。</li>
+      <li>确认同步走的是 <code>WrappedProviderService</code> 包装后的 WebDAV，而非裸 provider。</li>
+      <li>恢复前台未同步时，沿 <code>SyncTriggerService</code> 查触发条件，勿只看 <code>ios-interface</code>。</li>
+    </ol>
+
+    <h2>相关课程</h2>
+    <ul>
+      <li><a href="../lessons/0001-flow-map.html">0001 iOS WebDAV 桥接路径图</a></li>
+      <li><a href="../../slice-op-log-sync-flow/lessons/0001-flow-map.html">op-log 同步路径图</a></li>
+      <li><a href="../../slice-mobile-background-flush-flow/lessons/0001-flow-map.html">移动端后台恢复 flush</a></li>
+      <li><a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端宿主导览</a></li>
+    </ul>
+  </article>
+</main>
+</body>
+</html>

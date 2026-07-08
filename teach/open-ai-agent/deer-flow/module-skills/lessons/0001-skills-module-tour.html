@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 skill 如何被发现、激活、装入 prompt 并约束工具</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#0f766e; --green:#207a4c; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 58px; }
+    h1 { font-size:1.9rem; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.16rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:var(--green); }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 skill 如何被发现、激活、装入 prompt 并约束工具</h1>
+  <p class="lede">学习目标：读完后，你能用一条主线解释 DeerFlow skill 从存储发现到 prompt 出现，再到 slash 激活和工具收窄的过程。</p>
+
+  <h2>1. 先把 skill 看成“延迟加载的工作流文件”</h2>
+  <p><a href="../../00-overview/reference/00-overview.html">L0 总览</a>已经说过：skill 不是普通 tool，而是一个带 frontmatter 的 skill file 工作流。运行时先发现它的名字、描述、类别、启用状态和文件路径；真正的正文只在任务需要时才读。frontmatter 解析与 <code>.skill</code> 安装流程见 <a href="../reference/skills-overview.html">reference 生命周期表</a>（§2 解析、§9 安装）。</p>
+  <p>在源码里，入口分成两类：存储与解析在 <span class="where">backend/packages/harness/deerflow/skills/</span>，agent 装配在 <span class="where">backend/packages/harness/deerflow/agents/lead_agent/agent.py</span>。读源码时不要从某个 public skill 开始，而要先看 lead agent 怎么拿到可用 skill 列表。</p>
+
+  <h2>2. 发现：prompt 只给线索，不直接塞正文</h2>
+  <div class="diagram">load_skills(enabled_only=True)
+  ↓
+custom agent skills 白名单过滤
+  ↓
+skills.deferred_discovery ?
+  ├── false: prompt 渲染 name / description / location
+  └── true : prompt 只渲染 &lt;skill_index&gt;，并追加 describe_skill 工具</div>
+  <p>默认模式下，<span class="where">backend/packages/harness/deerflow/agents/lead_agent/prompt.py</span> 会把可用 skill 的摘要渲染进 <code>&lt;skill_system&gt;</code>，模型看到路径后再用 <code>read_file</code> 读取对应 skill file。如果开启 <code>skills.deferred_discovery</code>，prompt 只给 skill 名字，模型先调用 <code>describe_skill</code> 取描述和位置，再决定是否读取正文。</p>
+  <pre><code class="language-python">skills_for_tool_policy = _load_enabled_skills_for_tool_policy(...)
+skill_setup = build_skill_search_setup(skills_for_tool_policy, enabled=...)
+filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy,
+                                               always_allowed_tool_names=SKILL_LOADING_TOOL_NAMES)
+system_prompt = apply_prompt_template(..., skill_names=skill_setup.skill_names or None)</code></pre>
+
+  <h2>3. 激活：slash 是用户显式指定</h2>
+  <p>当用户输入 <code>/data-analysis analyze uploads/orders.csv</code>，<span class="where">backend/packages/harness/deerflow/agents/middlewares/skill_activation_middleware.py</span> 会解析最末尾的真实用户消息，检查 skill 是否已安装、已启用、并在当前 agent 白名单内。通过后，它读取完整 skill file，构造一个隐藏的 <code>HumanMessage</code> 放到模型调用前。</p>
+  <p>这和模型自主发现不同：slash 代表用户本轮明确指定，所以 runtime 直接注入正文；自主发现则只给索引或描述，让模型用 <code>read_file</code> 渐进加载。无论哪条路，disabled skill 都不能被使用。</p>
+
+  <h2>4. 工具：skill 可以反向收窄 tool set</h2>
+  <p><code>allowed-tools</code> 是 frontmatter 里的可选字段。若本次加载范围内没有任何 skill 声明它，DeerFlow 保持 legacy allow-all；一旦至少一个 skill 显式声明，运行时就取这些声明的并集过滤工具。lead agent 还会额外保留 <code>read_file</code>，否则模型连 skill 正文都无法加载。</p>
+  <div class="exercise">
+    <strong>判断题：</strong>假设 custom agent 只允许 <code>data-analysis</code>，用户输入 <code>/code-documentation write docs</code>。会发生什么？如果 <code>data-analysis</code> 声明了 <code>allowed-tools: [read_file, python]</code>，工具集合如何变化？
+    <div class="answer">参考答案：slash 解析会发现 <code>code-documentation</code> 不在当前 agent 的 skill 白名单内，返回“not available for this agent”一类错误，不会注入该 skill。工具集合则按当前可用 skill 的显式 <code>allowed-tools</code> 并集收窄，并保留框架级 <code>read_file</code>。如果没有任何可用 skill 显式声明 <code>allowed-tools</code>，才保持 allow-all。</div>
+  </div>
+  <p class="note">主要参考来源：<code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code>。长生命周期、API、测试锚点和内置 public skill 表见 <a href="../reference/skills-overview.html">Skills 系统参考页</a>。如果某个分支不清楚，可以继续追问 agent：“从这个函数继续展开到下一层”。</p>
+</main>
+</body>
+</html>

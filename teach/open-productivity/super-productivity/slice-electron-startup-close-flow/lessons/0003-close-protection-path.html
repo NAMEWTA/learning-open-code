@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L2：Electron 关闭前同步与 finish-day 保护</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topline">L2 垂直切片 · 15 分钟短课</div>
+      <h1>关闭前保护：等待项、同步和 finish-day</h1>
+      <p class="lead">
+        关闭链路的关键不是“用户点关闭就退出”，而是 main process 先拦截关闭，通知 renderer 处理已注册等待项。同步保护和 finish-day 提醒都通过同一组
+        before-close IPC 释放或保留窗口。
+      </p>
+
+      <div class="meta">
+        <span>上一课：<a href="./0002-main-path.html">启动主路径</a></span>
+        <span>相关 L1：<a href="../../module-op-log-sync/">op-log 同步</a></span>
+        <span>相关模块：<a href="../../module-electron-host/">Electron 宿主</a></span>
+      </div>
+
+      <h2>关闭保护状态机</h2>
+      <div class="flow-map">renderer registers wait ids
+  -> SyncEffects: SYNC_BEFORE_CLOSE_ID
+  -> FinishDayBeforeCloseEffects: finish-day wait id
+
+user close / app menu quit / native Cmd+Q
+  -> electron/start-app.ts before-quit may prevent default
+  -> closeWinAndQuit()
+  -> electron/main-window.ts close handler
+     -> minimize-to-tray: hide when allowed and not explicit quit
+     -> ids.length > 0: send NOTIFY_ON_CLOSE(ids)
+     -> ids.length === 0: setIsQuiting(true), close again
+
+renderer handles NOTIFY_ON_CLOSE
+  -> sync.effects.ts runs sync and always releases its id
+  -> finish-day effect: quit releases, cancel/finish-day keeps window
+  -> BEFORE_CLOSE_DONE(id)
+  -> main removes id; when empty, closes window for real</div>
+
+      <h2>等待项由谁负责</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>等待项</th>
+            <th>注册位置</th>
+            <th>释放规则</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>同步等待项</td>
+            <td><span class="where">src/app/imex/sync/sync.effects.ts</span></td>
+            <td>同步启用且 ready 后注册；收到关闭通知后停止当前任务、等待一个 macrotask、执行 sync；成功或失败都会 <code>setDone</code>。</td>
+          </tr>
+          <tr>
+            <td>finish-day 等待项</td>
+            <td><span class="where">src/app/features/finish-day-before-close/finish-day-before-close.effects.ts</span></td>
+            <td>功能开关启用后就注册；关闭通知到来后才检查当天已完成任务。没有已完成任务会立即释放；用户选择 <code>quit</code> 才释放，选择 <code>finish-day</code> 会导航到 daily summary 并保留窗口。</td>
+          </tr>
+          <tr>
+            <td>main 等待项数组</td>
+            <td><span class="where">electron/main-window.ts</span></td>
+            <td>只存 ID 和发送 IPC，不理解业务含义；业务是否完成由 renderer 回报。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>最小源码锚点</h2>
+      <pre class="language-ts"><code>mainWin.webContents.send(IPC.NOTIFY_ON_CLOSE, ids);
+
+this._execBeforeCloseService.schedule(SYNC_BEFORE_CLOSE_ID);
+this._execBeforeCloseService.setDone(SYNC_BEFORE_CLOSE_ID);
+
+if (choice === 'finish-day') {
+  this._router.navigateByUrl('/active/daily-summary');
+}</code></pre>
+
+      <div class="callout warning">
+        同步失败后仍释放等待项是刻意设计：不能让用户因为一次 sync 错误永远无法退出。finish-day 的 <code>finish-day</code> 选择则相反，它是用户主动留在应用内继续收尾。
+      </div>
+      <div class="callout warning">
+        托盘 indicator 菜单里的 <code>Quit</code> 是单独边界：它当前直接调用 <code>quitApp()</code>，先设置 <code>isQuiting=true</code> 再
+        <code>app.quit()</code>，因此不会进入 <code>NOTIFY_ON_CLOSE</code> 等待项流程。排查托盘退出时不要套用 app menu quit 的保护路径。
+      </div>
+
+      <h2>60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          点击窗口关闭按钮后应用只是隐藏到托盘，没有发出 <code>NOTIFY_ON_CLOSE</code>。这是 bug 吗？
+        </p>
+        <div class="answer">
+          <strong>参考答案：</strong>不一定。若启用了 minimize-to-tray，且这次不是显式 quit intent，<span class="where">electron/main-window.ts</span>
+          的 close handler 会先 <code>hide()</code> 并阻止关闭。只有真正 quit 或不走托盘隐藏时，才进入 before-close 等待项流程。
+        </div>
+      </div>
+
+      <p class="footer">
+        继续下钻可读 <a href="../reference/electron-startup-close-flow-reference.html">参考文档</a> 的“关闭前同步与 finish-day 保护”。
+      </p>
+    </main>
+  </body>
+</html>

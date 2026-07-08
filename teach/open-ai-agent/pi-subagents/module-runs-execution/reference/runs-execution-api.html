@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>runs execution API 参考（L3）</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; color:#263746; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:.52rem .6rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .lead { color:var(--muted); font-size:1.02rem; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    .sig { font-family:"SF Mono",Consolas,monospace; font-size:.86rem; background:#f4f7fa; border-left:4px solid var(--accent); padding:8px 10px; margin:8px 0; }
+    .where { color:#6f42c1; font-weight:600; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 8px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.82rem; }
+    a { color:#1d4ed8; text-decoration:none; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>runs execution 辅助 API 参考（L3）</h1>
+  <p class="lead">本页补全 runs 模块中尚未在 L1 图谱展开的辅助源文件：精确到公共导出、调用链与测试锚点。模块地图见 <a href="runs-execution-overview.html">runs-execution-overview.html</a>；短课入口 <a href="../lessons/0001-runs-execution-module-tour.html">0001-runs-execution-module-tour.html</a>。</p>
+  <p class="note">L3 只收录<strong>公共导出</strong>与边界行为；实现细节留在源码。路径前缀均为 <code>open-ai-agent/pi-subagents/src/runs/</code>。</p>
+
+  <h2>background 辅助层</h2>
+
+  <h3>chain-root-attachment.ts</h3>
+  <p><span class="where"><code>background/chain-root-attachment.ts</code></span> — 处理 chain step 中<strong>附着已有 async root</strong>（<code>importAsyncRoot</code>）的等待与结果归一化。当父 chain 不重新 spawn 子进程，而是引用先前已启动的后台 run 时，本模块轮询其 <code>status.json</code> 与 result JSON，在终态或超时后产出与前台 <code>SingleResult</code> 兼容的 <code>ImportedAsyncRootResult</code>。</p>
+  <p class="sig">waitForImportedAsyncRoot(root, options?) → Promise&lt;ImportedAsyncRootResult&gt;<br>resolveAsyncRootResultPath(resultsDir, runId) → string</p>
+  <p><strong>主要类型：</strong><code>ImportedAsyncRoot</code>（runId、asyncDir、resultPath、index）、<code>ImportedAsyncRootResult</code>（agent、output、success、exitCode、acceptance、structuredOutput 等可选字段）。<strong>调用方：</strong><code>subagent-runner.ts</code> 在 chain step 执行路径等待附着 root；<code>subagent-executor.ts</code> 用 <code>resolveAsyncRootResultPath</code> 解析 result 文件路径；<code>async-execution.ts</code> 引用 <code>ImportedAsyncRoot</code> 类型。<span class="tag">测试</span> <code>test/unit/chain-root-attachment.test.ts</code></p>
+
+  <h3>completion-batcher.ts</h3>
+  <p><span class="where"><code>background/completion-batcher.ts</code></span> — 后台任务<strong>成功完成通知的智能批处理</strong>。在短窗口内将多个 sibling job 的 completion 合并为一条分组消息；从首条入队起有硬上限 <code>maxWaitMs</code> 防止无限等待；已发出分组后，迟到的 sibling 进入更短的 straggler 窗口。失败与 needs-attention 信号<strong>不经过</strong> batcher，由调用方 <code>flush()</code> 后立即发出。</p>
+  <p class="sig">createCompletionBatcher&lt;T&gt;(options) → CompletionBatcher&lt;T&gt;<br>resolveCompletionBatchConfig(global?, override?) → ResolvedCompletionBatchConfig</p>
+  <p><strong>主要导出：</strong><code>DEFAULT_COMPLETION_BATCH_CONFIG</code>、<code>CompletionBatchConfig</code>（re-export）、<code>CompletionBatcher</code> 接口（<code>push</code> / <code>flush</code> / <code>dispose</code>）。<strong>调用方：</strong><code>notify.ts</code> 为每个 session/cwd 分组创建 batcher；extension 通过 <code>config.completionBatch</code> 传入覆盖配置。<span class="tag">测试</span> <code>test/unit/completion-batcher.test.ts</code></p>
+
+  <h3>completion-dedupe.ts</h3>
+  <p><span class="where"><code>background/completion-dedupe.ts</code></span> — completion 事件的<strong>去重键生成与 TTL 记忆</strong>。避免同一 async 完成被 result-watcher 与 notify 双重投递，或在 extension 热重载后重复触发 UI 消息。</p>
+  <p class="sig">buildCompletionKey(data, fallback) → string<br>markSeenWithTtl(seen, key, now, ttlMs) → boolean<br>getGlobalSeenMap(storeKey) → Map&lt;string, number&gt;</p>
+  <p><strong>键策略：</strong>优先用 <code>id</code>；否则组合 sessionId、agent、timestamp、taskIndex、success 等元数据。<strong>调用方：</strong><code>notify.ts</code>、<code>result-watcher.ts</code>。<span class="tag">测试</span> <code>test/unit/completion-dedupe.test.ts</code></p>
+
+  <h3>notify.ts</h3>
+  <p><span class="where"><code>background/notify.ts</code></span> — 向 Pi 父会话发送<strong>后台 subagent 完成通知</strong>。监听 <code>SUBAGENT_ASYNC_COMPLETE_EVENT</code>，仅处理与 <code>state.currentSessionId</code> 匹配的 result；成功 completion 经 batcher 分组，失败/暂停立即 <code>sendMessage</code>（<code>customType: "subagent-notify"</code>，<code>triggerTurn: true</code>）。</p>
+  <p class="sig">registerSubagentNotify(pi, state, options?) → void（default export）<br>formatSingleCompletion(details) → string<br>formatGroupedCompletion(details[]) → string<br>buildCompletionDetails(result) → SubagentNotifyDetails</p>
+  <p><strong>调用方：</strong><code>extension/index.ts</code> 在 extension 初始化时注册，传入 <code>batchConfig: config.completionBatch</code>。热重载时通过 global store 清理旧 unsubscribe 与 batcher。<span class="tag">测试</span> <code>test/unit/notify.test.ts</code></p>
+
+  <h3>parallel-groups.ts</h3>
+  <p><span class="where"><code>background/parallel-groups.ts</code></span> — async chain 中<strong>扁平 step 索引与逻辑 chain step 索引</strong>的映射。parallel group 在 status 里记录 <code>{ start, count, stepIndex }</code>，本模块校验边界后排序，并提供 <code>flatToLogicalStepIndex</code> 供 status/fleet/TUI 正确标注「第几步」。</p>
+  <p class="sig">normalizeParallelGroups(groups, stepCount, chainStepCount) → AsyncParallelGroupStatus[]<br>flatToLogicalStepIndex(flatIndex, chainStepCount, groups) → number</p>
+  <p><strong>调用方：</strong><code>async-job-tracker.ts</code>、<code>async-status.ts</code>、<code>run-status.ts</code>、<code>stale-run-reconciler.ts</code>；<code>tui/render.ts</code> 用 <code>flatToLogicalStepIndex</code> 渲染 widget。<span class="tag">测试</span> 间接覆盖于 <code>test/integration/chain-execution.test.ts</code>、<code>test/integration/async-execution.test.ts</code></p>
+
+  <h2>shared 辅助层</h2>
+
+  <h3>acceptance.ts</h3>
+  <p><span class="where"><code>shared/acceptance.ts</code></span> — subagent 运行的<strong>验收契约（Acceptance Contract）</strong>全链路：从 agent/task 推断 level（attested → checked → verified → reviewed）、校验 frontmatter 输入、生成 prompt 段落、解析子 agent 输出的结构化 acceptance report、执行 verify 命令与可选 reviewer 子运行，最终写入 <code>AcceptanceLedger</code> 并可能将 run 标记为失败。</p>
+  <table>
+    <tr><th>导出</th><th>职责</th></tr>
+    <tr><td><code>normalizeAcceptanceInput</code> / <code>validateAcceptanceInput</code></td><td>将 <code>false</code>、字符串 level 或对象规范为 <code>AcceptanceConfig</code>；返回校验错误列表。</td></tr>
+    <tr><td><code>resolveEffectiveAcceptance</code></td><td>合并显式配置与按 agent/task/mode 推断的 level、criteria、evidence、review。</td></tr>
+    <tr><td><code>formatAcceptancePrompt</code></td><td>注入子 agent system/task 的 Acceptance Contract 文本块。</td></tr>
+    <tr><td><code>parseAcceptanceReport</code> / <code>stripAcceptanceReport</code></td><td>从输出中解析/剥离 JSON acceptance report。</td></tr>
+    <tr><td><code>aggregateAcceptanceReport</code></td><td>chain/parallel group 多 step 验收结果聚合。</td></tr>
+    <tr><td><code>evaluateAcceptance</code></td><td>异步执行 verify 命令、可选 reviewer spawn，返回 <code>AcceptanceLedger</code>。</td></tr>
+    <tr><td><code>acceptanceFailureMessage</code></td><td>将 ledger 转为对用户可见的失败说明。</td></tr>
+  </table>
+  <p><strong>调用方：</strong><code>foreground/execution.ts</code>、<code>foreground/chain-execution.ts</code>、<code>background/subagent-runner.ts</code>、<code>background/async-execution.ts</code>；<code>subagent-executor.ts</code> 与 <code>agents/chain-serializer.ts</code>、<code>slash/slash-commands.ts</code> 做输入校验。<span class="tag">测试</span> <code>test/unit/acceptance.test.ts</code></p>
+
+  <h3>completion-guard.ts</h3>
+  <p><span class="where"><code>shared/completion-guard.ts</code></span> — <strong>实现类任务却零变更</strong>的完成守卫。根据 agent 名、task 文案、可用 tools 推断是否「应发生变更」（<code>expectsImplementationMutation</code>），再扫描 assistant toolCall 是否出现 edit/write/变更型 bash（<code>hasMutationToolCall</code>）。若预期变更但未尝试，<code>evaluateCompletionMutationGuard</code> 返回 <code>triggered: true</code>，运行层可将 exit 视为失败或触发 model fallback。</p>
+  <p class="sig">expectsImplementationMutation(agent, task) → boolean<br>hasMutationToolCall(messages) → boolean<br>evaluateCompletionMutationGuard(input) → { expectedMutation, attemptedMutation, triggered }</p>
+  <p><strong>调用方：</strong><code>foreground/execution.ts</code>、<code>background/subagent-runner.ts</code>。<span class="tag">测试</span> <code>test/unit/completion-guard.test.ts</code>；<code>test/integration/async-execution.test.ts</code>（<code>async-completion-guard-optout</code> 场景）</p>
+
+  <h3>long-running-guard.ts</h3>
+  <p><span class="where"><code>shared/long-running-guard.ts</code></span> — 长运行<strong>主动通知</strong>与<strong>变更型 tool 失败升级</strong>的纯函数库。根据 <code>ResolvedControlConfig</code> 与运行指标判断何时触发 <code>active_long_running</code>；识别 mutating bash/edit/write；记录连续 mutating 失败并在达到阈值时建议 <code>needs_attention</code>。</p>
+  <p class="sig">isMutatingBashCommand(command) → boolean<br>isMutatingTool(toolName, args) → boolean<br>nextLongRunningTrigger(config, metrics) → triggerReason | undefined<br>createMutatingFailureState / recordMutatingFailure / shouldEscalateMutatingFailures</p>
+  <p><strong>调用方：</strong><code>foreground/execution.ts</code>、<code>background/subagent-runner.ts</code>；<code>completion-guard.ts</code> 复用 <code>isMutatingBashCommand</code>。<span class="tag">测试</span> <code>test/unit/subagent-control.test.ts</code>（<code>nextLongRunningTrigger</code>）；<code>test/integration/single-execution.test.ts</code>（controlConfig 通知阈值）</p>
+
+  <h3>mcp-direct-tool-allowlist.ts</h3>
+  <p><span class="where"><code>shared/mcp-direct-tool-allowlist.ts</code></span> — 将 agent 配置中的 <code>mcpDirectTools</code> 解析为<strong>可直接暴露给子 Pi 的 builtin tool 名列表</strong>。合并项目/全局 <code>mcp.json</code>、可选 import（Cursor/Claude/Codex 等），读取 <code>mcp-cache.json</code> 元数据，按 server 的 <code>directTools</code> 与 allowlist 过滤。</p>
+  <p class="sig">resolveMcpDirectToolNames(mcpDirectTools?, cwd?) → string[]<br>computeMcpServerHash(definition) → string</p>
+  <p><strong>调用方：</strong><code>shared/pi-args.ts</code> 在构造子进程 argv 时把解析结果并入 <code>builtinTools</code>。<span class="tag">测试</span> <code>test/unit/pi-args.test.ts</code>（<code>computeMcpServerHash</code>）</p>
+
+  <h3>nested-events.ts</h3>
+  <p><span class="where"><code>shared/nested-events.ts</code></span> — <strong>嵌套 subagent 运行</strong>的事件总线与注册表。子 run 通过 env（<code>nestedRouteEnv</code>）向 <code>nested-subagent-events/</code> 写入 JSONL 事件；父 run 投影为 <code>NestedRegistry</code> / <code>NestedRunSummary</code> 树，供 status、fleet、foreground live control 展示；支持嵌套 interrupt/resume 的 control-request/result 文件协议。</p>
+  <p><strong>核心导出（节选）：</strong><code>NESTED_EVENTS_DIR</code>；<code>createNestedRoute</code>、<code>resolveNestedRouteFromEnv</code>、<code>writeNestedEvent</code>、<code>projectNestedEvents</code>、<code>findNestedRunById</code>、<code>readNestedControlRequests</code>、<code>writeNestedControlResult</code>；<code>updateAsyncJobNestedProjection</code>、<code>updateForegroundNestedProjection</code>、<code>nestedSummaryFromAsyncStatus</code>、<code>attachRootChildrenToSteps</code>。</p>
+  <p><strong>调用方：</strong><code>subagent-executor.ts</code>、<code>async-job-tracker.ts</code>、<code>async-status.ts</code>、<code>run-status.ts</code>、<code>fleet-view.ts</code>、<code>result-watcher.ts</code>、<code>run-id-resolver.ts</code>、<code>extension/fanout-child.ts</code>。<span class="tag">测试</span> <code>test/unit/nested-events.test.ts</code>、<code>test/unit/nested-control.test.ts</code>、<code>test/integration/result-watcher.test.ts</code></p>
+
+  <h3>nested-path.ts</h3>
+  <p><span class="where"><code>shared/nested-path.ts</code></span> — 嵌套路径 env 的<strong>编解码与消毒</strong>。<code>NestedPathEntry</code> 为 <code>{ runId, stepIndex?, agent? }</code> 数组（最多 4 段），防止路径穿越与超长 ID；供 <code>pi-args.ts</code> 与子 run 继承父路径。</p>
+  <p class="sig">sanitizeNestedPath(value) → NestedPathEntry[]<br>parseNestedPathEnv(value?) / encodeNestedPathEnv(value) → string<br>isSafeNestedPathId(value) → boolean</p>
+  <p><strong>调用方：</strong><code>nested-events.ts</code>、<code>shared/pi-args.ts</code>。<span class="tag">测试</span> 间接覆盖于 <code>test/unit/nested-events.test.ts</code>、<code>test/unit/pi-args.test.ts</code></p>
+
+  <h3>nested-render.ts</h3>
+  <p><span class="where"><code>shared/nested-render.ts</code></span> — 将 <code>NestedRunSummary</code> 树格式化为<strong>status/fleet 文本行</strong>。递归统计 running/paused/failed/complete/queued（<code>countNestedRuns</code>、<code>formatNestedAggregate</code>），按深度与行数上限缩进展示，可选附加 <code>subagent({ action: "status", id })</code> 命令提示。</p>
+  <p class="sig">formatNestedRunStatusLines(children, options?) → string[]<br>formatNestedAggregate(children) → string | undefined</p>
+  <p><strong>调用方：</strong><code>run-status.ts</code>、<code>async-status.ts</code>、<code>fleet-view.ts</code>、<code>foreground/subagent-executor.ts</code>；<code>tui/render.ts</code> 使用 <code>formatNestedAggregate</code>。<span class="tag">测试</span> 间接覆盖于 integration status/fleet 场景与 <code>test/integration/result-watcher.test.ts</code></p>
+
+  <h3>run-history.ts</h3>
+  <p><span class="where"><code>shared/run-history.ts</code></span> — 按 agent 名记录<strong>本地运行历史</strong>（<code>~/.pi/.../run-history.jsonl</code>）。每次 foreground/chain 完成后 append 一条 <code>RunEntry</code>；超过 1200 行时截断保留最近 1000 行。失败不影响主执行流。</p>
+  <p class="sig">recordRun(agent, task, exitCode, durationMs) → void<br>loadRunsForAgent(agent) → RunEntry[]</p>
+  <p><strong>调用方：</strong><code>foreground/subagent-executor.ts</code>、<code>foreground/chain-execution.ts</code>（parallel/chain step 完成后）。<span class="tag">测试</span> <code>test/unit/pi-coding-agent-dir.test.ts</code></p>
+
+  <h3>single-output.ts</h3>
+  <p><span class="where"><code>shared/single-output.ts</code></span> — 单 agent 运行的<strong>输出文件契约</strong>：解析 <code>output</code> frontmatter（含 <code>false</code> 禁用）、向 task/system prompt 注入权威路径说明、运行前后快照 mtime、将 child 文本写入或读取文件、在 <code>file-only</code> 模式下只返回引用消息。</p>
+  <p class="sig">normalizeSingleOutputOverride / resolveSingleOutputPath / injectSingleOutputInstruction / injectOutputPathSystemPrompt<br>captureSingleOutputSnapshot / resolveSingleOutput / finalizeSingleOutput<br>formatSavedOutputReference / validateFileOnlyOutputMode</p>
+  <p><strong>调用方：</strong><code>foreground/execution.ts</code>、<code>foreground/subagent-executor.ts</code>、<code>foreground/chain-execution.ts</code>、<code>background/async-execution.ts</code>、<code>background/subagent-runner.ts</code>。<span class="tag">测试</span> <code>test/unit/single-output.test.ts</code>；<code>test/integration/single-execution.test.ts</code>（<code>single-output-override-system-prompt</code>、<code>failed-single-output</code>）</p>
+
+  <h3>structured-output.ts</h3>
+  <p><span class="where"><code>shared/structured-output.ts</code></span> — 带 <code>outputSchema</code> 的 step 要求子 agent 以 <code>structured_output</code> tool 结束。在临时目录写入 schema JSON，通过 env（<code>PI_SUBAGENT_STRUCTURED_OUTPUT_SCHEMA</code>、<code>PI_SUBAGENT_STRUCTURED_OUTPUT_CAPTURE</code>）传给子进程，运行后用 TypeBox 校验 <code>output.json</code>。</p>
+  <p class="sig">createStructuredOutputRuntime(schema, baseDir?) → StructuredOutputRuntime<br>validateStructuredOutputValue(schema, value) → valid | invalid<br>readStructuredOutput(runtime) → { value? | error? }<br>cleanupStructuredOutputRuntime(runtime) → void</p>
+  <p><strong>调用方：</strong><code>foreground/execution.ts</code>、<code>foreground/chain-execution.ts</code>、<code>background/async-execution.ts</code>、<code>background/subagent-runner.ts</code>；<code>shared/dynamic-fanout.ts</code>、<code>subagent-prompt-runtime.ts</code>、<code>slash/slash-commands.ts</code>。<span class="tag">测试</span> <code>test/unit/subagent-prompt-runtime.test.ts</code>；<code>test/integration/async-execution.test.ts</code>（structured output 场景）</p>
+
+  <h2>跨文件协作速查</h2>
+  <table>
+    <tr><th>用户可见行为</th><th>涉及辅助模块</th></tr>
+    <tr><td>多个后台任务几乎同时完成，父会话只收到一条分组通知</td><td><code>completion-batcher.ts</code> + <code>notify.ts</code> + <code>completion-dedupe.ts</code></td></tr>
+    <tr><td>chain 引用已有 async run 作为一步</td><td><code>chain-root-attachment.ts</code> + <code>parallel-groups.ts</code></td></tr>
+    <tr><td>worker 声称完成但未 edit/write</td><td><code>completion-guard.ts</code> + <code>long-running-guard.ts</code></td></tr>
+    <tr><td>status 显示嵌套子 run 树与 <code>+N nested runs</code></td><td><code>nested-events.ts</code> + <code>nested-render.ts</code> + <code>nested-path.ts</code></td></tr>
+    <tr><td>验收失败导致 exitCode≠0 或附加 acceptance 字段</td><td><code>acceptance.ts</code></td></tr>
+    <tr><td>output 写入指定文件而非 inline 返回</td><td><code>single-output.ts</code></td></tr>
+    <tr><td>outputSchema 强制 JSON 终态</td><td><code>structured-output.ts</code></td></tr>
+    <tr><td>MCP 工具直接暴露给子 agent</td><td><code>mcp-direct-tool-allowlist.ts</code> → <code>pi-args.ts</code></td></tr>
+  </table>
+</main>
+</body>
+</html>

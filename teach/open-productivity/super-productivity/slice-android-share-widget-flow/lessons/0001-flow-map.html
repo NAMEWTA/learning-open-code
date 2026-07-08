@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Android 分享与 Widget 全链路路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断分享 intent 与 Widget 勾选从 native 入队到 Angular drain 的完整路径</p>
+    <h1>Android 分享 intent、Home Widget 与队列 drain</h1>
+    <p class="lead">Android 端不走 Capacitor 插件接分享，而是由 <code>CapacitorMainActivity</code> 解析 <code>ACTION_SEND</code>，写入 <code>ShareIntentQueue</code>，再经 <code>SUPAndroid</code> 桥推入 <code>onShareWithAttachment$</code>；桌面 Widget 则反向由 Angular 推送今日任务快照，用户勾选后写入 <code>WidgetDoneQueue</code>，由 <code>drainWidgetDoneQueue$</code> 拉取并调用 <code>setDone</code>。</p>
+
+    <h2>1. 时序路径图</h2>
+    <pre class="diagram">sequenceDiagram
+  participant Ext as 外部应用
+  participant MA as CapacitorMainActivity
+  participant SQ as ShareIntentQueue
+  participant JS as JavaScriptInterface
+  participant AI as android-interface.ts
+  participant FX as AndroidEffects
+  participant WFX as AndroidWidgetEffects
+  participant WP as TaskListWidgetProvider
+  participant WQ as WidgetDoneQueue
+
+  Ext-&gt;&gt;MA: ACTION_SEND text/*
+  MA-&gt;&gt;SQ: setPending(JSON)
+  alt 前端已就绪
+    MA-&gt;&gt;JS: onShareWithAttachment$(json)
+  else 冷启动
+    MA-&gt;&gt;MA: pendingShareIntent + Toast
+  end
+  AI-&gt;&gt;JS: getPendingShareData + triggerGetShareData
+  JS-&gt;&gt;MA: flushPendingShareIntent
+  AI-&gt;&gt;FX: onShareWithAttachment$
+  FX-&gt;&gt;FX: add(task) + addAttachment
+
+  WFX-&gt;&gt;JS: saveToDb(widget_data) + updateWidget
+  WP-&gt;&gt;WP: 渲染今日任务列表
+  WP-&gt;&gt;WQ: setTarget(taskId, isDone)
+  WP-&gt;&gt;MA: ACTION_WIDGET_DONE_DRAIN
+  MA-&gt;&gt;AI: onWidgetDoneDrainRequest$
+  WFX-&gt;&gt;JS: getWidgetDoneQueue()
+  WFX-&gt;&gt;WFX: setDone / setUnDone</pre>
+    <p>分享入口首查 <span class="where">CapacitorMainActivity.handleIntent</span>；Angular 消费在 <span class="where">src/app/features/android/store/android.effects.ts</span> 的 <code>handleShare$</code>。Widget 快照推送见 <span class="where">android-widget.effects.ts</span> + <span class="where">widget-data.service.ts</span>；勾选 drain 见同文件的 <code>drainWidgetDoneQueue$</code>。</p>
+
+    <h2>2. 两条链路的共同模式</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>链路</th><th>native 写入</th><th>触发 Angular</th><th>Angular 消费</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>分享 intent</td><td><code>ShareIntentQueue.setPending</code>（始终持久化）</td><td>push <code>onShareWithAttachment$</code> 或 pull <code>getPendingShareData</code>；<code>triggerGetShareData</code> 置 <code>isFrontendReady</code></td><td><code>handleShare$</code> 创建任务 + 附件；<code>checkPendingShareOnResume$</code> 补捞</td></tr>
+          <tr><td>Widget 勾选</td><td><code>WidgetDoneQueue.setTarget</code>（last-wins map）</td><td><code>onResume$</code> 或 <code>onWidgetDoneDrainRequest$</code>（无内容信号）</td><td><code>drainWidgetDoneQueue$</code> → <code>getWidgetDoneQueue</code> → <code>getTaskDoneChangesToApply</code></td></tr>
+          <tr><td>Widget 列表</td><td>KeyValStore <code>widget_data</code> 快照</td><td>NgRx 变更 / pause / sync window 结束</td><td><code>WidgetDataService.pushCurrent</code> → <code>updateWidget</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>设计要点：native 侧只持久化队列，不把任务数据拼进 JS 字符串；Angular 始终是唯一的状态写入方（NgRx <code>setDone</code>）。Widget 渲染时用 <code>WidgetDoneQueue.peek()</code> 叠加 pending 勾选，用户能立刻看到反馈，不必等 WebView 启动。</p>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>分享后没生成任务，先查 <span class="where">handleIntent</span> 是否因空白 <code>EXTRA_TEXT</code> 被跳过；再查冷启动时 <code>android-interface.ts</code> 是否成功 <code>getPendingShareData</code>，以及 <code>handleShare$</code> 是否因空 <code>path</code> 被 guard 掉。</p>
+    <p><strong>判断二：</strong>Widget 勾选了但任务未变，查 <code>drainWidgetDoneQueue$</code> 是否等到 <code>isAllDataLoadedInitially$</code>；再查 <code>getTaskDoneChangesToApply</code> 是否因任务已删除或已处于目标 <code>isDone</code> 而跳过（这是正常去重，不是 bug）。</p>
+    <p><strong>判断三：</strong>同步后 Widget 列表过期，查 <code>pushOnStateChange$</code> 的 hydration 守卫——远程 op 应用期间会暂停推送；sync window 关闭后靠 <code>pushOnSyncWindowEnd$</code> 补推一次。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：用户在桌面 Widget 勾选任务 A 为完成，此时应用进程完全被杀；随后从浏览器分享一篇长文到 Super Productivity，再手动打开应用。打开后应发生哪两件事、各自走哪条队列？若只完成了分享建任务、任务 A 仍为未完成，应优先查哪两个 drain 触发点？</p>
+    <div class="answer">参考答案：应发生（1）分享数据经 <code>ShareIntentQueue</code> 被 <code>getPendingShareData</code> / <code>flushPendingShareIntent</code> 消费，<code>handleShare$</code> 创建带附件的任务；（2）Widget 勾选经 <code>WidgetDoneQueue</code> 在 <code>onResume$</code> 触发 <code>drainWidgetDoneQueue$</code>，<code>getWidgetDoneQueue</code> 后 <code>setDone</code>。若分享成功但 A 未变，优先查冷启动是否只走了分享 pull 而未触发 Widget drain——确认 <code>onResume$</code> 是否发射、<code>isAllDataLoadedInitially$</code> 是否阻塞；其次查 <code>getTaskDoneChangesToApply</code> 是否判定 A 已 done 或已删除。</div>
+    <p>主要来源：<a href="../reference/android-share-widget-flow-reference.html">Android 分享与 Widget 全链路速查</a>。父模块：<a href="../../module-mobile-pwa-host/lessons/0001-mobile-pwa-host-module-tour.html">移动端与 PWA 宿主导览</a>。相邻主题：<a href="../../slice-android-native-reminder-flow/lessons/0001-flow-map.html">Android 原生提醒全链路</a>。如果某一步不清楚，可以向 agent 追问：“请从 <code>WidgetDoneQueue.setTarget</code> 跟到 <code>drainWidgetDoneQueue$</code> 的 concatMap 守卫”。</p>
+  </article>
+</main>
+</body>
+</html>

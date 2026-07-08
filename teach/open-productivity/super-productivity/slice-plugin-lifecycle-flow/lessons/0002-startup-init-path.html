@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>插件启动初始化时序</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="lesson">
+      <p class="eyebrow">L2 垂直切片 · 15 分钟</p>
+      <h1>启动初始化：provider token 不是实际调用栈</h1>
+      <p class="lede">
+        本课只拆一个常见误判：<code>PLUGIN_INITIALIZER_PROVIDER</code> 在 Angular provider 列表里出现，不代表插件会在 bootstrap 阶段立即初始化。真实运行路径由
+        <code>StartupService._initPlugins()</code> 在数据加载和当前同步结束后直接调用 <code>PluginService.initializePlugins()</code>。
+      </p>
+
+      <div class="source-rail">
+        相关课程：<a href="./0001-flow-map.html">生命周期地图</a> /
+        <a href="./0003-bridge-issue-provider-path.html">Bridge 与 issue provider</a>。
+        相关 L1：<a href="../../module-plugin-system/">插件系统</a>、
+        <a href="../../module-angular-app-shell/">Angular 应用装配</a>。
+      </div>
+
+      <h2>调用时序</h2>
+      <pre class="sequence">src/main.ts
+  -> bootstrapApplication(AppComponent, { providers: [PLUGIN_INITIALIZER_PROVIDER, ...] })
+     注意：这里注册的是 'PLUGIN_INITIALIZER' provider，不是运行时实际调用点
+
+src/app/core/startup/startup.service.ts
+  -> deferred init setTimeout(...)
+  -> _initPlugins()
+     -> wait isAllDataLoadedInitially$
+     -> wait afterCurrentSyncDoneOrSyncDisabled$
+     -> PluginService.initializePlugins()
+
+src/app/plugins/plugin.service.ts
+  -> discover built-in + uploaded manifests
+  -> load enabled plugins
+  -> activatePlugin()
+  -> _fireOnReady()</pre>
+
+      <h2>真实源码锚点</h2>
+      <pre class="language-ts"><code>// src/app/plugins/plugin-initializer.ts
+export const PLUGIN_INITIALIZER_PROVIDER = {
+  provide: 'PLUGIN_INITIALIZER',
+  useFactory: () => initializePlugins,
+  multi: true,
+};
+
+// src/app/core/startup/startup.service.ts
+await Promise.all([
+  this._dataInitStateService.isAllDataLoadedInitially$.pipe(take(1)).toPromise(),
+  this._syncWrapperService.afterCurrentSyncDoneOrSyncDisabled$.pipe(take(1)).toPromise(),
+]);
+await this._pluginService.initializePlugins();</code></pre>
+
+      <h2>三个判断点</h2>
+      <table>
+        <thead>
+          <tr><th>你看到的现象</th><th>先看哪里</th><th>判断</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Angular provider 里有 <code>PLUGIN_INITIALIZER_PROVIDER</code></td>
+            <td><span class="where">src/main.ts</span><br><span class="where">src/app/plugins/plugin-initializer.ts</span></td>
+            <td>这是 provider token 接线；本课程只把它当成可 grep 的历史/扩展入口。</td>
+          </tr>
+          <tr>
+            <td>插件要等数据和同步后才出现</td>
+            <td><span class="where">src/app/core/startup/startup.service.ts</span></td>
+            <td>真实初始化在 <code>_initPlugins()</code>；它等待初始数据和当前 sync 完成或禁用。</td>
+          </tr>
+          <tr>
+            <td>manifest 已发现但代码未运行</td>
+            <td><span class="where">src/app/plugins/plugin.service.ts</span></td>
+            <td>只有 enabled 插件才进入 <code>activatePlugin()</code>；nodeExecution 插件还要拿 grant。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>异常路径</h3>
+      <div class="callout">
+        <p>
+          <code>_initPlugins()</code> 捕获初始化错误并记录日志，不能让插件初始化失败阻断整个应用启动。单个插件加载失败时，状态会落在插件服务自己的 loading/error 分支，而不是回滚 Angular bootstrap。
+        </p>
+      </div>
+
+      <h2>60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          如果插件没有在冷启动第一时间出现，你会先查 <code>PLUGIN_INITIALIZER_PROVIDER</code> 是否被 Angular 执行，还是查 <code>StartupService._initPlugins()</code> 的等待条件？
+        </p>
+        <details>
+          <summary>参考答案与反馈</summary>
+          <p>
+            先查 <code>_initPlugins()</code>。源码里 provider 只是把 <code>initializePlugins</code> 暴露为 token；真实执行路径等待数据 hydration 和当前 sync 完成后才调用
+            <code>PluginService.initializePlugins()</code>。
+          </p>
+        </details>
+      </div>
+    </main>
+  </body>
+</html>

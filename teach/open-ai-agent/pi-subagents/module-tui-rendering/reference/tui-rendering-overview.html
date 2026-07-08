@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TUI Rendering Overview Reference</title>
+  <link rel="stylesheet" href="../assets/module-tui-rendering.css">
+</head>
+<body>
+<main class="reference">
+  <h1>TUI 渲染参考页</h1>
+  <p class="callout">本页是 L1 速查资料：lesson 只讲最小阅读主线，本页收纳渲染分支、helper 角色、async widget 状态展示、边界行为和测试证据。</p>
+
+  <h2>1. 模块边界</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>证据</th></tr>
+    <tr><td>一句话职责</td><td>把 subagent 执行结果、进度和后台 job 状态渲染成 Pi TUI 可展示的 <code>Component</code> 或 widget 行。</td><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td></tr>
+    <tr><td>主要输入</td><td>foreground 使用 <code>AgentToolResult&lt;Details&gt;</code>；background 使用 <code>AsyncJobState[]</code>。</td><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code></td></tr>
+    <tr><td>主要输出</td><td><code>renderSubagentResult</code> 返回 <code>Text</code>、<code>Markdown</code> 或 <code>Container</code>；<code>renderWidget</code> 调用 <code>ctx.ui.setWidget</code> 安装 widget component。</td><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td></tr>
+    <tr><td>不负责</td><td>不运行 child、不写 status 文件、不决定 agent 选择；它只消费已经形成的 result/progress/job state。</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td></tr>
+  </table>
+
+  <h2>2. 源码职责索引</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>阅读要点</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td><td>结果块、async widget、运行态 glyph、状态行、chain/parallel 标签、宽度裁剪。</td><td>先找导出函数，再沿 compact/expanded 与 single/multi 分支读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>通用 TUI helper：fuzzy filter、padding、边框行、header/footer、路径缩写、滚动提示。</td><td><code>row</code> 会把多行和 tab 规范化，再按可见宽度裁剪。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/status-format.ts</code></td><td>状态文案与聚合：activity age、step status、parallel outcome。</td><td>它是 result 与 widget 共享的状态语言层。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code></td><td>定义 <code>Details</code>、<code>AgentProgress</code>、<code>AsyncJobState</code> 等渲染输入。</td><td>不确定字段含义时先查这里，避免从渲染字符串反推数据结构。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code></td><td>把 background run summary 映射成 widget state，并在变化时刷新 widget。</td><td><code>summaryToJob</code> 决定 widget 能看到哪些字段。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code></td><td>把 result renderer 和 widget 刷新接入 Pi runtime。</td><td><code>renderResult</code> 传入 frame；<code>tool_result</code> 事件刷新 async widget。</td></tr>
+  </table>
+
+  <h2>3. foreground result 渲染分支</h2>
+  <table>
+    <tr><th>条件</th><th>函数路径</th><th>显示重点</th></tr>
+    <tr><td>没有 details 或没有 results</td><td><code>renderSubagentResult</code> 内部 plain text 分支</td><td>单行直接裁剪，多行用 <code>wrapPlainText</code> 包装；fork context 会显示 <code>[fork]</code>。</td></tr>
+    <tr><td>single 且 collapsed</td><td><code>renderSingleCompact</code></td><td>glyph、agent、model/thinking、turn/tool/token/duration、状态行、首行输出、session 和 artifact。</td></tr>
+    <tr><td>single 且 expanded</td><td><code>renderSubagentResult</code> 的 single expanded 分支</td><td>task、running live status、recent tools/output、tool call lines、Markdown output、usage、session 和 artifacts。</td></tr>
+    <tr><td>multi 且 collapsed</td><td><code>renderMultiCompact</code></td><td>mode headline、step/agent 计数、chain/parallel 标签、失败/暂停/空输出行、artifact 目录。</td></tr>
+    <tr><td>multi 且 expanded</td><td><code>renderSubagentResult</code> 的 multi expanded 分支</td><td>每个 step 的 task、output target、skills、fallbacks、running detail、tool call lines。</td></tr>
+  </table>
+
+  <h2>4. 状态与 glyph 规则</h2>
+  <table>
+    <tr><th>场景</th><th>函数</th><th>结果</th></tr>
+    <tr><td>result 状态行</td><td><code>resultStatusLine</code></td><td>detached、paused、error、acceptance、empty output、done 统一压成一行。</td></tr>
+    <tr><td>result glyph</td><td><code>resultGlyph</code></td><td>running 用 braille frame，detached/paused 用 warning square，failure 用 error cross，成功用 check。</td></tr>
+    <tr><td>activity 文案</td><td><code>buildLiveStatusLine</code> + <code>formatActivityLabel</code></td><td>把 last activity 和 activity state 转成 <code>active now</code>、<code>active 2s ago</code>、<code>needs attention</code> 等文案。</td></tr>
+    <tr><td>当前工具行</td><td><code>formatCurrentToolLine</code></td><td>显示 current tool、参数预览和工具运行时长；collapsed 时会按宽度截断参数。</td></tr>
+    <tr><td>step 聚合状态</td><td><code>aggregateStepStatus</code></td><td>running 优先，其次 failed、paused、all complete，最后 pending。</td></tr>
+    <tr><td>parallel outcome</td><td><code>formatParallelOutcome</code></td><td>生成 <code>1 agent running · 1/3 done · 1 failed</code> 一类摘要。</td></tr>
+  </table>
+
+  <h2>5. async widget 渲染链路</h2>
+  <table>
+    <tr><th>阶段</th><th>函数</th><th>作用</th></tr>
+    <tr><td>数据映射</td><td><code>summaryToJob</code></td><td>从 background run summary 取 mode、agents、steps、parallel groups、tokens、activity、nested children。</td></tr>
+    <tr><td>安装 widget</td><td><code>renderWidget</code></td><td>jobs 为空时清除 widget；有 UI 时设置 <code>WIDGET_KEY</code> 对应 component。</td></tr>
+    <tr><td>component 构建</td><td><code>buildWidgetComponent</code></td><td>按展开状态选择 <code>buildWidgetLines</code>、<code>compactSingleWidgetLines</code> 或 expanded 详情。</td></tr>
+    <tr><td>多 job 排序</td><td><code>buildWidgetLines</code></td><td>running 在前，queued 汇总，finished 在后，超过 <code>MAX_WIDGET_JOBS</code> 时显示隐藏计数。</td></tr>
+    <tr><td>单 job 详情</td><td><code>buildSingleWidgetLines</code></td><td>显示 <code>async subagent ... · background</code>、job 状态、step 或泛化 activity。</td></tr>
+    <tr><td>空间适配</td><td><code>fitAdaptiveWidgetLines</code></td><td>根据终端 rows/columns 与展开状态，在 full、progressive、single-line 间选择。</td></tr>
+  </table>
+
+  <h2>6. async widget 布局层级</h2>
+  <table>
+    <tr><th>层级</th><th>触发条件</th><th>保留的信息</th></tr>
+    <tr><td>full</td><td>折叠状态下行数仍能放入可用 widget 行。</td><td>完整 job header、activity、step detail、nested summary。</td></tr>
+    <tr><td>progressive</td><td>行数不足，但还不至于只剩一行。</td><td>header、优先 active job、隐藏 job 计数；session 内锁定行数，减少抖动。</td></tr>
+    <tr><td>single-line</td><td>终端几乎没有剩余行。</td><td>总数摘要，如 running、queued、failed、paused、done。</td></tr>
+    <tr><td>expanded</td><td>用户展开 tool detail。</td><td>跳过折叠自适应 session，允许更多 live detail、recent tools、recent output。</td></tr>
+  </table>
+
+  <h2>7. helper 角色</h2>
+  <table>
+    <tr><th>helper</th><th>位置</th><th>用途</th></tr>
+    <tr><td><code>truncLine</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td><td>按可见宽度裁剪，保留 ANSI 样式，并用 <code>Intl.Segmenter</code> 处理 grapheme。</td></tr>
+    <tr><td><code>wrapPlainText</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td><td>没有 details 的纯文本结果按终端宽度换行。</td></tr>
+    <tr><td><code>row</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>把一行内容放入边框，先规范化换行和 tab，再裁剪并补齐。</td></tr>
+    <tr><td><code>renderHeader</code> / <code>renderFooter</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>生成带边框的居中文本。</td></tr>
+    <tr><td><code>formatPath</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>把 home 路径缩写成 <code>~</code> 前缀。</td></tr>
+    <tr><td><code>formatScrollInfo</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>生成上下还有多少行的滚动提示。</td></tr>
+    <tr><td><code>fuzzyFilter</code></td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code></td><td>按 name、description、model 进行轻量模糊匹配。</td></tr>
+  </table>
+
+  <h2>8. chain 与 parallel 标签</h2>
+  <table>
+    <tr><th>对象</th><th>关键函数</th><th>读法</th></tr>
+    <tr><td>静态 chain parallel group</td><td><code>parseParallelGroupAgentCount</code>、<code>buildChainStepSpans</code></td><td>从 <code>[reviewer+auditor]</code> 一类 label 推导 group size。</td></tr>
+    <tr><td>workflow graph span</td><td><code>buildChainStepSpans</code></td><td>优先使用 <code>workflowGraph.nodes</code>，支持 dynamic fanout 的 flat index 映射。</td></tr>
+    <tr><td>活动 parallel group</td><td><code>isChainParallelGroupActive</code>、<code>buildMultiProgressLabel</code></td><td>活动 group 用 Agent 计数；普通 chain 用 Step 计数。</td></tr>
+    <tr><td>async chain group</td><td><code>buildAsyncChainStepSpans</code>、<code>widgetChainDetails</code></td><td>后台 widget 使用 <code>parallelGroups</code> 把 flat step 转回 logical step。</td></tr>
+    <tr><td>行标签</td><td><code>resultRowLabel</code></td><td>决定显示 <code>Step 2</code> 还是 <code>Agent 1/3</code>。</td></tr>
+  </table>
+
+  <h2>9. 边界行为</h2>
+  <table>
+    <tr><th>边界</th><th>处理方式</th><th>意义</th></tr>
+    <tr><td>空输出但没有 output target</td><td>显示 <code>Done (no text output)</code>，glyph 使用 warning success。</td><td>避免用户误以为任务有正文输出。</td></tr>
+    <tr><td>task 中包含 output target</td><td><code>extractOutputTarget</code> 识别 <code>[Write to: ...]</code>、<code>Write your findings to...</code>、<code>Output:</code>。</td><td>空正文不一定是异常，可能写入了文件。</td></tr>
+    <tr><td>运行态动画</td><td>foreground result 可由 <code>frame</code> 推进 glyph；async widget 依赖 progress seed 变化，不按动画 cadence 自刷。</td><td>foreground 需要平滑 spinner，background 避免无意义刷新。</td></tr>
+    <tr><td>Unicode 与 ANSI 宽度</td><td><code>truncLine</code> 使用 <code>visibleWidth</code> 和 grapheme segmentation，并在省略号前恢复 ANSI 样式。</td><td>避免 emoji、宽字符或颜色控制码造成错位。</td></tr>
+    <tr><td>nested children</td><td><code>formatNestedWidgetLines</code> collapsed 时聚合，expanded 时按预算展开。</td><td>嵌套 run 不抢占主 job 的第一屏空间。</td></tr>
+    <tr><td>拥挤终端</td><td>progressive 和 single-line fallback。</td><td>保证 widget 不把主对话挤出屏幕。</td></tr>
+  </table>
+
+  <h2>10. 测试证据</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖事实</th><th>对应源码区域</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/render-helpers.test.ts</code></td><td><code>row</code> 宽度裁剪、多行规范化、dynamic fanout spans、total cost、静态 chain 标签。</td><td><code>open-ai-agent/pi-subagents/src/tui/render-helpers.ts</code>、<code>open-ai-agent/pi-subagents/src/tui/render.ts</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/render-widget.test.ts</code></td><td>running/queued/finished 排序、parallel wording、progressive fallback、expanded live detail、hidden count、稳定 glyph、不按 timer 自刷。</td><td><code>buildWidgetLines</code>、<code>fitAdaptiveWidgetLines</code>、<code>renderWidget</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/render-fork-badge.test.ts</code></td><td>fork badge、tool call summary、expanded task、错误原因、running compact detail、paused、empty output、parallel/chain 标签。</td><td><code>renderSubagentResult</code>、<code>renderSingleCompact</code>、<code>renderMultiCompact</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/unit/status-format.test.ts</code></td><td>activity label、aggregate step status、parallel outcome。</td><td><code>open-ai-agent/pi-subagents/src/shared/status-format.ts</code></td></tr>
+  </table>
+
+  <h2>11. 后续 L2 候选</h2>
+  <table>
+    <tr><th>候选主题</th><th>本 L1 状态</th><th>建议学习产物</th></tr>
+    <tr><td><code>renderSubagentResult</code> compact/expanded 逐分支</td><td>只讲入口分支。</td><td>L2 短课：从 <code>Details</code> 到 result block 的完整读法。</td></tr>
+    <tr><td>async widget 自适应布局</td><td>只讲 full/progressive/single-line。</td><td>L2 参考：拥挤终端下的 row budget、session locking、active job selection。</td></tr>
+    <tr><td>chain/parallel 标签与 workflow graph span</td><td>只列关键函数。</td><td>L2 短课：dynamic fanout result index 如何映射回 logical step。</td></tr>
+    <tr><td>ANSI/Unicode 宽度裁剪</td><td>只说明目的。</td><td>L2 实验：构造宽字符、emoji、ANSI 样式，验证 <code>truncLine</code> 和 <code>row</code> 行宽。</td></tr>
+    <tr><td>状态语义与测试驱动阅读</td><td>只收集证据表。</td><td>L2 练习：从一个失败/暂停/空输出测试反推渲染路径。</td></tr>
+  </table>
+</main>
+</body>
+</html>

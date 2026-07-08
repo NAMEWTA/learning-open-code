@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>持久化与存储适配模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+  </style>
+</head>
+<body>
+  <h1>持久化与存储适配模块导览</h1>
+  <p class="lead">这一课只做一件事：建立 persistence 模块边界。学完后，你应该能判断一个存储相关文件是在描述业务库表、向量库适配、全文搜索适配，还是 Admin 的存储实例管理。</p>
+  <div class="meta">
+    <span class="pill">学习目标：判断存储后端边界</span>
+    <span class="pill">预计 13 分钟</span>
+    <span class="pill">主来源：<span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/pom.xml</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-persistence/snail-ai-vector-storage/snail-ai-vector-template/src/main/java/com/aizuda/snail/ai/vector/storage/vector/VectorStoreFactory.java</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/StoreInstanceController.java</span></span>
+  </div>
+
+  <h2>1. 职责：把三类存储隔开</h2>
+  <p>在 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 里，persistence 是 Server 能力落地到外部系统的适配层。它不是一个单独业务流程，而是三类存储边界：业务库保存用户、模型配置、Agent、RAG 文档、chunk 和存储实例；向量存储保存可相似度检索的 chunk 或记忆；搜索存储保存 BM25 全文索引。<a href="../../module-rag/lessons/0001-rag-module-tour.html">RAG L1</a> 已经讲过摄入和检索依赖 vector/search 后端，本课只解释这些后端怎样被抽象出来。</p>
+
+  <h2>2. 位置：Server Persistence 的三块</h2>
+  <div class="filetree">snail-ai-server-persistence/
+├── snail-ai-biz-storage/       ← MyBatis-Plus 业务库 PO、Mapper、方言 XML
+├── snail-ai-vector-storage/    ← SnailAiVectorStore 模板与 PgVector/Milvus/ES 实现
+└── snail-ai-search-storage/    ← SearchEngine 模板与 Elasticsearch 实现</div>
+  <p>业务库模板里有共享 PO 和 Mapper，MySQL、PostgreSQL、达梦模块只补少量方言 XML。向量库模板暴露 <code>SnailAiVectorStore</code>、<code>VectorStoreFactory</code>、<code>IndexNameBuilder</code> 和请求/结果 DTO；三个实现模块在生命周期启动时注册 PgVector、Milvus、Elasticsearch 构造器。搜索库更窄：模板暴露 <code>SearchEngine</code> 和 <code>SearchEngineFactory</code>，当前实现只有 Elasticsearch。</p>
+
+  <h2>3. 后端选择：StoreInstance 是开关</h2>
+  <pre class="diagram">StoreInstanceController
+  ↓
+StoreInstanceService → sai_store_instance(category, type, config)
+  ↓
+RagPO.vectorStoreInstanceId / searchEngineInstanceId
+  ↓
+VectorStoreFactory / SearchEngineFactory
+  ↓
+PgVector / Milvus / Elasticsearch</pre>
+  <p><code>sai_store_instance</code> 的 <code>category</code> 区分向量库和搜索引擎，<code>type</code> 区分 PG_VECTOR、MILVUS、ELASTICSEARCH、PG_FULLTEXT，<code>config</code> 保存连接 JSON。创建知识库时，<code>KnowledgeService.create</code> 把 <code>vectorStoreInstanceId</code> 写入 <code>RagPO</code>；若启用搜索引擎，再写 <code>searchEngineInstanceId</code>。后续摄入时 <code>DocumentPipeline</code> 用这些 ID 双写向量库和搜索引擎，检索时 <code>VectorSearchHandler</code> 与 <code>Bm25SearchHandler</code> 再用相同 ID 读回来。</p>
+
+  <h2>4. 最小示例：一个知识库选 PgVector + ES</h2>
+  <pre class="diagram">POST /store-instance  →  category=1,type=1,config={PgVector连接}
+POST /store-instance  →  category=2,type=3,config={Elasticsearch连接}
+POST /rag             →  vectorStoreInstanceId=1,
+                         searchEngineEnable=true,
+                         searchEngineInstanceId=2</pre>
+  <p>这个例子说明 Snail AI 的后端切换主要是运行期配置，不是把 RAG 代码改成某个数据库专用实现。真正的注意点有两个：向量库还要匹配 embedding 模型维度，<code>VectorDimensionConstraintService</code> 会按模型和后端取有效上限；搜索侧虽然枚举里有 <code>PG_FULLTEXT</code>，但当前 <code>SearchEngineEnum</code> 只注册 Elasticsearch。完整清单放在 <a href="../reference/persistence-overview.html">持久化参考</a>。</p>
+  <div class="practice"><strong>判断练习：</strong>不看上文，判断三个文件应该归到哪一层：<code>RagMapper.java</code>、<code>MilvusVectorLifecycle.java</code>、<code>ElasticsearchSearchEngine.java</code>。<br><strong>参考答案：</strong><code>RagMapper.java</code> 属于业务库模板；<code>MilvusVectorLifecycle.java</code> 属于向量库实现注册；<code>ElasticsearchSearchEngine.java</code> 属于全文搜索实现。若把后两者都叫“RAG 模块”，说明还需要把业务功能和存储适配拆开看。</div>
+  <p>主要推荐来源：先读 <code>snail-ai-server-persistence/pom.xml</code> 和 <code>StoreInstanceController.java</code>，再用 <a href="../reference/persistence-overview.html">持久化参考</a> 对照接口清单。遇到某个后端实现不清楚时，继续向 agent 追问对应 L2/L3 切片。</p>
+</body>
+</html>

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Main process 基础设施模块导览</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css" />
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .flow {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .step {
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Main process 基础设施模块导览</h1>
+    <p class="subtitle">学习目标：用 15 分钟读懂 `initializeProcess` 如何把 AionU 主进程启动前置设施串起来。</p>
+    <div class="meta">
+      <span class="pill">层级：L1 模块总览</span>
+      <span class="pill">主来源：open-ai-desktop/AionU/packages/desktop/src/process/index.ts</span>
+      <span class="pill">预计 15 分钟</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="课程导航">
+    <a href="#position">1. 它在启动链的位置</a>
+    <a href="#thin-entry">2. 薄入口的三件事</a>
+    <a href="#read-example">3. 一个阅读示例</a>
+    <a href="#practice">4. 检索练习</a>
+  </nav>
+
+  <h2 id="position">它在启动链的位置</h2>
+  <p>AionU 的 Electron 总入口在 <span class="where">open-ai-desktop/AionU/packages/desktop/src/index.ts</span>。它先处理单实例、PATH、Squirrel、全局错误、命令行模式等应用级事件，然后在 `handleAppReady()` 中调用 `initializeProcess()`。关键顺序是：主进程基础设施先完成，aioncore backend 再启动，最后才进入桌面窗口、WebUI 或 resetpass 分支。</p>
+  <p>所以本模块不是“所有 main process 代码百科”。它回答一个更小的问题：在 backend 和窗口出现之前，主进程必须先准备哪些共享条件？L0 已经说明 `open-ai-desktop/AionU/packages/desktop/src/process/index.ts` 保持薄入口；本课只沿着这个薄入口看三层基础设施。</p>
+  <div class="filetree">packages/desktop/src/process/
+├── index.ts                    ← initializeProcess 模块入口
+├── utils/                      ← 存储、Chromium、窗口、托盘、deep link、WebUI 配置
+├── services/                   ← i18n、自动更新、数据库迁移、诊断服务
+└── backend/                    ← aioncore 二进制解析</div>
+  <p>旁边还有 <code>open-ai-desktop/AionU/packages/desktop/src/process/startup/</code>。它是相邻的启动编排层，会消费这里准备好的能力继续启动 backend 和窗口，但不属于本课讨论的基础设施内部实现。</p>
+
+  <h2 id="thin-entry">薄入口的三件事</h2>
+  <p>先看 <span class="where">open-ai-desktop/AionU/packages/desktop/src/process/index.ts</span>。它真正 `await` 的只有 `initStorage()`，但模块加载阶段已经做了两件副作用工作：配置 Chromium，注册 bridge，并初始化 main process i18n。</p>
+  <pre><code class="language-typescript">import '@/common/platform/register-electron';
+import '@process/utils/configureChromium';
+
+import initStorage from './utils/initStorage';
+import './utils/initBridge';
+import './services/i18n';
+
+export const initializeProcess = async () => {
+  const t0 = performance.now();
+  const mark = (label: string) =>
+    console.log(`[AionUi:process] ${label} +${Math.round(performance.now() - t0)}ms`);
+
+  await initStorage();
+  mark('initStorage');
+};</code></pre>
+  <p>这段代码的读法是：不要只数函数调用，要区分“导入即执行”和“显式等待”。Chromium 配置必须早于任何 `app.getPath('userData')` 缓存；bridge 注册要让后续 preload/renderer 能找到主进程能力；i18n 先把主进程翻译资源放好。只有存储需要阻塞后续 backend，因为 legacy SQLite 迁移必须在 backend 触碰同一数据库前完成。</p>
+
+  <h2 id="read-example">一个阅读示例</h2>
+  <p>当你遇到“首次启动后 backend 报数据库或配置异常”，先进入 <span class="where">open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts</span>，从 `initStorage()` 的顺序读起，而不是直接跳到窗口或 renderer。</p>
+  <pre><code class="language-typescript">const initStorage = async () => {
+  await migrateLegacyData();
+
+  ensureDirectory(getHomePage());
+  ensureDirectory(getDataPath());
+
+  ConfigStorage.interceptor(configFile);
+  EnvStorage.interceptor(envFile);
+
+  await ensureAssistantDirs();
+  cleanupLegacyBuiltinSkillsDir();
+
+  const legacyDbMigration = await runLegacyDatabaseMigrations();
+
+  if (hasElectronAppPath()) {
+    application.systemInfo.provider(() => Promise.resolve(getSystemDir()));
+  }
+};</code></pre>
+  <p>这里的顺序就是基础设施契约：先迁移旧目录，再创建目录；先接管 ConfigStorage/EnvStorage，再让其他模块读取配置；先升级 legacy Electron SQLite，再允许 backend 启动。测试 <code>open-ai-desktop/AionU/tests/unit/bootstrap/configMigrationIntegration.test.ts</code> 还验证了迁移会关闭 driver、缺库时跳过、当前版本也会执行 handoff repair。</p>
+  <p>bridge 则从 <span class="where">open-ai-desktop/AionU/packages/desktop/src/process/utils/initBridge.ts</span> 切入：</p>
+  <pre><code class="language-typescript">import { logger } from '@office-ai/platform';
+import { initAllBridges } from '../bridge';
+
+logger.config({ print: true });
+
+initAllBridges();</code></pre>
+  <p>下一跳是 `open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts`，它集中注册 application、dialog、window controls、update、system settings、notification、WebUI、theme。完整入口清单见 <a href="../reference/process-infra-overview.html">参考文档</a>。</p>
+
+  <h2 id="practice">检索练习</h2>
+  <section class="quiz">
+    <p><strong>暂停回忆：</strong>如果用户反馈“桌面窗口还没出现，backend 启动就因 SQLite 迁移失败退出”，你会先读哪条链路？</p>
+    <p><strong>参考答案：</strong>先读 `open-ai-desktop/AionU/packages/desktop/src/index.ts` 中 `handleAppReady()` 对 `initializeProcess()` 和 `startBackendOrExit()` 的先后关系，再读 `open-ai-desktop/AionU/packages/desktop/src/process/index.ts` 的 `await initStorage()`，最后落到 `open-ai-desktop/AionU/packages/desktop/src/process/utils/initStorage.ts` 的 `runLegacyDatabaseMigrations()`。不要先读 renderer，因为此时窗口可能还没有创建。</p>
+    <p>继续学习时，可以让 agent 带你追问：某个 bridge 在哪里注册、某个迁移为什么延后到 renderer loaded 后执行、或者某类 backend 启动失败如何被分类。</p>
+  </section>
+
+  <section class="callout">
+    <p><strong>推荐主来源：</strong><span class="where">open-ai-desktop/AionU/packages/desktop/src/process/index.ts</span>。读完它再打开 <a href="../reference/process-infra-overview.html">process 基础设施参考清单</a>，能避免一开始被 `process/` 目录的大量工具文件分散注意力。</p>
+    <p><a href="../../00-overview/lessons/0001-project-map.html">返回 L0 项目导览</a></p>
+  </section>
+</main>
+</body>
+</html>

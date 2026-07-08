@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 PWA 缓存与更新全链路地图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟 · 目标：能把离线、更新、API 缓存与 native 注销症状映射到正确源码入口</p>
+    <h1>PWA 缓存与更新全链路地图</h1>
+    <p class="lead">这节课只建立一张地图：Web/PWA 靠 <code>ngsw-worker.js</code> 缓存壳层与少量 API，更新检测在首次 sync 前由 <code>InitialPwaUpdateCheckService</code> 触发；Capacitor/Electron 则在 <code>src/main.ts</code> 主动注销 SW。完整入口清单见 <a href="../reference/pwa-cache-update-flow-reference.html">参考文档</a>。父级 L1：<a href="../../module-mobile-pwa-host/reference/mobile-pwa-host-overview.html">Capacitor 移动端与 PWA 宿主</a>。</p>
+
+    <h2>1. 全链路时序（Web/PWA）</h2>
+    <pre class="mermaid">sequenceDiagram
+  participant Build as prod/stage build
+  participant Main as src/main.ts
+  participant NGSW as ngsw-worker.js
+  participant Config as ngsw-config.json
+  participant App as Angular app
+  participant Pwa as InitialPwaUpdateCheckService
+  participant SW as SwUpdate
+  participant Sync as SyncEffects
+  Build->>Config: 生成 asset/data groups
+  Main->>NGSW: registerWhenStable 或手动 register
+  NGSW->>Config: prefetch app shell + lazy assets
+  App->>App: DataInit 完成
+  Sync->>Pwa: afterInitialUpdateCheck$
+  Pwa->>SW: checkForUpdate (8s timeout)
+  alt 有新版本且用户确认
+    Pwa->>App: window.location.reload()
+  else 无更新或跳过
+    Pwa-->>Sync: of(undefined)
+    Sync->>Sync: 触发 initial sync
+  end</pre>
+    <p>关键顺序：<strong>数据先落地，再查 SW 更新，最后才 initial sync</strong>。不要把桌面 <code>UpdateCheckService</code>（GitHub releases）误当成 PWA 更新入口。</p>
+
+    <h2>2. 缓存策略：壳层 vs API freshness</h2>
+    <p><span class="where">ngsw-config.json</span> 分两类：<code>assetGroups</code> 缓存 HTML/JS/CSS/i18n/图标；<code>dataGroups</code> 里唯一的 <code>api-freshness</code> 只覆盖 GitHub/GitLab/Jira REST，策略是 <code>freshness</code>（网络优先，1h 内可回退缓存，10s 超时）。它<strong>不</strong>缓存 SuperSync、WebDAV 或本地 op-log。</p>
+    <pre class="diagram">assetGroups
+  app / criticalAssets → installMode: prefetch（壳层 + en.json）
+  assets / externalAssets → lazy + updateMode: prefetch
+
+dataGroups
+  api-freshness → GitHub/GitLab/Atlassian API only</pre>
+
+    <h2>3. 平台分叉：启用 SW 还是注销</h2>
+    <p><span class="where">src/main.ts</span> 双重 gate：Angular <code>ServiceWorkerModule</code> 与 bootstrap 末尾的手动 <code>register</code> 都要求 <code>production || stage</code>、非 Electron、非 native。否则遍历 <code>getRegistrations()</code> 并 <code>unregister()</code>——Capacitor WebView 虽暴露 <code>navigator.serviceWorker</code>，但 native 通知必须走 <code>NotifyService</code> 的 Capacitor 分支，不能误用 SW 通知路径。</p>
+    <pre class="diagram">// main.ts — native/Electron 注销
+} else if ('serviceWorker' in navigator && (IS_ELECTRON || IS_NATIVE_PLATFORM)) {
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const registration of registrations) {
+      registration.unregister();
+    }
+  });
+}</pre>
+
+    <h2>4. 60 秒判断</h2>
+    <p>用户报告：「Android Capacitor 版安装后，离线打不开壳层，且从未弹出 Web 应用更新对话框。」你先查 <code>ngsw-config.json</code> 的 <code>api-freshness</code>、<code>src/main.ts</code> 的 SW 注销分支，还是 <code>UpdateCheckService</code>？再说为什么。</p>
+    <div class="answer">参考答案：先查 <code>src/main.ts</code> 注销分支。Capacitor native 满足 <code>IS_NATIVE_PLATFORM</code>，启动时会 <code>unregister()</code> 全部 SW，因此不会走 PWA 离线壳层，也不会触发 <code>InitialPwaUpdateCheckService</code>。Android 更新应走 Play Store；<code>UpdateCheckService</code> 仅 Electron 有效。主要来源：<a href="../../../../../open-productivity/super-productivity/src/main.ts"><code>src/main.ts</code></a>。不确定某平台是否注册 SW 时，直接向 agent 追问 <code>IS_NATIVE_PLATFORM</code> 判定链。</div>
+  </article>
+</main>
+</body>
+</html>

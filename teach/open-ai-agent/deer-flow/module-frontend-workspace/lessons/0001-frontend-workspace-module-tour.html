@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>15 分钟理解 DeerFlow 前端 workspace</title>
+    <link rel="stylesheet" href="../assets/workspace-lesson.css" />
+    <style>
+      .filetree {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.75;
+        background: #fafbfc;
+        border: 1px solid #ebebeb;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>15 分钟理解 DeerFlow 前端 workspace</h1>
+        <p class="lead">
+          本课只教一个目标：看到 <code>/workspace</code> 相关代码时，能判断“这是路由壳、页面体验、组件状态，还是接后端的 core 层”。
+        </p>
+        <div class="meta">
+          <span class="pill">目标读者：React/Next.js 基础</span>
+          <span class="pill">主线：页面组织到 Gateway</span>
+          <span class="pill">参考：<a href="../reference/frontend-workspace-overview.html">完整清单</a></span>
+        </div>
+
+        <h2>1. 先把 workspace 看成四层</h2>
+        <p>
+          DeerFlow 的 workspace 是用户实际工作的区域，不是 landing page；它对应 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>里的 Next.js frontend/workspace 层。第一层是 Next.js App Router：
+          <span class="where">frontend/src/app/workspace/layout.tsx</span> 先在服务端读取用户状态，决定进入工作台、跳登录/setup，或显示 Gateway 离线兜底。
+          第二层是 <span class="where">frontend/src/app/workspace/workspace-content.tsx</span>，它挂上 React Query、侧栏、离线横幅、命令面板和 toast。
+        </p>
+        <div class="filetree">frontend/src/app/workspace/
+├── layout.tsx                         ← 认证与 Gateway 离线分流
+├── workspace-content.tsx              ← 工作台全局壳
+├── page.tsx                           ← /workspace 重定向
+├── chats/                             ← 聊天列表与线程页
+├── agents/                            ← Agent 管理与 agent 专属聊天页
+└── scheduled-tasks/                   ← 定时任务</div>
+        <p>
+          第三层是 <span class="where">frontend/src/components/workspace/</span>：侧栏、消息列表、输入框、artifact、sidecar、workspace changes 都在这里。第四层是 <code>core</code>：它把 UI 事件转成 LangGraph SDK 或 Gateway REST 请求。
+        </p>
+
+        <h2>2. 聊天页是主线样本</h2>
+        <p>
+          线程页入口是 <span class="where">frontend/src/app/workspace/chats/[thread_id]/page.tsx</span>。它不直接写底层请求，而是把体验拼起来：
+          <code>useThreadChat()</code> 处理 URL 里的 <code>thread_id</code> 和新线程临时 ID；<code>useThreadStream()</code> 提供 thread、发送、停止、历史加载；<code>MessageList</code> 显示消息；<code>InputBox</code> 负责提交。
+        </p>
+        <pre>handleSubmit(message)
+  -> sendMessage(threadId, message)
+  -> thread.submit({ messages }, { threadId, streamResumable: true })
+  -> Gateway /api/langgraph
+  -> MessageList 重新渲染 thread.messages</pre>
+        <p>
+          这里的关键判断是：聊天页面只组合“用户体验”，真正的连接点在
+          <span class="where">frontend/src/core/threads/hooks.ts</span> 和
+          <span class="where">frontend/src/core/api/api-client.ts</span>。
+          <code>api-client.ts</code> 创建 LangGraph Client，给状态变更请求补 CSRF，并处理 stream、cancel、joinStream 的兼容逻辑。
+        </p>
+
+        <h2>3. 其他页面复用同一套边界</h2>
+        <p>
+          Agents 页面从 <span class="where">frontend/src/app/workspace/agents/layout.tsx</span> 先查
+          <code>/api/features</code>，未开启就显示禁用页；创建 Agent 时复用聊天流发 bootstrap 消息。Agent 专属聊天页位于 <span class="where">frontend/src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx</span>，它复用普通聊天流，但把 URL 中的 <code>agent_name</code> 注入上下文。scheduled tasks 页面在
+          <span class="where">frontend/src/app/workspace/scheduled-tasks/page.tsx</span>，实际 CRUD API 位于
+          <span class="where">frontend/src/core/scheduled-tasks/api.ts</span>。注意：<span class="where">frontend/src/core/tasks/</span>
+          管的是聊天中的 subtask 事件和卡片状态，不是 scheduled tasks CRUD。
+        </p>
+        <p>
+          Artifact 和 sidecar 也遵守同一原则：<span class="where">frontend/src/components/workspace/chats/chat-box.tsx</span>
+          决定右侧面板展示哪个体验；artifact URL、sidecar thread 创建、workspace changes diff 这些后端连接分别留在 core 或专门 API 文件中。读代码时先问“这个文件在四层里的哪一层”，通常就能避免迷路。
+        </p>
+
+        <h2>练习：30 秒定位</h2>
+        <div class="callout">
+          <p>
+            假设你要排查“AI 回复下方的文件变更 badge 不出现”。先别搜全仓库，按本课四层判断：你会先看哪个组件文件？再看哪个 core 文件？
+          </p>
+        </div>
+        <div class="answer">
+          <p>
+            参考答案：先看 <span class="where">frontend/src/components/workspace/changes/workspace-change-badge.tsx</span>，
+            因为 badge 是消息 UI 的子组件；再看 <span class="where">frontend/src/core/workspace-changes/hooks.ts</span> 和
+            <span class="where">frontend/src/core/workspace-changes/api.ts</span>，确认 <code>runId</code>、enabled 条件、请求路径和返回的 <code>available</code>/<code>summary</code>。
+            如果还不清楚，继续追 <span class="where">frontend/src/components/workspace/messages/message-list-item.tsx</span> 里传给 badge 的 <code>threadId</code> 与 <code>runId</code>。
+          </p>
+        </div>
+
+        <p>
+          主要来源：本地源码与 <a href="https://nextjs.org/docs/app/getting-started/layouts-and-pages">Next.js App Router 官方文档</a>。若你想继续，可以让 agent 追问一个 L2 方向：聊天流、scheduled tasks、sidecar、artifacts 或 workspace changes。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox 微观 API 参考</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#2563eb; --warn:#9a3412; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.68; }
+    main { max-width:1180px; margin:0 auto; padding:42px 24px 72px; }
+    h1 { font-size:2.05rem; line-height:1.18; margin:0 0 8px; }
+    h2 { font-size:1.32rem; margin:34px 0 12px; border-top:1px solid var(--line); padding-top:22px; }
+    h3 { font-size:1rem; margin:22px 0 8px; color:#263746; }
+    p { margin:9px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; font-size:.9em; }
+    pre.shell { padding:12px 14px; white-space:pre; overflow-x:auto; border:1px solid #e2e8f0; border-radius:8px; background:#0f172a; color:#e2e8f0; font-family:"SF Mono",Consolas,monospace; font-size:.84rem; }
+    table { width:100%; border-collapse:collapse; margin:12px 0 20px; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .tag { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:1px 9px; margin:2px 4px 2px 0; color:#34495e; background:#fbfcfd; font-size:.84rem; }
+    .tag.core { border-color:#93c5fd; background:#eff6ff; }
+    .tag.tool { border-color:#86efac; background:#f0fdf4; }
+    .callout { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .warn { background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:12px 14px; }
+    nav.toc { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0 24px; }
+    nav.toc a { font-size:.88rem; padding:4px 10px; border:1px solid var(--line); border-radius:6px; }
+    .tests { font-size:.86rem; color:var(--muted); }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Sandbox 微观 API 参考</h1>
+  <p class="lead"><strong>L3 速查：</strong>按源码文件列出 <code>Sandbox</code> 抽象契约、provider 工厂、路径解析、配置模型、agent 文件工具公共 API 的签名、边界条件与测试锚点。返回 <a href="sandbox-overview.html">L1 模块参考</a> · <a href="../lessons/0001-sandbox-module-tour.html">短课</a> · <a href="../../00-overview/reference/00-overview.html">L0 总览</a>。</p>
+  <div>
+    <span class="tag core">Sandbox ABC</span>
+    <span class="tag core">Provider 单例</span>
+    <span class="tag tool">7 个文件工具</span>
+    <span class="tag">/mnt/user-data 契约</span>
+  </div>
+
+  <nav class="toc" aria-label="分节导航">
+    <a href="#sandbox-abc">sandbox.py</a>
+    <a href="#provider">sandbox_provider.py</a>
+    <a href="#paths">paths.py</a>
+    <a href="#config">sandbox_config.py</a>
+    <a href="#exceptions">exceptions.py</a>
+    <a href="#search">search.py</a>
+    <a href="#local">Local provider</a>
+    <a href="#community">Community providers</a>
+    <a href="#tools-runtime">tools 运行时</a>
+    <a href="#tools-agent">agent 工具</a>
+    <a href="#examples">调用示例</a>
+    <a href="#tests">测试索引</a>
+  </nav>
+
+  <p class="warn"><strong>虚拟路径契约：</strong>agent 与工具参数应使用 <code>/mnt/user-data/{workspace,uploads,outputs}</code>、<code>/mnt/skills/...</code>、<code>/mnt/acp-workspace</code>。host 绝对路径只在 provider、Gateway 和 <code>tools.py</code> 校验层出现，并在工具输出中被遮回虚拟路径。</p>
+
+  <!-- ========== SANDBOX ABC ========== -->
+  <h2 id="sandbox-abc"><code>Sandbox</code> 抽象接口：<span class="where">sandbox/sandbox.py</span></h2>
+  <table>
+    <thead><tr><th>成员</th><th>签名</th><th>返回值</th><th>边界与异常</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>Sandbox.__init__</code></td>
+        <td><code>(id: str)</code></td>
+        <td>设置 <code>self._id</code></td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><code>Sandbox.id</code></td>
+        <td>property</td>
+        <td><code>str</code></td>
+        <td>只读；Local 为 <code>local</code> 或 <code>local:{user}:{thread}</code>；AIO/E2B 为 provider 分配的 id</td>
+      </tr>
+      <tr>
+        <td><code>execute_command</code></td>
+        <td><code>(command: str, env: dict[str,str]|None=None, timeout: float|None=None) -&gt; str</code></td>
+        <td>命令 stdout/stderr 合并文本</td>
+        <td><code>env</code> 键须匹配 <code>^[A-Za-z_][A-Za-z0-9_]*$</code>，否则 <code>ValueError</code>（<code>_validate_extra_env</code>）；Local 用 <code>timeout</code> 杀进程组；远程实现可忽略 <code>timeout</code></td>
+      </tr>
+      <tr>
+        <td><code>read_file</code></td>
+        <td><code>(path: str) -&gt; str</code></td>
+        <td>UTF-8 文本内容</td>
+        <td>路径为 sandbox 内绝对路径（虚拟或已解析）；二进制/不存在由各实现决定（Local 抛 <code>OSError</code>/<code>FileNotFoundError</code>）</td>
+      </tr>
+      <tr>
+        <td><code>download_file</code></td>
+        <td><code>(path: str) -&gt; bytes</code></td>
+        <td>原始字节</td>
+        <td>路径穿越 → <code>PermissionError</code>；读失败 → <code>OSError</code>（契约要求统一）</td>
+      </tr>
+      <tr>
+        <td><code>list_dir</code></td>
+        <td><code>(path: str, max_depth=2) -&gt; list[str]</code></td>
+        <td>树形文本行列表</td>
+        <td>默认深度 2；目录不存在由各实现映射为异常或空</td>
+      </tr>
+      <tr>
+        <td><code>write_file</code></td>
+        <td><code>(path: str, content: str, append: bool=False) -&gt; None</code></td>
+        <td>—</td>
+        <td><code>append=False</code> 覆盖；只读 mount → <code>PermissionError</code></td>
+      </tr>
+      <tr>
+        <td><code>glob</code></td>
+        <td><code>(path, pattern, *, include_dirs=False, max_results=200) -&gt; tuple[list[str], bool]</code></td>
+        <td>匹配路径列表 + 是否截断</td>
+        <td>根目录不存在 → <code>FileNotFoundError</code>；非目录 → <code>NotADirectoryError</code></td>
+      </tr>
+      <tr>
+        <td><code>grep</code></td>
+        <td><code>(path, pattern, *, glob=None, literal=False, case_sensitive=False, max_results=100) -&gt; tuple[list[GrepMatch], bool]</code></td>
+        <td>匹配列表 + 是否截断</td>
+        <td>跳过二进制、超大文件、symlink escape；正则 ReDoS 防护（行长上限）</td>
+      </tr>
+      <tr>
+        <td><code>update_file</code></td>
+        <td><code>(path: str, content: bytes) -&gt; None</code></td>
+        <td>—</td>
+        <td>Gateway uploads 同步远程 sandbox 时使用；与 <code>write_file</code> 文本路径互补</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_local_sandbox_virtual_path_contract.py</code>（公共 API 必须接受 <code>/mnt/user-data/...</code>）</p>
+
+  <!-- ========== PROVIDER ========== -->
+  <h2 id="provider">Provider 工厂：<span class="where">sandbox/sandbox_provider.py</span></h2>
+  <table>
+    <thead><tr><th>符号</th><th>签名</th><th>行为</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>SandboxProvider</code></td>
+        <td>ABC</td>
+        <td>类属性：<code>uses_thread_data_mounts</code>、<code>needs_upload_permission_adjustment</code></td>
+        <td>Gateway uploads 根据后者决定是否 chmod</td>
+      </tr>
+      <tr>
+        <td><code>acquire</code></td>
+        <td><code>(thread_id: str|None=None, *, user_id: str|None=None) -&gt; str</code></td>
+        <td>创建或复用 sandbox，返回 <code>sandbox_id</code></td>
+        <td>抽象方法；<code>thread_id=None</code> 时 Local 返回 legacy <code>local</code></td>
+      </tr>
+      <tr>
+        <td><code>acquire_async</code></td>
+        <td><code>async (...) -&gt; str</code></td>
+        <td>默认 <code>asyncio.to_thread(self.acquire, ...)</code></td>
+        <td>AIO/Boxlite 可覆盖以避免阻塞事件循环</td>
+      </tr>
+      <tr>
+        <td><code>get</code></td>
+        <td><code>(sandbox_id: str) -&gt; Sandbox|None</code></td>
+        <td>内存查找，不触发 IO</td>
+        <td>已 release 的 id 返回 <code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>release</code></td>
+        <td><code>(sandbox_id: str) -&gt; None</code></td>
+        <td>销毁或归还 warm pool</td>
+        <td>抽象方法</td>
+      </tr>
+      <tr>
+        <td><code>reset</code></td>
+        <td><code>() -&gt; None</code></td>
+        <td>清缓存，默认 no-op</td>
+        <td><code>reset_sandbox_provider()</code> 调用；不 shutdown 活跃 sandbox</td>
+      </tr>
+      <tr>
+        <td><code>get_sandbox_provider</code></td>
+        <td><code>(**kwargs) -&gt; SandboxProvider</code></td>
+        <td>按 <code>config.sandbox.use</code> 反射构造单例</td>
+        <td><code>threading.Lock</code> 保护；构造在锁外，竞态失败者 <code>shutdown()</code> 孤儿实例（#3721）</td>
+      </tr>
+      <tr>
+        <td><code>reset_sandbox_provider</code></td>
+        <td><code>() -&gt; None</code></td>
+        <td>清单例 + 调 <code>provider.reset()</code></td>
+        <td>不 shutdown；活跃 sandbox 可能孤儿</td>
+      </tr>
+      <tr>
+        <td><code>shutdown_sandbox_provider</code></td>
+        <td><code>() -&gt; None</code></td>
+        <td>shutdown + 清单例</td>
+        <td>应用退出时调用</td>
+      </tr>
+      <tr>
+        <td><code>set_sandbox_provider</code></td>
+        <td><code>(provider: SandboxProvider) -&gt; None</code></td>
+        <td>测试注入 mock</td>
+        <td>不 shutdown 被替换的旧实例</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="callout"><strong>配置解析：</strong><code>resolve_class(config.sandbox.use, SandboxProvider)</code>。常见值：<code>deerflow.sandbox.local:LocalSandboxProvider</code>、<code>deerflow.community.aio_sandbox:AioSandboxProvider</code>、<code>deerflow.community.e2b_sandbox:E2BSandboxProvider</code>、<code>deerflow.community.boxlite:BoxliteProvider</code>。<code>sandbox</code> 在 <code>STARTUP_ONLY_FIELDS</code>，修改需重启 Gateway。</p>
+  <p class="tests">测试：<code>test_sandbox_provider_lifecycle.py</code>、<code>test_aio_sandbox_provider.py</code></p>
+
+  <!-- ========== PATHS ========== -->
+  <h2 id="paths">路径解析：<span class="where">config/paths.py</span></h2>
+  <h3>常量与工具函数</h3>
+  <table>
+    <thead><tr><th>符号</th><th>签名 / 值</th><th>用途</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>VIRTUAL_PATH_PREFIX</code></td><td><code>"/mnt/user-data"</code></td><td>agent 可见 user-data 根</td><td>—</td></tr>
+      <tr><td><code>make_safe_user_id</code></td><td><code>(raw: str) -&gt; str</code></td><td>IM 外部 id 规范化</td><td>空串 → <code>ValueError</code></td></tr>
+      <tr><td><code>join_host_path</code></td><td><code>(base, *parts) -&gt; str</code></td><td>保留 Windows 路径风格</td><td>Docker Desktop bind mount 兼容</td></tr>
+      <tr><td><code>get_paths</code></td><td><code>() -&gt; Paths</code></td><td>全局单例</td><td>懒初始化</td></tr>
+      <tr><td><code>resolve_path</code></td><td><code>(path: str) -&gt; Path</code></td><td>相对路径相对 <code>base_dir</code> 解析</td><td>绝对路径原样 normalize</td></tr>
+    </tbody>
+  </table>
+  <h3><code>Paths</code> 线程目录方法</h3>
+  <table>
+    <thead><tr><th>方法</th><th>host 路径模式</th><th>虚拟路径</th><th>异常</th></tr></thead>
+    <tbody>
+      <tr><td><code>thread_dir(thread_id, *, user_id=None)</code></td><td><code>users/{uid}/threads/{tid}/</code> 或 legacy <code>threads/{tid}/</code></td><td>—</td><td>非法 <code>thread_id</code>/<code>user_id</code> → <code>ValueError</code></td></tr>
+      <tr><td><code>sandbox_work_dir</code></td><td><code>.../user-data/workspace</code></td><td><code>/mnt/user-data/workspace</code></td><td>—</td></tr>
+      <tr><td><code>sandbox_uploads_dir</code></td><td><code>.../user-data/uploads</code></td><td><code>/mnt/user-data/uploads</code></td><td>—</td></tr>
+      <tr><td><code>sandbox_outputs_dir</code></td><td><code>.../user-data/outputs</code></td><td><code>/mnt/user-data/outputs</code></td><td>—</td></tr>
+      <tr><td><code>acp_workspace_dir</code></td><td><code>.../acp-workspace</code></td><td><code>/mnt/acp-workspace</code></td><td>—</td></tr>
+      <tr><td><code>sandbox_user_data_dir</code></td><td><code>.../user-data</code></td><td><code>/mnt/user-data</code></td><td>—</td></tr>
+      <tr><td><code>host_sandbox_*</code> 系列</td><td>同上，返回 <code>str</code></td><td>—</td><td>供 Docker bind mount；读 <code>DEER_FLOW_HOST_BASE_DIR</code></td></tr>
+      <tr><td><code>ensure_thread_dirs</code></td><td>创建 workspace/uploads/outputs/acp-workspace</td><td>—</td><td><code>chmod 0o777</code> 供容器写入</td></tr>
+      <tr><td><code>delete_thread_dir</code></td><td>递归删除线程数据</td><td>—</td><td>幂等：不存在则忽略</td></tr>
+      <tr><td><code>resolve_virtual_path</code></td><td><code>(thread_id, virtual_path, *, user_id=None) -&gt; Path</code></td><td>Gateway artifacts/uploads 反向解析</td><td>前缀不匹配或 <code>..</code> 穿越 → <code>ValueError</code></td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_paths_user_isolation.py</code>、<code>test_local_sandbox_virtual_path_contract.py</code></p>
+
+  <!-- ========== CONFIG ========== -->
+  <h2 id="config">配置模型：<span class="where">config/sandbox_config.py</span></h2>
+  <table>
+    <thead><tr><th>模型 / 字段</th><th>类型 / 默认</th><th>约束</th><th>消费方</th></tr></thead>
+    <tbody>
+      <tr><td><code>VolumeMountConfig</code></td><td><code>host_path</code>, <code>container_path</code>, <code>read_only=False</code></td><td>不能覆盖保留虚拟前缀</td><td>Local/AIO provider mount 列表</td></tr>
+      <tr><td><code>SandboxConfig.use</code></td><td><code>str</code>（必填）</td><td>provider 类路径</td><td><code>get_sandbox_provider</code></td></tr>
+      <tr><td><code>allow_host_bash</code></td><td><code>bool</code>，默认 <code>false</code></td><td>仅 Local；危险开关</td><td><code>security.is_host_bash_allowed</code>、<code>bash_tool</code></td></tr>
+      <tr><td><code>image</code> / <code>port</code> / <code>replicas</code> / <code>idle_timeout</code></td><td>可选</td><td>AIO/Boxlite warm pool</td><td>community providers</td></tr>
+      <tr><td><code>mounts</code></td><td><code>list[VolumeMountConfig]</code></td><td>自定义 bind mount</td><td>Local/AIO</td></tr>
+      <tr><td><code>environment</code></td><td><code>dict[str,str]</code></td><td><code>$VAR</code> 从 host 解析</td><td>容器内环境</td></tr>
+      <tr><td><code>bash_output_max_chars</code></td><td>20000，<code>ge=0</code></td><td>中间截断（头+尾）</td><td><code>bash_tool</code></td></tr>
+      <tr><td><code>read_file_output_max_chars</code></td><td>50000</td><td>头部截断</td><td><code>read_file_tool</code></td></tr>
+      <tr><td><code>ls_output_max_chars</code></td><td>20000</td><td>头部截断</td><td><code>ls_tool</code></td></tr>
+      <tr><td><code>bash_command_timeout</code></td><td>600，<code>gt=0</code></td><td>Local host bash 墙钟超时</td><td><code>LocalSandbox.execute_command</code></td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_config_version.py</code>、<code>test_local_sandbox_command_timeout.py</code></p>
+
+  <!-- ========== EXCEPTIONS ========== -->
+  <h2 id="exceptions">异常层次：<span class="where">sandbox/exceptions.py</span></h2>
+  <table>
+    <thead><tr><th>类型</th><th>触发场景</th><th>结构化字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>SandboxError</code></td><td>基类</td><td><code>message</code>, <code>details: dict</code></td></tr>
+      <tr><td><code>SandboxNotFoundError</code></td><td><code>get(sandbox_id)</code> 失败、acquire 后丢失</td><td><code>sandbox_id</code></td></tr>
+      <tr><td><code>SandboxRuntimeError</code></td><td>runtime/state/thread_id 缺失</td><td>—</td></tr>
+      <tr><td><code>SandboxCommandError</code></td><td>命令执行失败</td><td><code>command</code>, <code>exit_code</code></td></tr>
+      <tr><td><code>SandboxFileError</code></td><td>文件操作失败</td><td><code>path</code>, <code>operation</code></td></tr>
+      <tr><td><code>SandboxPermissionError</code></td><td>只读 mount、路径拒绝</td><td>继承 <code>SandboxFileError</code></td></tr>
+      <tr><td><code>SandboxFileNotFoundError</code></td><td>目标不存在</td><td>继承 <code>SandboxFileError</code></td></tr>
+    </tbody>
+  </table>
+  <p class="callout">工具层约定：<code>SandboxError</code> 被捕获后返回 <code>"Error: ..."</code> 字符串给模型，而非让 graph 崩溃。</p>
+
+  <!-- ========== SEARCH ========== -->
+  <h2 id="search">搜索辅助：<span class="where">sandbox/search.py</span></h2>
+  <table>
+    <thead><tr><th>符号</th><th>签名</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>GrepMatch</code></td><td><code>path, line_number, line</code></td><td>frozen dataclass；<code>grep</code> 返回元素类型</td></tr>
+      <tr><td><code>find_glob_matches</code></td><td><code>(root: Path, pattern, *, include_dirs=False, max_results=200) -&gt; tuple[list[str], bool]</code></td><td>忽略 <code>IGNORE_PATTERNS</code>（含 <code>.upload-*.part</code>）</td></tr>
+      <tr><td><code>find_grep_matches</code></td><td><code>(root, pattern, *, glob_pattern=None, literal=False, case_sensitive=False, max_results=100, max_file_size=1_000_000) -&gt; tuple[list[GrepMatch], bool]</code></td><td>跳过二进制、symlink、超大行</td></tr>
+      <tr><td><code>should_ignore_name</code> / <code>should_ignore_path</code></td><td>—</td><td>glob/grep 树遍历过滤</td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_sandbox_search_tools.py</code></p>
+
+  <!-- ========== LOCAL ========== -->
+  <h2 id="local">Local provider 关键 API</h2>
+  <h3><span class="where">local/local_sandbox_provider.py</span></h3>
+  <table>
+    <thead><tr><th>符号</th><th>签名 / 行为</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>LocalSandboxProvider.acquire</code></td><td>有 <code>thread_id</code> → id <code>local:{user}:{thread}</code>；否则 legacy <code>local</code></td><td>LRU 默认 256 线程；<code>uses_thread_data_mounts=True</code></td></tr>
+      <tr><td><code>_build_thread_path_mappings</code></td><td>映射 user-data 三子目录 + acp-workspace + per-user custom skills</td><td>调用 <code>ensure_thread_dirs</code>；保留前缀不可被 custom mount 覆盖</td></tr>
+      <tr><td><code>get</code> / <code>release</code> / <code>reset</code></td><td>线程安全；<code>reset</code> 清 LRU 与 generic singleton</td><td>evict 仅丢 <code>_agent_written_paths</code> 反向解析提示</td></tr>
+    </tbody>
+  </table>
+  <h3><span class="where">local/local_sandbox.py</span></h3>
+  <table>
+    <thead><tr><th>符号</th><th>要点</th></tr></thead>
+    <tbody>
+      <tr><td><code>PathMapping</code></td><td><code>container_path</code>, <code>local_path</code>, <code>read_only=False</code>；最长前缀优先匹配</td></tr>
+      <tr><td><code>LocalSandbox</code></td><td>实现全部 <code>Sandbox</code> 方法；<code>_resolve_path</code> / <code>_reverse_resolve_path</code>；symlink escape 检查</td></tr>
+      <tr><td><code>execute_command</code></td><td>需 <code>allow_host_bash</code>；进程组 + pipe drain + 默认 600s 超时</td></tr>
+      <tr><td><code>write_file</code></td><td>记录 <code>_agent_written_paths</code> 供 read 反向解析虚拟路径</td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_local_sandbox_provider_mounts.py</code>、<code>test_local_sandbox_virtual_path_contract.py</code>、<code>test_local_sandbox_command_timeout.py</code>、<code>test_local_bash_tool_loading.py</code></p>
+
+  <!-- ========== COMMUNITY ========== -->
+  <h2 id="community">Community providers（acquire 契约）</h2>
+  <table>
+    <thead><tr><th>Provider</th><th>类路径</th><th><code>acquire</code> 行为摘要</th><th>隔离模型</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>AioSandboxProvider</code></td>
+        <td><span class="where">community/aio_sandbox/aio_sandbox_provider.py</span></td>
+        <td>线程锁 + 跨进程文件锁；确定性 sandbox id；warm pool + idle cleanup；<code>acquire_async</code> 原生异步</td>
+        <td>Docker / remote AIO 容器；容器内同样暴露 <code>/mnt/user-data</code></td>
+      </tr>
+      <tr>
+        <td><code>E2BSandboxProvider</code></td>
+        <td><span class="where">community/e2b_sandbox/e2b_sandbox_provider.py</span></td>
+        <td>按 <code>(user_id, thread_id)</code> metadata 复用 cloud VM；映射 <code>/mnt/user-data</code> → remote home</td>
+        <td>E2B cloud micro-VM</td>
+      </tr>
+      <tr>
+        <td><code>BoxliteProvider</code></td>
+        <td><span class="where">community/boxlite/provider.py</span></td>
+        <td>确定性 box 名；私有 asyncio 线程；warm pool 与 replicas 软上限</td>
+        <td>BoxLite micro-VM（可选 extra）</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_aio_sandbox.py</code>、<code>test_aio_sandbox_provider.py</code>、<code>test_e2b_sandbox_provider.py</code>、<code>test_boxlite_provider.py</code>、<code>test_remote_sandbox_backend.py</code></p>
+
+  <!-- ========== TOOLS RUNTIME ========== -->
+  <h2 id="tools-runtime">工具运行时 API：<span class="where">sandbox/tools.py</span></h2>
+  <table>
+    <thead><tr><th>函数</th><th>签名</th><th>行为</th><th>异常 / 边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>get_thread_data</code></td><td><code>(runtime) -&gt; ThreadDataState|None</code></td><td>读 <code>runtime.state["thread_data"]</code></td><td>—</td></tr>
+      <tr><td><code>is_local_sandbox</code></td><td><code>(runtime) -&gt; bool</code></td><td><code>sandbox_id == "local"</code> 或 <code>startswith("local:")</code></td><td>—</td></tr>
+      <tr><td><code>ensure_sandbox_initialized</code></td><td><code>(runtime) -&gt; Sandbox</code></td><td>lazy acquire；写 <code>state["sandbox"]</code></td><td>缺 thread_id → <code>SandboxRuntimeError</code></td></tr>
+      <tr><td><code>ensure_sandbox_initialized_async</code></td><td><code>async (runtime) -&gt; Sandbox</code></td><td>走 <code>acquire_async</code></td><td>同上</td></tr>
+      <tr><td><code>sandbox_from_runtime</code></td><td><code>(runtime) -&gt; Sandbox</code></td><td><strong>已弃用</strong>；要求 sandbox 已存在</td><td>未初始化即抛错</td></tr>
+      <tr><td><code>validate_local_tool_path</code></td><td><code>(path, thread_data, *, read_only=False)</code></td><td>拒绝 <code>..</code>、越界、只读写、disabled skill</td><td><code>PermissionError</code></td></tr>
+      <tr><td><code>resolve_and_validate_user_data_path</code></td><td><code>(path, thread_data) -&gt; str</code></td><td>虚拟路径 → host 绝对路径</td><td>穿越检测</td></tr>
+      <tr><td><code>replace_virtual_path</code></td><td><code>(path, thread_data) -&gt; str</code></td><td>单路径翻译（防御纵深）</td><td>—</td></tr>
+      <tr><td><code>replace_virtual_paths_in_command</code></td><td><code>(command, thread_data) -&gt; str</code></td><td>bash 命令内路径替换</td><td>跳过 URL token</td></tr>
+      <tr><td><code>validate_local_bash_command_paths</code></td><td><code>(command, thread_data)</code></td><td>解析 shell token，校验绝对路径在白名单</td><td>Local bash 专用</td></tr>
+      <tr><td><code>mask_local_paths_in_output</code></td><td><code>(output, thread_data) -&gt; str</code></td><td>host 路径遮回虚拟路径</td><td>—</td></tr>
+      <tr><td><code>mask_secret_values</code></td><td><code>(output, injected_env) -&gt; str</code></td><td>遮罩 request-scoped secrets（#3861）</td><td>—</td></tr>
+      <tr><td><code>read_current_file_content</code></td><td><code>(runtime, path) -&gt; str</code></td><td>与 <code>read_file_tool</code> 同解析规则；供 ReadBeforeWrite 门闩</td><td>抛原生文件异常</td></tr>
+      <tr><td><code>ensure_thread_directories_exist</code></td><td><code>(runtime) -&gt; None</code></td><td>仅 Local：创建 thread_data 目录</td><td>远程 sandbox 为 no-op</td></tr>
+    </tbody>
+  </table>
+  <p class="tests">测试：<code>test_sandbox_tools_security.py</code>、<code>test_sandbox_middleware.py</code>、<code>test_skill_request_scoped_secrets.py</code>、<code>test_channel_user_id_env.py</code>、<code>test_github_token_plumbing.py</code></p>
+
+  <!-- ========== TOOLS AGENT ========== -->
+  <h2 id="tools-agent">Agent 可见工具（LangChain <code>@tool</code>）</h2>
+  <p>所有工具第一个业务参数为 <code>description: str</code>（模型必须先解释意图）。错误统一返回 <code>"Error: ..."</code> 字符串。</p>
+  <table>
+    <thead><tr><th>工具名</th><th>签名（除 <code>runtime</code> 外）</th><th>默认 / 上限</th><th>Local 额外校验</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>bash</code></td>
+        <td><code>(description, command: str) -&gt; str</code></td>
+        <td>输出截断 <code>bash_output_max_chars</code>；超时 <code>bash_command_timeout</code></td>
+        <td>需 <code>allow_host_bash</code>；路径校验 + 虚拟路径替换 + <code>cd workspace</code> 前缀；注入 <code>env</code> secrets</td>
+      </tr>
+      <tr>
+        <td><code>ls</code></td>
+        <td><code>(description, path: str) -&gt; str</code></td>
+        <td><code>list_dir</code> 深度 2；<code>ls_output_max_chars</code></td>
+        <td><code>validate_local_tool_path(read_only=True)</code>；disabled skill 拒绝</td>
+      </tr>
+      <tr>
+        <td><code>glob</code></td>
+        <td><code>(description, pattern, path, include_dirs=False, max_results=200) -&gt; str</code></td>
+        <td><code>max_results</code> 上限钳制</td>
+        <td><code>_resolve_local_read_path</code></td>
+      </tr>
+      <tr>
+        <td><code>grep</code></td>
+        <td><code>(description, pattern, path, glob=None, literal=False, case_sensitive=False, max_results=100) -&gt; str</code></td>
+        <td>同上</td>
+        <td>同上</td>
+      </tr>
+      <tr>
+        <td><code>read_file</code></td>
+        <td><code>(description, path, start_line=None, end_line=None) -&gt; str</code></td>
+        <td><code>read_file_output_max_chars</code></td>
+        <td>disabled skill 拒绝；二进制 → 友好错误提示</td>
+      </tr>
+      <tr>
+        <td><code>write_file</code></td>
+        <td><code>(description, path, content, append=False) -&gt; str</code></td>
+        <td>大小上限 <code>_effective_write_file_max_bytes()</code></td>
+        <td>写路径校验；文件操作锁 <code>file_operation_lock</code>；受 ReadBeforeWrite 门闩</td>
+      </tr>
+      <tr>
+        <td><code>str_replace</code></td>
+        <td><code>(description, path, old_str, new_str, replace_all=False) -&gt; str</code></td>
+        <td>—</td>
+        <td>按 <code>(sandbox.id, path)</code> 串行化；ReadBeforeWrite 门闩</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="callout">异步路径：每个工具注册 <code>.coroutine = _*_async</code>，内部先 <code>ensure_sandbox_initialized_async</code>，再 <code>asyncio.to_thread</code> 执行同步体。</p>
+  <p class="tests">测试：<code>test_write_file_tool_size_guard.py</code>、<code>test_read_before_write_middleware.py</code>、<code>test_sandbox_search_tools.py</code></p>
+
+  <!-- ========== EXAMPLES ========== -->
+  <h2 id="examples">调用示例</h2>
+  <h3>Lazy acquire + 写 outputs（工具层）</h3>
+  <pre class="shell"># tools.py 内部等价流程
+sandbox = ensure_sandbox_initialized(runtime)
+thread_data = get_thread_data(runtime)
+if is_local_sandbox(runtime):
+    validate_local_tool_path(path, thread_data)
+    path = resolve_and_validate_user_data_path(path, thread_data)
+sandbox.write_file("/mnt/user-data/outputs/report.html", content)</pre>
+  <h3>Gateway 反向解析 artifact</h3>
+  <pre class="shell"># paths.py
+host = get_paths().resolve_virtual_path(
+    thread_id,
+    "/mnt/user-data/outputs/report.html",
+    user_id=user_id,
+)</pre>
+  <h3>测试注入 provider</h3>
+  <pre class="shell">from deerflow.sandbox.sandbox_provider import set_sandbox_provider, reset_sandbox_provider
+
+set_sandbox_provider(mock_provider)
+# ... run test ...
+reset_sandbox_provider()</pre>
+
+  <!-- ========== TESTS ========== -->
+  <h2 id="tests">测试索引（行为佐证）</h2>
+  <table>
+    <thead><tr><th>测试文件</th><th>锁定行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>test_local_sandbox_virtual_path_contract.py</code></td><td>公共 <code>Sandbox</code> API 直接接受 <code>/mnt/user-data/...</code></td></tr>
+      <tr><td><code>test_local_sandbox_provider_mounts.py</code></td><td>线程级 PathMapping、custom mount、保留前缀冲突</td></tr>
+      <tr><td><code>test_sandbox_provider_lifecycle.py</code></td><td>单例竞态、reset/shutdown、set provider</td></tr>
+      <tr><td><code>test_sandbox_middleware.py</code></td><td>lazy init、<code>Command(update={"sandbox":...})</code> 写回</td></tr>
+      <tr><td><code>test_sandbox_tools_security.py</code></td><td>路径穿越、bash 白名单、虚拟路径遮罩</td></tr>
+      <tr><td><code>test_sandbox_search_tools.py</code></td><td>glob/grep 截断与 ignore 规则</td></tr>
+      <tr><td><code>test_sandbox_audit_middleware.py</code></td><td>bash 风险审计 block/warn/pass</td></tr>
+      <tr><td><code>test_thread_data_middleware.py</code></td><td>thread_data host 路径注入 state</td></tr>
+      <tr><td><code>test_aio_sandbox.py</code></td><td>AIO bash.exec env 路径、404 fail-fast（#3921）</td></tr>
+      <tr><td><code>test_e2b_sandbox_provider.py</code></td><td>E2B acquire 复用与路径映射</td></tr>
+      <tr><td><code>test_uploads_router.py</code></td><td>远程 sandbox <code>update_file</code> 同步上传</td></tr>
+      <tr><td><code>test_artifacts_router.py</code></td><td><code>resolve_virtual_path</code> + XSS 强制下载</td></tr>
+      <tr><td><code>test_paths_user_isolation.py</code></td><td>per-user 目录布局与 <code>make_safe_user_id</code></td></tr>
+      <tr><td><code>test_read_before_write_middleware.py</code></td><td>read → write 内容哈希门闩（#3857）</td></tr>
+      <tr><td><code>test_skill_request_scoped_secrets.py</code></td><td><code>execute_command(env=...)</code> 注入与泄漏面封闭（#3861）</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

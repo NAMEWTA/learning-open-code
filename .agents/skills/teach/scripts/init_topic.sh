@@ -18,7 +18,22 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# 向上查找工作区根目录（包含 .gitmodules 的目录），与 generate_snapshot.py 逻辑一致
+find_workspace_root() {
+    local current="$SCRIPT_DIR"
+    while [ "$current" != "/" ]; do
+        if [ -f "$current/.gitmodules" ]; then
+            echo "$current"
+            return 0
+        fi
+        current="$(dirname "$current")"
+    done
+    # 回退：脚本在 .agents/skills/teach/scripts/ 下，向上 4 级
+    cd "$SCRIPT_DIR/../../../../" && pwd
+}
+
+WORKSPACE_ROOT="$(find_workspace_root)"
 
 # --- 参数解析 ---
 if [ $# -lt 2 ]; then
@@ -37,8 +52,23 @@ if [ "${3:-}" = "--skip-index" ]; then
     SKIP_INDEX=true
 fi
 
+# --- 路径安全校验 ---
+if [[ "$PROJECT_PATH" != teach/* ]]; then
+    echo "❌ 错误：第一个参数必须以 teach/ 开头"
+    echo ""
+    echo "   你传入的: $PROJECT_PATH"
+    echo "   正确示例: teach/open-ai-agent/pi"
+    echo ""
+    echo "   教学持久化内容只能写入工作区根目录下的 teach/<path>/，"
+    echo "   严禁写入 .agents/ 目录。"
+    exit 1
+fi
+
 TOPIC_DIR="$WORKSPACE_ROOT/$PROJECT_PATH/$TOPIC_SLUG"
 
+echo "📍 工作区根目录: $WORKSPACE_ROOT"
+echo "📍 目标绝对路径: $TOPIC_DIR"
+echo ""
 # --- 检查是否已存在 ---
 if [ -d "$TOPIC_DIR" ]; then
     echo "❌ 教学主题已存在: $PROJECT_PATH/$TOPIC_SLUG"
@@ -146,5 +176,7 @@ fi
 echo ""
 echo "🔜 下一步:"
 echo "   1. 编辑 $TOPIC_SLUG/MISSION.md — 填写用户的学习目标"
-echo "   2. 运行 generate_snapshot.py 填充 SNAPSHOT.md"
-echo "   3. 开始设计第一节课"
+echo "   2. 编辑 $TOPIC_SLUG/RESOURCES.md — 填写真实资源或空白说明"
+echo "   3. 生成至少一节短课到 $TOPIC_SLUG/lessons/"
+echo "   4. 运行 generate_snapshot.py 填充 SNAPSHOT.md"
+echo "   5. 运行 audit_topic.py 确认主题可标记完成"

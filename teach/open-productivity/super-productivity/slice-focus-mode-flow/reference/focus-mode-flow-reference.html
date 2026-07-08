@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus session 与追踪联动全链路参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">Reference · Super Productivity · focus mode vertical slice</p>
+    <h1>Focus session、break、metric 与当前任务追踪联动参考</h1>
+    <p class="lead">本参考用于快速定位 focus timer、current task、break 策略、metric 写入与 idle 暂停的源码入口。短课见 <a href="../lessons/0001-flow-map.html">0001 路径图</a>。</p>
+
+    <h2>源码引用索引</h2>
+    <p>以下路径是本主题的源码依据，也用于生成主题快照：</p>
+    <div class="filetree">src/app/features/
+├── focus-mode/                          ← 专注模式 UI + store
+│   ├── focus-mode.model.ts              ← TimerState / FocusScreen / Strategy
+│   ├── focus-mode-strategies.ts         ← Pomodoro / Flowtime / Countdown
+│   ├── focus-mode.service.ts            ← 组件读 store 的门面
+│   ├── focus-mode-overlay/              ← overlay 壳层
+│   ├── focus-mode-main/                 ← work session UI
+│   ├── focus-mode-break/                ← break UI
+│   └── store/
+│       ├── focus-mode.actions.ts
+│       ├── focus-mode.reducer.ts
+│       ├── focus-mode.effects.ts        ← 与 tracking / metric / idle 联动
+│       └── focus-mode.selectors.ts
+├── tasks/
+│   ├── task.service.ts                  ← currentTaskId$ 与 tick
+│   └── store/
+│       ├── task.actions.ts              ← setCurrentTask / unsetCurrentTask
+│       └── task.selectors.ts            ← selectLastCurrentTask
+├── metric/
+│   ├── metric.service.ts                ← logFocusSession
+│   └── store/
+│       ├── metric.actions.ts
+│       └── metric.reducer.ts
+├── idle/store/
+│   ├── idle.actions.ts                  ← openIdleDialog
+│   └── idle.effects.ts                  ← 扣回误计时间（见 time-tracking 切片）
+└── config/store/
+    └── global-config.reducer.ts         ← focusMode / pomodoro 配置 selectors</div>
+    <p>
+      <code>src/app/features/focus-mode/focus-mode.model.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-strategies.ts</code>
+      <code>src/app/features/focus-mode/focus-mode.service.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-overlay/focus-mode-overlay.component.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-main/focus-mode-main.component.ts</code>
+      <code>src/app/features/focus-mode/focus-mode-break/focus-mode-break.component.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.actions.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.reducer.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.effects.ts</code>
+      <code>src/app/features/focus-mode/store/focus-mode.selectors.ts</code>
+      <code>src/app/features/tasks/task.service.ts</code>
+      <code>src/app/features/tasks/store/task.actions.ts</code>
+      <code>src/app/features/tasks/store/task.selectors.ts</code>
+      <code>src/app/features/metric/metric.service.ts</code>
+      <code>src/app/features/metric/store/metric.actions.ts</code>
+      <code>src/app/features/metric/store/metric.reducer.ts</code>
+      <code>src/app/features/idle/store/idle.actions.ts</code>
+      <code>src/app/features/config/store/global-config.reducer.ts</code>
+    </p>
+
+    <h2>状态层边界速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层</th><th>主文件</th><th>保存或派生什么</th><th>不是</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>focus timer</td>
+            <td><code>focus-mode.reducer.ts</code></td>
+            <td><code>timer.purpose</code>、elapsed、duration、screen</td>
+            <td>任务 <code>timeSpent</code>；break 时长不进 metric。</td>
+          </tr>
+          <tr>
+            <td>current task</td>
+            <td><code>task.reducer.ts</code></td>
+            <td><code>currentTaskId</code>、<code>lastCurrentTaskId</code></td>
+            <td>不带 persistent meta；远端 sync 不直接改 local current task。</td>
+          </tr>
+          <tr>
+            <td>wall-clock 追踪</td>
+            <td><code>task.service.ts</code></td>
+            <td>每秒累加 <code>timeSpentOnDay</code>，batch 后 flush timeTracking op</td>
+            <td>与 focus timer tick 是两条独立时钟链。</td>
+          </tr>
+          <tr>
+            <td>focus metric</td>
+            <td><code>metric.reducer.ts</code></td>
+            <td><code>Metric.focusSessions[]</code> 按日追加 duration</td>
+            <td>不是 session 进行中实时更新；完成时才 log。</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>FocusModeEffects 联动矩阵</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Effect</th><th>触发</th><th>主要 dispatch</th><th>目的</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>syncTrackingStartToSession$</code></td>
+            <td><code>currentTaskId$</code> 变为非空</td>
+            <td><code>unPauseFocusSession</code> / <code>skipBreak</code> / <code>startFocusSession</code></td>
+            <td>追踪开始 → 恢复或静默启动 session</td>
+          </tr>
+          <tr>
+            <td><code>syncTrackingStopToSession$</code></td>
+            <td><code>currentTaskId$</code> 变为 null</td>
+            <td><code>pauseFocusSession</code></td>
+            <td>追踪停止 → 暂停 work/break timer</td>
+          </tr>
+          <tr>
+            <td><code>syncSessionPauseToTracking$</code></td>
+            <td><code>pauseFocusSession</code></td>
+            <td><code>unsetCurrentTask</code></td>
+            <td>session 暂停 → 停止追踪（若仍有 current）</td>
+          </tr>
+          <tr>
+            <td><code>syncSessionResumeToTracking$</code></td>
+            <td><code>unPauseFocusSession</code></td>
+            <td><code>setCurrentTask</code> / <code>clearResumingBreakFlag</code></td>
+            <td>session 恢复 → 恢复 paused task</td>
+          </tr>
+          <tr>
+            <td><code>syncSessionStartToTracking$</code></td>
+            <td><code>startFocusSession</code></td>
+            <td><code>setCurrentTask</code> / <code>showFocusOverlay</code></td>
+            <td>session 开始 → 自动追踪或提示选任务</td>
+          </tr>
+          <tr>
+            <td><code>detectSessionCompletion$</code></td>
+            <td>work timer 到点停止</td>
+            <td><code>completeFocusSession</code></td>
+            <td>Pomodoro/Countdown 自动完成</td>
+          </tr>
+          <tr>
+            <td><code>autoStartBreakOnSessionComplete$</code></td>
+            <td><code>incrementCycle</code></td>
+            <td><code>unsetCurrentTask</code> + <code>startBreak</code></td>
+            <td>Pomodoro 自动 break</td>
+          </tr>
+          <tr>
+            <td><code>autoStartFlowtimeBreakOnSessionEnd$</code></td>
+            <td><code>endFlowtimeSession</code></td>
+            <td><code>completeFocusSession</code> + break 链</td>
+            <td>Flowtime 手动结束 → 可选 break</td>
+          </tr>
+          <tr>
+            <td><code>resumeTrackingOnBreakComplete$</code></td>
+            <td><code>completeBreak</code></td>
+            <td><code>setCurrentTask</code></td>
+            <td>break 完成 → 恢复 paused task</td>
+          </tr>
+          <tr>
+            <td><code>skipBreak$</code></td>
+            <td><code>skipBreak</code></td>
+            <td><code>setCurrentTask</code> + 可选 <code>startFocusSession</code></td>
+            <td>跳过 break 并续 session</td>
+          </tr>
+          <tr>
+            <td><code>logFocusSession$</code></td>
+            <td><code>completeFocusSession</code></td>
+            <td>（无 dispatch）→ <code>MetricService.logFocusSession</code></td>
+            <td>写当日 focusSessions</td>
+          </tr>
+          <tr>
+            <td><code>pauseOnIdle$</code></td>
+            <td><code>openIdleDialog</code></td>
+            <td><code>pauseFocusSession</code></td>
+            <td>idle 弹窗前暂停 focus</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Mode strategy 差异</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Mode</th><th>session 结束</th><th>自动 break</th><th>break 后自动下一 session</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Pomodoro</td>
+            <td>timer 到点 → <code>completeFocusSession</code></td>
+            <td>是，按 cycle 长短休息</td>
+            <td>是（<code>shouldAutoStartNextSession</code>）</td>
+          </tr>
+          <tr>
+            <td>Flowtime</td>
+            <td>用户 <code>endFlowtimeSession</code></td>
+            <td>配置开启时按 elapsed 比例</td>
+            <td>否</td>
+          </tr>
+          <tr>
+            <td>Countdown</td>
+            <td>timer 到点 → <code>completeFocusSession</code></td>
+            <td>否</td>
+            <td>否；overlay 关闭时走 banner 提醒</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>关键配置项</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>配置</th><th>影响</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>autoStartFocusOnPlay</code></td><td>追踪开始时无 session 则静默 <code>startFocusSession</code></td></tr>
+          <tr><td><code>isPauseTrackingDuringBreak</code></td><td>break 前 <code>unsetCurrentTask</code>，break 后恢复</td></tr>
+          <tr><td><code>isManualBreakStart</code></td><td>Pomodoro 开启 overtime，timer 可超过 duration</td></tr>
+          <tr><td><code>isShowPreparation</code></td><td>overlay 内准备屏；不影响静默 auto-spawn</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Action 速查</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Action</th><th>Reducer 主要效果</th><th>典型后续 effect</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>startFocusSession</code></td><td>work timer running</td><td><code>syncSessionStartToTracking$</code></td></tr>
+          <tr><td><code>pauseFocusSession</code></td><td>timer 停止，存 pausedTaskId</td><td><code>syncSessionPauseToTracking$</code></td></tr>
+          <tr><td><code>completeFocusSession</code></td><td>idle timer，SessionDone screen</td><td>metric / break / notify</td></tr>
+          <tr><td><code>startBreak</code></td><td>break timer，Break screen</td><td>reset TakeABreak timer</td></tr>
+          <tr><td><code>completeBreak</code> / <code>skipBreak</code></td><td>idle timer，Main screen</td><td>resume tracking / next session</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>阅读顺序建议</h2>
+    <ol>
+      <li><code>focus-mode.model.ts</code> — 认清 timer 与 screen 枚举。</li>
+      <li><code>focus-mode.reducer.ts</code> — 看 tick 到点如何停 timer。</li>
+      <li><code>focus-mode.effects.ts</code> — 从 <code>syncTrackingStartToSession$</code> 与 <code>syncTrackingStopToSession$</code> 读双向同步。</li>
+      <li><code>focus-mode-strategies.ts</code> — 判断 break / auto-next 是否启用。</li>
+      <li><code>metric.service.ts</code> + <code>logFocusSession$</code> — 确认 metric 写入时机。</li>
+    </ol>
+
+    <p>相关 L2：<a href="../../slice-time-tracking-flow/reference/time-tracking-flow-reference.html">时间追踪参考</a> · L1：<a href="../../module-planning-time/reference/planning-time-overview.html">规划与时间模块参考</a></p>
+  </article>
+</main>
+</body>
+</html>

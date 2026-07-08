@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Client 执行层速查</title>
+  <link rel="stylesheet" href="../assets/agent-client.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-agent-client-module-tour.html">返回短课</a>
+    <a href="agent-client-api.html">API 参考</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">Agent 责任链参考</a>
+  </nav>
+
+  <h1>Agent Client 执行层速查</h1>
+  <p class="lead">这份参考用于快速定位 `snail-ai-agent` 中 Client 执行层的职责、接口、依赖和扩展点。短课负责建立地图，本文负责放长清单。</p>
+
+  <h2>1. 架构位置与主链路</h2>
+  <p>Agent Client 执行层位于 <a href="../../00-overview/reference/00-overview.html">L0 总体架构</a>中的 Client 节点，接在 <a href="../../module-agent-chain/reference/agent-chain-overview.html">Server 端 Agent 责任链</a>之后。Server 端完成上下文装配并通过 gRPC 下发 `ChatDispatchRequest`；Client 端负责实际模型调用、本地工具执行、Advisor/Interceptor 观测与流式回传。</p>
+  <div class="diagram">Server Agent Chain
+  └─ LlmCallHandler
+      └─ gRPC /chat/dispatch
+          └─ ClientRequestDispatcher
+              └─ ChatDispatchStreamingHandler
+                  └─ ChatSessionRuntime
+                      ├─ ToolRuntime
+                      └─ ClientChatExecutor
+                          ├─ PromptFactory
+                          ├─ ChatClientFactory
+                          └─ Advisor / Interceptor / Tool / ChatModel</div>
+
+  <h2>2. 源码分层</h2>
+  <table>
+    <thead>
+      <tr><th>层</th><th>职责</th><th>关键源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>启动与配置</td>
+        <td>启用 Client、读取配置、创建 Bean、启动 gRPC server 和心跳</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-starter/src/main/java/com/aizuda/snail/ai/agent/starter/SnailAiAgentAutoConfiguration.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-common/src/main/java/com/aizuda/snail/ai/agent/common/config/SnailAiAgentProperties.java</span></td>
+      </tr>
+      <tr>
+        <td>通信层</td>
+        <td>本地接收 Server 调度，并保留回调 Server 的 channel</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-common/src/main/java/com/aizuda/snail/ai/agent/common/rpc/ClientGrpcServer.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-common/src/main/java/com/aizuda/snail/ai/agent/common/rpc/RpcClient.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-common/src/main/java/com/aizuda/snail/ai/agent/common/handler/ClientHeartbeatScheduler.java</span></td>
+      </tr>
+      <tr>
+        <td>分发层</td>
+        <td>按 URI 转给 unary/streaming handler，聊天请求走 server-streaming</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/ClientRequestDispatcher.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/grpc/handler/ChatDispatchStreamingHandler.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/grpc/handler/PingRequestHandler.java</span></td>
+      </tr>
+      <tr>
+        <td>会话运行时</td>
+        <td>活跃计数、工具解析、完成或错误后的资源清理</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/runtime/ChatSessionRuntime.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/runtime/tool/ToolRuntime.java</span></td>
+      </tr>
+      <tr>
+        <td>Chat 执行</td>
+        <td>构建 Prompt、ChatClient、Reactor context，并订阅 Spring AI 流</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/ClientChatExecutor.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/client/DefaultChatClientFactory.java</span><br><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-model/src/main/java/com/aizuda/snail/ai/agent/core/executor/model/DefaultChatModelFactory.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 公共接口清单</h2>
+  <p class="note">第 3 节列接入方常用公共接口，第 5 节补充 Tool resolver 公共类，便于后续 L3 API 覆盖。</p>
+  <table>
+    <thead>
+      <tr><th>接口 / 类</th><th>使用者</th><th>看它解决什么问题</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>@EnableSnailAiAgent</code></td><td>接入方 Spring Boot 应用</td><td>导入 Client 自动配置。</td></tr>
+      <tr><td><code>SnailAiAgentProperties</code></td><td>部署与配置</td><td>`snail-ai.*` 配置：appId、token、port、server、并发、临时目录。</td></tr>
+      <tr><td><code>ClientGrpcServer</code></td><td>自动配置</td><td>启动 Client 本地 gRPC 服务，注册 unary 与 server-streaming service。</td></tr>
+      <tr><td><code>ClientRequestDispatcher</code></td><td>gRPC server</td><td>把请求的 URI 交给通用 `GrpcRequestDispatcher`。</td></tr>
+      <tr><td><code>RpcClient</code></td><td>Tool 与 callback</td><td>回调 Server：创建会话、保存记录、短期记忆、获取 Skill 内容、RAG 搜索。</td></tr>
+      <tr><td><code>GrpcChannelProvider</code></td><td>`RpcClient` 动态代理</td><td>保存心跳建立的 Server channel 和认证 header。</td></tr>
+      <tr><td><code>ChatDispatchStreamingHandler</code></td><td>Client 分发入口</td><td>把 `/chat/dispatch` 请求转为 `ChatSessionRequest`，并把 text/thinking/completion/error 写回 observer。</td></tr>
+      <tr><td><code>ChatSessionRuntime</code></td><td>gRPC handler</td><td>一次 Chat 会话的运行壳：计数、解析工具、执行、清理。</td></tr>
+      <tr><td><code>ClientChatExecutor</code></td><td>会话运行时</td><td>构建 `Prompt` 与 `ChatClient`，设置 Advisor context，订阅响应流。</td></tr>
+      <tr><td><code>PromptFactory</code></td><td>`ClientChatExecutor`</td><td>把 system prompt、history、user message 变成 Spring AI `Prompt`。</td></tr>
+      <tr><td><code>ChatClientFactory</code></td><td>`ClientChatExecutor`</td><td>构建 Spring AI `ChatClient`，装配模型、Advisor 和工具。</td></tr>
+      <tr><td><code>ChatModelFactory</code></td><td>`DefaultChatClientFactory`</td><td>把 Server 下发的 `ModelConfig` 转为可调用 `ChatModel`。</td></tr>
+      <tr><td><code>ChatClientCustomizer</code></td><td>接入方扩展</td><td>在 `ChatClient.Builder` build 前做横向定制。</td></tr>
+      <tr><td><code>SnailAiInterceptor</code></td><td>接入方扩展</td><td>在 LLM 调用前后修改请求或响应，按 order 进入 `InterceptorChainAdvisor`。</td></tr>
+      <tr><td><code>CustomToolCallbackProvider</code></td><td>工具扩展</td><td>扫描业务 Spring Bean 中的 `@Tool` 方法，缓存为 `ToolCallback`。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. Advisor 与 Interceptor</h2>
+  <table>
+    <thead>
+      <tr><th>组件</th><th>Order</th><th>实际职责</th><th>行为佐证</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>InterceptorChainAdvisor</code></td><td>300</td><td>执行 `SnailAiInterceptorChain`，before 正序、after 逆序。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/interceptor/SnailAiInterceptorChain.java</span></td></tr>
+      <tr><td><code>TokenUsageCollectorAdvisor</code></td><td>350</td><td>从流式最终 chunk 的 usage 中写入 prompt、completion、cache token。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/advisor/TokenUsageCollectorAdvisor.java</span></td></tr>
+      <tr><td><code>ThinkingCollectorAdvisor</code></td><td>400</td><td>从 metadata 或底层响应对象中收集 reasoning/thinking 文本。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/test/java/com/aizuda/snail/ai/agent/core/advisor/ThinkingCollectorAdvisorTest.java</span></td></tr>
+      <tr><td><code>StreamChunkForwarderAdvisor</code></td><td>500</td><td>抽取文本 chunk，累积 `fullText` 并调用文本消费者。</td><td><span class="where">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/advisor/StreamChunkForwarderAdvisor.java</span></td></tr>
+    </tbody>
+  </table>
+  <p class="note">源码注意：`SnailAiAgentAutoConfiguration#chatClientFactory` 当前默认装配的是上表 4 个 Advisor。客户端文档中出现的 `MemoryInjectionAdvisor` 不在当前 Client 自动配置与 `advisor` 包中；历史消息和记忆上下文主要随 `ChatDispatchRequest` 由 Server 侧准备，Client 的 `DefaultPromptFactory` 负责放进 `Prompt`。</p>
+
+  <h2>5. Tool resolver 速查</h2>
+  <table>
+    <thead>
+      <tr><th>Resolver / Provider</th><th>何时注册工具</th><th>产物</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>BaseToolResolver</code></td><td>每次对话都会创建按 agentId/conversationId 隔离的工作目录。</td><td>`shell`、`http_request`。</td></tr>
+      <tr><td><code>ClientRagToolResolver</code></td><td>Agent 启用 RAG、有 ragIds，且不是强制调用模式。</td><td>`rag_search`，通过 `RpcClient.searchRag` 回调 Server。</td></tr>
+      <tr><td><code>ClientSkillToolResolver</code></td><td>`ChatDispatchRequest.skills` 非空。</td><td>`read_skill`，并把可用 skill 列表追加到 system prompt。</td></tr>
+      <tr><td><code>ClientMcpToolResolver</code></td><td>`mcpServers` 非空，支持 Streamable HTTP 与 Stdio；SSE 在当前代码中告警后跳过。</td><td>MCP Server 暴露的 `ToolCallback`。</td></tr>
+      <tr><td><code>CustomToolCallbackProvider</code></td><td>Spring 容器启动后扫描非内部包 Bean。</td><td>业务自定义 `@Tool` 方法。</td></tr>
+      <tr><td><code>ClientMemoryToolResolver</code></td><td>当前返回空列表，且未注入 `ToolRuntime` 构造器。</td><td>无独立 memory tool。</td></tr>
+    </tbody>
+  </table>
+  <p><span class="where">open-java/snail-ai/snail-ai-agent-example/src/main/java/com/aizuda/snail/ai/agent/example/tool/QueryDbTool.java</span></p>
+  <pre><code class="language-java">@Component
+public class QueryDbTool {
+    @Tool(name = "query_order", description = "查询订单信息")
+    public String queryOrder(@ToolParam(description = "订单ID") String orderId,
+                             ToolContext toolContext) {
+        return "...";
+    }
+}</code></pre>
+
+  <h2>6. 调用示例与排查入口</h2>
+  <table>
+    <thead>
+      <tr><th>你看到的问题</th><th>优先入口</th><th>判断依据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Client 没上线或 Server 找不到实例</td><td><code>ClientHeartbeatScheduler</code>、`snail-ai.app-id/token/server/port`</td><td>心跳负责注册 hostId、hostIp、port、并发数和认证 header。</td></tr>
+      <tr><td>收到请求但没有输出</td><td><code>ChatDispatchStreamingHandler</code>、<code>ChatSessionRuntime</code></td><td>先确认是否解析 dispatch 成功、是否进入 `execute`、是否触发 error consumer。</td></tr>
+      <tr><td>模型配置报错</td><td><code>ClientModelConfigValidator</code>、<code>ClientChatModelSpecFactory</code></td><td>当前校验要求 `apiEndpoint`、`apiKey`、`modelKey` 非空。</td></tr>
+      <tr><td>工具没有被模型看到</td><td><code>ToolRuntime</code>、各 resolver、<code>CustomToolCallbackProvider</code></td><td>工具最终必须作为 `ToolCallback` 进入 `DefaultChatClientFactory.defaultTools`。</td></tr>
+      <tr><td>thinking 或 token 没记录</td><td><code>ThinkingCollectorAdvisor</code>、<code>TokenUsageCollectorAdvisor</code></td><td>依赖模型响应 metadata；测试只覆盖 reasoningContent metadata 的 happy path。</td></tr>
+    </tbody>
+  </table>
+
+  <p>最小接入示例来自 `snail-ai-agent-example`：应用类加 `@EnableSnailAiAgent`，配置 `snail-ai.enabled=true`、`app-id`、`token`、Client 端口和 Server gRPC 地址。之后 Server 端 Agent 关联该应用，Server 的 `LlmCallHandler` 才会把聊天请求分发到这个 Client。</p>
+</main>
+</body>
+</html>

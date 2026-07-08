@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · Hub 路由与 Session 匹配</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · Hub 路由与 Session 匹配 <span class="tag">路由 & 会话</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能说出 Hub 的 4 条路由规则及匹配顺序，理解 owner vs guest 两种模式的 Prompt 构建差异，知道 4 个被屏蔽的工具及原因。这是整个链路中逻辑密度最高的一层。
+</div>
+
+<p>上一课我们追踪了消息在 BridgeManager 中的防抖聚合与命令拦截。本课聚焦两个核心组件：<strong>Hub</strong>（消息路由中枢）和 <strong>BridgeSessionManager</strong>（会话匹配与 Prompt 构建）。后者是整个链路中<strong>逻辑密度最高</strong>的一层（~320 行方法体）。</p>
+
+<h2>一、Hub.send()：4 条路由规则按序匹配</h2>
+
+<p>Hub 是消息路由中枢（位于 <code>hub/index.ts</code>），管理 4 条路由规则，<strong>顺序匹配，第一条命中即执行</strong>：</p>
+
+<pre><code>// Hub 路由表（顺序匹配，第一条命中即执行）：
+const routes = [
+  { // 规则 1：桌面端 owner — 无 sessionKey + 非 ephemeral
+    match: o => !o.sessionKey && !o.ephemeral && o.role === "owner",
+    handle: () => submitDesktopSessionMessage(engine, { ... })
+  },
+  { // 规则 2：Bridge guest — 有 sessionKey + role = "guest"
+    match: o => o.sessionKey && o.role === "guest",
+    handle: () => guestHandler.handle(text, sessionKey, ...)
+  },
+  { // 规则 3：Bridge owner — 有 sessionKey + 非 ephemeral
+    match: o => o.sessionKey && !o.ephemeral,
+    handle: () => engine.executeExternalMessage(text, sessionKey,
+      meta, { guest: false, agentId, onDelta, images, ... })
+  },
+  { // 规则 4：独立执行 — ephemeral（cron / heartbeat / phone）
+    match: o => o.ephemeral,
+    handle: () => engine.executeIsolated(text, { ... })
+  },
+];</code></pre>
+
+<table>
+<thead><tr><th>规则</th><th>匹配条件</th><th>处理器</th><th>典型场景</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>无 sessionKey + role=owner + 非 ephemeral</td><td>桌面端会话提交</td><td>用户在桌面 App 中直接对话</td></tr>
+<tr><td>2</td><td>有 sessionKey + role=guest</td><td>GuestHandler</td><td>群聊中非 owner 成员发言</td></tr>
+<tr><td>3</td><td>有 sessionKey + 非 ephemeral（隐含 owner）</td><td>engine.executeExternalMessage</td><td>Bridge 私聊（最常见路径）</td></tr>
+<tr><td>4</td><td>ephemeral=true</td><td>独立执行（无会话持久化）</td><td>cron 定时任务 / heartbeat / phone channel</td></tr>
+</tbody>
+</table>
+
+<div class="danger">
+⚠️ <b>顺序敏感！</b>规则 3 的匹配条件是 <code>sessionKey && !ephemeral</code>，没有检查 role。因为规则 2 已经将 guest 拦截，到达规则 3 的必然是 owner。如果规则顺序颠倒，guest 消息会被错误地路由到 owner 处理器，导致权限越界。
+</div>
+
+<h2>二、BridgeSessionManager：会话索引查找与恢复</h2>
+
+<p>对于 bridge 私聊消息（命中规则 3），Hub 调用 <code>engine.executeExternalMessage()</code>，最终委托给 <code>BridgeSessionManager.executeExternalMessage()</code>。这是 <code>core/bridge-session-manager.ts</code> 中约 320 行的方法体。</p>
+
+<pre><code>// 1. 读取 bridge-sessions.json 索引（per-agent）
+const index = this.readIndex(agent);
+const raw = index[sessionKey];
+const entry = this._normalizeIndexEntry(raw);
+const existingFile = entry.file || null;  // e.g. "owner/dt_dm_xxx.jsonl"
+
+// 2. 尝试打开已有 session（带修复）
+if (existingPath && !roleChanged) {
+  // 修复：清理孤儿 toolResult entry
+  repairOrphanToolResultEntriesInFile(existingPath);
+  // 修复：内联媒体历史
+  this._repairInlineMediaHistory(existingPath, "bridge session restore");
+  mgr = SessionManager.open(existingPath, sessionDir);
+}
+
+// 3. 打不开则创建新 session（自愈）
+if (!mgr) {
+  mgr = SessionManager.create(homeCwd, sessionDir);
+}</code></pre>
+
+<div class="step"><span class="num">1</span><b>索引查找</b>：<code>readIndex(agent)</code> 读取 per-agent 的 <code>bridge-sessions.json</code>，以 <code>sessionKey</code> 为键查找历史会话文件路径<br>
+<span class="where">core/bridge-session-manager.ts · executeExternalMessage() 第 1 步</span></div>
+
+<div class="step"><span class="num">2</span><b>修复打开</b>：打开旧 session 前执行两项修复——清理孤儿 toolResult entry（#1285 修复）、修复内联媒体历史<br>
+<span class="where">自愈机制：不因历史数据损坏而阻塞新对话</span></div>
+
+<div class="step"><span class="num">3</span><b>自愈创建</b>：如果旧 session 打不开（文件损坏 / 格式变更），自动创建新 session，不阻塞用户对话<br>
+<span class="where">SessionManager.create(homeCwd, sessionDir)</span></div>
+
+<h2>三、Owner vs Guest 模式的 Prompt 构建差异</h2>
+
+<p>这是 BridgeSessionManager 中最重要的设计决策——owner 和 guest 使用截然不同的 Prompt 和工具集：</p>
+
+<table>
+<thead><tr><th>方面</th><th>Owner 模式</th><th>Guest 模式</th></tr></thead>
+<tbody>
+<tr><td><strong>System Prompt</strong></td><td>完整（yuan + ishiki + memory + skills + agents files）+ bridge 上下文行</td><td>仅 yuan + public-ishiki + contextTag + bridge 上下文行</td></tr>
+<tr><td><strong>模型</strong></td><td>agent.config.models.chat</td><td>agent.config.models.chat</td></tr>
+<tr><td><strong>工具集</strong></td><td>全部 agent 工具，屏蔽 4 个禁用工具</td><td>空（无工具执行能力）</td></tr>
+<tr><td><strong>thinking level</strong></td><td>用户配置的思考级别</td><td>off（不启用思考）</td></tr>
+<tr><td><strong>Vision Bridge</strong></td><td>启用视觉上下文注入</td><td>启用视觉上下文注入</td></tr>
+<tr><td><strong>Resource Loader</strong></td><td>Prompt Snapshot 快照</td><td>Prompt Snapshot 快照</td></tr>
+</tbody>
+</table>
+
+<div class="side">
+💡 <b>关键洞察：为什么 guest 没有工具？</b><br>
+Guest 是群聊中的非 owner 成员——可能是同事、朋友或陌生人。给 guest 开放工具执行能力（如文件读写、命令执行、浏览器操控）是严重的安全风险。guest 只能进行纯文本对话，所有工具调用请求由 LLM 自行拒绝（因为没有可用工具）。
+</div>
+
+<h2>四、工具过滤规则</h2>
+
+<p>Owner 模式下，4 个工具被显式从 bridge session 移除：</p>
+
+<pre><code>const BRIDGE_OWNER_DENIED_TOOL_NAMES = Object.freeze([
+  "computer",        // 电脑操控 — bridge 场景不适用（远程用户无法操作桌面）
+  "browser",         // 浏览器管理 — bridge 场景不适用
+  "hana_card_guide", // 卡片引导 — 桌面 UI 专属功能
+  "show_card",       // 卡片展示 — 桌面 UI 专属功能
+]);</code></pre>
+
+<p>这 4 个工具的共性：<strong>它们依赖桌面 UI 环境</strong>。Bridge 用户通过手机 IM 交互，没有桌面端的卡片渲染引擎和窗口管理系统，因此这些工具在 bridge 场景下没有意义。</p>
+
+<h2>五、Bridge 上下文构建</h2>
+
+<p><code>buildBridgeContext()</code>（位于 <code>lib/bridge/bridge-context.ts</code>）将 sessionKey / 平台名 / 用户信息 / 角色拼接为一行注入 system prompt：</p>
+
+<pre><code>// 示例输出（中文环境）
+"[Bridge 上下文] 这是来自 钉钉 的消息。你的名字是 Hana。
+ 发送者名称：张三。请使用简洁、自然的语言回复。"</code></pre>
+
+<p>这一行上下文让 Agent 知道自己正在通过外部 IM 平台与用户对话，从而调整回复风格（更简洁、避免代码块过长、不使用桌面专属功能）。</p>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. Hub 的 4 条路由规则为什么必须按当前顺序排列？</p>
+<span class="opt">A. 因为按字母顺序排列代码更整洁</span>
+<span class="opt">B. 因为规则 2 拦截 guest 后，规则 3 才能安全地不检查 role 字段——顺序颠倒会导致 guest 被错误路由到 owner 处理器</span>
+<span class="opt">C. 因为规则 1 的处理速度最快，放前面提升性能</span>
+<span class="opt">D. 因为它们按创建时间排序</span>
+<details><summary>看答案</summary><b>B</b>。路由规则顺序敏感：规则 2（guest）必须在规则 3（owner）之前，否则 guest 消息会匹配到不检查 role 的规则 3，被当作 owner 处理——这会导致权限越界。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. BridgeSessionManager 打开旧 session 时的两项修复是什么？</p>
+<span class="opt">A. 修复数据库连接和网络超时</span>
+<span class="opt">B. 清理孤儿 toolResult entry 和修复内联媒体历史</span>
+<span class="opt">C. 修复 JSON 格式化错误和编码问题</span>
+<span class="opt">D. 修复时间戳偏移和用户权限</span>
+<details><summary>看答案</summary><b>B</b>。两项修复：（1）<code>repairOrphanToolResultEntriesInFile()</code> 清理因崩溃/中断产生的孤儿 toolResult 条目；（2）<code>_repairInlineMediaHistory()</code> 修复内联媒体引用的历史记录。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. guest 模式的工具集为什么是空的？</p>
+<span class="opt">A. 因为 guest 的模型不支持工具调用</span>
+<span class="opt">B. 因为安全考虑——guest 可能是群聊中的陌生人，不应有文件读写、命令执行等能力</span>
+<span class="opt">C. 因为 SDK 版本限制</span>
+<span class="opt">D. 因为 guest 的工具需要额外付费</span>
+<details><summary>看答案</summary><b>B</b>。安全是第一位的。guest 是群聊中的非 owner 成员，开放工具执行能力（文件读写、命令执行、浏览器操控）是严重的安全风险。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 哪 4 个工具在 bridge owner 模式下被屏蔽？共性是什么？</p>
+<span class="opt">A. read、write、edit、delete — 文件操作</span>
+<span class="opt">B. computer、browser、hana_card_guide、show_card — 都依赖桌面 UI 环境</span>
+<span class="opt">C. search、fetch、bash、grep — 数据查询</span>
+<span class="opt">D. memory、skills、agents、config — 配置管理</span>
+<details><summary>看答案</summary><b>B</b>。computer（桌面操控）、browser（浏览器管理）、hana_card_guide（卡片引导）、show_card（卡片展示）——它们的共性是都依赖桌面 UI 环境，bridge 用户通过手机 IM 交互无法使用。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>hub/index.ts</code> 阅读路由表的完整实现，然后打开 <code>core/bridge-session-manager.ts</code> 搜索 <code>executeExternalMessage</code>——这是整个文件中最长的方法，建议按"索引查找 → 会话恢复 → Prompt 构建 → 工具过滤"的顺序分段阅读。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「为什么 session 文件损坏时不直接报错而是自动创建新 session？」「bridge-sessions.json 索引的数据结构是什么样的？」下一课我们聚焦 <strong>响应清洗与流式分片发送</strong>——LLM 输出如何被清洗和投递给各个平台。</div>
+
+<div class="nav">课程 0003 / 桥接消息流全链路 · <a href="0002.html">← 上一课：BridgeManager</a> · 下一课预告：响应清洗与流式分片发送——内省标签删除 + UTF-8 12KB 分片</div>
+
+</body>
+</html>

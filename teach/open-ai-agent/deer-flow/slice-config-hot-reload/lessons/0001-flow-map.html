@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟划清配置热加载边界</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5d6b78; --line:#d9e1e8; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 10px; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+    .pill { display:inline-block; border:1px solid var(--line); border-radius:999px; padding:2px 10px; margin:2px 6px 2px 0; font-size:.84rem; color:#34495e; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <h1>15 分钟划清配置热加载边界</h1>
+  <p class="lede">
+    学习目标：改完 <code>config.yaml</code> 后，你能判断「下一条消息即生效」还是「必须重启 Gateway」。
+    完整注册表与字段对照见
+    <a href="../reference/config-hot-reload-flow-map.html">热加载边界参考页</a>。
+  </p>
+  <p>
+    <span class="pill">L2 垂直切片</span>
+    <span class="pill">关联：<a href="../../module-config-deploy/lessons/0001-config-deploy-module-tour.html">config-deploy</a> · <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">gateway</a></span>
+  </p>
+
+  <h2>1. 两条路径：请求时刷新 vs 启动快照</h2>
+  <p>
+    DeerFlow 故意把配置分成两层。<strong>请求路径</strong>：Gateway 依赖注入里的
+    <span class="where">deps.get_config()</span> 每次调用
+    <code>get_app_config()</code>，按文件内容签名决定是否从磁盘重载——因此
+    <code>models</code>、<code>memory</code>、<code>summarization</code>、<code>tools</code> 等「每轮 agent 构图时读取」的字段，保存后下一条消息即可生效。
+    <strong>启动路径</strong>：<span class="where">gateway/app.py</span> 的 <code>lifespan()</code> 把
+    <code>startup_config = get_app_config()</code> 存为局部变量，只用于一次性引导：
+    <code>configure_logging</code>、<code>langgraph_runtime</code>、IM <code>channels</code>、<code>scheduler</code>。
+    刻意<strong>不</strong>把 <code>AppConfig</code> 挂在 <code>app.state</code>，避免 worker 与 HTTP 层读到不同年代的配置（issue #3107）。
+  </p>
+
+  <h2>2. 机器可读边界：<code>reload_boundary.py</code></h2>
+  <p>
+    <span class="where">config/reload_boundary.py</span> 的 <code>STARTUP_ONLY_FIELDS</code> 是单一事实来源。
+    每个需重启的顶层段（<code>database</code>、<code>checkpointer</code>、<code>run_events</code>、<code>stream_bridge</code>、<code>sandbox</code>、<code>log_level</code>、<code>logging</code>、<code>channels</code>、<code>channel_connections</code>、<code>scheduler</code>）都写明「哪段启动代码捕获了快照」。
+    对应 <code>AppConfig</code> 字段的 Pydantic <code>Field(description=...)</code> 以 <code>startup-only:</code> 开头，IDE hover 与注册表由 <code>test_reload_boundary.py</code> 双向锁死。
+    不在表里的顶层段默认可热加载——例如改 <code>memory.debounce_seconds</code> 或 <code>subagents.timeout_seconds</code> 无需重启。
+  </p>
+  <pre>get_app_config()  # mtime + SHA256 签名
+  ├── 文件未变 → 返回缓存 AppConfig
+  └── 文件已变 → AppConfig.from_file() 重载
+
+lifespan(startup_config)  # 仅启动一次
+  ├── langgraph_runtime → engine / checkpointer / store
+  ├── start_channel_service → IM 客户端
+  └── ScheduledTaskService → 轮询参数</pre>
+
+  <h2>3. 时序：编辑 config 到 agent 读到新值</h2>
+  <div class="diagram">
+    <pre class="mermaid">sequenceDiagram
+    participant Op as 运维编辑 config.yaml
+    participant Disk as 配置文件
+    participant GW as Gateway 请求
+    participant CFG as get_app_config()
+    participant RT as langgraph_runtime 引擎
+    participant AG as make_lead_agent
+
+    Op->>Disk: 保存 models[].max_tokens
+    GW->>CFG: get_config() 下一请求
+    CFG->>Disk: 签名变化，重载
+    CFG-->>AG: 新 AppConfig（热加载字段）
+    Note over RT: database/sandbox 等仍绑 startup 快照
+
+    Op->>Disk: 改 sandbox.use
+    GW->>CFG: 重载 AppConfig
+    CFG-->>AG: 新 sandbox 配置对象
+  Note over RT: _default_sandbox_provider 仍是旧 provider → 需重启</pre>
+  </div>
+
+  <h2>4. 边界案例：改了却「像没生效」</h2>
+  <p>
+    典型误报：把 <code>sandbox.use</code> 从 local 改成 aio，或切换 <code>database.backend</code> 为 postgres，保存后立刻发消息——
+    <code>get_app_config()</code> 确实返回新对象，但 <code>get_sandbox_provider()</code> / SQLAlchemy engine 在启动时已创建，注册表要求重启。
+    另一类：<code>logging.enhance.enabled</code> 控制 <code>TraceMiddleware</code> 是否在构造时捕获；运行时改 YAML 不会让响应头 <code>X-Trace-Id</code> 与日志格式同步，也需重启。
+    排障口诀：先查字段是否在 <code>STARTUP_ONLY_FIELDS</code>；不在则确认是否走了 <code>get_config()</code> 而非误读 <code>startup_config</code> 局部变量。
+  </p>
+
+  <div class="exercise">
+    <strong>检索练习：</strong>判断对错（不看上文）：A. <code>AppConfig</code> 缓存在 <code>app.state</code> 上供请求复用。B. 改 <code>models[0].name</code> 后下一条 run 可读新配置。C. 改 <code>channels.feishu.app_id</code> 保存即生效，无需重启 Gateway。
+    <div class="answer">参考答案：A 错，请求走 <code>get_app_config()</code> 模块级缓存，启动快照仅是 <code>lifespan</code> 局部变量。B 对，models 不在 <code>STARTUP_ONLY_FIELDS</code>。C 错，<code>channels</code> 在注册表中，IM 客户端启动时绑定。</div>
+  </div>
+
+  <p class="note">主要来源：<code>reload_boundary.py</code>、<code>app_config.py</code>、<code>gateway/app.py</code>、<code>backend/AGENTS.md</code> Config Hot-Reload Boundary 节。想沿 <code>langgraph_runtime</code> 或 <code>extensions_config.json</code> 的 MCP mtime 继续，向 agent 追问即可。</p>
+</main>
+</body>
+</html>

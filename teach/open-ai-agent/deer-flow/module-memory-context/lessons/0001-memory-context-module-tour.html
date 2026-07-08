@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 Memory、Summarization 与 Durable Context</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#246bfe; --green:#207a4c; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 58px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:var(--green); }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 Memory、Summarization 与 Durable Context</h1>
+  <p class="lede">学习目标：读完后，你能判断一段对话信息会写入跨线程 <code>memory.json</code>、被压成 <code>summary_text</code>，还是通过 durable context 继续出现在模型请求里。前置：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>、<a href="../../module-lead-agent/lessons/0001-lead-agent-module-tour.html">lead agent middleware 链</a>。</p>
+
+  <h2>1. 三条链路，三种时间尺度</h2>
+  <p>deer-flow 用三套机制管理「上下文」，不要混为一谈：</p>
+  <ul>
+    <li><strong>Memory（长期、跨线程）</strong>：异步写入 <code>users/{user_id}/memory.json</code>，下一轮通过 <code>DynamicContextMiddleware</code> 以 <code>&lt;memory&gt;</code> 注入。入口是 <span class="where">agents/memory/</span> 与 <code>MemoryMiddleware</code>。</li>
+    <li><strong>Summarization（单线程、压缩）</strong>：当 token 或消息数触阈值，<code>DeerFlowSummarizationMiddleware</code> 删掉旧 <code>messages</code>，把 prose 摘要存进 <code>ThreadState.summary_text</code>。</li>
+    <li><strong>Durable context（单线程、防丢）</strong>：<code>DurableContextMiddleware</code> 在 summarization 之前把 delegation ledger、skill 引用和 <code>summary_text</code> 投影成隐藏的 <code>&lt;durable_context_data&gt;</code>，避免 tool 细节被压没。</li>
+  </ul>
+  <div class="diagram">用户消息 → messages（checkpoint）
+  ↓ before_model
+DurableContext 捕获 delegations / skills，并注入 summary + ledger
+  ↓ before_model（若 summarization.enabled）
+Summarization 触发 → 旧 messages 移除 → summary_text 更新
+  ↓ memory_flush_hook（压缩前）
+即将被删的消息先入 memory 队列
+  ↓ after_agent
+MemoryMiddleware 把本轮 user+AI 最终回复入队 → debounce → LLM 更新 memory.json
+  ↓ 下一轮 before_model
+DynamicContext 读取 memory.json → &lt;memory&gt; 注入</div>
+
+  <h2>2. middleware 在 lead 链上的位置</h2>
+  <p>在 <span class="where">agents/lead_agent/agent.py</span> 的 <code>build_middlewares</code> 里，顺序很关键：<code>DurableContextMiddleware</code> 排在 <code>SummarizationMiddleware</code> 之前，这样 summarization 压消息前，delegation 与 skill 已写入 checkpoint；<code>MemoryMiddleware</code> 在 <code>TitleMiddleware</code> 之后、靠链尾 <code>after_agent</code> 入队，不阻塞当前 turn 的模型调用。</p>
+  <p>summarization 与 memory 还有第二条汇合点：<code>_create_summarization_middleware</code> 在 <code>memory.enabled</code> 时把 <code>memory_flush_hook</code> 挂到 <code>before_summarization</code>，确保<strong>即将被摘要掉的历史</strong>不会漏进长期记忆队列。</p>
+
+  <h2>3. 两个入队入口，共用 debounce 队列</h2>
+  <p>长期记忆只关心「用户说了什么 + agent 最终回了什么」，tool call 中间态会被 <code>filter_messages_for_memory</code> 滤掉。正常 turn 结束时 <code>MemoryMiddleware.after_agent</code> 入队；长对话被压缩时 <code>memory_flush_hook</code> 用 <code>add_nowait</code> 立即 flush。两者都写入 <span class="where">agents/memory/queue.py</span>，默认 debounce 30 秒、按 <code>(thread_id, user_id, agent_name)</code> 去重，并在入队时捕获 <code>user_id</code>（Timer 线程拿不到 ContextVar）。</p>
+  <pre><code class="language-python"># memory_middleware.py — after_agent 入队（节选）
+filtered_messages = filter_messages_for_memory(messages)
+queue.add(
+    thread_id=thread_id,
+    messages=filtered_messages,
+    agent_name=self._agent_name,
+    user_id=user_id,
+    correction_detected=detect_correction(filtered_messages),
+)</code></pre>
+  <p>后台线程调用 <code>MemoryUpdater</code>，用独立 LLM 抽取 facts 与 context 段落，原子写入 <code>memory.json</code>。这与 summarization 用的摘要模型、与主对话模型可以完全不同——分别由 <code>memory.model_name</code> 和 <code>summarization.model_name</code> 控制。</p>
+
+  <h2>4. 暂停回忆</h2>
+  <div class="exercise">
+    <strong>判断题：</strong>某线程里 subagent 刚完成一次 <code>task</code> 委托，随后 summarization 把 tool messages 从 checkpoint 删掉。问：lead agent 下一轮还能知道这次委托的结果吗？长期 memory 会记住 tool 输出吗？
+    <div class="answer">参考答案：委托结果<strong>可以</strong>继续可见——<code>DurableContextMiddleware</code> 在压缩前把 terminal delegation 写入 <code>ThreadState.delegations</code>，并在每次 model call 注入 ledger；<code>summary_text</code> 也会经 durable 块投影。长期 memory<strong>通常不会</strong>直接记住 tool 原文——入队前已过滤，只剩 user 输入与最终 AI 文本；若对话被 summarization 截断，<code>memory_flush_hook</code> 会把被删段落先入队再压缩。</div>
+  </div>
+  <p class="note">主要参考来源：<code>backend/packages/harness/deerflow/agents/memory/</code> 与三条 middleware 源文件。配置字段、数据结构与 API 清单见 <a href="../reference/memory-context-overview.html">Memory 与 summarization 参考页</a>。若某条链路不清楚，可以继续追问 agent：“从 MemoryMiddleware 追到 queue 再到 updater”。</p>
+</main>
+</body>
+</html>

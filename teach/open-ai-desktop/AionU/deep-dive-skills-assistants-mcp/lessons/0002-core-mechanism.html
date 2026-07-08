@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills / Assistants / MCP：核心机制</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Skills / Assistants / MCP：核心机制</h1>
+    <p class="subtitle">学习目标：能把 Assistant 编辑器状态、Skill 导入绑定、MCP 设置页和 adapter API 对上号。</p>
+    <div class="meta">
+      <span class="pill">L4：核心机制</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：useAssistantEditor.ts</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#editor-state">1. Assistant 编辑器状态</a>
+    <a href="#skills">2. Skill 导入与绑定</a>
+    <a href="#mcp">3. MCP 到 adapter/backend</a>
+    <a href="#practice">4. 判断练习</a>
+  </nav>
+
+  <p class="muted">本课主源码文件不超过 3 个：<code>packages/desktop/src/renderer/hooks/assistant/useAssistantEditor.ts</code>、<code>packages/desktop/src/renderer/pages/settings/ToolsSettings/McpManagement.tsx</code>、<code>packages/desktop/src/common/adapter/ipcBridge.ts</code>。补充索引见 <a href="../reference/skills-assistants-mcp-notes.html#sources">参考笔记源码表</a>。</p>
+
+  <h2 id="editor-state">1. Assistant 编辑器状态</h2>
+  <p><code>useAssistantEditor</code> 是 Assistant 设置页的状态中枢。编辑已有 Assistant 时，它并行加载三类资源：<code>ipcBridge.assistants.get</code> 取角色详情，<code>ipcBridge.fs.listAvailableSkills</code> 取 Skill 目录，<code>ensureBackendMcpCatalog()</code> 取 MCP 目录。随后把 <code>detail.defaults.skills.mode</code>、<code>detail.defaults.mcps.mode</code>、<code>detail.capabilities.default_skill_ids</code>、<code>detail.defaults.mcps.value</code> 填进本地 state。</p>
+  <p>这里的设计取舍是把“选择器显示状态”和“后端持久化 shape”分开。UI 可以显示“Remember last used automatically”，但保存时仍写成 <code>{ mode: 'auto' }</code>；固定选择才写 <code>{ mode: 'fixed', value: [...] }</code>。内置 Assistant 更收敛：源码只允许更新主 agent、默认模型、权限、思考级别，不允许直接改默认 Skills/MCP。</p>
+
+  <h2 id="skills">2. Skill 导入与绑定</h2>
+  <p>Skill 绑定有两步：先保证 Skill 存在于全局目录，再把名字放进 Assistant 默认能力。<code>pendingSkills</code> 是“用户已选但还没真正导入”的过渡态；保存前会逐个调用 <code>ipcBridge.fs.importSkills.invoke</code>，刷新 Skill 列表后再组装 <code>defaults.skills</code>。</p>
+  <pre><code class="language-ts">if (pendingSkills.length > 0) {
+  const skillsToImport = pendingSkills.filter(
+    (pending) => !availableSkills.some((available) => available.name === pending.name)
+  );
+
+  for (const pendingSkill of skillsToImport) {
+    await ipcBridge.fs.importSkills.invoke({ skill_path: pendingSkill.path });
+  }
+}
+
+const defaults = {
+  skills: { mode: defaultSkillsMode, value: selectedSkills },
+  mcps: { mode: defaultMcpMode, value: selectedMcpIds },
+};</code></pre>
+  <p>自动注入 builtin skill 还有一层反向列表。<code>AssistantEditorSections</code> 会把自动注入 skill 合入显示值；用户取消某个自动项时，不是把它从 builtin 目录删除，而是写入 <code>disabled_builtin_skills</code>。这能保留全局 builtin 行为，同时允许单个 Assistant opt out。</p>
+
+  <h2 id="mcp">3. MCP 到 adapter/backend</h2>
+  <p>Tools/MCP 设置页由 <code>McpManagement</code> 组合多个 hook：<code>useMcpServers</code> 读取后端用户 MCP、本地 builtin MCP 和 extension MCP；<code>useMcpServerCRUD</code> 调用 create/import/update/delete/toggle；<code>useMcpConnection</code> 调用连接测试并把返回的 tools 写进本地 UI 状态；<code>useMcpOAuth</code> 只对 URL transport 检查和触发登录。</p>
+  <p><code>ipcBridge.ts</code> 把 API 面切得很直：Assistant 是 API /api/assistants，Skill 是 API /api/skills，MCP 是 API /api/mcp，extension 贡献则从 API /api/extensions 读取。这个分层让设置页职责清晰：Assistant 保存默认能力，Tools/MCP 保存工具服务器目录，Guid 创建会话时再把 MCP id 和 session MCP server 快照发给 API /api/conversations。</p>
+  <div class="diagram">
+    Assistant 编辑器 -> /api/assistants + /api/skills<br>
+    Tools/MCP 设置 -> /api/mcp/servers + /api/mcp/test-connection<br>
+    Extension examples -> /api/extensions/skills + /api/extensions/mcp-servers<br>
+    Guid 创建会话 -> /api/conversations，携带 assistant overrides 和 MCP snapshot
+  </div>
+
+  <h2 id="practice">4. 判断练习</h2>
+  <div class="quiz">
+    <p><strong>判断题：</strong>“MCP 连接测试成功”是否等于“当前会话一定正在使用这个 MCP”？</p>
+    <details>
+      <summary>参考反馈</summary>
+      <p>不等于。<code>McpServerHeader</code> 的提示也说明手动检查只验证配置可用性，不代表当前会话实时状态。当前会话是否使用某个 MCP，要看创建会话时的 selected MCP ids、session MCP servers，以及 conversation extra 中的 loaded MCP snapshot。</p>
+    </details>
+  </div>
+  <p class="muted">主要阅读：<code>packages/desktop/src/renderer/hooks/assistant/useAssistantEditor.ts</code>。下一课：<a href="0003-verification-and-tests.html">0003-verification-and-tests</a>。</p>
+</main>
+</body>
+</html>

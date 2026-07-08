@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>移动端配对与会话恢复参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>移动端配对与会话恢复参考</h1>
+        <p class="meta">范围：桌面 QR、main IPC、runtime device registry、E2EE WebSocket、mobile pairing screens、host 持久化、共享 client 和 Resume。</p>
+
+        <h2>端到端时序</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>主文件</th>
+              <th>关键事实</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>桌面生成 QR</td>
+              <td><code>src/renderer/src/components/settings/MobilePane.tsx</code></td>
+              <td>调用 <code>window.api.mobile.getPairingQR()</code>，保存 qrDataUrl、pairingUrl、endpoint，并记录 mobile-pairing feature interaction。</td>
+            </tr>
+            <tr>
+              <td>选择可达地址</td>
+              <td><code>src/main/ipc/mobile.ts</code></td>
+              <td>枚举非 internal IPv4，tailnet 地址优先；renderer 也可传选中的 address。</td>
+            </tr>
+            <tr>
+              <td>生成 offer</td>
+              <td><code>src/main/runtime/runtime-rpc.ts</code></td>
+              <td><code>createPairingOffer()</code> 把 endpoint、device token、public key 和 optional scope 编进 shared pairing URL。</td>
+            </tr>
+            <tr>
+              <td>登记设备 token</td>
+              <td><code>src/main/runtime/device-registry.ts</code></td>
+              <td>pending mobile token 可复用；显式 rotate 才删除未扫描 token 并生成新 token。</td>
+            </tr>
+            <tr>
+              <td>手机解析</td>
+              <td><code>mobile/src/transport/pairing.ts</code></td>
+              <td>接受 <code>orca://pair?code=...</code>、hash code 和裸 base64 payload，输出不含 scope 的 mobile <code>PairingOffer</code>。</td>
+            </tr>
+            <tr>
+              <td>手机验证</td>
+              <td><code>mobile/app/pair-confirm.tsx</code></td>
+              <td>临时 client 完成 E2EE/auth 后请求 <code>status.get</code>；失败按 unauthorized、timeout、server error 分类。</td>
+            </tr>
+            <tr>
+              <td>保存 host</td>
+              <td><code>mobile/src/transport/host-store.ts</code></td>
+              <td>metadata 进 AsyncStorage；native device token 进 SecureStore；保存失败独立于连接成功。</td>
+            </tr>
+            <tr>
+              <td>后续复用</td>
+              <td><code>mobile/src/transport/client-context.tsx</code></td>
+              <td>每个 host 共享一个 <code>RpcClient</code>；屏幕 acquire/release，foreground/network 触发恢复。</td>
+            </tr>
+            <tr>
+              <td>Resume 入口</td>
+              <td><code>mobile/app/index.tsx</code></td>
+              <td>从已连接 host 的 worktree snapshot 和本地缓存挑 Resume worktree，进入 session route。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>桌面 QR：renderer 只是发起者</h2>
+        <p>
+          桌面设置页的入口在 <code>src/renderer/src/components/settings/MobilePane.tsx</code>。
+          <code>generateQR()</code> 调 <code>window.api.mobile.getPairingQR()</code>，如果成功就写入
+          <code>qrDataUrl</code>、<code>pairingUrl</code>、<code>endpoint</code>，并刷新 paired devices。
+          <code>src/renderer/src/components/settings/MobileNetworkInterfaceSection.tsx</code>
+          让用户选择写进 QR 的网络地址；<code>src/renderer/src/components/settings/MobilePairingQrSection.tsx</code>
+          展示二维码，也把同一个 <code>pairingUrl</code> 作为可复制 code。
+        </p>
+        <p>
+          main 边界在 <code>src/main/ipc/mobile.ts</code>。<code>mobile:getPairingQR</code> 默认选择可达 IPv4，
+          tailnet 地址排在前面；然后调用 <code>rpcServer.createPairingOffer({ scope: "mobile" })</code>。
+          这个 handler 还负责 <code>mobile:listDevices</code>：只展示 <code>scope === "mobile"</code>
+          且 <code>lastSeenAt &gt; 0</code> 的设备。换句话说，生成 QR 只创建 pending token，
+          真正扫码并连上后才出现在 paired devices 列表。
+        </p>
+        <p>
+          对比 <code>mobile:getRuntimePairingUrl</code> 很重要。runtime/web/desktop remote clients 会请求
+          <code>scope: "runtime"</code>，并可能拿到 web client URL；mobile QR 固定用 mobile scope，
+          因为手机端应该被 runtime 的 mobile allowlist 限制。
+          <code>mobile/README.md</code> 可用于开发环境和网络要求参考，但其中 QR 编码 TLS fingerprint 的旧说法不再作为 payload 权威来源。
+        </p>
+
+        <h2>runtime offer 和凭据文件</h2>
+        <p>
+          <code>src/main/runtime/runtime-rpc.ts</code> 的 <code>createPairingOffer()</code>
+          先要求 WebSocket endpoint、<code>DeviceRegistry</code> 和 E2EE public key 都可用。
+          它会解析 address override，把 <code>0.0.0.0</code> 这类监听地址替换成用户选中的 LAN/tailnet 地址。
+          然后用 <code>getOrCreatePendingDevice()</code> 或 <code>rotatePendingDevice()</code>
+          生成 token，调用 <code>src/shared/pairing.ts</code> 的 <code>encodePairingOffer()</code>。
+        </p>
+        <pre><code class="language-text">Shared PairingOffer v2
+  endpoint       ws://192.168.x.y:6768 或 tailnet/wss endpoint
+  deviceToken    DeviceRegistry 里的 per-device bearer token
+  publicKeyB64   runtime E2EE public key
+  scope          "mobile" 或 "runtime"</code></pre>
+        <p>
+          这说的是桌面/shared payload。手机端 <code>mobile/src/transport/types.ts</code>
+          的 <code>PairingOfferSchema</code> 当前只保留 <code>v</code>、<code>endpoint</code>、
+          <code>deviceToken</code> 和 <code>publicKeyB64</code>，不暴露也不依赖 <code>scope</code>。
+          手机侧授权判断来自 token registry、runtime allowlist 和 <code>status.get</code> 返回的 <code>deviceScope</code>。
+        </p>
+        <p>
+          <code>src/main/runtime/device-registry.ts</code> 把 token 写进 <code>DEVICE_REGISTRY_FILENAME</code> 指向的 userData 文件。
+          <code>getOrCreatePendingDevice()</code> 会复用同 scope、<code>lastSeenAt === 0</code> 的 pending token，
+          避免用户反复打开设置页产生一堆永远未扫描的凭据；显式 regenerate 才 rotate pending token。
+          <code>lastSeenAt</code> 在 E2EE auth 成功后更新。
+        </p>
+        <p>
+          <code>src/main/runtime/e2ee-keypair.ts</code> 负责 <code>E2EE_KEYPAIR_FILENAME</code> 指向的 userData 文件。
+          public key 进 QR；secret key 留在桌面 userData。<code>src/main/runtime/mobile-pairing-files.ts</code>
+          把 devices registry 和 E2EE keypair 声明为同一迁移单元。<code>src/main/runtime/mobile-pairing-userdata-path.test.ts</code>
+          保护这两个文件写在 canonical userData path，并从旧路径成对迁移。
+        </p>
+
+        <h2>手机入口：scan、deep link、paste</h2>
+        <p>
+          <code>mobile/app/_layout.tsx</code> 安装 <code>RpcClientProvider</code>，同时监听
+          <code>Linking.getInitialURL()</code> 和 warm-start URL event。只要
+          <code>extractPairingCodeFromUrl()</code> 找到 code，就 <code>router.replace("/pair-confirm")</code>。
+          <code>mobile/app/pair.tsx</code> 是文件路由上的 redirect screen：如果 URL 参数里有 code，
+          直接进 confirm；否则再读 initial URL。
+        </p>
+        <p>
+          <code>mobile/app/pair-scan.tsx</code> 处理相机扫码和手动粘贴。扫码结果先进入
+          <code>decodePairingUrl()</code>，粘贴输入进入 <code>parsePairingCode()</code>。
+          <code>mobile/src/transport/pairing.ts</code> 为 Metro/Hermes 复制了一份 shared parser：
+          它用 <code>atob/btoa</code>，接受 query code、hash code、bare base64，并拒绝
+          <code>orca://pairing</code> 这类 lookalike route。
+        </p>
+        <p>
+          <code>mobile/app/pair-confirm.tsx</code> 用 <code>mobile/src/transport/pair-confirm-state.ts</code>
+          把 route param 分成 missing、invalid、ready。ready 只代表 payload 结构正确，还没有证明桌面可达。
+        </p>
+
+        <h2>临时连接：E2EE/auth/status.get</h2>
+        <p>
+          pair scan 和 pair confirm 的验证逻辑相同：创建临时 <code>RpcClient</code>，
+          调 <code>connect(offer.endpoint, offer.deviceToken, offer.publicKeyB64, { onLog })</code>，
+          再等待 <code>client.sendRequest("status.get")</code>。
+          <code>mobile/src/transport/pairing-connection-attempt.ts</code> 给这个初次配对套 25 秒总超时；
+          超时或 route unmount 都会 dispose，并关闭临时 client。
+        </p>
+        <p>
+          <code>mobile/src/transport/rpc-client.ts</code> 的握手顺序是：
+          打开 WebSocket，生成一次性 mobile keypair，发明文 <code>e2ee_hello</code>，
+          收到明文 <code>e2ee_ready</code> 后，用共享密钥加密发送 <code>e2ee_auth</code> 和 deviceToken，
+          收到加密的 <code>e2ee_authenticated</code> 后才进入 <code>connected</code>。
+          后续 request、stream subscribe、terminal/browser binary frame 都走同一个 shared key。
+          具体加解密 primitive 在 <code>mobile/src/transport/e2ee.ts</code>，它用 tweetnacl、ExpoCrypto 和 base64 text frame。
+        </p>
+        <p>
+          桌面对应实现是 <code>src/main/runtime/rpc/e2ee-channel.ts</code>。
+          channel 在 <code>awaiting_hello</code> 收 hello，派生 shared key 后发 ready；
+          在 <code>awaiting_auth</code> 解密 auth 并调用 <code>validateToken()</code>。
+          token 不存在时会返回 encrypted <code>e2ee_error</code> 并关闭 socket。
+          只有 ready 后，channel 才把解密后的 JSON 交给 runtime message handler。
+        </p>
+
+        <h2>runtime WebSocket 授权边界</h2>
+        <p>
+          WebSocket transport 在 <code>src/main/runtime/runtime-rpc.ts</code> 启动时创建。
+          <code>src/main/runtime/rpc/ws-transport.ts</code> 处理连接数、pre-auth timeout、ping/pong heartbeat
+          和 close cleanup；runtime server 为每个 WebSocket 创建 <code>E2EEChannel</code>，
+          auth 成功后调用 <code>wsTransport.setClientId()</code>，并把 device 的 <code>lastSeenAt</code> 更新为现在。
+        </p>
+        <p>
+          进入 <code>handleWebSocketMessage()</code> 后，server 不信任 request 里重复携带的 token。
+          如果 E2EE channel 已绑定 authenticatedDeviceToken，就以 channel identity 为准；
+          request token 不匹配会返回 unauthorized。然后用 <code>DeviceRegistry.validateToken()</code>
+          找 device entry。mobile scope 还必须通过 <code>MOBILE_RPC_METHOD_ALLOWLIST</code>，
+          否则返回 forbidden。
+        </p>
+        <p>
+          <code>status.get</code> 有一处特殊处理：runtime 会把 authenticated device 的 scope 注入 success result。
+          共享类型在 <code>src/shared/runtime-types.ts</code>，字段是 <code>RuntimeStatus.deviceScope</code>。
+          这样旧的 saved WebSocket pairing 不需要从 URL payload 重新推断 scope。
+        </p>
+
+        <h2>保存 host：本地状态和 token 分离</h2>
+        <p>
+          当 <code>status.get</code> 成功，<code>mobile/app/pair-confirm.tsx</code> 和
+          <code>mobile/app/pair-scan.tsx</code> 都会生成 <code>host-${Date.now()}</code>，
+          用 <code>getNextHostName()</code> 取默认名称，并调用 <code>saveHost()</code>。
+          <code>saveHost()</code> 先校验 <code>HostProfileSchema</code>，再把不含 token 的
+          <code>StoredHostProfile</code> 写入 AsyncStorage，最后写 token。
+        </p>
+        <p>
+          <code>mobile/src/transport/host-store.ts</code> 的关键边界是 storage split：
+          native 上 deviceToken 写入 Expo SecureStore，配置为 <code>WHEN_UNLOCKED_THIS_DEVICE_ONLY</code>；
+          web fallback 才把 token 放到 AsyncStorage 的 web token key。<code>loadHosts()</code>
+          读取 metadata 后再从 SecureStore 拼回 token。没有 token 的 orphan metadata 会被跳过；
+          pre-v0.0.3 把 token 放 metadata 的旧记录也被丢弃，要求用户重新配对。
+        </p>
+        <p>
+          所以错误文案要分层理解。<code>Cannot connect</code>、<code>Authentication failed</code>、
+          <code>Couldn't connect within 25s</code> 是连接/认证阶段；<code>Pairing succeeded but couldn't save the host</code>
+          是本地持久化阶段。排障时先看 AsyncStorage/SecureStore 和 schema，而不是重新查 WebSocket 握手。
+        </p>
+
+        <h2>后续恢复：共享 client，不重新配对</h2>
+        <p>
+          App 根部 <code>mobile/app/_layout.tsx</code> 包了一层 <code>RpcClientProvider</code>。
+          <code>mobile/src/transport/client-context.tsx</code> 用 Map 保存每个 host 的 <code>RpcClient</code>、
+          connection state 和 refCount。屏幕通过 <code>useHostClient()</code> 或
+          <code>useAllHostClients()</code> acquire；如果 client 尚未打开，provider 会异步
+          <code>loadHosts()</code>，用保存的 endpoint/token/publicKey 重建连接。
+        </p>
+        <p>
+          provider 还接入 <code>mobile/src/transport/connection-revival-triggers.ts</code>。
+          当 AppState 变为 active，或网络从 offline 回 online、Wi-Fi/蜂窝切换时，它会对所有 live client 调
+          <code>notifyForeground()</code>。如果当前 state 是 connected，client 发一次 <code>status.get</code>
+          activity probe，8 秒无有效响应就关闭 socket 进入 reconnect；如果 state 是 reconnecting，
+          它会清掉旧 backoff，重置 attempt budget，并马上 openConnection。
+        </p>
+        <p>
+          <code>mobile/src/transport/rpc-client.ts</code> 还会在 reconnect 后 replay 已登记的 stream subscription。
+          terminal subscribe 会重建 stream id 路由，browser screencast 会等待新的 ready 后再路由 binary frame。
+          这些都是“会话恢复”，不是“重新配对”。
+        </p>
+
+        <h2>首页 Resume：从 host 恢复到 worktree</h2>
+        <p>
+          <code>mobile/app/index.tsx</code> 启动时 <code>loadHosts()</code>，然后把 hosts 传给
+          <code>primeHosts()</code>，避免 provider 再做一轮 Keychain 读取。它用
+          <code>useAllHostClients()</code> 为所有 host 建共享连接，并对每个 client 请求
+          <code>worktree.ps</code> 和 accounts snapshot。
+        </p>
+        <p>
+          Resume 卡片的来源有两层。第一层是本机上次打开的 <code>orca:last-visited-worktree</code>
+          和 worktree cache；第二层是按 host <code>lastConnected</code> 排序后的每个 host 的 <code>lastActiveWorktree</code>。
+          <code>mobile/src/worktree/resume-worktree.ts</code> 的 fallback 策略是优先 <code>isActive</code>
+          的 desktop-focused worktree，再按 <code>lastOutputAt</code> 选最近输出的 worktree；这个策略只发生在单个 host 的 worktree 列表内。
+          首页只对 state 为 connected 的 host 展示 Resume，避免给用户一个暂时无法加载的 stale route。
+          进入 host 后，<code>mobile/app/h/[hostId]/index.tsx</code> 复用同一个 host client 读取 <code>worktree.ps</code> 并进入 session route。
+        </p>
+
+        <h2>撤销和 cleanup</h2>
+        <p>
+          桌面侧 <code>mobile:revokeDevice</code> 调 <code>rpcServer.revokeMobileDevice()</code>。
+          runtime 会确认 device scope 是 mobile，删除 registry entry，并调用
+          <code>wsTransport.terminateClientConnections(device.token)</code>。active socket 关闭时，
+          runtime 会按 WebSocket connection id 清理 stream subscriptions、mobile dictation 和 binary handlers；
+          如果这个 token 没有其他连接，还会调用 <code>runtime.onClientDisconnected(clientId)</code>。
+        </p>
+        <p>
+          runtime scope 有单独的 <code>revokeRuntimeAccess()</code>，mobile revocation 不会误删 runtime grant。
+          <code>src/main/runtime/runtime-rpc.test.ts</code> 对 mobile/runtime 两类 revoke 都有覆盖。
+        </p>
+
+        <h2>测试护栏</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>测试</th>
+              <th>保护的不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/main/ipc/mobile.test.ts</code></td>
+              <td>网络接口每次重读并优先 tailnet；mobile QR 用 mobile scope；runtime pairing URL 用 runtime scope；paired devices 过滤 pending/mobile scope。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/runtime-rpc.test.ts</code></td>
+              <td>pairing offer endpoint/token/public key/scope 正确；mobile scope 无 web URL；revocation 关闭 active socket；<code>status.get</code> 注入 deviceScope；forbidden method 被拒绝。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/mobile-rpc-allowlist.test.ts</code></td>
+              <td>静态扫描 mobile app 使用的 request/subscribe method，确保 allowlist 和 <code>ALL_RPC_METHODS</code> 都包含它们。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/runtime/mobile-pairing-userdata-path.test.ts</code></td>
+              <td>device registry 与 E2EE keypair 写在 canonical userData path，并按成对文件迁移。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/pairing.test.ts</code></td>
+              <td>query/hash/bare code 都能解析；lookalike route 被拒绝；base64 padding 边界可用。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/pair-confirm-state.test.ts</code></td>
+              <td>confirm route 明确区分 valid、missing 和 invalid code。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/pairing-connection-attempt.test.ts</code></td>
+              <td>25 秒总超时会关闭临时 client；提前 dispose 只关闭一次并清掉 timer。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/rpc-client.test.ts</code></td>
+              <td>foreground probe、parked reconnect loop 重启、half-open socket 回收、auth retry 和 request timeout 行为。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/rpc-client-live-recovery.test.ts</code></td>
+              <td>用真实 WebSocket 和 tweetnacl E2EE 复现半开链路恢复，作为 opt-in 慢测试。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/transport/connection-revival-triggers.test.ts</code></td>
+              <td>App foreground 和网络恢复/切换才触发 client nudge。</td>
+            </tr>
+            <tr>
+              <td><code>mobile/src/worktree/resume-worktree.test.ts</code></td>
+              <td>Resume 选择优先 desktop-active，再按 lastOutputAt 回退。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>排障索引</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>症状</th>
+              <th>优先看哪里</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>手机扫 QR 后无法打开确认页</td>
+              <td><code>mobile/app/_layout.tsx</code>、<code>mobile/app/pair.tsx</code>、<code>mobile/src/transport/pairing.ts</code> 的 URL/code 提取。</td>
+            </tr>
+            <tr>
+              <td>提示 invalid pairing code</td>
+              <td><code>PairingOfferSchema</code>、base64url padding、是否误用了 <code>orca://pairing</code> 这类 lookalike route。</td>
+            </tr>
+            <tr>
+              <td>连接 25 秒超时</td>
+              <td>QR endpoint 是否是手机可达 LAN/tailnet 地址，桌面 WebSocket 是否监听，<code>pairing-connection-attempt.ts</code> 是否触发总超时。</td>
+            </tr>
+            <tr>
+              <td>Authentication failed</td>
+              <td><code>DeviceRegistry.validateToken()</code>、pending token 是否被 rotate/revoke、E2EE auth 是否收到 unauthorized。</td>
+            </tr>
+            <tr>
+              <td>连接成功但保存失败</td>
+              <td><code>host-store.ts</code> 的 AsyncStorage/SecureStore 写入、schema 校验、平台 keychain 状态。</td>
+            </tr>
+            <tr>
+              <td>已配对 host 一直 reconnecting</td>
+              <td><code>rpc-client.ts</code> 的 reconnectAttempt、foreground probe、network revival trigger 和 endpoint 可达性。</td>
+            </tr>
+            <tr>
+              <td>业务 RPC 返回 forbidden</td>
+              <td>token scope 是否为 mobile，以及 <code>MOBILE_RPC_METHOD_ALLOWLIST</code> 是否包含 mobile app 实际使用的方法。</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AionU Cron 任务创建与触发全链路参考</title>
+  <link rel="stylesheet" href="../assets/slice.css" />
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>AionU Cron 任务创建与触发全链路参考</h1>
+    <p class="subtitle">从 `/scheduled`、创建弹窗、AI 对话创建入口开始，追到 hook、common adapter、HTTP/WS 事件、run-now 导航、状态刷新与测试证据。</p>
+    <div class="meta">
+      <span class="pill">入口点</span>
+      <span class="pill">沿途每一层</span>
+      <span class="pill">调用时序</span>
+      <span class="pill">异常/边界路径</span>
+      <span class="pill">交叉链接</span>
+    </div>
+  </section>
+
+  <nav class="toc">
+    <a href="../lessons/0001-flow-map.html">短课入口：0001-flow-map</a>
+    <a href="../../00-overview/reference/00-overview.html">L0：AionU 项目总览</a>
+    <a href="../../module-cron/reference/cron-overview.html">L1：Cron 定时任务模块</a>
+    <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">L1：Conversation Runtime 与 Agent UI</a>
+    <a href="../../module-common-adapter/reference/common-adapter-overview.html">L1：Common Adapter 与 API 映射</a>
+  </nav>
+
+  <h2>一眼图</h2>
+  <div class="diagram">
+    <pre><code class="language-text">手动创建
+  -> ScheduledTasksPage：打开 CreateTaskDialog
+  -> CreateTaskDialog：表单校验、schedule、agent_config、execution_mode
+  -> ipcBridge.cron.addJob/updateJob：HTTP 写入 /api/cron/jobs
+  -> cron.job-created/job-updated：hook 更新列表、状态、会话历史
+  -> TaskDetailPage：读取 getJob、展示 history、runNow、编辑、删除
+  -> runNow：POST /api/cron/jobs/:id/run，返回 conversation_id 后导航到会话
+  -> Conversation：CronJobManager、ChatHistory、MessageList 显示任务状态或执行结果
+
+AI 对话创建
+  -> /scheduled 的 create via chat 跳 /guid 并预填 prompt
+  -> AI 使用注入 HTTP helper 创建或更新任务
+  -> localCronCommands 只剥离 think 标签，必要时替换展示文本
+  -> E2E 轮询 bridge API，验证任务出现在 Scheduled Tasks 页面</code></pre>
+  </div>
+
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant User as 用户
+  participant Page as ScheduledTasksPage
+  participant Dialog as CreateTaskDialog
+  participant Utils as cronUtils/resolveCronAgentConfig
+  participant Adapter as ipcBridge.cron
+  participant Backend as Cron API
+  participant Hooks as useCronJobs/useCronJobsMap
+  participant Detail as TaskDetailPage
+  participant Chat as Conversation runtime
+  User-&gt;&gt;Page: create manually / edit / pause / resume
+  Page-&gt;&gt;Dialog: visible=true 或传入 editJob
+  Dialog-&gt;&gt;Utils: createCronSchedule + agent_config
+  alt create
+    Dialog-&gt;&gt;Adapter: addJob.invoke(params)
+  else edit
+    Dialog-&gt;&gt;Adapter: updateJob.invoke({ job_id, updates })
+  else pause/resume
+    Page-&gt;&gt;Hooks: pauseJob/resumeJob
+    Hooks-&gt;&gt;Adapter: updateJob.invoke({ enabled })
+  end
+  Adapter-&gt;&gt;Backend: HTTP
+  Backend--&gt;&gt;Hooks: cron.job-created / cron.job-updated / cron.job-removed
+  Hooks--&gt;&gt;Page: local jobs state
+  User-&gt;&gt;Detail: run now
+  Detail-&gt;&gt;Adapter: runNow.invoke({ job_id })
+  Backend--&gt;&gt;Detail: { conversation_id }
+  Detail-&gt;&gt;Chat: navigate(/conversation/:conversation_id)</code></pre>
+
+  <h2>入口与层级</h2>
+  <table>
+    <thead>
+      <tr><th>层</th><th>文件</th><th>职责</th><th>读码判断</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>路由/页面</td><td><code>ScheduledTasksPage/index.tsx</code></td><td>读取全部任务、打开创建弹窗、进入详情、启停、对话创建跳转。</td><td><code>handleCreateViaChat</code> 只跳 <code>/guid</code>；<code>handleCreateManually</code> 打开弹窗。</td></tr>
+      <tr><td>表单转换</td><td><code>CreateTaskDialog.tsx</code></td><td>把 name、prompt、frequency、assistant、model、workspace、execution mode 转成创建/更新负载。</td><td><code>handleSubmit</code> 是创建与编辑的唯一主入口。</td></tr>
+      <tr><td>工具函数</td><td><code>cronUtils.ts</code>、<code>resolveCronAgentConfig.ts</code></td><td>构造带 timezone 的 cron schedule，生成执行会话标题，解析 agent 配置。</td><td><code>createCronSchedule</code> 默认用当前 IANA timezone，失败回退 UTC。</td></tr>
+      <tr><td>hook 状态</td><td><code>useCronJobs.ts</code></td><td>提供单会话、全局列表、会话状态 map、关联会话列表和通用 CRUD action。</td><td>三个事件订阅 created、updated、removed 是列表刷新的主线。</td></tr>
+      <tr><td>adapter/API</td><td><code>ipcBridge.ts</code></td><td>把 <code>listJobs/addJob/updateJob/removeJob/runNow</code> 映射到 Cron HTTP，并把 job 事件映射成 WS emitter。</td><td><code>ipcBridge</code> 名字保留旧形状，但 Cron 域主传输是 HTTP + WS。</td></tr>
+      <tr><td>详情触发</td><td><code>TaskDetailPage.tsx</code></td><td>读取单任务、启停、run-now、删除、编辑、展示关联会话。</td><td><code>runningNowRef</code> 是同步防重入边界。</td></tr>
+      <tr><td>会话侧</td><td><code>localCronCommands.ts</code>、<code>useAionrsMessage.ts</code></td><td>AI 对话创建/更新由注入 helper 完成；renderer 完成消息后剥离 think 标签并合并展示。</td><td>不要把 <code>localCronCommands</code> 误读成任务创建实现。</td></tr>
+      <tr><td>测试证据</td><td><code>cron-crud.e2e.ts</code>、<code>tests/unit/cron/*</code></td><td>验证 AI 创建/修改/删除、页面可见、状态刷新、timezone 和状态标签。</td><td>E2E 覆盖用户可见链路，unit 覆盖 hook 与工具函数边界。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>真实代码片段</h2>
+  <div class="split">
+    <section class="panel">
+      <h3>编辑分流落点</h3>
+      <pre><code class="language-typescript">if (isEditMode) {
+  const metadata: ICronJobUpdateParams['metadata'] = {
+    conversation_title: editJob!.metadata.conversation_title,
+  };
+  if (canEditAgentConfig) {
+    metadata.agent_config = agent_config;
+  }
+
+  // Edit mode: update existing job
+  const updates: ICronJobUpdateParams = {
+    name: values.name,
+    schedule,
+    target: {
+      payload: { kind: 'message', text: values.prompt },
+      execution_mode: resolvedExecutionMode,
+    },
+    metadata,
+    state: {
+      max_retries: editJob!.state.max_retries,
+    },
+  };
+
+  await ipcBridge.cron.updateJob.invoke({
+    job_id: editJob!.id,
+    updates,
+  });
+  Message.success(t('cron.page.updateSuccess'));
+}</code></pre>
+      <p>来源：<code>CreateTaskDialog.tsx</code>。注意编辑是 <code>updateJob</code>，不是删除后重建；完整 create else 分支见 <a href="../lessons/0002-create-edit-path.html">短课 0002</a>。</p>
+    </section>
+    <section class="panel">
+      <h3>启停统一落到 updateJob</h3>
+      <pre><code class="language-typescript">const pauseJob = async (job_id: string) => {
+  await ipcBridge.cron.updateJob.invoke({
+    job_id,
+    updates: { enabled: false },
+  });
+};
+
+const resumeJob = async (job_id: string) => {
+  await ipcBridge.cron.updateJob.invoke({
+    job_id,
+    updates: { enabled: true },
+  });
+};</code></pre>
+      <p>来源：<code>useCronJobs.ts</code>。列表页和单会话任务都复用这组 action。</p>
+    </section>
+    <section class="panel">
+      <h3>run-now 防重入与导航</h3>
+      <pre><code class="language-typescript">if (!job) return;
+if (runningNowRef.current) return;
+runningNowRef.current = true;
+setRunningNow(true);
+try {
+  const result = await ipcBridge.cron.runNow.invoke({ job_id: job.id });
+  Message.success(t('cron.runNowSuccess'));
+  if (result?.conversation_id) {
+    const conversationKey = `conversation/${result.conversation_id}`;
+    const deadline = Date.now() + 15_000;
+    let latestConversation: TChatConversation | null = null;</code></pre>
+      <p>来源：<code>TaskDetailPage.tsx</code>。真实代码还会轮询会话、修正新会话标题并补齐 <code>cron_job_id</code>。</p>
+    </section>
+    <section class="panel">
+      <h3>adapter/API contract</h3>
+      <pre><code class="language-typescript">export const cron = {
+  listJobs: httpGet&lt;ICronJob[], void&gt;('/api/cron/jobs'),
+  listJobsByConversation: httpGet&lt;ICronJob[], { conversation_id: string }&gt;(
+    (p) =&gt; `/api/cron/jobs?conversation_id=${encodeURIComponent(p.conversation_id)}`
+  ),
+  getJob: httpGet&lt;ICronJob | null, { job_id: string }&gt;((p) =&gt; `/api/cron/jobs/${p.job_id}`),
+  addJob: httpPost&lt;ICronJob, ICreateCronJobParams&gt;('/api/cron/jobs'),
+  updateJob: httpPut&lt;ICronJob, { job_id: string; updates: ICronJobUpdateParams }&gt;(
+    (p) =&gt; `/api/cron/jobs/${p.job_id}`,
+    (p) =&gt; ({
+      name: p.updates.name,
+      description: p.updates.description,
+      enabled: p.updates.enabled,
+      schedule: p.updates.schedule,
+      message: p.updates.target?.payload.text,
+      execution_mode: p.updates.target?.execution_mode,
+      agent_config: p.updates.metadata?.agent_config,
+      conversation_title: p.updates.metadata?.conversation_title,
+      max_retries: p.updates.state?.max_retries,
+    })
+  ),
+  removeJob: httpDelete&lt;void, { job_id: string }&gt;((p) =&gt; `/api/cron/jobs/${p.job_id}`),
+  runNow: httpPost&lt;{ conversation_id: string }, { job_id: string }&gt;((p) =&gt; `/api/cron/jobs/${p.job_id}/run`),</code></pre>
+      <p>来源：<code>ipcBridge.ts</code>。这里是 renderer 与 backend 的 contract 边界。</p>
+    </section>
+  </div>
+
+  <h2>主路径分解</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>动作</th><th>状态变化</th><th>证据文件</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>列表加载</td><td><code>useAllCronJobs</code> 调 <code>listJobs</code>，再修复缺失 timezone。</td><td>页面从 loading 到 jobs / empty。</td><td><code>useCronJobs.ts</code>、<code>repairCronJobTimeZone.ts</code></td></tr>
+      <tr><td>手动创建</td><td><code>CreateTaskDialog</code> 校验表单，构造 <code>schedule</code> 和 <code>agent_config</code>，调用 <code>addJob</code>。</td><td>后端创建后通过 <code>cron.job-created</code> 回推，列表追加任务。</td><td><code>CreateTaskDialog.tsx</code>、<code>useCronJobs.ts</code></td></tr>
+      <tr><td>编辑任务</td><td>同一个弹窗传入 <code>editJob</code>，构造 <code>updates</code> 调 <code>updateJob</code>。</td><td>任务 id 不变，列表和详情替换为 updated job。</td><td><code>CreateTaskDialog.tsx</code>、<code>cron-crud.e2e.ts</code></td></tr>
+      <tr><td>启停任务</td><td>列表页 <code>handleToggleEnabled</code> 调 hook 的 <code>pauseJob/resumeJob</code>。</td><td><code>enabled</code> 变 false/true；状态标签变 paused/active。</td><td><code>ScheduledTasksPage/index.tsx</code>、<code>CronStatusTag.dom.test.tsx</code></td></tr>
+      <tr><td>立即执行</td><td>详情页 <code>runNow</code> 调用 adapter，等待返回 <code>conversation_id</code>。</td><td>补齐执行会话信息，导航到 conversation 页面。</td><td><code>TaskDetailPage.tsx</code>；当前未找到自动化测试覆盖。</td></tr>
+      <tr><td>执行后刷新</td><td><code>cron.job-updated</code> 或 <code>cron.job-executed</code> 到达。</td><td>会话历史刷新，新执行可标记 unread，详情历史重新拉取。</td><td><code>useCronJobs.ts</code></td></tr>
+      <tr><td>AI 对话创建</td><td>AI 使用注入 HTTP helper；完成消息由 <code>processLocalCronResponse</code> 清理展示。</td><td>创建/更新结果通过 bridge API 和任务页验证，不靠本地解析文本。</td><td><code>localCronCommands.ts</code>、<code>cron-crud.e2e.ts</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>异常与边界矩阵</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>触发点</th><th>处理</th><th>测试/证据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>手动任务</td><td><code>frequency === 'manual'</code> 生成空 cron expr。</td><td>列表和详情判断 <code>!job.schedule.expr</code>，不显示启停开关，只允许 run-now。</td><td><code>ScheduledTasksPage/index.tsx</code>、<code>TaskDetailPage.tsx</code></td></tr>
+      <tr><td>run-now 双击</td><td>用户快速点击立即执行。</td><td><code>runningNowRef</code> 在 React state 更新前同步阻断第二次调用。</td><td><code>TaskDetailPage.tsx</code></td></tr>
+      <tr><td>缺失 timezone</td><td>旧任务有 cron expr 但没有 <code>schedule.tz</code>。</td><td><code>repairCronJobTimeZone</code> 调 <code>updateJob</code> 补当前 timezone，失败则返回原 job。</td><td><code>repairCronJobTimeZone.test.ts</code>、<code>useCronJobs.dom.test.ts</code></td></tr>
+      <tr><td>任务执行失败或 missed</td><td><code>state.last_status</code> 为 error / missed。</td><td>hook 与状态标签都把它视为 error；但 disabled 优先显示 paused。</td><td><code>CronStatusTag.dom.test.tsx</code></td></tr>
+      <tr><td>AI 更新任务</td><td>对话中要求修改已有任务。</td><td>E2E 等待同一个 job id 的名称变化，断言不是新建任务。</td><td><code>cron-crud.e2e.ts</code></td></tr>
+      <tr><td>删除任务</td><td>详情页删除。</td><td>任务不可见且 <code>getJob</code> 返回 null；原始会话仍可访问。</td><td><code>cron-crud.e2e.ts</code></td></tr>
+      <tr><td>关联会话来源</td><td>详情页历史需要展示任务相关会话。</td><td><code>useCronJobConversations</code> 直接调 backend 列表，不依赖可能陈旧的侧边栏 cache。</td><td><code>useCronJobs.dom.test.ts</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">测试证据</h2>
+  <table>
+    <thead>
+      <tr><th>文件</th><th>证明了什么</th><th>边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>tests/e2e/specs/cron-crud.e2e.ts</code></td><td>AI 对话创建任务、任务出现在 Scheduled Tasks 页面、详情历史存在、对话修改后 job id 保持、删除后原会话仍可访问。</td><td>需要可用 assistant；如果没有可用 backend，测试会 skip。</td></tr>
+      <tr><td><code>tests/unit/cron/useCronJobs.dom.test.ts</code></td><td>单会话和全局列表读取、启停删除更新 action、事件订阅、未读执行、执行会话重命名、关联会话刷新。</td><td>mock adapter，不证明真实 HTTP 服务。</td></tr>
+      <tr><td><code>tests/unit/cron/cronUtils.test.ts</code></td><td><code>createCronSchedule</code> 使用系统 timezone，解析失败回退 UTC，执行会话标题带日期。</td><td>不校验 cron 表达式语义正确性。</td></tr>
+      <tr><td><code>tests/unit/cron/repairCronJobTimeZone.test.ts</code></td><td>启动修复缺失 timezone，且并发修复请求复用同一个 promise。</td><td>失败路径只记录日志并回退原 job。</td></tr>
+      <tr><td><code>tests/unit/cron/CronStatusTag.dom.test.tsx</code></td><td>active、paused、error、missed 的显示优先级。</td><td>只覆盖标签文本，不覆盖整页布局。</td></tr>
+      <tr><td><code>TaskDetailPage.tsx</code> 源码路径</td><td>证明 run-now 防重入、调用 <code>cron.runNow</code>、等待会话、补 cache 并导航。</td><td>在 <code>cron-crud.e2e.ts</code> 与 <code>tests/unit/cron/</code> 中未找到 run-now 自动化覆盖；这里只能作为源码证据。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>调试索引</h2>
+  <table>
+    <thead>
+      <tr><th>现象</th><th>先看</th><th>再看</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>点击创建后没有任务</td><td><code>CreateTaskDialog.handleSubmit</code> 是否进入 <code>addJob</code>，表单是否被 <code>assistantRequired</code> 或模型缺失挡住。</td><td><code>ipcBridge.cron.addJob</code> 的 HTTP 返回和 <code>cron.job-created</code> 事件。</td></tr>
+      <tr><td>任务存在但列表不刷新</td><td><code>useAllCronJobs</code> 首次 <code>listJobs</code>。</td><td><code>useCronJobSubscription</code> 的 created/updated/removed 订阅是否触发。</td></tr>
+      <tr><td>启停不生效</td><td>列表页 <code>handleToggleEnabled</code> 是否调用 <code>pauseJob/resumeJob</code>。</td><td><code>ipcBridge.cron.updateJob</code> 的 <code>enabled</code> 映射。</td></tr>
+      <tr><td>立即执行重复创建会话</td><td><code>runningNowRef</code> 是否被绕过。</td><td>后端 <code>runNow</code> 是否被重复请求。</td></tr>
+      <tr><td>执行后侧边栏没红点</td><td><code>useCronJobsMap</code> 是否观察到 <code>last_run_at_ms</code> 变化。</td><td>当前 active conversation 是否正好是该任务所属会话。</td></tr>
+      <tr><td>AI 修改任务变成新任务</td><td>E2E 的 follow-up prompt 和 <code>waitForCronJobUpdated</code>。</td><td>注入 HTTP helper 或后端更新逻辑是否把 existing job id 传丢。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

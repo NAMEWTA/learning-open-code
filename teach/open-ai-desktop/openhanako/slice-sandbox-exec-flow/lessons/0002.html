@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · 路径守卫与命令分类：PathGuard 11级级联+preflight检查</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 2 课 · 路径守卫与命令分类：PathGuard 11级级联+preflight检查 <span class="tag">安全核心</span></h1>
+
+<div class="mission">
+<b>本节目标（对应使命 Success #2）</b>：学完你能解释 <code>classifyExecCommand()</code> 的五级风险分类体系，掌握 PathGuard 的 11 级级联判定逻辑和四级访问级别（BLOCKED/READ_ONLY/READ_WRITE/FULL），理解 preflight 模式匹配如何拦截高危命令。
+</div>
+
+<p>上一课我们了解了 8 层架构的全貌。这一课深入到第 3 层（命令风险分级）和第 4 层（PathGuard 路径判决）——这是整个安全体系中<b>最核心的决策引擎</b>。所有命令在进入 OS 沙盒前，都必须经过这两层的检查。</p>
+
+<h2>一、命令风险五级分类（Layer 3）</h2>
+
+<p><code>classifyExecCommand()</code>（<code>lib/exec-command/policy.ts</code>）将命令分为五个风险等级，决定后续的审批策略：</p>
+
+<table>
+<tr><th>级别</th><th>含义</th><th>示例命令</th><th>典型处理</th></tr>
+<tr><td><span style="background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:10px;font-size:0.75rem;">safe</span></td>
+<td>安全的只读操作，无副作用</td>
+<td><code>git status</code>、<code>cat</code>、<code>ls</code>、<code>Get-ChildItem</code></td>
+<td>直接执行，通常不需要审批</td></tr>
+<tr><td><span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:10px;font-size:0.75rem;">probe</span></td>
+<td>环境探测，检查依赖可用性</td>
+<td><code>node --version</code>、<code>which npm</code></td>
+<td>允许执行；失败标记为依赖缺失</td></tr>
+<tr><td><span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:0.75rem;">mutation</span></td>
+<td>本地文件变更（创建、修改）</td>
+<td><code>touch file.txt</code>、<code>mkdir dir</code></td>
+<td>需 PathGuard 写权限校验 + 可能触发审批</td></tr>
+<tr><td><span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:10px;font-size:0.75rem;">dangerous</span></td>
+<td>破坏性操作，需高度警惕</td>
+<td><code>rm -rf</code>、<code>git push -f</code>、<code>reg delete</code></td>
+<td>强制审批 + PathGuard FULL 权限校验</td></tr>
+<tr><td><span style="background:#ede9fe;color:#7c3aed;padding:2px 8px;border-radius:10px;font-size:0.75rem;">unknown</span></td>
+<td>未分类命令，默认保守处理</td>
+<td>任意不在白名单中的可执行文件</td>
+<td>按潜在危险处理，需审批</td></tr>
+</table>
+
+<h3>命令分词器：避免字符串欺骗</h3>
+
+<p>风险分析的第一步是将命令字符串拆分为 token。分词器正确处理引号和转义，避免被 <code>echo "rm -rf /"</code> 这类命令欺骗：</p>
+
+<pre><code>// lib/exec-command/policy.ts — 命令分词核心逻辑
+function tokenizeCommand(command: string) {
+  const tokens: string[] = [];
+  let token = "", quote = null, escaped = false;
+  for (const char of command) {
+    if (escaped) { token += char; escaped = false; continue; }
+    if (char === "\\") { escaped = true; continue; }
+    if (quote) {
+      if (char === quote) quote = null;
+      else token += char;
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (/\s/.test(char)) { if (token) tokens.push(token); token = ""; continue; }
+    token += char;
+  }
+  if (token) tokens.push(token);
+  return tokens;
+}</code></pre>
+
+<h3>Git 命令的特殊处理</h3>
+
+<p>Git 命令有独立的分支逻辑 <code>classifyGit()</code>：<code>git status/log/diff</code> 为 safe，<code>git push</code> 为 mutation，<code>git push -f/--force/--all/--mirror</code> 为 dangerous。</p>
+
+<div class="danger">
+<b>局限性：</b>policy.ts 的分类是静态的、基于文件名的。它不能检测 Shell 注入（如 <code>curl example.com | bash</code> 中的管道后命令），这是 PathGuard preflight 和 OS 沙盒的职责。
+</div>
+
+<h2>二、PathGuard 四级访问级别（Layer 4）</h2>
+
+<p>PathGuard（<code>lib/sandbox/path-guard.ts</code>）是应用层安全的核心组件，对每个文件路径返回四个访问级别之一：</p>
+
+<table>
+<tr><th>级别</th><th>read</th><th>write</th><th>delete</th><th>典型场景</th></tr>
+<tr><td><span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:10px;font-size:0.75rem;">BLOCKED</span></td><td>否</td><td>否</td><td>否</td><td>auth.json、browser-data、未授权外部路径</td></tr>
+<tr><td><span style="background:#dbeafe;color:#1e40af;padding:2px 8px;border-radius:10px;font-size:0.75rem;">READ_ONLY</span></td><td>是</td><td>否</td><td>否</td><td>config.yaml、session-files、user/ 目录</td></tr>
+<tr><td><span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:10px;font-size:0.75rem;">READ_WRITE</span></td><td>是</td><td>是</td><td>否</td><td>memory/、sessions/、channels/、logs/</td></tr>
+<tr><td><span style="background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:10px;font-size:0.75rem;">FULL</span></td><td>是</td><td>是</td><td>是</td><td>workspace roots（用户项目目录）</td></tr>
+</table>
+
+<p>操作所需的最低权限级别由 <code>OP_REQUIREMENTS</code> 映射定义：</p>
+<pre><code>// lib/sandbox/path-guard.ts — 操作-权限映射
+const OP_REQUIREMENTS = {
+  read:   new Set([READ_ONLY, READ_WRITE, FULL]),
+  write:  new Set([READ_WRITE, FULL]),
+  delete: new Set([FULL]),
+};</code></pre>
+
+<h2>三、11 级级联判定流程</h2>
+
+<p><code>getAccessLevel(rawPath)</code> 按优先级从高到低依次匹配 11 个条件，第一个命中即返回。这种级联设计确保"拒绝优先于允许，精确匹配优先于通配"：</p>
+
+<pre><code>级联判定顺序（优先级从高到低，逐级匹配，命中即返回）：
+1. BLOCKED 文件      → hanakoHome 根级别黑名单文件
+2. BLOCKED 目录      → hanakoHome 根级别黑名单目录
+3. READ_ONLY agent文件 → agent 目录下只读文件（ishiki.md、config.yaml 等）
+4. READ_ONLY agent目录 → 通用机制（当前为空数组）
+5. READ_ONLY 全局目录  → hanakoHome 下的 user/、skills/、session-files/
+6. READ_WRITE agent目录 → agent 目录下 7 个可写目录（memory/、sessions/等）
+7. READ_WRITE agent文件 → agent 目录下可写文件（pinned.md、channels.md）
+8. READ_WRITE 全局目录 → hanakoHome 下 channels/、logs/、uploads/、.ephemeral/
+9. hanakoHome 未匹配   → 根据 allowExternalReads 决定 READ_ONLY 或 BLOCKED
+10. workspace roots    → 用户项目目录，FULL 权限
+11. policyWritablePaths → 运行时缓存、沙盒临时目录等非 workspace 写入点
+12. 其他（兜底）        → 根据 allowExternalReads 决定 READ_ONLY 或 BLOCKED</code></pre>
+
+<h3>关键机制拆解</h3>
+
+<div class="step"><span class="num">1</span><b>符号链接跟踪</b>：PathGuard 在执行任何检查前，先通过 <code>_resolveReal()</code> 解析路径的真实位置。对于存在的路径使用 <code>fs.realpathSync()</code>；对于不存在的路径，递归向上找最近祖先做 realpath。<br><span class="where">lib/sandbox/path-guard.ts — _resolveReal()</span></div>
+
+<div class="step"><span class="num">2</span><b>级联判定</b>：<code>getAccessLevel()</code> 从优先级 1（BLOCKED 文件）到优先级 12（兜底），逐级 if 判断，第一个命中即返回。拒绝优先于允许，精确匹配优先于通配。<br><span class="where">lib/sandbox/path-guard.ts — getAccessLevel()</span></div>
+
+<div class="side">
+<b>为什么需要符号链接跟踪？</b>如果用户创建了一个符号链接 <code>ln -s /etc/passwd ~/project/link</code>，不跟踪符号链接的话 PathGuard 会认为这是在 workspace 内的安全路径。跟踪后会发现真实路径指向 /etc/passwd，属于 BLOCKED 级别。
+</div>
+
+<h2>四、Preflight 模式匹配</h2>
+
+<p>对于 bash 命令执行，<code>tool-wrapper.ts</code> 的 <code>wrapBashTool()</code> 在 PathGuard 检查之前先运行 preflight 正则匹配：</p>
+
+<pre><code>// lib/sandbox/tool-wrapper.ts — preflight 模式匹配（部分）
+const PREFLIGHT_UNIX = [
+  [/\bsudo\s/,    () => t("sandbox.noSudo")],
+  [/\bsu\s+\w/,   () => t("sandbox.noSu")],
+  [/\bchmod\s/,   () => t("sandbox.noChmod")],
+  [/\bchown\s/,   () => t("sandbox.noChown")],
+];
+
+const PREFLIGHT_WIN32 = [
+  [/\bdel\s+\/s/i,              () => t("sandbox.noDelRecursive")],
+  [/\brmdir\s+\/s/i,            () => t("sandbox.noRmdirRecursive")],
+  [/\breg\s+(delete|add)\b/i,   () => t("sandbox.noRegEdit")],
+  [/\btakeown\b/i,              () => t("sandbox.noTakeown")],
+  [/\bicacls\b/i,               () => t("sandbox.noIcacls")],
+  [/\bformat\s+[a-z]:/i,        () => t("sandbox.noFormat")],
+  [/\bbcdedit\b/i,              () => t("sandbox.noBcdedit")],
+];</code></pre>
+
+<p>Preflight 在 macOS/Linux 上作为体验层优化（OS 沙盒兜底），在 Windows 上作为关键安全层。命中后直接拦截，命令不会进入 PathGuard 检查和 OS 沙盒。</p>
+
+<h2>五、Managed Config Guard</h2>
+
+<p>除了 PathGuard，还有一个更精细的 <code>ManagedConfigWriteGuard</code>（<code>lib/sandbox/managed-config-guard.ts</code>），专门保护 <code>agents/*/config.yaml</code> 文件。即使路径在 PathGuard 中属于可写区域，此 guard 也会拦截对 agent 配置文件的直接写入，强制通过 settings API 修改：</p>
+
+<pre><code>// lib/sandbox/managed-config-guard.ts
+export function createManagedConfigWriteGuard({ hanakoHome }) {
+  return (absolutePath, operation) => {
+    if (operation !== "write" && operation !== "delete") return { allowed: true };
+    if (!isManagedAgentConfigPath(absolutePath, { hanakoHome })) return { allowed: true };
+    return {
+      allowed: false,
+      reason: "managed config files must be changed through settings APIs",
+    };
+  };
+}</code></pre>
+
+<h2>六、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 某命令的第一个可执行文件名为 <code>mkdir</code>，它会被 classifyExecCommand 分到哪个级别？</p>
+<span class="opt">A. safe</span>
+<span class="opt">B. probe</span>
+<span class="opt">C. mutation</span>
+<span class="opt">D. dangerous</span>
+<details><summary>看答案</summary><b>C</b>。mkdir 是本地文件变更操作，属于 mutation 级别。需 PathGuard 写权限校验，可能触发审批。safe 是只读操作（如 ls、cat），dangerous 是破坏性操作（如 rm -rf）。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. PathGuard 的级联判定中，如果路径同时匹配了 READ_WRITE agent 目录（优先级 6）和 workspace roots（优先级 10），最终返回什么级别？</p>
+<span class="opt">A. READ_WRITE</span>
+<span class="opt">B. FULL</span>
+<span class="opt">C. 合并为 READ_WRITE（取更严格者）</span>
+<span class="opt">D. 抛出冲突异常</span>
+<details><summary>看答案</summary><b>A</b>。级联判定是"第一个命中即返回"。优先级 6 的 READ_WRITE agent 目录先命中，直接返回 READ_WRITE，不会到达优先级 10 的 workspace roots（FULL）。级联设计确保精确规则优先于宽泛规则。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. preflight 正则匹配和 PathGuard 检查的关系是什么？</p>
+<span class="opt">A. 两者并行执行，任一失败即拦截</span>
+<span class="opt">B. preflight 先执行，命中则直接拦截（不进入 PathGuard）；未命中才进入 PathGuard</span>
+<span class="opt">C. PathGuard 先执行，命中则直接拦截；未命中才进入 preflight</span>
+<span class="opt">D. preflight 只在 Windows 上执行，PathGuard 在所有平台执行</span>
+<details><summary>看答案</summary><b>B</b>。在 <code>wrapBashTool()</code> 中，preflight 正则匹配最先运行。如果命中了 sudo/chmod/reg delete 等模式，直接返回 blockedResult，不会进入后续的 PathGuard 检查。preflight 是一个快速的模式匹配层。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>lib/sandbox/path-guard.ts</code> 查阅 <code>getAccessLevel()</code> 方法的完整实现，关注 11 个 if 判断的排列顺序；打开 <code>lib/exec-command/policy.ts</code> 查看 <code>DANGEROUS_EXECUTABLES</code> 集合的完整名单。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：「如果我想在 PathGuard 中新增加一个 READ_WRITE 目录，应该放在级联判定的第几级？」「为什么 Git push 没有 --force 时是 mutation 而不是 safe？」下一课我们聚焦 <b>Bubblewrap 容器执行与流式输出</b>——三路径执行模型、bwrap 参数构造、CommandOutputCollector 的双缓冲设计。</div>
+
+<div class="nav">课程 0002 / 沙盒执行全链路 · <a href="0001.html">← 上一课：架构总览</a> · <a href="0003.html">下一课：Bubblewrap 容器执行 →</a></div>
+
+</body>
+</html>

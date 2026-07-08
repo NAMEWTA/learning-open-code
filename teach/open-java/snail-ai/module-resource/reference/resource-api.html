@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>资源模块构建 API 速查</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:32px;margin-bottom:6px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px;font-size:14px}
+    th,td{border:1px solid #e5e7eb;padding:7px 9px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px;font-size:.9em}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .note{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px;margin:14px 0}
+    .where{font-family:"SF Mono",Consolas,monospace;font-size:.82em;color:#374151}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+    nav a{margin-right:12px}
+    pre{background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:.8rem 1rem;font-size:.82rem;overflow-x:auto}
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="../lessons/0001-resource-module-tour.html">返回短课</a>
+    <a href="resource-overview.html">模块总览</a>
+    <a href="../../slice-resource-upload-access/reference/resource-upload-access-flow-map.html">上传访问切片</a>
+  </nav>
+
+  <h1>资源模块构建 API 速查</h1>
+  <p class="summary"><strong>一句话：</strong>本页按分组列出 <code>snail-ai-feature-resource</code> 的 Maven 坐标、依赖关系、<code>ResourceService</code> 方法签名、存储策略契约与枚举；HTTP 入口与端到端链路见 <a href="resource-overview.html">resource-overview.html</a>，L2 上传访问切片见 <a href="../../slice-resource-upload-access/reference/resource-upload-access-flow-map.html">resource-upload-access-flow-map</a>。</p>
+
+  <nav>
+    <a href="#maven">Maven 坐标</a>
+    <a href="#deps">模块依赖</a>
+    <a href="#consumers">被谁依赖</a>
+    <a href="#service">ResourceService</a>
+    <a href="#storage">存储策略</a>
+    <a href="#enum">枚举</a>
+    <a href="#config">配置</a>
+    <a href="#slice">与 L2 切片对应</a>
+  </nav>
+
+  <h2 id="maven">Maven 坐标 — <span class="where">snail-ai-feature-resource/pom.xml</span></h2>
+  <table>
+    <thead><tr><th>字段</th><th>值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>groupId</code></td><td><code>com.aizuda</code></td><td>继承自根 POM <span class="where">open-java/snail-ai/pom.xml</span>。</td></tr>
+      <tr><td><code>artifactId</code></td><td><code>snail-ai-feature-resource</code></td><td>资源领域 feature 模块，<code>packaging=jar</code>。</td></tr>
+      <tr><td><code>version</code></td><td><code>${revision}</code></td><td>与 monorepo 统一版本号；根 POM 在 <code>dependencyManagement</code> 中登记该 artifact。</td></tr>
+      <tr><td><code>parent</code></td><td><code>snail-ai-server-features</code></td><td>位于 <span class="where">snail-ai-server/snail-ai-server-features/pom.xml</span>，与 RAG、Agent、Skill 等 feature 并列。</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><strong>模块定位：</strong>纯领域 JAR，不含独立 <code>@SpringBootApplication</code>。运行时由 <code>snail-ai-server-admin</code> 引入并参与组件扫描，<code>ResourceService</code>、存储策略 Bean 在 Admin 进程中注册。</p>
+
+  <h2 id="deps">模块依赖 — <span class="where">snail-ai-feature-resource/pom.xml</span></h2>
+  <table>
+    <thead><tr><th>依赖 artifactId</th><th>用途</th><th>在资源模块中的落点</th></tr></thead>
+    <tbody>
+      <tr><td><code>snail-ai-commons-core</code></td><td>公共异常、工具类</td><td><code>ResourceService.requireResource</code> 抛 <code>SnailAiException</code>。</td></tr>
+      <tr><td><code>snail-ai-biz-template</code></td><td>业务库 PO / Mapper</td><td><code>ResourcePO</code>、<code>ResourceMapper</code>；<code>ResourceService</code> 直接注入 <code>ResourceMapper</code> 读写 <code>sai_resource</code>。</td></tr>
+      <tr><td><code>minio</code></td><td>MinIO Java SDK</td><td><code>MinioResourceStorageService</code> 上传、读取、删除对象。</td></tr>
+      <tr><td><code>okhttp-jvm</code></td><td>HTTP 客户端</td><td>MinIO SDK 传输层依赖。</td></tr>
+      <tr><td><code>lombok</code>（provided）</td><td>编译期注解</td><td><code>@RequiredArgsConstructor</code>、<code>@Slf4j</code>、枚举 <code>@Getter</code>。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>传递能力：</strong><code>snail-ai-biz-template</code> 再依赖 <code>mybatis-plus-spring-boot4-starter</code>，因此资源模块无需在自身 POM 重复声明 MyBatis-Plus；持久化查询在 <code>ResourceService</code> 中用 <code>LambdaQueryWrapper</code> 完成。</p>
+
+  <h2 id="consumers">被谁依赖</h2>
+  <table>
+    <thead><tr><th>消费模块</th><th>典型调用方</th><th>调用方式</th></tr></thead>
+    <tbody>
+      <tr><td><code>snail-ai-server-admin</code></td><td><code>ResourceAdminService</code>、<code>FileAccessController</code>、<code>RagDocumentService</code>、<code>UserService</code></td><td>注入 <code>ResourceService</code>，经 HTTP 或业务服务暴露。</td></tr>
+      <tr><td><code>snail-ai-feature-rag</code></td><td><code>DocumentPipeline</code></td><td>解析阶段 <code>resourceService.load(resourceId)</code> 取原始文件流。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="service">ResourceService — 领域服务 API</h2>
+  <p>类路径：<span class="where">com.aizuda.snail.ai.features.resource.ResourceService</span>。标注 <code>@Service</code>、<code>@RequiredArgsConstructor</code>；写操作带 <code>@Transactional</code>。</p>
+
+  <table>
+    <thead><tr><th>方法</th><th>签名</th><th>返回</th><th>行为摘要</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>upload</code></td>
+        <td><code>(InputStream inputStream, String originalName, long fileSize, String bizType, Long bizId, Long creatorId)</code></td>
+        <td><code>ResourcePO</code></td>
+        <td>① <code>storageFactory.getDefault()</code> ② <code>store</code> 得 <code>storageKey</code> ③ <code>MimeTypeUtils.detect</code> ④ <code>insert</code> 资源行 ⑤ <code>getAccessUrl</code> 回写 <code>accessUrl</code>。</td>
+      </tr>
+      <tr>
+        <td><code>load</code></td>
+        <td><code>(Long resourceId)</code></td>
+        <td><code>InputStream</code></td>
+        <td><code>requireResource</code> 后按 <code>storageType</code> 取策略，<code>load(storageKey)</code>。</td>
+      </tr>
+      <tr>
+        <td><code>delete</code></td>
+        <td><code>(Long resourceId)</code></td>
+        <td><code>void</code></td>
+        <td>资源不存在则直接返回；存储删除失败只 <code>log.warn</code>，随后删 DB 行。</td>
+      </tr>
+      <tr>
+        <td><code>getById</code></td>
+        <td><code>(Long resourceId)</code></td>
+        <td><code>ResourcePO</code> 或 <code>null</code></td>
+        <td>标准 <code>selectById</code>，不抛异常。</td>
+      </tr>
+      <tr>
+        <td><code>getByStorageKey</code></td>
+        <td><code>(String storageKey)</code></td>
+        <td><code>ResourcePO</code> 或 <code>null</code></td>
+        <td><code>FileAccessController</code> 反查资源元数据用。</td>
+      </tr>
+      <tr>
+        <td><code>updateBizType</code></td>
+        <td><code>(Long resourceId, String bizType)</code></td>
+        <td><code>void</code></td>
+        <td>预览提交时 <code>DOCUMENT_PREVIEW</code> → <code>DOCUMENT</code>；资源不存在则静默返回。</td>
+      </tr>
+      <tr>
+        <td><code>requireResource</code></td>
+        <td><code>(Long resourceId)</code></td>
+        <td><code>ResourcePO</code></td>
+        <td>不存在抛 <code>SnailAiException("Resource not found: …")</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>ResourcePO 关键字段 — <code>sai_resource</code></h3>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>id</code></td><td><code>Long</code></td><td>自增主键；<code>getAccessUrl</code> 生成 URL 时可用。</td></tr>
+      <tr><td><code>storageKey</code></td><td><code>String</code></td><td>存储后端唯一键；公开访问凭证，格式见 <code>StorageKeyGenerator</code>。</td></tr>
+      <tr><td><code>originalName</code> / <code>fileSize</code> / <code>mimeType</code></td><td><code>String</code> / <code>Long</code> / <code>String</code></td><td>上传元数据。</td></tr>
+      <tr><td><code>storageType</code></td><td><code>String</code></td><td><code>LOCAL</code>、<code>MINIO</code>、<code>EXTERNAL</code>。</td></tr>
+      <tr><td><code>accessUrl</code></td><td><code>String</code></td><td>对外 URL；LOCAL/MINIO 多为 <code>/files/{storageKey}</code>，EXTERNAL 为外部地址。</td></tr>
+      <tr><td><code>bizType</code> / <code>bizId</code></td><td><code>String</code> / <code>Long</code></td><td>业务分区与关联 ID。</td></tr>
+      <tr><td><code>creatorId</code></td><td><code>Long</code></td><td>上传用户；删除授权依据之一。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="storage">存储策略 API</h2>
+
+  <h3>ResourceStorageService — 策略接口</h3>
+  <pre>String getType();
+String store(String bizType, String fileName, InputStream inputStream);
+InputStream load(String storageKey);
+void delete(String storageKey);
+String getAccessUrl(Long resourceId, String storageKey);
+boolean exists(String storageKey);</pre>
+  <table>
+    <thead><tr><th>实现类</th><th><code>getType()</code></th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td><code>LocalResourceStorageService</code></td><td><code>LOCAL</code></td><td>写入 <code>snail-ai.resource.upload-dir</code>；<code>getAccessUrl</code> 返回 <code>/files/{storageKey}</code>。</td></tr>
+      <tr><td><code>MinioResourceStorageService</code></td><td><code>MINIO</code></td><td>对象 key 与 storageKey 一致；访问 URL 形式与 LOCAL 相同，由 Admin 代理读取。</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><code>EXTERNAL</code> 无对应 <code>ResourceStorageService</code> 实现；OpenAPI 等场景直接插入 <code>ResourcePO</code>，<code>accessUrl</code> 指向外部地址，不经 <code>ResourceService.upload</code>。</p>
+
+  <h3>ResourceStorageFactory</h3>
+  <table>
+    <thead><tr><th>方法</th><th>行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>get(String type)</code></td><td>从 Spring 注入的 <code>List&lt;ResourceStorageService&gt;</code> 按 <code>getType()</code> 忽略大小写匹配；无匹配抛 <code>IllegalArgumentException</code>。</td></tr>
+      <tr><td><code>getDefault()</code></td><td><code>get(resourceConfig.getStorageType())</code>；上传链路默认入口。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="enum">枚举</h2>
+
+  <h3>ResourceBizTypeEnum</h3>
+  <table>
+    <thead><tr><th>枚举值</th><th><code>value</code></th><th>典型场景</th></tr></thead>
+    <tbody>
+      <tr><td><code>GENERAL</code></td><td><code>GENERAL</code></td><td>管理端上传未指定 bizType 时的默认值。</td></tr>
+      <tr><td><code>AVATAR</code></td><td><code>AVATAR</code></td><td>用户头像绑定。</td></tr>
+      <tr><td><code>ATTACHMENT</code></td><td><code>ATTACHMENT</code></td><td>通用附件。</td></tr>
+      <tr><td><code>DOCUMENT</code></td><td><code>DOCUMENT</code></td><td>RAG 正式文档资源。</td></tr>
+      <tr><td><code>DOCUMENT_PREVIEW</code></td><td><code>DOCUMENT_PREVIEW</code></td><td>RAG 预览临时资源；commit 后 <code>updateBizType</code> 提升。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>ResourceStorageTypeEnum</h3>
+  <table>
+    <thead><tr><th>枚举值</th><th><code>value</code></th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>LOCAL</code></td><td><code>LOCAL</code></td><td>本地文件系统。</td></tr>
+      <tr><td><code>MINIO</code></td><td><code>MINIO</code></td><td>MinIO 对象存储。</td></tr>
+      <tr><td><code>EXTERNAL</code></td><td><code>EXTERNAL</code></td><td>外部 URL，无存储策略 Bean。</td></tr>
+    </tbody>
+  </table>
+  <p><code>fromValue(String)</code>：忽略大小写匹配；<code>null</code> 入参返回 <code>null</code>。</p>
+
+  <h2 id="config">配置 — <code>snail-ai.resource.*</code></h2>
+  <table>
+    <thead><tr><th>属性</th><th>类型</th><th>默认值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>storage-type</code></td><td><code>String</code></td><td><code>LOCAL</code></td><td>默认存储后端；<code>ResourceStorageFactory.getDefault()</code> 读取。</td></tr>
+      <tr><td><code>upload-dir</code></td><td><code>String</code></td><td><code>./upload/resource</code></td><td>LOCAL 模式根目录。</td></tr>
+      <tr><td><code>minio.endpoint</code></td><td><code>String</code></td><td><code>http://localhost:9000</code></td><td>MinIO 服务地址。</td></tr>
+      <tr><td><code>minio.access-key</code> / <code>secret-key</code></td><td><code>String</code></td><td><code>minioadmin</code></td><td>MinIO 凭证。</td></tr>
+      <tr><td><code>minio.bucket</code></td><td><code>String</code></td><td><code>snail-ai</code></td><td>对象桶名。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="slice">与 L2 切片 <code>slice-resource-upload-access</code> 的对应</h2>
+  <table>
+    <thead><tr><th>L2 链路阶段</th><th>本模块 API</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>ResourceAdminService.upload</code> 补齐用户与 bizType</td><td>调用 <code>ResourceService.upload(…)</code></td><td>Admin 层负责 <code>creatorId</code> 和默认 <code>GENERAL</code>；领域签名见上表。</td></tr>
+      <tr><td>存储策略选择与写文件</td><td><code>ResourceStorageFactory.getDefault()</code> → <code>store</code></td><td>L2 时序图「Factory → Local/MinIO」对应策略接口。</td></tr>
+      <tr><td>写入 <code>sai_resource</code> 并回写 URL</td><td><code>upload</code> 内 <code>insert</code> + <code>updateById(accessUrl)</code></td><td>L2 强调「插入后才生成 accessUrl」的两步写。</td></tr>
+      <tr><td><code>GET /files/**</code> 反查与读流</td><td><code>getByStorageKey</code> + <code>load</code></td><td>Controller 用 storageKey 查 PO，再按 <code>storageType</code> 调策略 <code>load</code>；<code>load(resourceId)</code> 是等价领域入口。</td></tr>
+      <tr><td><code>DELETE /resource/{id}</code></td><td><code>delete(resourceId)</code></td><td>授权在 Admin 层；领域层只负责删存储与 DB。</td></tr>
+      <tr><td>RAG 预览提交提升 bizType</td><td><code>updateBizType(resourceId, DOCUMENT)</code></td><td>不在 L2 主链路，但与同一 <code>ResourceService</code> 实例。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>与总览的分工</h2>
+  <table>
+    <thead><tr><th>文档</th><th>侧重</th></tr></thead>
+    <tbody>
+      <tr><td><a href="resource-overview.html">resource-overview.html</a></td><td>Controller 边界、端到端链路、上层模块复用、调试 checklist。</td></tr>
+      <tr><td>本页</td><td>Maven 坐标、POM 依赖、<code>ResourceService</code> / 策略接口签名、枚举与配置契约。</td></tr>
+      <tr><td><a href="../../slice-resource-upload-access/reference/resource-upload-access-flow-map.html">resource-upload-access-flow-map</a></td><td>Admin 上传 → 存储 → <code>/files/**</code> 访问的垂直切片与时序图。</td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

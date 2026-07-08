@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backend 启动失败恢复全链路参考图谱</title>
+  <link rel="stylesheet" href="../assets/backend-recovery.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Backend 启动失败恢复全链路参考图谱</h1>
+    <p class="subtitle">速查 main 分类、preload 注入、renderer failure dialog、InstallationIntegrityDialog、数据库恢复 IPC 与测试证据。</p>
+    <div class="meta">
+      <span class="pill">参考文档：backend-recovery-flow-map</span>
+      <span class="pill">主课程：0001-flow-map</span>
+      <span class="pill">边界：不夸大 app-launch 证明范围</span>
+    </div>
+    <nav class="navlinks" aria-label="交叉链接">
+      <a href="../lessons/0001-flow-map.html">课程 0001</a>
+      <a href="../../00-overview/reference/00-overview.html">L0 总览</a>
+      <a href="../../module-main-entry/reference/main-entry-overview.html">L1 main-entry</a>
+      <a href="../../module-process-infra/reference/process-infra-overview.html">L1 process-infra</a>
+      <a href="../../module-preload-ipc/reference/preload-ipc-overview.html">L1 preload-ipc</a>
+      <a href="../../module-renderer-core/reference/renderer-core-overview.html">L1 renderer-core</a>
+      <a href="../../slice-desktop-startup/reference/desktop-startup-flow-map.html">L2 desktop-startup</a>
+    </nav>
+  </section>
+
+  <h2>1. 五要素覆盖清单</h2>
+  <table>
+    <thead>
+      <tr><th>要素</th><th>本切片落点</th><th>源码证据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>入口点真实代码片段</td><td>`markBackendStartupFailed()` 调用 `classifyBackendStartupFailure()`，renderer 根入口读取 `window.__backendStartupFailure`。</td><td>`packages/desktop/src/index.ts:283-287`、`packages/desktop/src/process/startup/backendStartupFailure.ts:181-235`、`packages/desktop/src/renderer/main.tsx:384-405`</td></tr>
+      <tr><td>沿途每一层</td><td>main 启动编排 → failure 分类器 → preload 同步注入与恢复 IPC → renderer 根分流 → InstallationIntegrityDialog → main recovery handler → backend 重启。</td><td>`index.ts`、`preload/main.ts`、`renderer/main.tsx`、`InstallationIntegrityDialog.tsx`。</td></tr>
+      <tr><td>Mermaid 调用时序</td><td>见本页“主时序图”。</td><td>按源码调用关系绘制，不补造 aioncore 内部实现。</td></tr>
+      <tr><td>异常/边界路径</td><td>可恢复数据库损坏可重建；迁移失败、本地数据修复失败和安装缺失主要走诊断或下载；GLIBC 与架构不匹配有单独弹窗形态。</td><td>`backendStartupFailure.test.ts`、`recoverCorruptedDatabase.test.ts`。</td></tr>
+      <tr><td>交叉链接</td><td>回链 L0，并连接 main-entry、process-infra、preload-ipc、renderer-core、desktop-startup。</td><td>页首导航。当前尚未生成本切片专属 L3 API 参考；preload IPC 细节暂回链 L1。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>2. 主时序图</h2>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  participant Main as Electron main
+  participant Startup as startBackendOrExit
+  participant Classifier as classifyBackendStartupFailure
+  participant Preload as preload contextBridge
+  participant Renderer as renderer/main.tsx
+  participant Integrity as InstallationIntegrityDialog
+  participant Recovery as recoverCorruptedDatabase
+  Main->>Startup: startBackend({ onHealthTimeout, onPendingExit })
+  Startup-->>Main: backend error / pending exit
+  Main->>Classifier: classifyBackendStartupFailure(error)
+  Classifier-->>Main: BackendStartupFailureInfo
+  Main->>Main: backendStartupFailureInfo = failure
+  Preload->>Main: ipcRenderer.sendSync('get-backend-startup-failure')
+  Main-->>Preload: backendStartupFailureInfo
+  Preload-->>Renderer: contextBridge.exposeInMainWorld('__backendStartupFailure')
+  Renderer->>Renderer: shouldShowBackendStartupFailureDialog
+  alt incompatible runtime or package architecture mismatch
+    Renderer-->>Renderer: 显示专用 Modal
+  else installation / migration / local data / recoverable corruption / generic
+    Renderer->>Integrity: InstallationIntegrityModalHost
+    alt recoverable database corruption
+      Integrity->>Preload: window.electronAPI.recoverCorruptedDatabase()
+      Preload->>Main: invoke backend:recover-corrupted-database
+      Main->>Recovery: recoverCorruptedDatabaseAfterUserConfirmation()
+      Recovery->>Main: stopBackend()
+      Main->>Startup: backendManager.start({ recoverCorruptedDatabase: true })
+      Main-->>Renderer: markReady 后 reload()
+    else other integrity style failure
+      Integrity-->>Renderer: report diagnostics / download latest
+    end
+  end
+    </div>
+  </div>
+
+  <h2>3. 分层路径速查</h2>
+  <table>
+    <thead>
+      <tr><th>层次</th><th>源码位置</th><th>职责</th><th>下一跳</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>main 启动编排</td><td>`packages/desktop/src/index.ts:653-715`</td><td>调用 `startBackendOrExit()`；默认桌面模式 `exitOnFailure` 为 false，所以失败后仍可创建窗口显示错误。</td><td>`markBackendStartupFailed()`。</td></tr>
+      <tr><td>失败状态存储</td><td>`packages/desktop/src/index.ts:209-287`</td><td>保存 `backendStartupFailureInfo`，提供 `get-backend-startup-failed` 与 `get-backend-startup-failure` 同步 IPC。</td><td>preload。</td></tr>
+      <tr><td>分类器</td><td>`packages/desktop/src/process/startup/backendStartupFailure.ts:87-235`</td><td>按详情字段和 stderr/stdout 文本把错误归类成 renderer 可消费的 reason。</td><td>`BackendStartupFailureInfo`。</td></tr>
+      <tr><td>preload 边界</td><td>`packages/desktop/src/preload/main.ts:51-64`</td><td>暴露 `recoverCorruptedDatabase()`，同步读取 failure 并写入 `window.__backendStartupFailure`。</td><td>renderer 根入口。</td></tr>
+      <tr><td>renderer 根分流</td><td>`packages/desktop/src/renderer/main.tsx:300-405`</td><td>已知 reason 渲染 `BackendStartupFailureDialog`；否则进入正常 `AppProviders`。</td><td>失败弹窗或正常 App。</td></tr>
+      <tr><td>安装完整性弹窗</td><td>`packages/desktop/src/renderer/components/layout/InstallationIntegrityDialog.tsx:135-330`</td><td>按 diagnosticsKind 选择下载、诊断上报、数据库重建按钮。</td><td>用户操作。</td></tr>
+      <tr><td>数据库恢复动作</td><td>`packages/desktop/src/process/startup/recoverCorruptedDatabase.ts:13-25`</td><td>只允许 recoverable corruption 状态；停止 backend，用 recovery 标志重启，mark ready 后 reload。</td><td>mainWindow reload。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 失败分类与 UI 去向</h2>
+  <table>
+    <thead>
+      <tr><th>reason</th><th>识别条件</th><th>renderer 去向</th><th>用户动作</th><th>测试证据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>`backend_package_architecture_mismatch`</td><td>`details.stage === 'startup_architecture_check'`。</td><td>专用下载 Modal。</td><td>下载匹配架构版本。</td><td>`backendStartupFailure.test.ts` 架构不匹配用例。</td></tr>
+      <tr><td>`backend_incomplete_installation`</td><td>packaged app 在 `resolve_binary` 阶段缺 `bundled-aioncore/`、runtime 目录、`managed-resources/` 或 backend binary。</td><td>`InstallationIntegrityModalHost`，kind 为 `incomplete_installation`。</td><td>发送诊断或下载最新版。</td><td>unit 覆盖缺目录和缺二进制；E2E 覆盖 debug 注入弹窗与诊断上报。</td></tr>
+      <tr><td>`backend_incompatible_runtime`</td><td>stderr/stdout 中出现 `GLIBC_x.y not found`。</td><td>无 footer 的 runtime Modal。</td><td>阅读所需 GLIBC 版本；当前 UI 不给重建按钮。</td><td>unit 覆盖版本提取和排序。</td></tr>
+      <tr><td>`backend_local_data_repair_failed`</td><td>`BOOTSTRAP_SERVICE_INIT_FAILED` + `services.init` + agent_metadata 数据库查询 invalid UTF-8 签名。</td><td>`InstallationIntegrityModalHost`，kind 为 `local_data_repair`。</td><td>发送诊断；不直接重启。</td><td>unit 覆盖完整签名与模糊文本不误判。</td></tr>
+      <tr><td>`backend_recoverable_database_corruption`</td><td>`BOOTSTRAP_DATA_INIT_FAILED` + `database.recoverable_corruption`。</td><td>`InstallationIntegrityModalHost`，kind 为 `recoverable_database_corruption`。</td><td>发送诊断或确认重建数据库。</td><td>unit 覆盖分类、恢复可用性、restart 失败边界和 preload IPC。</td></tr>
+      <tr><td>`backend_data_migration_failed`</td><td>`BOOTSTRAP_DATA_INIT_FAILED` + `database.migration` 或 `database.schema_repair`。</td><td>`InstallationIntegrityModalHost`，kind 为 `data_migration`。</td><td>发送诊断；不显示重建按钮。</td><td>unit 覆盖 migration 与 schema repair。</td></tr>
+      <tr><td>`backend_startup_failed`</td><td>无法命中以上分类时兜底，保留 boundary code/stage。</td><td>`InstallationIntegrityModalHost` 默认 incomplete style 文案。</td><td>发送诊断；没有恢复按钮。</td><td>unit 覆盖通用失败和无关服务初始化失败。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 数据库恢复边界</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>允许恢复</h3>
+      <p>`recoverCorruptedDatabaseAfterUserConfirmation()` 第一行读取当前 failure，只有 `backend_recoverable_database_corruption` 继续执行。成功路径是 `stopBackend()`、`startBackendWithRecovery()`、`markReady(port, 'backendManager.recoverCorruptedDatabase')`、`reloadMainWindow()`。</p>
+    </section>
+    <section class="panel">
+      <h3>拒绝恢复</h3>
+      <p>没有 active failure，或 reason 是 `backend_data_migration_failed` 等其他类型时，函数抛出 `backend_corrupted_database_recovery_not_available`，并且不会 stop 或 restart backend。</p>
+    </section>
+    <section class="panel">
+      <h3>重启失败</h3>
+      <p>如果 `startBackendWithRecovery()` 抛错，main 会再次 `markBackendStartupFailed()` 并采集失败；单元测试确认此时不会 `markReady()` 或 `reloadMainWindow()`。</p>
+    </section>
+  </div>
+
+  <h2>6. 证据边界</h2>
+  <table>
+    <thead>
+      <tr><th>证据</th><th>证明了什么</th><th>没有证明什么</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>`tests/unit/bootstrap/backendStartupFailure.test.ts`</td><td>分类器和 modal action 分流的输入输出稳定。</td><td>不启动真实 Electron，也不证明真实资源目录一定缺失。</td></tr>
+      <tr><td>`tests/unit/bootstrap/recoverCorruptedDatabase.test.ts`</td><td>恢复动作的守卫、成功顺序和 restart 失败边界。</td><td>不证明 aioncore 内部数据库重建细节。</td></tr>
+      <tr><td>`tests/unit/bootstrap/recoverCorruptedDatabasePreload.test.ts`</td><td>preload 暴露的恢复方法确实 invoke main channel。</td><td>不证明 renderer 按钮点击后的完整 UI 反馈。</td></tr>
+      <tr><td>`tests/e2e/specs/installation-integrity.e2e.ts`</td><td>debug 注入 `backend_incomplete_installation` 时，窗口中出现安装完整性弹窗、诊断按钮、下载按钮，点击诊断后记录上报标记。</td><td>不覆盖 GLIBC、架构不匹配、数据库重建和所有真实二进制启动失败。</td></tr>
+      <tr><td>普通 app-launch 烟雾测试</td><td>最多证明窗口和 renderer 能加载。</td><td>不能证明 backend recovery 链路，也不能把可见 body 等同于 backend 启动成功。</td></tr>
+    </tbody>
+  </table>
+</main>
+<script>mermaid.initialize({ startOnLoad: true, securityLevel: 'loose' });</script>
+</body>
+</html>

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · PluginContext 注入与工具注册：7 大隔离能力 + 命名空间前缀 + 懒激活</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · PluginContext 注入与工具注册：7 大隔离能力 + 命名空间前缀 + 懒激活 <span class="tag">上下文 & 工具</span></h1>
+
+<div class="mission">
+  <b>本节目标：</b>学完你能画出 PluginContext 的 7 大组件及其权限约束，能解释工具注册的命名空间前缀设计和懒激活机制，能区分命令的 Slash 路径和 Palette 路径的权限差异。
+</div>
+
+<p>上一课我们了解了插件如何被发现和判定权限。这一课进入插件获得运行环境的核心阶段——<code>createPluginContext()</code> 构建隔离沙箱，以及贡献点如何被扫描、包装、注册到全局注册表。</p>
+
+<h2>一、createPluginContext()：7 大隔离能力组件</h2>
+
+<p>这是插件获取运行环境的唯一入口。每个插件获得一个<strong>完全隔离的</strong>上下文对象，不能直接访问宿主进程的全局状态。</p>
+
+<pre><code>export function createPluginContext({
+  pluginId, pluginKey, source, pluginDir, dataDir, bus, accessLevel,
+  permissions, capabilities, sensitiveCapabilities, network,
+  registerSessionFile, emitResourceChanged, resourceIO, resourceWatch,
+  configSchema, logSink, runtimeContext
+}) {
+  // 1. 配置存储：JSON Schema 驱动的 key-value，三级作用域
+  const config = createPluginConfigStore({ dataDir, schema: configSchema });
+
+  // 2. 权限与能力声明归一化
+  const grantedPermissions = normalizePermissions(permissions);
+  const declaredCapabilities = normalizeCapabilityList(capabilities);
+
+  // 3. 网络能力（受 capabilities 和 manifest.network 限制）
+  const pluginNetwork = createPluginNetwork({ pluginId, network,
+    capabilities: declaredCapabilities,
+    sensitiveCapabilities: declaredSensitiveCapabilities });
+
+  // 4. 资源 IO（文件系统操作，按 capability 鉴权）
+  const pluginResources = createPluginResources({ pluginId, resourceIO,
+    resourceWatch, capabilities, sensitiveCapabilities, runtimeScope });
+
+  // 5. 结构化日志（带 [plugin:pluginId] 前缀）
+  const prefix = `[plugin:${pluginId}]`;
+  const log = {
+    info: (...args) => { recordLog("info", args); console.log(prefix, ...args); },
+    warn: (...args) => { recordLog("warn", args); console.warn(prefix, ...args); },
+    error: (...args) => { recordLog("error", args); console.error(prefix, ...args); },
+  };
+
+  // 6. EventBus 代理（受权限约束）— 详见第 4 课
+  const pluginBus = createPluginBusProxy(bus, { ownerContext, grantedPermissions,
+    allowHandle: accessLevel === "full-access" });
+
+  // 7. 只读身份描述（嵌入 bus 事件中用于审计）
+  const ownerContext = Object.freeze({ kind: "plugin", pluginId, pluginKey,
+    source, pluginDir, dataDir });
+
+  return Object.freeze({ config, bus: pluginBus, network: pluginNetwork,
+    resources: pluginResources, log, appEvents, ownerContext, ... });
+}</code></pre>
+
+<table>
+<tr><th>组件</th><th>权限约束</th><th>说明</th></tr>
+<tr><td><code>config</code></td><td>按 JSON Schema 校验；sensitive 字段自动脱敏</td><td>key-value 配置，支持 global / per-agent / per-session 三级作用域</td></tr>
+<tr><td><code>bus</code></td><td>restricted: 不能 emit llm_usage、不能 handle</td><td>EventBus 代理，所有操作经过权限检查转发到全局 bus</td></tr>
+<tr><td><code>network</code></td><td>需 <code>network.fetch</code> capability；受 allowedDomains/methods/allowLocalhost 限制</td><td>包装的 fetch，限制域名、方法、响应大小（默认 5MB），默认超时 15 秒</td></tr>
+<tr><td><code>resources</code></td><td>按操作类型：resource.read/write/search/materialize/watch</td><td>文件系统操作（stat/read/write/delete/copy/move/list/search/watch）</td></tr>
+<tr><td><code>log</code></td><td>无限制</td><td>带 <code>[plugin:pluginId]</code> 前缀，同时发送到诊断面板</td></tr>
+<tr><td><code>appEvents</code></td><td>无限制</td><td>向宿主发送应用级事件，自动标注 <code>source: "plugin:pluginId"</code></td></tr>
+<tr><td><code>ownerContext</code></td><td>只读（Object.freeze）</td><td>插件身份描述，嵌入 bus 事件中用于审计追踪</td></tr>
+</table>
+
+<div class="side">
+  <b>关键洞察：config 的三级作用域</b><br>
+  <code>global</code>（所有 Agent 共享）→ <code>per-agent</code>（特定 Agent 覆盖）→ <code>per-session</code>（单次会话覆盖）。读取时按 session > agent > global 优先级合并。sensitive 字段（如 API key）读取时自动脱敏为 <code>"***"</code>，仅在 <code>config.get("key", { reveal: true })</code> 时返回明文。
+</div>
+
+<h2>二、工具注册：命名空间前缀 + 执行包装 + 懒激活</h2>
+
+<p><code>_loadTools()</code> 扫描 <code>tools/*.ts</code> 文件，每个文件必须导出 <code>{ name, description, execute }</code>。</p>
+
+<pre><code>async _loadTools(entry) {
+  const toolsDir = path.join(entry.pluginDir, "tools");
+  if (!fs.existsSync(toolsDir)) return;
+  const files = fs.readdirSync(toolsDir).filter(isPluginSourceFile);
+  for (const file of files) {
+    const mod = await freshImport(path.join(toolsDir, file));
+    if (!mod.name || !mod.description || typeof mod.execute !== "function") continue;
+
+    const origExecute = mod.execute;
+    this._tools.push({
+      name: `${entry.id}_${mod.name}`,        // 命名空间前缀：pluginId_toolName
+      description: mod.description,
+      parameters: mod.parameters ?? {},
+      execute: async (_toolCallId, params, signalOrRuntimeCtx, _onUpdate, piCtx) => {
+        // ① 懒激活：首次工具调用时触发 activatePlugin
+        await this.activatePlugin(entry.id,
+          { event: `onToolCall:${mod.name}`, toolName: mod.name });
+
+        // ② 上下文合并：runtime + session + helper
+        const { ctx: runtimeCtx } = normalizeToolRuntimeContext(signalOrRuntimeCtx, piCtx);
+        const sessionCtx = normalizeToolSessionRef(runtimeCtx, fallbackSessionPath);
+        const mergedCtx = { ...entry.ctx, ...runtimeCtx, ...sessionCtx, ...helperCtx };
+
+        // ③ 执行原始工具函数
+        const raw = await origExecute(params, mergedCtx);
+        return normalizePluginToolResult(raw, entry.id);
+      },
+      _pluginId: entry.id, _pluginKey: entry.pluginKey,
+    });
+  }
+}</code></pre>
+
+<div class="step"><span class="num">1</span><b>命名空间前缀：</b>工具名称格式为 <code>{pluginId}_{toolName}</code>，避免跨插件名称冲突。Agent 调用时 <code>getPluginTool()</code> 可同时支持带前缀和不带前缀的名称。<br><span class="where">core/plugin-manager.ts:822-867</span></div>
+
+<div class="step"><span class="num">2</span><b>懒激活：</b>每次执行工具前自动调用 <code>activatePlugin()</code> 触发激活事件匹配。如果插件 activationEvents 不含 onStartup，首次工具调用时才激活。<br><span class="where">激活事件：onToolCall / onBusRequest / onPageOpen / onWidgetOpen</span></div>
+
+<div class="step"><span class="num">3</span><b>上下文合并：</b>将 runtimeCtx（signal/session/agent）、sessionCtx（sessionPath/sessionId）、helperCtx（registerSessionFile/stageFile）合并到插件 ctx。<br><span class="where">normalizeToolRuntimeContext() + normalizeToolSessionRef()</span></div>
+
+<div class="step"><span class="num">4</span><b>结果标准化：</b><code>normalizePluginToolResult()</code> 将字符串、<code>{content}</code>、或其他格式统一转为 <code>{ content: [{ type: "text", text }] }</code>。</div>
+
+<h2>三、命令注册：Slash vs Palette 两条路径</h2>
+
+<p>命令有两条注册路径，权限要求不同：</p>
+
+<table>
+<tr><th>路径</th><th>权限要求</th><th>注册到</th><th>说明</th></tr>
+<tr><td><strong>Slash（handler）</strong></td><td>仅 full-access</td><td><code>slashRegistry.registerCommand()</code></td><td>默认 <code>permission: "owner"</code>（最严）</td></tr>
+<tr><td><strong>Palette（execute）</strong></td><td>所有插件可用</td><td><code>this._commands[]</code></td><td>向后兼容的非 slash 命令</td></tr>
+</table>
+
+<pre><code>// Slash 注册的 full-access 闸门
+if (hasHandler) {
+  if (entry.accessLevel !== "full-access") {
+    log.warn(`"${entry.id}/${file}" declares slash handler but plugin is restricted; skipped.`);
+    continue;
+  }
+  this._slashRegistry.registerCommand({ name: mod.name, handler: mod.handler, ... },
+    { source: "plugin", sourceId: entry.pluginKey });
+}</code></pre>
+
+<h2>四、生命周期激活：_activatePluginEntry() 的 6 步流程</h2>
+
+<div class="step"><span class="num">1</span><b>入口解析：</b><code>resolvePluginEntry()</code> 按优先级查找 <code>index.ts</code>（首选）→ <code>index.js</code>。无入口则 <code>hasLifecycle = false</code>，跳过激活。<br><span class="where">core/plugin-manager.ts:747-801</span></div>
+
+<div class="step"><span class="num">2</span><b>动态导入：</b><code>freshImport()</code> 使用时间戳参数（<code>?t=Date.now()</code>）绕过 Node.js 模块缓存，确保热重载时获取最新代码。</div>
+
+<div class="step"><span class="num">3</span><b>实例化：</b>取 <code>mod.default</code> 作为插件类，<code>new PluginClass()</code> 创建实例。</div>
+
+<div class="step"><span class="num">4</span><b>注入上下文与工具：</b>将 <code>entry.ctx</code> 赋值给 <code>instance.ctx</code>；注入 <code>instance.register()</code>（注册清理函数）和 <code>ctx.registerTool()</code>（动态注册工具）。</div>
+
+<div class="step"><span class="num">5</span><b>调用 onload：</b>带超时保护（默认 15 秒）执行 <code>instance.onload()</code>。负责初始化——连接外部服务、预热缓存等。</div>
+
+<div class="step"><span class="num">6</span><b>状态更新：</b>成功 → <code>activationState = "activated"</code>；失败 → <code>"failed"</code> 并记录 <code>activationError</code>。注意 status 可能仍为 "loaded"（静态贡献已加载，仅生命周期失败）。</div>
+
+<div class="danger">
+  <b>重要：status 和 activationState 是两个独立维度。</b><br>
+  <code>status: "loaded" && activationState: "failed"</code> 表示插件静态贡献（tools/skills 等）加载成功，但 onload 失败。这种 dual-status 编码避免了使用额外字段——工具仍然可用，只是插件没有完成初始化。
+</div>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. createPluginContext() 创建的 7 大组件中，哪个组件操作前需要校验 capability 声明？</p>
+<span class="opt">A. config（配置存储）— 所有读写都需要 capability</span>
+<span class="opt">B. network 和 resources — 分别需要 network.fetch 和 resource.read/write 等 capability 声明</span>
+<span class="opt">C. log（日志）— 写日志需要 logging.write capability</span>
+<span class="opt">D. appEvents — 发送事件需要 event.emit capability</span>
+<details><summary>看答案</summary><b>B</b>。network 需要 <code>network.fetch</code> capability，且受 manifest.network 中 allowedDomains/methods/allowLocalhost 的三重限制。resources 按操作类型需要 resource.read/write/search/materialize/watch 等 capability。config、log、appEvents、ownerContext 无限制或只读。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 工具命名空间前缀 <code>{pluginId}_{toolName}</code> 的设计目的是什么？</p>
+<span class="opt">A. 为了让工具名更长更好看</span>
+<span class="opt">B. 避免跨插件名称冲突——两个插件都可以定义名为 "hello" 的工具，运行时通过前缀区分</span>
+<span class="opt">C. 为了性能优化——前缀让查找更快</span>
+<span class="opt">D. 为了让用户知道工具来自哪个插件</span>
+<details><summary>看答案</summary><b>B</b>。命名空间前缀是插件系统避免名称冲突的核心机制。Agent 调用时可通过 <code>getPluginTool()</code> 同时支持带前缀和不带前缀的名称——如果当前只有一个工具匹配不带前缀的名称，可以直接使用短名。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. Restricted 插件注册命令时，Slash 路径会发生什么？</p>
+<span class="opt">A. 正常注册，和 Palette 路径一样</span>
+<span class="opt">B. 跳过并打印 warn 日志——restricted 插件不能注册 slash 命令，只能注册 palette 命令</span>
+<span class="opt">C. 抛出异常，阻止插件加载</span>
+<span class="opt">D. 自动降级为 Palette 命令</span>
+<details><summary>看答案</summary><b>B</b>。Slash 注册有显式的 <code>accessLevel !== "full-access"</code> 闸门——如果受限插件尝试声明 slash handler，系统会打印 warn 日志并 <code>continue</code> 跳过该文件。但 Palette 路径的 execute 命令不受影响，两种路径在同一次 <code>_loadCommands()</code> 中独立处理。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. _activatePluginEntry() 中，如果 onload() 抛出异常，工具的可用性如何？</p>
+<span class="opt">A. 所有工具都不可用</span>
+<span class="opt">B. 工具仍然可用——静态贡献（tools/skills 等）已在 onload 之前注册完成，只有 activationState 变为 failed</span>
+<span class="opt">C. 只有部分工具可用</span>
+<span class="opt">D. 插件被完全卸载</span>
+<details><summary>看答案</summary><b>B</b>。这是 dual-status 编码的核心价值：工具注册发生在生命周期激活之前，所以即使 onload 失败，插件的静态贡献仍然可用。状态变为 <code>status: "loaded" && activationState: "failed"</code>——用户仍然可以调用工具，只是插件的初始化逻辑未完成。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>core/plugin-context.ts</code> 第 23-176 行，阅读 <code>createPluginContext()</code> 的完整初始化流程。然后打开 <code>core/plugin-manager.ts</code> 第 822-867 行的 <code>_loadTools()</code>，注意执行包装层（execute wrapper）的三步操作：激活插件、合并上下文、标准化结果。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：如果插件在 onload 中注册了一个清理函数，卸载时会按什么顺序执行？config 的三级作用域如何解决 per-agent 和 per-session 的优先级冲突？下一课我们聚焦 <strong>EventBus 通信与 Agent 调用</strong>——四级权限矩阵和 executePluginTool 全链路。</div>
+
+<div class="nav">课程 0003 / 插件安装与加载全链路 · <a href="0002.html">← 上一课：manifest 扫描与加载决策</a> · <a href="0004.html">下一课：EventBus 通信与 Agent 调用 →</a></div>
+
+</body>
+</html>

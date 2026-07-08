@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slash Workflows Module Tour</title>
+  <link rel="stylesheet" href="../assets/slash-workflows.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../reference/slash-workflows-overview.html#flow">参考：完整链路</a>
+    <a href="../reference/slash-workflows-overview.html#commands">参考：命令清单</a>
+    <a href="../reference/slash-workflows-overview.html#tests">参考：测试证据</a>
+  </nav>
+
+  <h1>读懂 slash command 如何从模板进入执行链路</h1>
+  <p class="lead">本课只回答一个问题：用户输入 <code>/prompt-workflow parallel-review some-file</code> 后，系统如何把一个 Markdown prompt 变成真正的 subagent 执行请求。先抓住这条主线，其他命令清单放到参考页。</p>
+
+  <div class="flow" aria-label="主链路">
+    <div><span class="badge">1</span>发现模板：读取 package/user/project 三类 prompt 目录。</div>
+    <div><span class="badge">2</span>注册命令：把模板命令接到 slash 命令系统。</div>
+    <div><span class="badge">3</span>执行桥接：转换为 <code>SubagentParamsLike</code>，经事件桥进入 executor。</div>
+  </div>
+
+  <h2>1. 先把 Markdown 变成 workflow</h2>
+  <p>入口在 <span class="where">open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</span>。模块先扫描内置 package prompts、用户 prompts、项目 prompts。因为发现结果放进同一个 <code>Map</code>，后发现的同名 workflow 会覆盖前面的同名项；测试里明确验证了项目 prompt 会覆盖用户 prompt。</p>
+
+  <pre><code>function promptDirs(cwd: string): string[] {
+  return [
+    packagePromptsDir(),
+    path.join(getAgentDir(), "prompts"),
+    path.join(getProjectConfigDir(cwd), "prompts"),
+  ];
+}
+
+function loadPromptWorkflow(filePath: string): PromptWorkflow | undefined {
+  const content = fs.readFileSync(filePath, "utf-8");
+  const { frontmatter, body } = parseFrontmatter(content);
+  const name = path.basename(filePath, ".md");
+  if (!name || RESERVED_COMMAND_NAMES.has(name)) return undefined;
+  return {
+    name,
+    description: stringField(frontmatter, "description") ?? firstNonEmptyLine(body),
+    body,
+    agent: parseAgent(frontmatter),
+  };
+}</code></pre>
+
+  <p>没有写 <code>subagent</code> 的模板默认走 <code>delegate</code>。模板正文里的 <code>$@</code>、<code>$ARGUMENTS</code>、<code>$1</code> 会在运行时被 slash 命令参数替换，所以 Markdown 文件本身就是可执行 workflow 的“任务蓝图”。</p>
+
+  <h2>2. 再注册成 slash 命令</h2>
+  <p>普通 slash 命令集中在 <span class="where">open-ai-agent/pi-subagents/src/slash/slash-commands.ts</span>。关键不是 `/prompt-workflow` 自己执行，而是 `registerSlashCommands` 把 `runSlashSubagent` 注入给 prompt workflow 注册器。这样模板命令和 `/run`、`/chain`、`/parallel` 最终共用同一个执行出口。</p>
+
+  <pre><code>registerPromptWorkflowCommands({
+  pi,
+  run: (params, ctx) =&gt; runSlashSubagent(pi, ctx, params),
+});
+
+pi.registerCommand("prompt-workflow", {
+  handler: async (rawArgs, ctx) =&gt; {
+    const words = shellWords(rawArgs);
+    const workflow = findWorkflow(discoverPromptWorkflows(ctx.cwd), words.shift() ?? "");
+    const runtime = parseRuntimeOptions(words);
+    await run(workflowParams(workflow, runtime.args, runtime), ctx);
+  },
+});</code></pre>
+
+  <p>这一步完成了最重要的翻译：模板 frontmatter 和运行时 flags 被合成为 <code>agent</code>、<code>task</code>、<code>model</code>、<code>skill</code>、<code>context</code>、<code>worktree</code> 等结构化字段。</p>
+
+  <h2>3. 最后进入 slash 执行桥</h2>
+  <p><code>runSlashSubagent</code> 先生成可渲染的初始结果，再发出事件请求。真正接住请求的是 <span class="where">open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</span>；扩展入口 <span class="where">open-ai-agent/pi-subagents/src/extension/index.ts</span> 在启动时注册这个 bridge，并把它连到 executor。</p>
+
+  <pre><code>const requestId = randomUUID();
+const initialDetails = buildSlashInitialResult(requestId, params);
+pi.sendMessage({
+  customType: SLASH_RESULT_TYPE,
+  content: initialText,
+  display: true,
+  details: initialDetails,
+});
+
+const response = await requestSlashRun(pi, ctx, requestId, params);
+const finalDetails = finalizeSlashResult(response);
+pi.sendMessage({
+  customType: SLASH_RESULT_TYPE,
+  content: buildSlashExportText(response),
+  display: !ctx.hasUI,
+  details: finalDetails,
+});</code></pre>
+
+  <p>这里的 UI 消息不是装饰。<span class="where">open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</span> 会先保存 running placeholder，再把 bridge 回传的 progress 写入 live snapshot，最后用 final snapshot 替换。于是用户看到的是同一张 slash result 卡片从“运行中”变成“完成”。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="exercise">
+    <p><strong>暂停回忆：</strong>不看上文，把这四件事按发生顺序排序：A. executor 执行；B. Markdown prompt 被解析；C. `registerPromptWorkflowCommands` 注入 `runSlashSubagent`；D. `buildSlashInitialResult` 创建可渲染占位结果。</p>
+    <details>
+      <summary>查看答案与反馈</summary>
+      <div class="answer">
+        <p>答案是 <strong>B → C → D → A</strong>。B 发生在 workflow 发现阶段；C 发生在 slash 命令注册阶段；用户真正运行命令后，D 先让 UI 有 live card；随后 slash bridge 才把请求交给 executor。若你把 A 放在 D 前面，说明你跳过了 live-state 这层可观测性。</p>
+      </div>
+    </details>
+  </div>
+
+  <p class="source-list">主要来源：<span class="where">open-ai-agent/pi-subagents/src/slash/prompt-workflows.ts</span>、<span class="where">open-ai-agent/pi-subagents/src/slash/slash-commands.ts</span>、<span class="where">open-ai-agent/pi-subagents/src/slash/slash-bridge.ts</span>、<span class="where">open-ai-agent/pi-subagents/src/slash/slash-live-state.ts</span>。下一步可以让 agent 追问：某一个 flag 是在哪一层被消费的，或某个测试如何证明这条链路。</p>
+</main>
+</body>
+</html>

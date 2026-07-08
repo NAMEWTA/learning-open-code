@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>问题框架：Memory 双入队为何共存</title>
+  <link rel="stylesheet" href="../assets/deep-dive-lesson.css">
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+  </script>
+</head>
+<body>
+<main>
+  <article class="page">
+    <h1>问题框架：Memory 双入队为何共存</h1>
+    <p class="lead">
+      学习目标：解释 DeerFlow 为何对同一 <code>MemoryUpdateQueue</code> 使用 <strong>debounce 入队</strong>与<strong>零延迟入队</strong>两条路径，以及 summarization 场景下不能等防抖的原因。
+      API 对照与测试锚点见
+      <a href="../reference/memory-dual-queue-notes.html">memory-dual-queue-notes 参考页</a>；
+      L2 总览见 <a href="../../slice-memory-update-injection/lessons/0001-flow-map.html">memory 注入切片</a>。
+    </p>
+    <div class="meta">
+      <span class="pill">L4 深度剖析</span>
+      <span class="pill">源码：<code>queue.py</code></span>
+      <span class="pill">关联：<a href="../../module-memory-context/lessons/0001-memory-context-module-tour.html">module-memory-context</a></span>
+    </div>
+
+    <h2>1. 问题：记忆更新既要省 LLM，又不能丢历史</h2>
+    <p>
+      长期 memory 由后台 LLM 从对话里抽取事实，每调一次都花钱、也占速率配额。
+      若每轮 agent 结束立刻写盘，短对话里连续多轮会产生大量重复抽取。
+      另一方面，<code>SummarizationMiddleware</code> 会把旧消息压成摘要并从 <code>messages</code> 里移除——
+      若这些轮次还没进 memory 队列，事实就永远丢失。
+      DeerFlow 的解法是<strong>同一条队列、两种调度</strong>：常态走 debounce 合并，摘要前走即时 flush。
+    </p>
+    <div class="filetree">每轮 agent 结束
+  → MemoryMiddleware.after_agent
+  → queue.add()           ← debounce_seconds（默认 30s）
+
+上下文逼近上限、即将压缩
+  → SummarizationMiddleware._fire_hooks
+  → memory_flush_hook
+  → queue.add_nowait()    ← _schedule_timer(0)</div>
+
+    <h2>2. debounce 路径：批量、降本</h2>
+    <p>
+      <span class="where">memory_middleware.py</span> 在 <code>after_agent</code> 过滤出「用户句 + 最终 AI 回复」（去掉 tool call 中间态），
+      并在<strong>仍存活</strong>的请求上下文里捕获 <code>user_id</code> 与 <code>deerflow_trace_id</code>——
+      因为后续 <code>threading.Timer</code> 线程不会继承 ContextVar。
+      然后调用 <code>queue.add()</code>：入队后重置定时器为 <code>config.debounce_seconds</code>。
+      同一 <code>(thread_id, user_id, agent_name)</code> 在窗口内多次入队会被 <code>_enqueue_locked</code> 合并为最新一份消息快照。
+    </p>
+    <pre><code>queue.add(...)          # after_agent
+  → _enqueue_locked(...)
+  → _reset_timer()      # delay = debounce_seconds</code></pre>
+
+    <h2>3. 即时路径：摘要前的「最后抢救」</h2>
+    <p>
+      <span class="where">summarization_hook.py</span> 注册为 SummarizationMiddleware 的 <code>before_summarization</code> hook。
+      在消息被压摘要<strong>之前</strong>，对 <code>event.messages_to_summarize</code> 做同样的 memory 过滤；
+      若至少有一对 human/ai，则 <code>queue.add_nowait()</code>，内部把定时器设为 <code>0</code>，尽快触发 <code>_process_queue</code>。
+      设计意图明确：压缩一旦完成，原始逐句对话不再可供 MemoryUpdater 读取，不能再等 30 秒防抖。
+    </p>
+    <div class="mermaid-wrap">
+      <pre class="mermaid">sequenceDiagram
+    participant MW as MemoryMiddleware
+    participant Q as MemoryUpdateQueue
+    participant SM as SummarizationMiddleware
+    participant H as memory_flush_hook
+
+    MW->>Q: add() debounce 30s
+    Note over Q: 多轮合并同一 thread key
+    SM->>H: before_summarization
+    H->>Q: add_nowait() timer=0
+    Q->>Q: _process_queue → MemoryUpdater</pre>
+    </div>
+
+    <h2>4. 边界：何时重叠、何时跳过</h2>
+    <p>
+      两条路径共享 <code>_enqueue_locked</code>，不是两个队列。
+      <code>memory.enabled=false</code>、缺少 <code>thread_id</code>、或过滤后没有 human+ai 组合时，两侧都直接 return。
+      若 <code>_processing=True</code> 时又来 <code>add_nowait</code>，<code>_process_queue</code> 会再 <code>_schedule_timer(0)</code>，保留「即时 flush」语义而不丢队。
+      同一轮既 <code>after_agent</code> 又即将 summarization 时，后到的入队会覆盖同 key 的 <code>messages</code>，correction/reinforcement 标志做 OR 合并——
+      通常 summarization 批次更完整，这正是期望行为。
+      <code>memory_flush_hook</code> 用 <code>resolve_runtime_user_id</code> 而非 middleware 那套 trace 捕获；详见参考页对照表。
+    </p>
+
+    <div class="callout">
+      <p><strong>判断题：</strong>用户长对话触发 summarization，但 <code>memory.enabled=true</code> 且 summarization 已开启。被压缩的旧消息若未经过 <code>memory_flush_hook</code>，仅靠 <code>after_agent</code> 的 30s debounce，是否仍能保证写入 memory？</p>
+      <p>A. 能，after_agent 每轮都已入队 &nbsp; B. 不能，Timer 未触发前消息已被摘要丢弃 &nbsp; C. 能，dedupe 会保留最早一份 &nbsp; D. 取决于 DynamicContext 注入</p>
+    </div>
+    <div class="answer">
+      <p><strong>参考答案：B。</strong>debounce 只延迟<strong>处理</strong>，不阻止 summarization 从 state 删除原文；没有 hook 的即时 flush，队列里可能仍是旧快照或 Timer 尚未跑完。A 忽略了压缩与 Timer 的竞态；C 错在 dedupe 保留的是<strong>最新</strong>快照而非最早。</p>
+    </div>
+
+    <p class="note">
+      主要来源：<code>queue.py</code>、<code>memory_middleware.py</code>、<code>summarization_hook.py</code>。
+      想继续下钻 <code>_process_queue</code> 与 <code>MemoryUpdater</code> 写盘，向 agent 追问即可。
+    </p>
+  </article>
+</main>
+</body>
+</html>

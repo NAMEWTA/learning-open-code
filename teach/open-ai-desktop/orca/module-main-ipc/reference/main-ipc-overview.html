@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>主进程 IPC 边界模块总览参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>主进程 IPC 边界模块总览参考</h1>
+        <p class="meta">定位：L1 模块速查。配合 <a href="../lessons/0001-main-ipc-module-tour.html">导览短课</a> 使用。</p>
+
+        <h2>职责边界</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>核心文件</th>
+              <th>职责</th>
+              <th>边界不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>preload 桥</td>
+              <td><code>src/preload/index.ts</code></td>
+              <td>把 renderer 可用能力组织成 <code>api</code>，用 <code>contextBridge.exposeInMainWorld()</code> 暴露。</td>
+              <td>renderer 只看到封装后的函数，不直接拿到 Node/Electron main 能力。</td>
+            </tr>
+            <tr>
+              <td>总注册</td>
+              <td><code>src/main/ipc/register-core-handlers.ts</code></td>
+              <td>一次性注册 app、filesystem、runtime、settings、browser、GitHub/GitLab、Linear/Jira 等核心 domain handler。</td>
+              <td>module-level <code>registered</code> 防止重复注册；trusted webContents ID 每次仍会更新。repo/worktree handlers 由窗口装配层注册。</td>
+            </tr>
+            <tr>
+              <td>终端边界</td>
+              <td><code>src/main/ipc/pty.ts</code></td>
+              <td>处理 PTY spawn/write/resize/kill、renderer delivery、provider 路由、pane serializer 和 mobile driver 防线。</td>
+              <td>本地 spawn 等 daemon startup barrier；SSH/headless 路径不等桌面 daemon。</td>
+            </tr>
+            <tr>
+              <td>文件与 Git</td>
+              <td><code>src/main/ipc/filesystem.ts</code></td>
+              <td>注册文件读写、搜索和 <code>git:*</code> channel；watcher 由 <code>src/main/ipc/filesystem-watcher.ts</code> 单独注册。</td>
+              <td><code>connectionId</code> 存在时走 SSH provider，否则走本地 Git；commit message 在 IPC 边界先校验。</td>
+            </tr>
+            <tr>
+              <td>移动端配对</td>
+              <td><code>src/main/ipc/mobile.ts</code></td>
+              <td>生成 QR/runtime pairing URL、列设备、列 runtime grant、撤销设备和报告 WebSocket ready。</td>
+              <td>移动端 QR 用 <code>scope: 'mobile'</code>；web/runtime link 用 <code>scope: 'runtime'</code>。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>接口清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>接口族</th>
+              <th>preload API</th>
+              <th>main channel</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>PTY</td>
+              <td><code>api.pty.spawn/write/resize/kill</code></td>
+              <td><code>pty:spawn</code>、<code>pty:write</code>、<code>pty:resize</code>、<code>pty:kill</code></td>
+              <td>spawn/kill 用 invoke；write/resize 用 send/on，降低高频空回复。</td>
+            </tr>
+            <tr>
+              <td>PTY 事件</td>
+              <td><code>api.pty.onData/onExit/onReplay</code></td>
+              <td><code>pty:data</code>、<code>pty:exit</code>、<code>pty:replay</code></td>
+              <td>main 将 provider 数据批量转发给当前 trusted renderer。</td>
+            </tr>
+            <tr>
+              <td>Git</td>
+              <td><code>api.git.status/commit/stage/discard</code></td>
+              <td><code>git:status</code>、<code>git:commit</code>、<code>git:stage</code>、<code>git:discard</code></td>
+              <td>当前源码中由 <code>src/main/ipc/filesystem.ts</code> 注册，按 <code>connectionId</code> 分流本地或 SSH provider。</td>
+            </tr>
+            <tr>
+              <td>Mobile</td>
+              <td>renderer 通过 mobile UI 调 main channel</td>
+              <td><code>mobile:getPairingQR</code>、<code>mobile:getRuntimePairingUrl</code>、<code>mobile:revokeDevice</code></td>
+              <td>handler 依赖 <code>OrcaRuntimeRpcServer</code>，因为设备 registry 和 pairing offer 归它所有。</td>
+            </tr>
+            <tr>
+              <td>核心注册</td>
+              <td>无直接 renderer API</td>
+              <td><code>registerCoreHandlers()</code></td>
+              <td>由窗口装配调用，确保 domain handlers 与 trusted window 状态就绪。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键依赖与调用示例</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>调用链</th>
+              <th>关键依赖</th>
+              <th>读法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>renderer → preload → PTY</td>
+              <td><code>ipcRenderer</code>、<code>ipcMain</code>、<code>IPtyProvider</code>、<code>OrcaRuntimeService</code></td>
+              <td>先看 preload 参数形状，再看 <code>src/main/ipc/pty.ts</code> 中 provider 选择和 runtime driver 防线。</td>
+            </tr>
+            <tr>
+              <td>renderer → preload → Git</td>
+              <td><code>Store</code>、Git runner、SSH filesystem/git provider</td>
+              <td>不要找旧清单里的 git.ts；直接看 <code>src/main/ipc/filesystem.ts</code> 的 <code>git:*</code> handlers。</td>
+            </tr>
+            <tr>
+              <td>renderer → mobile IPC → runtime RPC</td>
+              <td><code>OrcaRuntimeRpcServer</code>、device registry、QRCode、networkInterfaces</td>
+              <td>mobile handler 只是 desktop UI 的桥，真正 token 和 E2EE 物料在 runtime RPC server。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-typescript">const offer = rpcServer.createPairingOffer({
+  address: ip,
+  rotate: args?.rotate,
+  name: `Mobile ${new Date().toLocaleDateString()}`,
+  scope: 'mobile'
+})</code></pre>
+        <p>
+          这是移动端 QR 的最小调用示例：IPC handler 负责选择可达地址和生成 QR，runtime RPC server 负责生成带 scope 的 pairing offer。
+        </p>
+
+        <h2>测试佐证</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行为</th>
+              <th>测试文件</th>
+              <th>不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>总注册幂等</td>
+              <td><code>src/main/ipc/register-core-handlers.test.ts</code></td>
+              <td>再次调用会更新 trusted IDs，但不会重复注册 IPC handlers。</td>
+            </tr>
+            <tr>
+              <td>PTY 启动屏障</td>
+              <td><code>src/main/ipc/pty-startup-barrier-ordering.test.ts</code></td>
+              <td>本地 spawn 在解析 provider 前等待 startup barrier，防止抢在 daemon provider 替换前运行。</td>
+            </tr>
+            <tr>
+              <td>daemon 路径 parity</td>
+              <td><code>src/main/ipc/pty.test.ts</code></td>
+              <td>daemon-backed PTY 也注入 OpenCode、Codex、proxy、agent hook 等环境，与本地 provider 行为对齐。</td>
+            </tr>
+            <tr>
+              <td>Git 本地/SSH 分流</td>
+              <td><code>src/main/ipc/filesystem.test.ts</code></td>
+              <td><code>connectionId</code> 存在时走 SSH provider；空 commit message 在进入 provider 前就被拒绝。</td>
+            </tr>
+            <tr>
+              <td>移动端 pairing</td>
+              <td><code>src/main/ipc/mobile.test.ts</code></td>
+              <td>网络地址会优先 tailnet；mobile 和 runtime scope 分开；pending runtime grant 也可撤销。</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </main>
+  </body>
+</html>

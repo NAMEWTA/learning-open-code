@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Commons 与 gRPC 基础模块速查</title>
+  <link rel="stylesheet" href="../assets/commons-grpc.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-commons-grpc-module-tour.html">返回短课</a>
+    <a href="commons-grpc-api.html">API 字典</a>
+    <a href="route-strategy-api.html">路由策略 API</a>
+    <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">责任链参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Client 参考</a>
+  </nav>
+
+  <h1>Commons 与 gRPC 基础模块速查</h1>
+  <p class="lead">这份参考用于快速定位 <code>snail-ai-commons-core</code> 与 <code>snail-ai-commons-grpc</code> 的共享契约。短课负责建立地图，本文负责放长清单、边界和风险。</p>
+
+  <h2>1. 模块定位</h2>
+  <table>
+    <thead>
+      <tr><th>模块</th><th>职责</th><th>主要消费者</th><th>关键源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>snail-ai-commons-core</code></td>
+        <td>公共 DTO、枚举、响应模型、异常、JSON 工具、RAG 工具和 OpenAPI DTO。</td>
+        <td>Server features、Admin/OpenAPI、Agent Client、Models、Persistence。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-core/src/main/java/com/aizuda/snail/ai/common</span></td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-commons-grpc</code></td>
+        <td>统一 gRPC request/result 信封、URI/header 常量、unary/streaming handler SPI、client/server 构建工具。</td>
+        <td>Server feature-common、Agent common、Agent executor、Server feature-agent/RAG/Skill。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-commons/snail-ai-commons-grpc/src/main/java/com/aizuda/snail/ai/common/grpc</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>2. 公共 DTO 与枚举分类</h2>
+  <p class="note">主题范围说明：本页不是 <code>commons-core</code> 的完整 API 字典，而是面向 gRPC、聊天分发、OpenAPI 和跨模块共享契约的公共类型索引；未展开异常、日志、WebSearch 等旁支类型。</p>
+  <table>
+    <thead>
+      <tr><th>类别</th><th>对象</th><th>用途</th><th>风险提示</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>agent DTO</td>
+        <td><code>ChatDispatchRequest</code>、<code>ChatStreamResponse</code>、<code>ConversationCreateRequest</code>、<code>ConversationRecordRequest</code>、<code>SkillContentRequest</code>、<code>SkillContentResponse</code>、<code>HeartbeatBody</code></td>
+        <td>聊天分发、流式回传、会话回调、Skill 内容回调和旧心跳模型。<code>ChatDispatchRequest</code> 还内嵌 agent/model/MCP/Skill/history 描述符。</td>
+        <td>新增必填字段会影响 Client 反序列化后的执行期校验；字段语义变更要同步 Server 与 Client。</td>
+      </tr>
+      <tr>
+        <td>beat DTO</td>
+        <td><code>HeartbeatBodyRequest</code>、<code>HeartbeatBody</code></td>
+        <td>上报 maxConcurrentChats 与 activeChats。当前 Server handler 使用 <code>HeartbeatBodyRequest</code>。</td>
+        <td>两者字段相同但包不同，后续应避免继续扩散重复 DTO。</td>
+      </tr>
+      <tr>
+        <td>mcp DTO / 引用</td>
+        <td><code>ChatDispatchRequest.McpServerDescriptor</code>、<code>McpServerRef</code></td>
+        <td>分发到 Client 的 MCP server 运行参数，以及公共 MCP 引用模型。</td>
+        <td>transport、endpoint、authConfig、envVars 会影响 Client 侧工具初始化；只改 Server 配置表不等于 Client 可兼容。</td>
+      </tr>
+      <tr>
+        <td>model DTO</td>
+        <td><code>ChatDispatchRequest.ModelConfig</code>、<code>ConfigExtAttrsDTO</code>、<code>EmbeddingModelConfigDTO</code>、<code>EmbeddingResponseDTO</code></td>
+        <td>聊天分发携带模型 provider、adapter、endpoint、apiKey 和扩展配置；公共 model 包承载 embedding / rerank 调用形状。</td>
+        <td>模型配置常包含密钥和 endpoint；日志、课程截取和跨进程传输都要避免泄露真实凭据。</td>
+      </tr>
+      <tr>
+        <td>rag DTO</td>
+        <td><code>RagSearchRequest</code>、<code>RagSearchResponse</code>、<code>SearchResult</code></td>
+        <td>Client 本地 RAG 工具通过 Server 检索知识库，返回 chunkId、content、score、documentName 和 metadata。</td>
+        <td><code>score</code> 是 double，排序和阈值语义由 RAG 模块决定，Commons 只保存结果形状。</td>
+      </tr>
+      <tr>
+        <td>memory DTO</td>
+        <td><code>ShortTermMemoryRequest</code>、<code>MemoryRetrieveRequest</code></td>
+        <td>短期历史加载和长期记忆检索请求模型。当前短期历史 URI 只在 <code>RpcClient</code> 声明；长期检索只有 URI 常量和 DTO 预留。</td>
+        <td>不要把 DTO 存在误读为 gRPC 闭环已接通；Server 聊天链路当前由 <code>ContextCollectorHandler</code> 直接读取 <code>ShortTermMemoryStore</code>。</td>
+      </tr>
+      <tr>
+        <td>OpenAPI DTO</td>
+        <td><code>OpenApiChatRequest</code> 等 <code>common/openapi/dto</code> 类型</td>
+        <td>OpenAPI chat、agent、conversation、user、embed token 等接口共享请求/响应模型；聊天入口代表是 <code>OpenApiChatRequest</code>。</td>
+        <td>OpenAPI DTO 面向 HTTP/SSE 客户端，不等同于 gRPC 信封内的 <code>ChatDispatchRequest</code>。</td>
+      </tr>
+      <tr>
+        <td>响应模型</td>
+        <td><code>Result&lt;T&gt;</code>、<code>PageResult&lt;T&gt;</code></td>
+        <td>HTTP/API 层通用成功失败包装，status 默认 1。</td>
+        <td>gRPC result 另有 <code>GrpcSnailAiResult.status</code>，不要混用。</td>
+      </tr>
+      <tr>
+        <td>枚举</td>
+        <td><code>CommonStatusEnum</code>、<code>AgentStatusEnum</code>、<code>MemoryStatusEnum</code>、<code>StoreCategoryEnum</code>、<code>RagCallModeEnum</code>、<code>McpTransportTypeEnum</code>、<code>McpAuthTypeEnum</code>、<code>MemoryTypeEnum</code>、<code>DocumentStatusEnum</code>、<code>StoreInstanceTypeEnum</code></td>
+        <td>通用启停、Agent 状态、记忆状态、存储分类、RAG 调用方式、MCP transport/auth、记忆类型和 RAG 文档/存储实例状态。</td>
+        <td>带 <code>@EnumValue</code> 的枚举与数据库值绑定；改值比改描述风险高。</td>
+      </tr>
+      <tr>
+        <td>工具</td>
+        <td><code>JsonUtil</code>、<code>RagResultReorderUtil</code></td>
+        <td>JSON 序列化/反序列化和 RAG lost-in-the-middle 重排。</td>
+        <td><code>JsonUtil</code> 忽略未知字段、空值不序列化，利于增量字段兼容，但会隐藏拼写错误。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. gRPC proto、方法和消息</h2>
+  <p class="note">当前源码没有业务 service stub。通信方法由 <code>GrpcServiceDefinitionBuilder</code> 和 <code>GrpcChannelUtil</code> 共同使用固定服务名、方法名和统一消息类型手工构建。</p>
+  <table>
+    <thead>
+      <tr><th>层级</th><th>名称</th><th>类型或字段</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>消息</td><td><code>GrpcSnailAiRequest</code></td><td><code>reqId</code>、<code>metadata</code>、<code>body</code></td><td>所有请求的统一信封。<code>body</code> 是 JSON 字符串。</td></tr>
+      <tr><td>消息</td><td><code>GrpcSnailAiResult</code></td><td><code>reqId</code>、<code>status</code>、<code>message</code>、<code>data</code></td><td>所有响应的统一信封。业务响应通常放在 <code>data</code> JSON 中。</td></tr>
+      <tr><td>消息</td><td><code>Metadata</code></td><td><code>uri</code>、<code>headers</code></td><td><code>uri</code> 负责业务路由，headers 负责 app/token/host/version 等元数据。</td></tr>
+      <tr><td>Unary 方法</td><td><code>UnaryRequest/unaryRequest</code></td><td><code>GrpcSnailAiRequest -&gt; GrpcSnailAiResult</code></td><td>心跳、ping、Client 回调 Server 都走这个形态。</td></tr>
+      <tr><td>Server Streaming 方法</td><td><code>ServerStreamingRequest/serverStreamingRequest</code></td><td><code>GrpcSnailAiRequest -&gt; stream GrpcSnailAiResult</code></td><td>聊天分发走这个形态，Client 连续返回 text/thinking/completion/error。</td></tr>
+    </tbody>
+  </table>
+  <h3>业务 URI</h3>
+  <table>
+    <thead>
+      <tr><th>方向</th><th>URI</th><th>方式</th><th>处理边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Client 到 Server</td><td><code>/beat</code></td><td>Unary</td><td><code>BeatRequestHandler</code> 校验 token，注册或更新 Client。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/conversation/create</code></td><td>Unary</td><td>Agent feature 回调 handler 创建对话并保存用户消息。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/conversation/record</code></td><td>Unary</td><td>Agent feature 回调 handler 保存助手消息、thinking 和 token。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/memory/short-term</code></td><td>Unary</td><td>只在 <code>RpcClient.loadShortTermHistory</code> 声明；未找到 Server 端 handler 或实际闭环调用。Server 聊天链路当前由 <code>ContextCollectorHandler</code> 直接读取 <code>ShortTermMemoryStore</code>。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/memory/retrieve</code></td><td>Unary</td><td><code>UriConstants.CALLBACK_MEMORY_RETRIEVE</code> 与 <code>MemoryRetrieveRequest</code> 存在，但未找到 <code>RpcClient</code> mapping、Server 端 handler 或调用闭环。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/skill/content</code></td><td>Unary</td><td>Skill feature 返回完整 Skill 正文和文件。</td></tr>
+      <tr><td>Client 到 Server</td><td><code>/callback/rag/search</code></td><td>Unary</td><td>RAG feature 执行知识库搜索，供 Client 本地工具使用。</td></tr>
+      <tr><td>Server 到 Client</td><td><code>/chat/dispatch</code></td><td>Server Streaming</td><td>Client 执行模型调用并流式返回。</td></tr>
+      <tr><td>Server 到 Client</td><td><code>/ping</code></td><td>Unary</td><td>Client 返回 timestamp 与 activeChats。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. Server feature-common RPC</h2>
+  <table>
+    <thead>
+      <tr><th>组件</th><th>职责</th><th>关键行为</th><th>源码</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>SnailAiServerGrpcServer</code></td>
+        <td>Server 端 gRPC 入口。</td>
+        <td>监听 <code>snail-ai.server.grpc-port</code>，默认源码值 1789；只注册 unary service，接收 Client 心跳和回调。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/rpc/SnailAiServerGrpcServer.java</span></td>
+      </tr>
+      <tr>
+        <td><code>BeatRequestHandler</code></td>
+        <td>处理 <code>/beat</code>。</td>
+        <td>读取 appId/token，调用 <code>ClientInstanceManager.validateToken</code>，解析 <code>HeartbeatBodyRequest</code>，返回 serverTimestamp。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/rpc/handler/BeatRequestHandler.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ClientInstanceManager</code></td>
+        <td>维护 Client 节点注册表。</td>
+        <td>内存缓存实时更新，队列异步刷 DB；DB 节点可预热为 REMOTE；40 秒未心跳视为过期；每个实例持有到 Client 的 <code>ManagedChannel</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/ClientInstanceManager.java</span></td>
+      </tr>
+      <tr>
+        <td><code>ClientRouteStrategyManager</code></td>
+        <td>选择 Client 路由策略。六种算法见 <a href="route-strategy-api.html">route-strategy-api.html</a>。</td>
+        <td>按字符串匹配策略，找不到时回退默认 <code>LEAST_LOAD</code>。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/route/ClientRouteStrategyManager.java</span></td>
+      </tr>
+      <tr>
+        <td><code>LeastLoadClientRoute</code></td>
+        <td>默认负载策略。</td>
+        <td>按 <code>activeChats / maxConcurrent</code> 最小值选节点；maxConcurrent 小于等于 0 时视为无效高负载。</td>
+        <td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-common/src/main/java/com/aizuda/snail/ai/route/LeastLoadClientRoute.java</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. Agent Client 消费边界</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>组件</th><th>它消费或产生什么</th><th>不要误解成</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>本地 gRPC 入口</td>
+        <td><code>ClientGrpcServer</code></td>
+        <td>注册 unary 和 server-streaming service，接收 Server 的 <code>/ping</code> 与 <code>/chat/dispatch</code>。</td>
+        <td>它不执行业务，只把请求交给外部传入的 handler。</td>
+      </tr>
+      <tr>
+        <td>启动装配</td>
+        <td><code>SnailAiAgentAutoConfiguration</code></td>
+        <td>启动 Client gRPC server、创建 <code>RpcClient</code> 动态代理、启动心跳任务。</td>
+        <td>它不是 Server feature-common 的一部分。</td>
+      </tr>
+      <tr>
+        <td>心跳</td>
+        <td><code>ClientHeartbeatScheduler</code></td>
+        <td>构建 app/token/host headers 和 <code>HeartbeatBodyRequest</code>，调用 unary <code>/beat</code>。</td>
+        <td>心跳不是聊天分发；它只让 Server 发现和更新节点状态。</td>
+      </tr>
+      <tr>
+        <td>回调 Server</td>
+        <td><code>RpcClient</code> + <code>GrpcClientInvokeHandler</code></td>
+        <td>按 <code>@Mapping</code> path 把 DTO 转 Map，再通过 unary 请求 Server。</td>
+        <td>它不是 REST client，也不会使用业务 proto message。</td>
+      </tr>
+      <tr>
+        <td>聊天消费</td>
+        <td><code>ChatDispatchStreamingHandler</code></td>
+        <td>解析 <code>ChatDispatchRequest</code>，调用会话运行时，按 text/thinking/completion/error 写回 <code>GrpcSnailAiResult.data</code>。</td>
+        <td>它不负责选择 Client，不负责 Server 上下文装配。</td>
+      </tr>
+      <tr>
+        <td>Ping</td>
+        <td><code>PingRequestHandler</code></td>
+        <td>返回 timestamp 与 activeChats。</td>
+        <td>它不等价于心跳注册；心跳方向是 Client 到 Server。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. 兼容风险清单</h2>
+  <table>
+    <thead>
+      <tr><th>变更点</th><th>影响面</th><th>当前源码依据</th><th>处理原则</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>修改 proto 字段号或消息名</td>
+        <td>所有 gRPC 请求和响应。</td>
+        <td><code>snail_ai_grpc_service.proto</code> 只有统一信封，已生成 Java 类随源码提交；gRPC Maven 生成插件当前被注释。</td>
+        <td>不能只改 proto；必须同步生成类、client/server marshaller 和双方发布版本。</td>
+      </tr>
+      <tr>
+        <td>修改 <code>GrpcConstants</code> 服务名或方法名</td>
+        <td>方法匹配失败，Server 与 Client 无法互通。</td>
+        <td><code>GrpcChannelUtil</code> 和 <code>GrpcServiceDefinitionBuilder</code> 都使用相同常量手工构建 descriptor。</td>
+        <td>服务名、方法名应作为跨端协议稳定维护。</td>
+      </tr>
+      <tr>
+        <td>修改或新增 <code>UriConstants</code></td>
+        <td>业务路由找不到 handler，返回 unknown URI。</td>
+        <td><code>GrpcRequestDispatcher</code> 只按 <code>handler.supports(uri)</code> 顺序匹配。</td>
+        <td>新增 URI 时要同时新增发送端 mapping 和接收端 handler。</td>
+      </tr>
+      <tr>
+        <td>修改 header 名称</td>
+        <td>心跳认证、实例注册和回调 header 透传。</td>
+        <td><code>HeaderConstants</code> 定义 app-id、token、host-id、host-ip、host-port、version；<code>GrpcHandlerRequest</code> 直接读取这些键。</td>
+        <td>header 变更必须双端同步，并注意 <code>host-port</code> 非法值会触发 parseInt 异常。</td>
+      </tr>
+      <tr>
+        <td>新增 DTO 字段</td>
+        <td>JSON body 兼容。</td>
+        <td><code>JsonUtil</code> 反序列化忽略未知属性，序列化跳过 null 字段。</td>
+        <td>可选字段通常可渐进发布；必填语义应先让消费端兼容默认值。</td>
+      </tr>
+      <tr>
+        <td>删除或重命名 DTO 字段</td>
+        <td>Server 与 Client 运行期行为偏差。</td>
+        <td>业务 DTO 没有 schema 校验，反序列化成功也可能得到 null。</td>
+        <td>先引入新字段并双写/双读，再清理旧字段。</td>
+      </tr>
+      <tr>
+        <td>新增 <code>ChatStreamResponse.type</code></td>
+        <td>Server SSE 转发和持久化逻辑。</td>
+        <td>当前固定值为 text、thinking、completion、error。</td>
+        <td>新增类型时同步 Server observer、前端消费和持久化策略。</td>
+      </tr>
+      <tr>
+        <td>调整心跳间隔或过期阈值</td>
+        <td>Client 上下线判定和路由可用性。</td>
+        <td>Client 每 10 秒心跳；Server 内存过期阈值 40 秒，DB expireDt 偏移 40 秒。</td>
+        <td>间隔、过期、DB 清理和路由降级要成组调整。</td>
+      </tr>
+      <tr>
+        <td>官方文档与源码不一致</td>
+        <td>学习和排查误判。</td>
+        <td><code>docs/architecture/distributed.md</code> 描述了示例业务 proto service，但当前源码使用统一信封和 URI 分发。</td>
+        <td>以当前源码、pom 和生成类为准；文档只作为背景材料。</td>
+      </tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 管理配置全链路参考</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body class="reference">
+<main>
+  <h1>Agent 管理、覆盖与配置解析 — 速查</h1>
+  <p class="callout">L2 垂直切片参考页。短课入口：<a href="../lessons/0001-flow-map.html">0001 全链路</a> · L1：<a href="../../module-agent-system/lessons/0001-agent-system-module-tour.html">Agent 发现与配置模块</a></p>
+
+  <h2>1. 调用时序（执行路径）</h2>
+  <div class="diagram">subagent-executor
+  → discoverAgents(cwd, scope)
+      → readSubagentSettings(user|project)
+      → loadAgentsFromDir × (builtin, package, user, project)
+          → parseFrontmatter → AgentConfig + frontmatterFields
+      → applySubagentDefaultModel
+      → applyBuiltinOverrides / applyCustomAgentOverrides
+      → mergeAgentsForScope
+      → filter disabled
+  → executor 使用 AgentConfig</div>
+
+  <h2>2. 调用时序（管理路径）</h2>
+  <table>
+    <tr><th>阶段</th><th>函数</th><th>说明</th></tr>
+    <tr><td>入口</td><td><code>handleManagementAction</code></td><td><code>subagent-executor.ts</code> 传入 <code>ctx.config</code>（来自 <code>loadConfig()</code>）</td></tr>
+    <tr><td>读</td><td><code>discoverAgentsAll</code></td><td>分来源返回 agents/chains，含 disabled</td></tr>
+    <tr><td>写 agent 文件</td><td><code>create</code> / <code>update</code> / <code>delete</code></td><td>仅 user/project；序列化经 <code>serializeAgent</code></td></tr>
+    <tr><td>写 settings</td><td><code>disable</code> / <code>enable</code> / <code>reset</code></td><td><code>mergeBuiltinAgentOverride</code> / <code>removeBuiltinAgentOverrideFields</code></td></tr>
+    <tr><td>复制</td><td><code>eject</code></td><td>builtin/package → user/project 文件，同名冲突拒绝</td></tr>
+  </table>
+
+  <h2>3. 优先级与视图差异</h2>
+  <table>
+    <tr><th>规则</th><th>结论</th><th>证据</th></tr>
+    <tr><td>同名 agent</td><td><code>builtin &lt; package &lt; user &lt; project</code></td><td><code>agent-selection.ts</code></td></tr>
+    <tr><td>settings 层</td><td>project 覆盖 user；defaultModel 只填缺省 model</td><td><code>agent-overrides.test.ts</code></td></tr>
+    <tr><td>builtin override</td><td>直接覆盖字段；<code>false</code> 可清除 model/tools 等</td><td><code>agents.ts</code> <code>applyBuiltinOverride</code></td></tr>
+    <tr><td>custom override</td><td>frontmatter 已声明字段不被 settings 覆盖</td><td><code>applyCustomAgentOverride</code></td></tr>
+    <tr><td>package 同名</td><td>执行路径后加载胜；<code>discoverAgentsAll</code> 先发现胜</td><td><code>agents.ts</code></td></tr>
+    <tr><td>disabled</td><td>执行路径过滤；管理路径保留</td><td><code>discoverAgents</code> vs <code>discoverAgentsAll</code></td></tr>
+  </table>
+
+  <h2>4. 配置路径</h2>
+  <table>
+    <tr><th>类型</th><th>路径</th><th>读写</th></tr>
+    <tr><td>user settings</td><td><span class="mono">~/.pi/agent/settings.json</span></td><td>subagents.* override</td></tr>
+    <tr><td>project settings</td><td><span class="mono">&lt;project&gt;/.pi/settings.json</span></td><td>优先于 user</td></tr>
+    <tr><td>user agents</td><td><span class="mono">~/.pi/agent/agents/*.md</span>、<span class="mono">~/.agents/*.md</span></td><td>管理面可写</td></tr>
+    <tr><td>project agents</td><td><span class="mono">&lt;project&gt;/.pi/agents/*.md</span></td><td>最高优先级 custom</td></tr>
+    <tr><td>extension config</td><td><span class="mono">~/.pi/agent/extensions/subagent/config.json</span></td><td><code>extension/config.ts</code></td></tr>
+    <tr><td>builtin</td><td><span class="mono">pi-subagents/agents/*.md</span></td><td>只读</td></tr>
+  </table>
+
+  <h2>5. 管理动作边界速查</h2>
+  <table>
+    <tr><th>动作</th><th>常见失败 / 边界</th><th>测试</th></tr>
+    <tr><td><code>disable</code></td><td>更高优先级 override 仍 enabled → isError + 提示 agentScope</td><td><code>agent-eject-disable.test.ts</code></td></tr>
+    <tr><td><code>enable</code></td><td>另一 scope 仍 disabled → 要求指定该 scope</td><td>同上</td></tr>
+    <tr><td><code>reset</code></td><td>纯 custom 无 bundled 默认 → 提示用 delete</td><td>同上</td></tr>
+    <tr><td><code>eject</code></td><td>目标 scope 已有同名 agent/chain → 拒绝</td><td>同上</td></tr>
+    <tr><td><code>create</code></td><td>非法 JSON config → <code>config must be valid JSON</code></td><td><code>agent-management.test.ts</code></td></tr>
+    <tr><td><code>models</code></td><td>非 builtin 名称 → 错误</td><td><code>agent-management.ts</code></td></tr>
+  </table>
+
+  <h2>6. 测试证据索引</h2>
+  <table>
+    <tr><th>文件</th><th>覆盖行为</th></tr>
+    <tr><td><code>test/unit/agent-overrides.test.ts</code></td><td>defaultModel、agentOverrides、project 胜 user、frontmatter 逐字段</td></tr>
+    <tr><td><code>test/unit/agent-selection.test.ts</code></td><td>mergeAgentsForScope 各 scope 与 package 位置</td></tr>
+    <tr><td><code>test/unit/agent-management.test.ts</code></td><td>CRUD、package 命名、JSON 解析</td></tr>
+    <tr><td><code>test/unit/agent-eject-disable.test.ts</code></td><td>disable/enable/reset/eject 跨 scope</td></tr>
+    <tr><td><code>test/unit/agent-frontmatter.test.ts</code></td><td>frontmatter 字段与 block 解析</td></tr>
+    <tr><td><code>test/unit/agent-disabled.test.ts</code></td><td>disabled 过滤与 list 行为</td></tr>
+  </table>
+</main>
+</body>
+</html>

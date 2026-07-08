@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>主进程 Runtime 与 Daemon 模块导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>主进程 Runtime 与 Daemon：三层边界</h1>
+        <p class="meta">目标：15 分钟内判断一段主进程代码属于状态层、控制面传输层，还是长期 PTY 宿主层。</p>
+
+        <h2>先记住一句话</h2>
+        <p>
+          Orca 的主进程 runtime 不是单个“后端服务”，而是三层协作：
+          <code>OrcaRuntimeService</code> 持有活的应用状态，<code>OrcaRuntimeRpcServer</code>
+          把这些能力开放给 CLI、移动端和 headless server，daemon provider 则把终端会话放进可跨应用重启存活的独立进程。
+          后续读 worktree 创建、mobile pairing 或 <code>orca</code> CLI 时，先问“这段代码是在改状态、收请求，还是保 PTY”。
+        </p>
+
+        <h2>模块骨架</h2>
+<div class="filetree">src/main/
+├── index.ts                         ← 装配 runtime、RPC server 和启动服务
+├── runtime/
+│   └── runtime-rpc.ts               ← OrcaRuntimeRpcServer：控制面传输
+└── daemon/
+    └── daemon-init.ts               ← 长期 PTY provider 初始化与替换</div>
+        <p>
+          <code>src/main/index.ts</code> 是装配点：先构造 <code>OrcaRuntimeService</code>，
+          传入 store、统计器和延迟解析的 PTY provider；再创建 <code>OrcaRuntimeRpcServer</code>，
+          使用 canonical userData 存放 metadata、device registry 和 E2EE keypair；桌面模式还会在首窗启动服务里调用
+          <code>initDaemonPtyProvider()</code>。这里要注意：daemon 初始化属于 first-window startup service 的异步工作，
+          不等于严格先于 <code>runtimeRpc.start()</code> 完成。
+        </p>
+
+        <h2>三层怎么协作</h2>
+        <pre><code class="language-typescript">const runtimeService = new OrcaRuntimeService(store, stats, {
+  getLocalProvider: () => getLocalPtyProvider(),
+  onPtyStopped: clearProviderPtyState
+})
+
+runtimeRpc = new OrcaRuntimeRpcServer({
+  runtime,
+  userDataPath: getCanonicalUserDataPath(),
+  enableWebSocket: true
+})</code></pre>
+        <p>
+          这段装配体现了一个关键设计：runtime 不在构造时抓住 PTY provider，而是通过
+          <code>getLocalProvider</code> 每次延迟读取。原因是 daemon 初始化稍后才会把本地 provider
+          替换成 <code>DaemonPtyAdapter</code>、<code>DaemonPtyRouter</code> 或 degraded fallback；如果提前缓存引用，
+          后续终端清理和 worktree teardown 会扫不到 daemon session。
+        </p>
+        <p>
+          RPC server 启动后会监听 Unix socket / Windows named pipe，并可选启动 WebSocket。
+          前者用 metadata 文件中的共享 <code>authToken</code> 服务 CLI，后者通过 device token 与 E2EE channel 服务移动端和 web runtime。
+          长等待请求会进入 long-poll 计数器并定期写 keepalive，满额时返回 <code>runtime_busy</code>。
+        </p>
+
+        <h2>检索练习</h2>
+        <p>
+          判断下面三个改动应该优先看哪层：A. 移动端扫码后生成 pairing URL；B. Orca 更新后旧终端继续运行；
+          C. <code>terminal.wait</code> 等待 10 分钟时 socket 不断线。
+        </p>
+        <div class="answer">
+          参考答案：A 看 <code>runtime-rpc.ts</code> 的 <code>createPairingOffer</code> 与 device registry；
+          B 看 <code>daemon-init.ts</code> 的 legacy / degraded provider 和 restart 流程；
+          C 看 <code>runtime-rpc.ts</code> 的 long-poll keepalive、cap 和 abort cleanup。继续阅读
+          <a href="../reference/main-runtime-overview.html">模块总览参考</a>，再回到源码验证这三个入口。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/main/index.ts</code>、<code>src/main/runtime/runtime-rpc.ts</code>、
+          <code>src/main/daemon/daemon-init.ts</code>。可以继续向 agent 追问 worktree 创建或 mobile pairing 的完整链路。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

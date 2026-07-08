@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Client Advisor Stream Flow Map</title>
+  <style>
+    :root {
+      --ink: #202a33;
+      --muted: #66717d;
+      --line: #d6dee6;
+      --soft: #f6f8fb;
+      --paper: #ffffff;
+      --green: #0f766e;
+      --red: #9f1239;
+      --blue: #1d4ed8;
+      --amber: #92400e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: #edf1f5;
+      line-height: 1.62;
+    }
+    main {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 34px 18px 54px;
+      min-height: 100vh;
+      background: var(--paper);
+    }
+    h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }
+    h2 { margin: 34px 0 14px; font-size: 22px; letter-spacing: 0; }
+    h3 { margin: 22px 0 10px; font-size: 17px; letter-spacing: 0; }
+    p { margin: 9px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #eef7f6;
+      color: #0f4f49;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+    pre {
+      overflow-x: auto;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; border-radius: 0; }
+    .mermaid {
+      white-space: pre;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 14px; }
+    th, td { border: 1px solid var(--line); padding: 9px 10px; vertical-align: top; }
+    th { background: var(--soft); text-align: left; }
+    .lead { color: var(--muted); max-width: 860px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    .pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; background: var(--soft); font-size: 13px; }
+    .swimlane { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-top: 16px; }
+    .row { display: grid; grid-template-columns: 160px 1fr; border-top: 1px solid var(--line); }
+    .row:first-child { border-top: 0; }
+    .lane { background: var(--soft); padding: 12px; font-weight: 700; color: #334155; }
+    .events { padding: 10px 12px; display: grid; gap: 8px; }
+    .event { border-left: 4px solid var(--green); padding: 8px 10px; background: #fbfcfd; }
+    .event.error { border-left-color: var(--red); }
+    .event.usage { border-left-color: var(--blue); }
+    .event.cleanup { border-left-color: var(--amber); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .callout { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: #fbfcfd; }
+    .checklist { margin: 10px 0; padding-left: 20px; }
+    a { color: var(--green); text-underline-offset: 3px; }
+    @media (max-width: 760px) {
+      main { padding: 24px 14px 40px; }
+      .row, .grid { grid-template-columns: 1fr; }
+      .lane { border-bottom: 1px solid var(--line); }
+      table { font-size: 13px; }
+    }
+    @media print {
+      body { background: #fff; }
+      main { max-width: none; padding: 0; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Client Advisor Stream Flow Map</h1>
+  <p class="lead">这是 <code>L2-slice-client-advisor-stream</code> 的速查图谱。它以当前源码为准，追踪 Server 发起 <code>/chat/dispatch</code> 后，Client 侧如何把模型流转换为 <code>ChatStreamResponse</code> 并通过 gRPC observer 回写 Server。</p>
+
+  <div class="legend">
+    <span class="pill">入口：<code>ChatDispatchStreamingHandler</code></span>
+    <span class="pill">状态：<code>ClientStreamExecutionContext</code></span>
+    <span class="pill">响应：<code>ChatStreamResponse</code></span>
+    <span class="pill">清理：<code>ToolResolution.close()</code></span>
+    <span class="pill">计数：<code>ActiveChatCounter</code></span>
+  </div>
+  <p>横向模块背景见 <a href="../../module-agent-client/reference/agent-client-overview.html"><code>../module-agent-client/reference/agent-client-overview.html</code></a>。L3 API 参考暂待后续覆盖率扫描生成；本页先保持 L2 切片图谱和源码锚点。</p>
+
+  <h2>调用时序图</h2>
+  <div class="mermaid" aria-label="Mermaid sequenceDiagram 源码">sequenceDiagram
+    participant Server as Server LlmCallHandler
+    participant Handler as Client ChatDispatchStreamingHandler
+    participant Runtime as ChatSessionRuntime
+    participant Executor as ClientChatExecutor
+    participant Advisor as Stream Advisors
+    participant Observer as gRPC StreamObserver
+
+    Server->>Handler: /chat/dispatch body
+    Handler->>Handler: parse body, read requestId/sid
+    Handler->>Runtime: execute(ChatSessionRequest)
+    Runtime->>Runtime: ActiveChatCounter.increment()
+    Runtime->>Executor: executeStream(...)
+    Executor->>Advisor: ChatClient.stream().chatResponse()
+    Advisor-->>Observer: text / thinking chunks
+    Advisor-->>Executor: complete signal
+    Executor->>Runtime: acceptCompletion(state.toCompletionResult())
+    Runtime->>Handler: completion consumer
+    Handler->>Observer: onNext(ChatStreamResponse.completion)
+    Handler->>Observer: onCompleted()
+    Runtime->>Runtime: cleanup + ActiveChatCounter.decrement()
+    Observer-->>Server: completion event then stream end</div>
+  <div class="swimlane" aria-label="Client Advisor 流式处理调用时序图">
+    <div class="row">
+      <div class="lane">Server</div>
+      <div class="events">
+        <div class="event"><code>LlmCallHandler</code> 构造 <code>ChatDispatchRequest</code>，通过 <code>GrpcChannelUtil.sendServerStreaming()</code> 调用 <code>UriConstants.CHAT_DISPATCH</code>。</div>
+        <div class="event"><code>ChatStreamObserver.onNext()</code> 解析 Client 回写的 JSON，根据 <code>type</code> 分发到 text、thinking、completion、error。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">Client gRPC</div>
+      <div class="events">
+        <div class="event"><code>ClientRequestDispatcher.streamingHandler()</code> 把请求交给 <code>GrpcRequestDispatcher.dispatchStreaming()</code>。</div>
+        <div class="event"><code>ChatDispatchStreamingHandler.supports()</code> 匹配 <code>/chat/dispatch</code>，<code>handle()</code> 先解析 body 并读取 <code>requestId/sid</code>，再注册四个 consumer；解析阶段外层没有 <code>try/catch</code> 和 <code>ChatStreamResponse.error()</code> 包装。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">Runtime</div>
+      <div class="events">
+        <div class="event cleanup"><code>ChatSessionRuntime.execute()</code> 先 <code>activeChatCounter.increment()</code>，再调用 <code>toolRuntime.resolve()</code>。</div>
+        <div class="event cleanup">completion/error consumer 外层使用 <code>finally</code> 调用 <code>cleanup()</code>，执行 <code>activeChatCounter.decrement()</code> 和 <code>ToolResolution.close()</code>。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">Executor</div>
+      <div class="events">
+        <div class="event"><code>ClientChatExecutor.executeStream()</code> 创建 <code>ClientStreamExecutionContext</code>，订阅 <code>streamResponses()</code>。</div>
+        <div class="event"><code>streamResponses()</code> 构造 <code>ChatClient</code> 与 <code>Prompt</code>，把 <code>DISPATCH</code>、<code>STREAM_STATE</code>、<code>CHUNK_CONSUMER</code>、<code>THINKING_CONSUMER</code> 写入 Advisor context。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">ChatClient</div>
+      <div class="events">
+        <div class="event"><code>DefaultChatClientFactory.build()</code> 用 <code>ChatModelFactory</code> 生成模型，追加默认 Advisor、<code>ToolCallingAdvisor</code>、tools 和 tool context。</div>
+        <div class="event"><code>DefaultPromptFactory.build()</code> 依次放入 system prompt、history messages 和 user message。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">Advisor 链</div>
+      <div class="events">
+        <div class="event"><code>InterceptorChainAdvisor</code> 执行 <code>SnailAiInterceptorChain</code> 的 before/after。</div>
+        <div class="event usage"><code>TokenUsageCollectorAdvisor</code> 从 chunk metadata 的 <code>Usage</code> 写入 <code>promptTokens</code>、<code>completionTokens</code>、<code>cacheTokens</code>。</div>
+        <div class="event"><code>ThinkingCollectorAdvisor</code> 从 metadata 或 additional properties 提取 thinking，追加到 <code>thinkingText</code> 并回调。</div>
+        <div class="event"><code>StreamChunkForwarderAdvisor</code> 从 <code>AssistantMessage.getText()</code> 取 text，追加到 <code>fullText</code> 并回调。</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="lane">回写</div>
+      <div class="events">
+        <div class="event"><code>handleTextChunk()</code> 和 <code>handleThinkingChunk()</code> 发送 status 1 的 <code>GrpcSnailAiResult</code>，发送失败只 log warn，不结束也不中断模型流。</div>
+        <div class="event"><code>handleCompletion()</code> 在同一个 <code>try</code> 内先 <code>observer.onNext()</code>，再 <code>observer.onCompleted()</code>；如果发送 completion 失败，只 log warn，不会继续进入 <code>onCompleted()</code>。</div>
+        <div class="event error"><code>handleError()</code> 发送 status 0 和 <code>LLM_FAILED</code>，随后调用 <code>observer.onCompleted()</code>；error 响应发送失败时同样只记录 warn。</div>
+      </div>
+    </div>
+  </div>
+
+  <h2>响应类型映射</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>产生位置</th>
+        <th>关键字段</th>
+        <th>Server 落点</th>
+        <th>调试观察点</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>text</code></td>
+        <td><code>StreamChunkForwarderAdvisor</code> 提取文本，handler 调用 <code>ChatStreamResponse.text(sid, text)</code></td>
+        <td><code>sid</code>、<code>content</code></td>
+        <td><code>ChatStreamObserver.handleText()</code> 转发给 <code>ChatStreamWriter</code></td>
+        <td>检查 <code>AssistantMessage.getText()</code> 是否非空，observer 是否 <code>onNext()</code></td>
+      </tr>
+      <tr>
+        <td><code>thinking</code></td>
+        <td><code>ThinkingCollectorAdvisor</code> 从 metadata key 或 additional properties 提取，handler 调用 <code>ChatStreamResponse.thinking()</code></td>
+        <td><code>sid</code>、<code>content</code></td>
+        <td><code>ChatStreamObserver.handleThinking()</code> 非空才转发</td>
+        <td>直接 metadata key 是 <code>reasoningContent</code>、<code>thinking</code>、<code>reasoning</code>；<code>reasoning_content</code> 只在 <code>_additionalProperties</code> 等兼容路径中提取</td>
+      </tr>
+      <tr>
+        <td><code>completion</code></td>
+        <td><code>ClientChatExecutor</code> complete 回调调用 <code>state.toCompletionResult()</code>，handler 调用 <code>ChatStreamResponse.completion()</code></td>
+        <td><code>fullText</code>、<code>fullThinking</code>、<code>promptTokens</code>、<code>completionTokens</code>、<code>cacheTokens</code>、<code>durationMs</code></td>
+        <td><code>ChatStreamObserver.handleCompletion()</code> 调用 <code>persistService.persistAsync()</code></td>
+        <td>检查流是否正常 complete，<code>fullText</code> 是否已累积，Token 是否在最终 chunk 写入</td>
+      </tr>
+      <tr>
+        <td><code>error</code></td>
+        <td>进入 <code>ChatSessionRuntime</code> 后的启动异常或订阅 error 回调会触发 error consumer，再由 handler 调用 <code>ChatStreamResponse.error()</code>；body 解析异常发生在 runtime 前，不在这个包装范围内</td>
+        <td><code>sid</code>、<code>errorCode</code>、<code>errorMessage</code></td>
+        <td><code>ChatStreamObserver.handleError()</code> 向前端发送错误文本</td>
+        <td>检查 <code>request.acceptError()</code> 是否触发，以及 cleanup 是否执行</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>关键源码片段</h2>
+  <div class="grid">
+    <div class="callout">
+      <h3>入口只绑定回调</h3>
+<pre><code>chatSessionRuntime.execute(ChatSessionRequest.builder()
+    .dispatchRequest(dispatchRequest)
+    .textConsumer(text -> handleTextChunk(reqId, sid, text, observer))
+    .thinkingConsumer(thinking -> handleThinkingChunk(reqId, sid, thinking, observer))
+    .completionConsumer(completion -> handleCompletion(reqId, requestId, sid, completion, observer))
+    .errorConsumer(error -> handleError(reqId, sid, error, observer))
+    .build());</code></pre>
+      <p>来源：<code>ChatDispatchStreamingHandler.java</code> 第 45-51 行。</p>
+    </div>
+    <div class="callout">
+      <h3>请求解析在 runtime 前</h3>
+<pre><code>ChatDispatchRequest dispatchRequest = parseDispatchRequest(request.getBody());
+String requestId = dispatchRequest.getRequestId();
+String sid = dispatchRequest.getSid();</code></pre>
+      <p>来源：<code>ChatDispatchStreamingHandler.java</code> 第 38-41 行。这里没有外层 <code>try/catch</code>，失败时不会被包装成 <code>ChatStreamResponse.error()</code>。</p>
+    </div>
+    <div class="callout">
+      <h3>状态由 Advisor 写入</h3>
+<pre><code>public final StringBuilder fullText = new StringBuilder();
+public final StringBuilder thinkingText = new StringBuilder();
+public final long startTime = System.currentTimeMillis();
+
+public ChatCompletionResult toCompletionResult() {
+    long duration = System.currentTimeMillis() - startTime;
+    return new ChatCompletionResult(
+        fullText.toString(), thinkingText.toString(),
+        promptTokens, completionTokens, cacheTokens, duration);
+}</code></pre>
+      <p>来源：<code>ClientStreamExecutionContext.java</code> 第 17-61 行。</p>
+    </div>
+    <div class="callout">
+      <h3>工厂追加工具调用</h3>
+<pre><code>ChatClient.Builder builder = ChatClient.builder(chatModel)
+    .defaultAdvisors(defaultAdvisors)
+    .defaultAdvisors(toolCallingAdvisor)
+    .defaultTools(tools.toArray())
+    .defaultToolContext(new HashMap<>());</code></pre>
+      <p>来源：<code>DefaultChatClientFactory.java</code> 第 48-52 行。</p>
+    </div>
+    <div class="callout">
+      <h3>清理绑定在终态</h3>
+<pre><code>private void cleanup(ToolResolution resolution) {
+    activeChatCounter.decrement();
+    if (resolution != null) {
+        resolution.close();
+    }
+}</code></pre>
+      <p>来源：<code>ChatSessionRuntime.java</code> 第 57-61 行。</p>
+    </div>
+  </div>
+
+  <h2>源码索引</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>文件</th>
+        <th>建议阅读行</th>
+        <th>读它是为了确认什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ChatDispatchStreamingHandler.java</code></td><td>31-56、58-135</td><td>URI 匹配、请求解析边界、四类 consumer、observer 回写与 completed 时机</td></tr>
+      <tr><td><code>ChatSessionRuntime.java</code></td><td>21-61</td><td>active count、工具解析、completion/error cleanup</td></tr>
+      <tr><td><code>ActiveChatCounter.java</code></td><td>11-25</td><td>Agent 实例级活跃会话计数的 increment、decrement、get</td></tr>
+      <tr><td><code>PingRequestHandler.java</code></td><td>21-38</td><td>Ping 响应如何读取 <code>activeChatCounter.get()</code> 并暴露 <code>activeChats</code></td></tr>
+      <tr><td><code>ClientHeartbeatScheduler.java</code></td><td>58-75、186-190</td><td>心跳 body 如何携带最大并发数与当前活跃会话数</td></tr>
+      <tr><td><code>ClientChatExecutor.java</code></td><td>41-80、92-110</td><td>流状态、Reactor context、Advisor 参数、completion result</td></tr>
+      <tr><td><code>DefaultChatClientFactory.java</code></td><td>38-60</td><td>模型、默认 Advisor、<code>ToolCallingAdvisor</code>、tools 和 customizer 装配</td></tr>
+      <tr><td><code>DefaultPromptFactory.java</code></td><td>21-44</td><td>system/history/user message 如何进入 <code>Prompt</code></td></tr>
+      <tr><td><code>StreamChunkForwarderAdvisor.java</code></td><td>31-57</td><td>text chunk 如何提取、累积、转发</td></tr>
+      <tr><td><code>ThinkingCollectorAdvisor.java</code></td><td>57-69、86-195、201-209</td><td>thinking metadata 提取路径、回调、完成后桥接上下文</td></tr>
+      <tr><td><code>ThinkingCollectorAdvisorTest.java</code></td><td>22-45</td><td>验证 <code>reasoningContent</code> metadata happy path 会进入 thinking consumer 和 state</td></tr>
+      <tr><td><code>TokenUsageCollectorAdvisor.java</code></td><td>37-66、77-120</td><td>usage 提取、cache token 反射兼容路径</td></tr>
+      <tr><td><code>ChatStreamResponse.java</code></td><td>20-23、65-139</td><td>四类响应的字段构造</td></tr>
+      <tr><td><code>ToolRuntime.java</code></td><td>36-50、82-104</td><td>工具集合生成和 <code>ToolResolution.close()</code> 的真实动作</td></tr>
+      <tr><td><code>SnailAiAgentAutoConfiguration.java</code></td><td>80-96、138-167、232-235</td><td>Advisor bean、factory 注入、handler 注册</td></tr>
+      <tr><td><code>ChatStreamObserver.java</code></td><td>30-43、55-91</td><td>Server 如何消费 Client 回写的四类响应</td></tr>
+    </tbody>
+  </table>
+
+  <h2>调试 checklist</h2>
+  <div class="grid">
+    <div class="callout">
+      <h3>text chunk</h3>
+      <ol class="checklist">
+        <li>确认 <code>ClientChatExecutor.streamResponses()</code> 已传入 <code>CHUNK_CONSUMER</code>。</li>
+        <li>确认 <code>StreamChunkForwarderAdvisor.extractText()</code> 能从 <code>ChatClientResponse</code> 拿到文本。</li>
+        <li>确认 <code>ChatDispatchStreamingHandler.handleTextChunk()</code> 写入 status 1 和 JSON data。</li>
+        <li>确认 Server <code>ChatStreamObserver.handleText()</code> 收到同一 <code>sid</code>。</li>
+      </ol>
+    </div>
+    <div class="callout">
+      <h3>thinking</h3>
+      <ol class="checklist">
+        <li>确认模型确实返回推理字段，不要只看普通 text。</li>
+        <li>优先检查 metadata key：<code>reasoningContent</code>、<code>thinking</code>、<code>reasoning</code>。</li>
+        <li>兼容路径检查 <code>chunkChoice</code>、<code>message</code>、<code>_additionalProperties</code>；<code>reasoning_content</code> 只属于这些 additional properties 路径。</li>
+        <li>确认 <code>THINKING_CONSUMER</code> 进入 handler 的 <code>handleThinkingChunk()</code>。</li>
+      </ol>
+    </div>
+    <div class="callout">
+      <h3>TokenUsage</h3>
+      <ol class="checklist">
+        <li>确认最终 chunk 的 <code>ChatResponse.metadata.usage</code> 非空。</li>
+        <li>确认 <code>totalTokens</code> 大于 0，否则源码不会写入 state。</li>
+        <li>确认 OpenAI-compatible 流式 usage 已按模型适配器要求开启。</li>
+        <li>cache token 只在 native usage 暴露 <code>promptTokensDetails.cachedTokens</code> 时可提取。</li>
+      </ol>
+    </div>
+    <div class="callout">
+      <h3>completion</h3>
+      <ol class="checklist">
+        <li>确认 Flux 进入 complete 分支，而不是 error 分支。</li>
+        <li>确认 <code>state.toCompletionResult()</code> 输出 <code>fullText</code>、<code>fullThinking</code> 和 duration。</li>
+        <li>确认 handler 发送 <code>ChatStreamResponse.completion()</code> 后调用 <code>observer.onCompleted()</code>；两者在同一个 <code>try</code> 内，发送失败不会继续 completed。</li>
+        <li>确认 Server <code>handleCompletion()</code> 进入异步持久化。</li>
+      </ol>
+    </div>
+    <div class="callout">
+      <h3>error</h3>
+      <ol class="checklist">
+        <li>请求 body 解析异常发生在 <code>ChatSessionRuntime</code> 前，不会被 <code>ChatStreamResponse.error()</code> 包装。</li>
+        <li>启动前异常会被 <code>ChatSessionRuntime</code> 的 catch 捕获并回调 error。</li>
+        <li>订阅中异常会进入 <code>ClientChatExecutor.subscribe()</code> 的 error consumer。</li>
+        <li>handler 用 <code>LLM_FAILED</code> 和 status 0 写回，再 completed；error 响应发送失败只记录 warn。</li>
+        <li>Server <code>handleError()</code> 只发送错误文本，不执行 completion 持久化。</li>
+      </ol>
+    </div>
+    <div class="callout">
+      <h3>active count 和 cleanup</h3>
+      <ol class="checklist">
+        <li>每次 <code>ChatSessionRuntime.execute()</code> 入口都会 increment。</li>
+        <li>completion/error 的 <code>finally</code> 都会调用 cleanup。</li>
+        <li>启动异常也会 cleanup 已解析出的 <code>ToolResolution</code>。</li>
+        <li><code>ActiveChatCounter.get()</code> 通过 <code>PingRequestHandler</code> 的 <code>activeChats</code> 和 <code>ClientHeartbeatScheduler</code> 的心跳 body 暴露。</li>
+        <li><code>ToolResolution.close()</code> 当前主要关闭 <code>ClientMcpToolResolver</code>。</li>
+      </ol>
+    </div>
+  </div>
+
+  <h2>最小排障路径</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>现象</th>
+        <th>先看</th>
+        <th>再看</th>
+        <th>常见结论</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>前端完全无输出</td>
+        <td><code>ChatDispatchStreamingHandler.handle()</code> 是否收到请求并成功解析 body</td>
+        <td><code>ClientChatExecutor.streamResponses()</code> 是否订阅并进入模型流</td>
+        <td>请求未路由、body 解析失败、模型创建失败或订阅前异常</td>
+      </tr>
+      <tr>
+        <td>有 text，无 completion</td>
+        <td><code>Flux</code> 是否 complete</td>
+        <td><code>handleCompletion()</code> 是否 <code>onCompleted()</code></td>
+        <td>模型流未结束、订阅异常或 observer 回写失败</td>
+      </tr>
+      <tr>
+        <td>completion 有 fullText，usage 为 0</td>
+        <td><code>TokenUsageCollectorAdvisor.extractUsage()</code></td>
+        <td>模型最终 chunk 是否包含 <code>Usage</code></td>
+        <td>模型适配器未返回 streaming usage</td>
+      </tr>
+      <tr>
+        <td>thinking 不展示但模型支持</td>
+        <td><code>ThinkingCollectorAdvisor.extractThinkingText()</code></td>
+        <td>metadata key 是否在兼容列表内</td>
+        <td>字段名不匹配或模型把 thinking 混入 text</td>
+      </tr>
+      <tr>
+        <td>active count 持续升高</td>
+        <td><code>ChatSessionRuntime.cleanup()</code></td>
+        <td><code>PingRequestHandler</code> 或 <code>ClientHeartbeatScheduler</code> 暴露的 <code>activeChats</code></td>
+        <td>流没有终态、回调链被阻断，或 observer 终态发送失败</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>配套短课：<a href="../lessons/0001-flow-map.html"><code>lessons/0001-flow-map.html</code></a>、<a href="../lessons/0002-main-path.html"><code>lessons/0002-main-path.html</code></a>、<a href="../lessons/0003-error-path.html"><code>lessons/0003-error-path.html</code></a>。横向模块背景见 <a href="../../module-agent-client/reference/agent-client-overview.html"><code>../module-agent-client/reference/agent-client-overview.html</code></a>；L3 API 参考暂待后续覆盖率扫描生成。</p>
+</main>
+</body>
+</html>

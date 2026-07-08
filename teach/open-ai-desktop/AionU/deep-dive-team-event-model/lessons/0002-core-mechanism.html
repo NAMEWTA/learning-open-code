@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Mode 事件模型：核心合成机制</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team Mode 事件模型：核心合成机制</h1>
+    <p class="subtitle">学习目标：能解释 ack、run event、child turn event 如何合成 `activeRun`、`slotWorkBySlot` 和 `childTurnsBySlot`。</p>
+    <div class="meta">
+      <span class="pill">核心文件：useTeamRunView.ts</span>
+      <span class="pill">前置：0001-problem-frame</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#ack">1. ack 先占位</a>
+    <a href="#run">2. run event 覆盖</a>
+    <a href="#child">3. child turn 改局部</a>
+    <a href="#practice">4. 判断练习</a>
+  </nav>
+
+  <p class="muted">本课只看状态合成，不重讲 Team 创建流程。详细表格见 <a href="../reference/team-event-model-notes.html#reducers">reducer 速查</a>。</p>
+
+  <h2 id="ack">1. ack 先占位</h2>
+  <p><code>TeamChatView</code> 发送 leader 消息时调用 <code>ipcBridge.team.sendMessage</code>，成员 tab 则调用 <code>sendMessageToAgent</code>。两者返回的 ack 都交给 <code>onTeamRunAck</code>。在 <code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code> 中，ack 不单独存一份，而是被转成普通 run event。</p>
+  <pre><code class="language-ts">const ackToRunEvent = (ack: ITeamRunAck): ITeamRunEvent =&gt; ({
+  team_id: ack.team_id,
+  team_run_id: ack.team_run_id,
+  target_slot_id: ack.target_slot_id,
+  target_role: ack.target_role,
+  status: ack.status,
+  active_child_count: 0,
+  pending_wake_count: 0,
+  starting_child_count: 0,
+  slot_work: [
+    {
+      slot_id: ack.accepted_slot_id || ack.target_slot_id,
+      role: ack.accepted_role || ack.target_role,
+      pending_wake_count: 1,
+      starting_child_count: 0,
+    },
+  ],
+});</code></pre>
+  <p>这个转换有意“保守”：没有 child turn 时，先让 accepted slot 的 gate 进入 pending。这样用户不会在同一个 slot 重复发送，后续事件到来后再把数量和 active turn 修正。</p>
+
+  <h2 id="run">2. run event 覆盖</h2>
+  <p>WebSocket 的 <code>runAccepted</code>、<code>runStarted</code>、<code>runUpdated</code> 也进入同一个 <code>applyRunEvent()</code>。如果 run 进入 completed、cancelled 或 failed，hook 直接回到空状态；否则用事件里的 <code>slot_work</code> 重建 <code>slotWorkBySlot</code>，但保留已有的 <code>childTurnsBySlot</code>。</p>
+  <pre><code class="language-ts">if (TERMINAL_RUN_STATUSES.has(event.status)) {
+  return emptyState;
+}
+return {
+  activeRun: event,
+  childTurnsBySlot: prev.childTurnsBySlot,
+  slotWorkBySlot: indexSlotWork(event.slot_work),
+};</code></pre>
+  <p>这里的边界很重要：run event 是团队级快照，负责覆盖 slot work；child turn 是 slot 局部事实，不被普通 run event 顺手清空。否则后端短暂不带某个 slot work 时，前端可能误以为 child turn 已结束。</p>
+
+  <h2 id="child">3. child turn 改局部</h2>
+  <p><code>childTurnStarted</code> 写入 <code>childTurnsBySlot[slot_id]</code>，并补充该 slot 的 <code>active_turn_id</code>。终态 child turn 则删除这个 slot 的 active turn；如果没有 pending wake、starting child、paused 或 suppressed work，才把该 slot 的 work 删除。</p>
+  <p>换句话说，run event 决定“这次 Team run 的全局骨架”，child turn event 决定“某个成员现在是否真的有 turn 在跑”。两者以 <code>slot_id</code> 汇合，而不是以 conversation id 或当前 active tab 汇合，这正是防串扰的关键。</p>
+
+  <h2 id="practice">4. 判断练习</h2>
+  <div class="quiz">
+    <p><strong>判断：</strong>收到 <code>runCompleted</code> 后，前端是否应该保留旧的 <code>childTurnsBySlot</code>，等待每个 <code>childTurnCompleted</code> 再清理？</p>
+    <p><strong>答案：</strong>不应该。源码把 completed、cancelled、failed 都视为团队级终态，直接返回 <code>emptyState</code>。终态 run 是比局部 child turn 更强的清理信号。</p>
+  </div>
+  <p class="muted">主要阅读：<code>open-ai-desktop/AionU/packages/desktop/src/renderer/pages/team/hooks/useTeamRunView.ts</code>。继续：<a href="0003-reconcile-and-tests.html">0003-reconcile-and-tests</a>。</p>
+</main>
+</body>
+</html>

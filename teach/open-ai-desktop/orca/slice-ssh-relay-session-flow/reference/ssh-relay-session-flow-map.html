@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SSH Relay 会话保活参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>SSH Relay 会话保活参考</h1>
+        <p class="meta">范围：renderer 启动恢复、main SSH/relay session、远端 relay daemon、PTY lease 与测试护栏。</p>
+
+        <h2>端到端时序</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>主文件</th>
+              <th>关键事实</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>启动恢复</td>
+              <td><code>src/renderer/src/App.tsx</code></td>
+              <td>读取 workspace session 后，先对 shutdown 时活跃的 SSH target 执行 eager reconnect；passphrase 或超时目标放入 deferred 列表。</td>
+            </tr>
+            <tr>
+              <td>terminal session 标记</td>
+              <td><code>src/renderer/src/store/slices/terminals.ts</code></td>
+              <td>水合时保留 pending reconnect worktree、tab 和 session id；SSH repo 的 remote session id 来自 session 的 <code>remoteSessionIdsByTabId</code>。</td>
+            </tr>
+            <tr>
+              <td>用户 connect 入口</td>
+              <td><code>src/main/ipc/ssh.ts</code></td>
+              <td><code>ssh:connect</code> 串行化同 target 并发请求，创建或刷新 <code>SshRelaySession</code>，广播 <code>deploying-relay</code>。</td>
+            </tr>
+            <tr>
+              <td>SSH transport</td>
+              <td><code>src/main/ssh/ssh-connection.ts</code></td>
+              <td>负责 ssh2/system SSH 连接、credential cache、disconnect handler、bounded reconnect；不直接拥有 relay provider。</td>
+            </tr>
+            <tr>
+              <td>relay session</td>
+              <td><code>src/main/ssh/ssh-relay-session.ts</code></td>
+              <td>部署 relay、创建 mux、健康检查、注册 provider、reattach PTY、监听 mux loss，最后进入 ready。</td>
+            </tr>
+            <tr>
+              <td>部署与桥接</td>
+              <td><code>src/main/ssh/ssh-relay-deploy.ts</code></td>
+              <td>优先连接已有 socket；否则 detached launch，再通过 <code>--connect</code> 桥接到 daemon socket。</td>
+            </tr>
+            <tr>
+              <td>远端 daemon</td>
+              <td><code>src/relay/relay.ts</code></td>
+              <td>注册 handler、监听 socket、处理 grace、接收 <code>relay.configureGraceTime</code>，并在 shutdown 时清理 socket 和 PTY。</td>
+            </tr>
+            <tr>
+              <td>远端 PTY</td>
+              <td><code>src/relay/pty-handler.ts</code></td>
+              <td>维护 live <code>node-pty</code> map、100KB replay buffer、<code>pty.spawn</code>/<code>pty.attach</code> 和 grace timer。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>连接建立细节</h2>
+        <p>
+          <code>src/main/ipc/ssh.ts</code> 的 <code>doConnect()</code> 先检查已有 ready session。如果 SSH 状态仍 connected、mux 未 disposed、
+          且没有 relay override 或 backoff，它只刷新 renderer 状态，不拆旧 session。否则先 detach 旧 session，
+          再创建新的 <code>SshRelaySession</code>。
+        </p>
+        <pre><code class="language-text">doConnect(targetId)
+  -> connectionManager.connect(target)
+  -> broadcast deploying-relay
+  -> session.establish(conn, grace)
+  -> broadcast connected after session ready
+  -> persist lastRequiredPassphrase</code></pre>
+        <p>
+          <code>SshRelaySession.establish()</code> 和 <code>reconnect()</code> 共享 provider 注册序列。它们都会先调用
+          <code>deployAndLaunchRelay()</code>，创建 <code>SshChannelMultiplexer</code>，用
+          <code>session.resolveHome</code> 进行 round-trip 健康检查，然后注册 PTY、filesystem、Git provider。
+          健康检查必须早于 provider 注册，因为 <code>--connect</code> bridge 可能已经关闭，不能让 session 误进入 ready。
+        </p>
+
+        <h2>relay 部署与 socket 复用</h2>
+        <p>
+          <code>src/main/ssh/ssh-relay-deploy.ts</code> 会把 relay 安装到 content-hashed 版本目录，并用 target id 生成 target-specific socket。
+          POSIX 上先用 <code>test -S</code> probe socket；如果 alive，直接 <code>relay.js --connect</code>。
+          如果 probe dead 或握手失败，才删除 stale socket 并 fresh launch detached relay。
+        </p>
+        <pre><code class="language-text">socket alive
+  -> node relay.js --connect --sock-path relay.sock
+socket dead
+  -> nohup node relay.js --detached --grace-time N --sock-path relay.sock &
+  -> poll socket READY
+  -> node relay.js --connect --sock-path relay.sock</code></pre>
+        <p>
+          Windows 不能像 Unix socket 那样 unlink occupied named pipe，所以部署层维护 active pipe marker；
+          当旧 pipe 连接失败时，会用确定性的 fallback pipe relaunch relay，并把 marker 写回。相关测试覆盖 fallback pipe。
+        </p>
+
+        <h2>版本握手和 sentinel</h2>
+        <p>
+          <code>src/relay/relay-handshake.ts</code> 在 dispatcher 接管 socket 之前处理 handshake frame。
+          <code>--connect</code> bridge 发送当前 relay package version，daemon 返回 ok 或 mismatch。
+          只有 handshake 通过后，bridge 才向主进程 stdout 写 <code>RELAY_SENTINEL</code>，让
+          <code>waitForSentinel()</code> 放行 multiplexer。版本不匹配会让 bridge 以 exit 42 退出，并由
+          <code>src/main/ssh/ssh-relay-deploy-helpers.ts</code> 映射为 <code>RelayVersionMismatchError</code>；
+          但已有 socket 的 <code>--connect</code> 失败会先被 <code>src/main/ssh/ssh-relay-deploy.ts</code>
+          当成 stale socket/pipe 恢复机会处理，POSIX 路径会删除 stale socket 后 fresh launch，Windows 路径可能切换 fallback pipe。
+          只有最终仍把版本不匹配抛到 <code>SshRelaySession</code> 时，才会走 terminal relay error 并跳过普通 relay-lost backoff。
+        </p>
+        <p>
+          <code>src/relay/protocol.ts</code> 额外提供 <code>FrameDecoder.drain()</code>，保证 handshake ok 与 JSON-RPC frame 同包到达时，
+          leftover bytes 不会丢。roundtrip 测试覆盖 daemon 侧和 bridge 侧 leftover。
+        </p>
+
+        <h2>relay 内部 client 模型</h2>
+        <p>
+          <code>RelayDispatcher</code> 有一个 primary client，也能 attach 多个 socket client。每个 client 独立维护
+          decoder、seq、ack 和 generation。通知会广播给所有 client；反向请求如 <code>orca.cli</code> 会通过
+          <code>requestAnyClient()</code> 优先选择真实 socket client，避免发给 detached relay 留下的 dead stdout。
+        </p>
+        <p>
+          当初始 stdin 结束或 socket client 关闭时，dispatcher 会 invalidate/detach 对应 client。
+          这会让 stale client 的请求变成 stale，防止 late <code>pty.spawn</code> 创建无人拥有的远端 shell。
+        </p>
+
+        <h2>grace 语义</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>信号</th>
+              <th>语义</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>relayGracePeriodSeconds</code></td>
+              <td>用户可配置目标级 grace。<code>src/shared/ssh-types.ts</code> 定义 0 表示不自动过期以及 min/max/default 常量；main session/deploy 路径负责把非 0 值 clamp 到 60 秒到 7 天，远端 relay 只接收已归一化的非负秒数。</td>
+            </tr>
+            <tr>
+              <td>fresh detached startup</td>
+              <td>relay 没有 stdout client，会立即 start grace；第一个 socket client 接入后 cancel grace。</td>
+            </tr>
+            <tr>
+              <td>empty detached startup</td>
+              <td>如果没有 PTY 且从未接入 client，即使 grace 为 0，也用一个短启动窗口避免空 daemon 永久滞留。</td>
+            </tr>
+            <tr>
+              <td>host sleep</td>
+              <td><code>prepareForHostSleep()</code> 发送 <code>relay.configureGraceTime</code>，把 grace 设置为 0，保护 live PTY。</td>
+            </tr>
+            <tr>
+              <td>socket/stdin close</td>
+              <td>没有 client 时 start grace；grace 到期调用 shutdown，dispose dispatcher/PTY/FS/hook server 并清理 socket。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>重连路径</h2>
+        <p>
+          有两条失败路径会回到同一个 session reconnect：
+        </p>
+        <ul>
+          <li>SSH transport 掉线：<code>SshConnection</code> 收到 <code>end/close/error</code> 后 schedule reconnect；重新 connected 且 <code>reconnectAttempt = 0</code> 时，<code>src/main/ipc/ssh.ts</code> 调 <code>session.reconnect()</code>。</li>
+          <li>relay bridge 掉线：<code>SshChannelMultiplexer</code> 的 transport close、write EPIPE 或 timeout 会 dispose 为 <code>connection_lost</code>；<code>SshRelaySession.watchMuxForRelayLoss()</code> 触发 relay-lost backoff。</li>
+        </ul>
+        <p>
+          <code>session.reconnect()</code> 会停止 port scanning、移除 port forwards、广播空列表、以 <code>connection_lost</code>
+          teardown provider，然后重新 deploy/bridge/register/reattach。版本 mismatch 是 terminal error；普通失败保持
+          reconnecting 并让 <code>src/main/ipc/ssh.ts</code> 的 bounded backoff 接管。
+        </p>
+
+        <h2>PTY lease、reattach 和 replay</h2>
+        <p>
+          main 侧 <code>src/main/ipc/pty.ts</code> 在 SSH PTY spawn 成功后把 relay PTY id 写入
+          <code>sshRemotePtyLeases</code>。这个 lease 是重连索引，不是 PTY 本体。真正的 PTY 本体在远端
+          <code>PtyHandler.ptys</code> map 中，受 relay grace window 保护。
+        </p>
+        <p>
+          reconnect 时，<code>SshRelaySession.reattachKnownPtys()</code> 合并 durable lease 与当前
+          <code>getPtyIdsForConnection()</code>，通过 <code>SshPtyProvider.attachForReconnect()</code> 调
+          <code>pty.attach</code>。relay 侧如果 buffer 有内容，会返回最近 100KB replay；session 侧做 1 秒重复 replay 去重，
+          再发送 <code>pty:replay</code> 给 renderer。如果 attach 返回 not found，lease 标为 expired，local ownership 清掉，
+          renderer 收到 <code>pty:exit</code> 后可以冷启动新 shell。
+        </p>
+        <p>
+          renderer 启动恢复分两层。<code>src/renderer/src/App.tsx</code> 先让无凭据目标 eager connect；passphrase 目标或 15 秒内未恢复的目标进入
+          deferred。<code>src/renderer/src/store/slices/terminals.ts</code> 把 session id 存到 <code>deferredSshSessionIdsByTabId</code>。
+          当 TerminalPane 挂载或用户聚焦时，<code>src/renderer/src/components/terminal-pane/pty-connection.ts</code> 再检查是否需要 prompt，等待用户主动 connect，
+          然后调用 <code>transport.connect({ sessionId })</code>。若 <code>SSH_SESSION_EXPIRED</code>，会清旧绑定并 fresh spawn。
+        </p>
+
+        <h2>workspace session 和 PTY 的持久性差异</h2>
+        <p>
+          <code>src/relay/workspace-session-handler.ts</code> 把 workspace session 写入远端用户主目录下的 Orca sessions JSON，
+          有 revision、atomic rename 和 presence TTL。
+          这份 JSON 能跨 relay 进程重启保留 UI session。远端 PTY replay buffer 不一样，它在 relay 进程内存中；
+          relay 退出后，PTY 和 buffer 都不存在，只能靠 cold restore 或 fresh spawn。
+        </p>
+
+        <h2>测试护栏</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>测试</th>
+              <th>保护的不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-session.test.ts</code></td>
+              <td>reconnect 会换 mux、重注册 provider、reattach live PTY、转发 replay、过期 stale PTY、host sleep 设置 unlimited grace。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-deploy.test.ts</code></td>
+              <td>默认 grace 为 until reset、0 合法、上限为 7 天、安装目录带 content hash、socket 按 target 隔离。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-relay-cross-version-isolation.test.ts</code></td>
+              <td>新版本 deploy 不会引用旧版本 install dir 或旧 socket，避免把新 client 接到旧 daemon。</td>
+            </tr>
+            <tr>
+              <td><code>src/relay/relay-handshake-roundtrip.test.ts</code></td>
+              <td>handshake 通过才 accepted，daemon/bridge 两侧 coalesced leftover 都不会丢。</td>
+            </tr>
+            <tr>
+              <td><code>src/main/ssh/ssh-channel-multiplexer.test.ts</code></td>
+              <td>keepalive 定时发送，write failure 不抛出到 timer 外，transport close 会以 connection lost 拒绝 pending request。</td>
+            </tr>
+            <tr>
+              <td><code>src/renderer/src/components/terminal-pane/pty-connection.test.ts</code></td>
+              <td>deferred SSH reattach 会写 replay，passphrase 取消不会自动 connect，expired session 会清绑定并 fresh spawn。</td>
+            </tr>
+            <tr>
+              <td><code>src/renderer/src/app-startup-routing.test.ts</code></td>
+              <td>first-window startup services 必须先于 terminal reconnect，避免恢复阶段提前挂载产生重复 PTY。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>调试入口</h2>
+        <ul>
+          <li>UI 一直停在 reconnecting：先查 <code>src/main/ipc/ssh.ts</code> 的 relay override/backoff，再查 <code>SshConnection</code> 的 reconnectAttempt。</li>
+          <li>SSH connected 但远端文件不可用：查 <code>SshRelaySession.establish()</code> 是否通过 health check 和 provider 注册。</li>
+          <li>终端没有旧输出：查 lease 是否存在、<code>pty.attach</code> 是否返回 replay、renderer 是否走 deferred path。</li>
+          <li>每次重启都 fresh shell：查远端 socket 是否 alive、handshake 是否 mismatch、grace 是否过期。</li>
+          <li>多个 Orca 客户端状态不同步：查 <code>RelayDispatcher</code> socket client 数量、workspace revision 和 presence。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

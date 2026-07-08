@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>0001 native supervisor 与 intercom 全链路</title>
+	<link rel="stylesheet" href="../../module-intercom/assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-native-supervisor-intercom 短课 0001</p>
+		<h1>native supervisor 与 intercom 协调全链路</h1>
+		<p>学习目标：15 分钟内能口述一次前台 subagent run 从 bridge 注入到 result delivery 的五段链路，并指出每段对应源码文件。</p>
+	</header>
+
+	<section>
+		<h2>1. 协调发生在三个时刻</h2>
+		<p>不要把 intercom 想成单一机制。一次前台 run 里，协调分三次发生：<strong>启动前</strong> bridge 决定子 agent 是否拥有 <code>contact_supervisor</code>；<strong>运行中</strong> native supervisor channel 用文件把阻塞请求递给父会话；<strong>完成后</strong> result intercom 把 grouped 子结果经事件总线送回父会话，同时把普通 tool result 压缩成 receipt。</p>
+		<div class="grid">
+			<div class="panel"><strong>Bridge</strong><br><span class="where">intercom-bridge.ts</span> + <span class="where">subagent-executor.ts</span></div>
+			<div class="panel"><strong>Supervisor Channel</strong><br><span class="where">native-supervisor-channel.ts</span> + <span class="where">pi-args.ts</span></div>
+			<div class="panel"><strong>Result Intercom</strong><br><span class="where">result-intercom.ts</span> + executor 出口</div>
+		</div>
+	</section>
+
+	<section>
+		<h2>2. 五段分工：谁写盘、谁轮询、谁压缩</h2>
+		<pre class="tree">前台 subagent run + intercom
+├── 1. resolveIntercomBridge          ← subagent-executor 启动前
+│      applyIntercomBridgeToAgent     ← 注入工具与系统提示
+├── 2. buildPiArgs                    ← pi-args 写 channelDir 等 env
+│      registerNativeSupervisorClient ← 子进程注册 contact_supervisor
+├── 3. createNativeSupervisorChannel  ← extension/index session_start
+│      poll request → pi.sendMessage  ← 父端展示 pending
+│      subagent_supervisor reply      ← 写 reply 文件
+├── 4. runSync 完成                   ← execution 产出 SingleResult
+└── 5. emitForegroundResultIntercom   ← grouped event + delivery ack
+       maybeBuildForegroundIntercomReceipt ← 压缩 details</pre>
+		<p>记忆口诀：<strong>注入 → 环境 → 轮询回复 → 执行 → 送达压缩</strong>。async 路径在第 4 步之后由 result-watcher 接手，本切片聚焦 foreground。</p>
+	</section>
+
+	<section>
+		<h2>3. 调用时序（主路径）</h2>
+		<pre>Parent turn          subagent-executor       child Pi           native-supervisor-channel    result-intercom
+    |                        |                    |                         |                          |
+    |-- subagent tool ------>|                    |                         |                          |
+    |                        |-- resolveBridge -->|                         |                          |
+    |                        |-- applyBridge ---->| (tools in config)       |                          |
+    |                        |-- buildPiArgs ---->| spawn + channelDir env  |                          |
+    |                        |                    |-- contact_supervisor -->| write request.json       |
+    |                        |                    |                         |<-- poll + sendMessage ---|
+    |-- subagent_supervisor reply -------------------------------------------->| write reply.json         |
+    |                        |                    |<-- waitForReply --------|                          |
+    |                        |<-- SingleResult ---|                         |                          |
+    |                        |-- buildPayload --------------------------------|------------------------->|
+    |                        |-- deliverEvent -------------------------------|------------------------->|
+    |&lt;- compact receipt -----| (strip heavy outputs)                        |                          |</pre>
+		<div class="note">
+			<p>完整消息类型表、生命周期状态机与测试索引见 <a href="../reference/native-supervisor-intercom-flow-map.html">参考流程图谱</a>；三条通道边界见 <a href="../../module-intercom/reference/intercom-overview.html">intercom L1 参考</a>。</p>
+		</div>
+	</section>
+
+	<section class="quiz">
+		<h2>检索练习</h2>
+		<p>一次 parallel foreground run 完成，父会话 tool result 只有简短 receipt，看不到 child 的完整 summary。下面哪种判断最符合源码设计？</p>
+		<ol>
+			<li>这是 bug，完整输出应仍在 tool result 的 details 里。</li>
+			<li>bridge inactive，因此从未尝试 grouped delivery。</li>
+			<li>delivery 成功，完整输出在 grouped intercom event 里，details 被刻意剥离。</li>
+		</ol>
+		<div class="answer">
+			<p><strong>参考答案：3（在 bridge active 且 delivery 确认时）。</strong><code>stripDetailsOutputsForIntercomReceipt</code> 会移除 heavy output fields；若 bridge inactive 或 500ms 内未收到 acknowledgement，则回退 legacy foreground output（见 <code>intercom-result-delivery.test.ts</code>）。</p>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>主要来源</h3>
+		<p>建议先读 <code>subagent-executor.ts</code> 中 <code>resolveIntercomBridge</code> 与 <code>maybeBuildForegroundIntercomReceipt</code>，再对照 <code>native-supervisor-channel.ts</code> 的 request/reply 协议。</p>
+		<p>下一节：<a href="0002-supervisor-request-reply.html">0002 运行中 supervisor 请求与回复</a> · <a href="0003-result-delivery.html">0003 完成结果 delivery 与 receipt</a>。不清楚某段链路时，可以让 agent 按 run id 带你逐文件追踪。</p>
+	</section>
+
+	<nav class="lesson-nav">
+		<p>课程导航 · <a href="0002-supervisor-request-reply.html">0002 supervisor 请求回复</a> · <a href="0003-result-delivery.html">0003 result delivery</a> · <a href="../reference/native-supervisor-intercom-flow-map.html">参考图谱</a></p>
+	</nav>
+</main>
+</body>
+</html>

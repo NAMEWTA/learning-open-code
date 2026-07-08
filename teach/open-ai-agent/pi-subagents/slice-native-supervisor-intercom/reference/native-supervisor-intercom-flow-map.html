@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>native supervisor intercom 流程图谱</title>
+	<link rel="stylesheet" href="../../module-intercom/assets/topic.css">
+	<style>
+		main { width: min(1120px, calc(100% - 40px)); }
+		table { font-size: 0.92rem; }
+		th { background: var(--wash); }
+		@media print { main { width: 100%; padding: 0; } a { color: inherit; } }
+	</style>
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-native-supervisor-intercom 参考</p>
+		<h1>native supervisor 与 intercom 流程图谱</h1>
+		<p>本页承载长清单：五要素对照、环境变量、request 生命周期、delivery 状态与测试索引。短课只保留判断技能。</p>
+	</header>
+
+	<section>
+		<h2>1. 垂直切片五要素对照</h2>
+		<table>
+			<tr><th>要素</th><th>本切片落点</th></tr>
+			<tr><td>入口</td><td><code>subagent-executor</code> → <code>resolveIntercomBridge</code> + foreground 出口 <code>maybeBuildForegroundIntercomReceipt</code></td></tr>
+			<tr><td>沿途层</td><td>bridge 注入 → pi-args env → supervisor channel 文件 → runSync 执行 → result event delivery</td></tr>
+			<tr><td>时序</td><td>见 <a href="../lessons/0001-flow-map.html">0001 流程图</a></td></tr>
+			<tr><td>异常路径</td><td>bridge inactive、metadata 缺失、session 不匹配、delivery 超时、detached child、expired/inactive request</td></tr>
+			<tr><td>交叉链接</td><td><a href="../../module-intercom/reference/intercom-overview.html">intercom L1</a> · <a href="../../slice-single-foreground-run/lessons/0001-flow-map.html">单次前台 run L2</a></td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>2. 子进程 supervisor 环境变量</h2>
+		<table>
+			<tr><th>环境变量</th><th>写入方</th><th>消费方</th></tr>
+			<tr><td><code>PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR</code></td><td><code>pi-args.ts</code></td><td><code>readChildMetadata</code></td></tr>
+			<tr><td><code>PI_SUBAGENT_ORCHESTRATOR_SESSION_ID</code></td><td><code>pi-args.ts</code></td><td>request 过滤、session 匹配</td></tr>
+			<tr><td><code>PI_SUBAGENT_ORCHESTRATOR_TARGET</code></td><td><code>pi-args.ts</code></td><td>bridge 模板、result payload <code>to</code></td></tr>
+			<tr><td><code>PI_SUBAGENT_RUN_ID</code> / <code>PI_SUBAGENT_CHILD_AGENT</code> / <code>PI_SUBAGENT_CHILD_INDEX</code></td><td><code>pi-args.ts</code></td><td>request metadata、channel 目录名</td></tr>
+			<tr><td><code>PI_INTERCOM_ASK_TIMEOUT_MS</code></td><td>可选覆盖</td><td><code>askTimeoutMs</code>、request <code>expiresAt</code></td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>3. Supervisor request 生命周期</h2>
+		<table>
+			<tr><th>状态</th><th>含义</th><th>父端可见</th><th>清理</th></tr>
+			<tr><td><code>pending</code></td><td>等待 reply 或 progress 展示</td><td>是（session 匹配）</td><td>—</td></tr>
+			<tr><td><code>resolved</code></td><td>reply 文件已存在</td><td>否</td><td>删 request</td></tr>
+			<tr><td><code>expired</code></td><td>超过 expiresAt / ask timeout</td><td>否</td><td>删 request</td></tr>
+			<tr><td><code>inactive</code></td><td>子 run 已 complete/failed/paused</td><td>否</td><td>删 request</td></tr>
+			<tr><td><code>wrong-session</code></td><td>orchestratorSessionId 不匹配</td><td>否</td><td>poll 跳过</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>4. Bridge mode 与 active 条件</h2>
+		<table>
+			<tr><th>mode</th><th>active 条件</th><th>inactive 原因</th></tr>
+			<tr><td><code>off</code></td><td>永不</td><td>bridge mode is off</td></tr>
+			<tr><td><code>fork-only</code></td><td><code>context === "fork"</code> 且有 orchestrator target</td><td>context 不是 fork</td></tr>
+			<tr><td><code>always</code>（默认）</td><td>有 orchestrator target</td><td>target 为空</td></tr>
+		</table>
+		<p>unknown mode 归一为 <code>always</code>。active 时 <code>applyIntercomBridgeToAgent</code> 追加 <code>intercom</code>、<code>contact_supervisor</code> 与带 <code>Intercom orchestration channel:</code> marker 的系统提示。</p>
+	</section>
+
+	<section>
+		<h2>5. Result delivery 决策树</h2>
+		<table>
+			<tr><th>条件</th><th>父会话 tool result</th></tr>
+			<tr><td>bridge inactive</td><td>legacy 完整 foreground output</td></tr>
+			<tr><td>所有 child detached</td><td>不尝试 intercom；legacy 或空 children</td></tr>
+			<tr><td>delivery ack 在 500ms 内确认</td><td>compact receipt + stripped details</td></tr>
+			<tr><td>delivery 超时 / 无 listener</td><td>legacy 完整 foreground output</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>6. 源码文件索引</h2>
+		<table>
+			<tr><th>文件</th><th>职责</th><th>首读符号</th></tr>
+			<tr><td><code>intercom-bridge.ts</code></td><td>bridge 解析与 agent 注入</td><td><code>resolveIntercomBridge</code>、<code>applyIntercomBridgeToAgent</code></td></tr>
+			<tr><td><code>native-supervisor-channel.ts</code></td><td>文件通道 request/reply</td><td><code>sendSupervisorRequest</code>、<code>createNativeSupervisorChannel</code></td></tr>
+			<tr><td><code>result-intercom.ts</code></td><td>grouped payload 与 delivery</td><td><code>buildSubagentResultIntercomPayload</code>、<code>deliverSubagentResultIntercomEvent</code></td></tr>
+			<tr><td><code>subagent-executor.ts</code></td><td>foreground 接线与出口</td><td><code>emitForegroundResultIntercom</code>、<code>maybeBuildForegroundIntercomReceipt</code></td></tr>
+			<tr><td><code>pi-args.ts</code></td><td>channelDir 与子 metadata env</td><td><code>buildPiArgs</code> supervisor 分支</td></tr>
+			<tr><td><code>extension/index.ts</code></td><td>父端 channel start/dispose</td><td><code>supervisorChannel.start</code></td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>7. 测试佐证</h2>
+		<table>
+			<tr><th>测试</th><th>佐证行为</th></tr>
+			<tr><td><code>test/unit/intercom-bridge.test.ts</code></td><td>mode 默认、fork-only、工具注入幂等、allowlist 不阻塞 native 工具</td></tr>
+			<tr><td><code>test/unit/native-supervisor-channel.test.ts</code></td><td>session 过滤、reply path、resolved/expired 清理、cancel 删 request</td></tr>
+			<tr><td><code>test/unit/result-intercom.test.ts</code></td><td>grouped payload、receipt 格式、strip heavy output、嵌套脱敏</td></tr>
+			<tr><td><code>test/integration/intercom-result-delivery.test.ts</code></td><td>single/parallel/chain 单 event；inactive bridge 与 delivery 失败回退 legacy</td></tr>
+		</table>
+	</section>
+
+	<section>
+		<h2>8. 课程导航</h2>
+		<ul>
+			<li><a href="../lessons/0001-flow-map.html">0001 native supervisor 与 intercom 全链路</a></li>
+			<li><a href="../lessons/0002-supervisor-request-reply.html">0002 运行中 supervisor 请求与回复</a></li>
+			<li><a href="../lessons/0003-result-delivery.html">0003 完成结果 delivery 与 receipt</a></li>
+			<li><a href="../../module-intercom/lessons/0001-intercom-module-tour.html">L1 intercom 模块导览</a></li>
+		</ul>
+	</section>
+</main>
+</body>
+</html>

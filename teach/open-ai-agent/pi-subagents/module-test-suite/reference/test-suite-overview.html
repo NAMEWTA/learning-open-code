@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>test suite overview</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#7c3aed; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.88rem; }
+    th, td { border:1px solid var(--line); padding:.48rem .55rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>test suite 参考图谱</h1>
+  <p class="note">本页承载 L1 长清单：三层测试边界、npm 命令、support 夹具、integration/e2e 与源码模块的映射，以及 unit 分层索引。短课只保留「去哪一层找佐证」的判断技能。</p>
+
+  <h2>1. 三层对比</h2>
+  <table>
+    <tr><th>层</th><th>文件数</th><th>运行命令</th><th>依赖</th><th>验证什么</th></tr>
+    <tr><td>unit</td><td>84</td><td><code>npm run test:unit</code></td><td><code>--experimental-strip-types</code>，无自定义 loader</td><td>纯函数、解析器、守卫、格式化、schema；不 spawn 子进程、不 mock Pi CLI。</td></tr>
+    <tr><td>integration</td><td>21</td><td><code>npm run test:integration</code></td><td><code>--experimental-transform-types</code> + <code>register-loader.mjs</code></td><td>mock <code>pi</code> CLI 下的 spawn→JSONL 解析→result/artifact/status；覆盖 runs、slash、intercom、render 等跨模块管道。</td></tr>
+    <tr><td>e2e</td><td>1</td><td><code>npm run test:e2e</code></td><td>同上 loader + <code>@earendil-works/pi-*</code> devDependencies</td><td>真实 <code>AgentSession</code> 加载 extension，faux provider 驱动父会话调用 <code>subagent</code>，子进程回传 marker。</td></tr>
+  </table>
+  <pre>npm run test:all
+  = test:unit + test:integration + test:e2e（顺序执行，任一失败即中断）</pre>
+
+  <h2>2. support 夹具索引</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>被谁使用</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/register-loader.mjs</code></td><td>注册 <code>ts-loader.mjs</code>，解决 integration/e2e 的 ESM 解析。</td><td>integration、e2e 的 node 启动参数。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/ts-loader.mjs</code></td><td>resolve 阶段把 <code>.js</code> 重写为 <code>.ts</code>。</td><td>由 register-loader 间接加载。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/helpers.ts</code></td><td><code>createTempDir</code>、<code>makeAgent</code>、<code>makeMinimalCtx</code>、<code>createEventBus</code>、<code>tryImport</code>、<code>events.*</code> JSONL 工厂。</td><td>三层测试广泛复用。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/mock-pi.ts</code></td><td>生成临时 <code>pi</code> 可执行文件，劫持 <code>PATH</code>，队列化 <code>onCall</code> 响应。</td><td>integration 执行管道测试。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/mock-pi-script.mjs</code></td><td>实际被调用的 mock CLI：读队列 JSON，写 stdout JSONL，处理 delay/exitCode/steps。</td><td>由 mock-pi 安装的 shell/cmd 包装器启动。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/real-session-runner.ts</code></td><td>启动带 extension 的父 <code>AgentSession</code>，注册 faux provider，暴露 <code>routeParentThroughSubagent</code>。</td><td>e2e。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/support/real-session-child-cli.mjs</code></td><td>子进程 CLI：真实 <code>AgentSession</code> + faux provider，供前台 spawn 路径消费。</td><td>e2e 与 real-session-runner。</td></tr>
+  </table>
+
+  <h2>3. integration 测试 → 源码模块映射</h2>
+  <table>
+    <tr><th>测试文件</th><th>主要佐证模块</th><th>行为焦点</th></tr>
+    <tr><td><code>single-execution.test.ts</code></td><td>runs/foreground</td><td>single alias、spawn 限额、progress、artifact、intercom detach、model fallback。</td></tr>
+    <tr><td><code>parallel-execution.test.ts</code></td><td>runs/foreground + shared</td><td>top-level parallel、<code>mapConcurrent</code>、顺序保持、timeout、输出文件。</td></tr>
+    <tr><td><code>chain-execution.test.ts</code></td><td>runs/foreground/chain</td><td>sequential/parallel step、<code>{previous}</code>、named output、dynamic fanout、workflow graph。</td></tr>
+    <tr><td><code>template-resolution.test.ts</code></td><td>runs/shared prompt runtime</td><td><code>{task}</code>、<code>{previous}</code>、<code>{chain_dir}</code> 模板替换纯逻辑。</td></tr>
+    <tr><td><code>chain-clarify.test.ts</code></td><td>runs/foreground + TUI</td><td>chain 步骤需要澄清时的交互路径。</td></tr>
+    <tr><td><code>async-execution.test.ts</code></td><td>runs/background</td><td>detached runner、status 文件、events jsonl、control state、live output。</td></tr>
+    <tr><td><code>top-level-async.test.ts</code></td><td>runs/foreground + background</td><td>顶层 async 分流与配置强制 async。</td></tr>
+    <tr><td><code>async-status.test.ts</code></td><td>runs/background/run-status</td><td>status/fleet/transcript 格式化与缓存读取。</td></tr>
+    <tr><td><code>async-job-tracker.test.ts</code></td><td>runs/background/async-job-tracker</td><td>session 内 active job map 与 widget 恢复。</td></tr>
+    <tr><td><code>result-watcher.test.ts</code></td><td>runs/background/result-watcher</td><td>result JSON 消费、完成通知、intercom payload。</td></tr>
+    <tr><td><code>fork-context-execution.test.ts</code></td><td>runs/foreground + shared/fork</td><td>fork context 传递与前台执行。</td></tr>
+    <tr><td><code>foreground-result-size.test.ts</code></td><td>runs/foreground</td><td>超大 tool result 的 compaction 与截断策略。</td></tr>
+    <tr><td><code>error-handling.test.ts</code></td><td>runs/foreground + background</td><td>crash、stderr、detectSubagentError、signal/abort、chain 错误传播。</td></tr>
+    <tr><td><code>detect-error.test.ts</code></td><td>runs/shared</td><td>子进程错误检测启发式与覆盖。</td></tr>
+    <tr><td><code>doctor-executor.test.ts</code></td><td>extension/doctor</td><td><code>subagent({ action: "doctor" })</code> 执行路径。</td></tr>
+    <tr><td><code>slash-commands.test.ts</code></td><td>slash</td><td>slash 命令注册、解析与 subagent 桥接。</td></tr>
+    <tr><td><code>slash-live-state.test.ts</code></td><td>slash + runs</td><td>slash 触发的 live state 与前台控件。</td></tr>
+    <tr><td><code>intercom-result-delivery.test.ts</code></td><td>intercom + runs</td><td>detach/attach、result 投递与 receipt。</td></tr>
+    <tr><td><code>render-widget.test.ts</code></td><td>TUI render</td><td>async/foreground widget 渲染。</td></tr>
+    <tr><td><code>render-fork-badge.test.ts</code></td><td>TUI render</td><td>fork badge 与嵌套展示。</td></tr>
+    <tr><td><code>session-tokens.test.ts</code></td><td>runs/shared + extension</td><td>session token 统计与传递。</td></tr>
+  </table>
+
+  <h2>4. unit 测试分层索引（按源码域）</h2>
+  <h3>4.1 agents 与 discovery</h3>
+  <p><code>agent-selection</code>、<code>agent-frontmatter</code>、<code>agent-overrides</code>、<code>agent-management</code>、<code>agent-disabled</code>、<code>agent-eject-disable</code>、<code>agent-memory</code>、<code>agent-scope</code>、<code>extra-agent-dirs</code>、<code>profiles</code>、<code>proactive-skills</code>、<code>skills-fallback</code></p>
+  <h3>4.2 runs / execution / async</h3>
+  <p><code>recursion-guard</code>、<code>pi-spawn</code>、<code>pi-args</code>、<code>single-output</code>、<code>get-final-output</code>、<code>dynamic-fanout</code>、<code>workflow-graph</code>、<code>chain-append</code>、<code>chain-root-attachment</code>、<code>chain-serializer</code>、<code>parallel-utils</code>、<code>subagent-control</code>、<code>subagent-prompt-runtime</code>、<code>async-execution</code>、<code>async-interrupt-action</code>、<code>async-permission-session</code>、<code>async-resume</code>、<code>live-async-resume</code>、<code>run-status</code>、<code>run-id-resolver</code>、<code>stale-run-reconciler</code>、<code>wait</code>、<code>scheduled-runs</code>、<code>turn-budget</code>、<code>tool-budget</code>、<code>model-fallback</code>、<code>model-scope</code>、<code>model-scope-settings</code>、<code>model-info</code>、<code>worktree</code>、<code>acceptance</code>、<code>fork-context</code>、<code>child-transcript</code>、<code>foreground-tool-call-compaction</code></p>
+  <h3>4.3 extension / RPC / schemas</h3>
+  <p><code>index-child-registration</code>、<code>rpc</code>、<code>schemas</code>、<code>doctor</code>、<code>tool-description</code>、<code>package-manifest</code>、<code>config-dir-runtime</code>、<code>pi-coding-agent-dir</code></p>
+  <h3>4.4 slash / prompt workflows</h3>
+  <p><code>slash-bridge</code>、<code>slash-chain-groups</code>、<code>prompt-workflows</code>、<code>prompt-template-bridge</code></p>
+  <h3>4.5 intercom / control / notify</h3>
+  <p><code>intercom-bridge</code>、<code>result-intercom</code>、<code>native-supervisor-channel</code>、<code>control-channel</code>、<code>control-notices</code>、<code>nested-control</code>、<code>nested-events</code>、<code>notify</code>、<code>completion-batcher</code>、<code>completion-dedupe</code>、<code>completion-guard</code></p>
+  <h3>4.6 shared infra / render / misc</h3>
+  <p><code>atomic-json</code>、<code>jsonl-writer</code>、<code>file-coalescer</code>、<code>path-handling</code>、<code>path-resolution</code>、<code>temp-paths</code>、<code>artifacts</code>、<code>status-format</code>、<code>render-helpers</code>、<code>widget-nested-render</code>、<code>types-fork-preamble</code>、<code>total-cost</code>、<code>close-grace-timer</code>、<code>windows-hide-spawn</code>、<code>ts-loader</code></p>
+
+  <h2>5. e2e 全链路要点</h2>
+  <table>
+    <tr><th>项</th><th>说明</th></tr>
+    <tr><td>文件</td><td><code>open-ai-agent/pi-subagents/test/e2e/real-session-subagent.test.ts</code></td></tr>
+    <tr><td>跳过条件</td><td><code>tryImport("@earendil-works/pi-coding-agent")</code> 或 <code>pi-ai</code> 返回 null 时整组 skip。</td></tr>
+    <tr><td>环境隔离</td><td>测试前写入 bogus 的 <code>PI_SUBAGENT_*</code> 环境变量，防止父进程污染子 spawn。</td></tr>
+    <tr><td>断言链</td><td>faux parent 调 <code>subagent</code> → 真实 child CLI → JSONL marker → extension 解析 → tool result 含 <code>CHILD_REAL_SESSION_OK</code>。</td></tr>
+    <tr><td>与 integration 差异</td><td>integration 劫持 PATH 用 mock CLI；e2e 走真实 <code>AgentSession</code> 与 extension 注册，验证「在 Pi runtime 里仍成立」。</td></tr>
+  </table>
+
+  <h2>6. 常用过滤命令</h2>
+  <pre>npm run test:unit -- recursion-guard agent-selection
+npm run test:integration -- single-execution chain-execution async-execution
+npm run test:e2e</pre>
+  <p>Node 原生 test runner 支持在命令末尾追加文件名子串过滤；适合 L2 垂直切片时只跑与当前源码文件相关的子集。</p>
+</main>
+</body>
+</html>

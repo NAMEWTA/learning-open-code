@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 功能模块参考</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.7;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:32px;margin-bottom:6px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px}
+    th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .warn{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+  </style>
+</head>
+<body>
+  <h1>RAG 功能模块参考</h1>
+  <p class="summary"><strong>一句话：</strong>RAG 模块把知识库文档变成 chunk、向量索引和全文索引，并在搜索或问答时召回 <code>SearchResult</code>，供 Admin 调试、知识库问答和 Agent 运行时上下文使用。DTO 字段、枚举解析与策略接口签名见 <a href="rag-api.html">rag-api.html</a>。</p>
+  <p class="warn"><strong>源码优先：</strong>官方文档描述了 Query 改写、PARSING 状态、PPT/OCR/CSV 等能力；当前源码中 QueryRewrite 是空实现，文档处理直接抢占为 PROCESSING，parser 清单也没有 PPT/OCR/CSV 专用实现。</p>
+
+  <h2>可信来源</h2>
+  <table>
+    <thead><tr><th>来源</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">open-java/snail-ai/docs/architecture/rag-pipeline.md</span></td><td>官方 RAG 流程、摄入、检索、融合和存储后端说明。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/pipeline/DocumentPipeline.java</span></td><td>文档解析、分片、chunk 入库、向量与搜索双写。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/search/pipeline/RagSearchPipeline.java</span></td><td>检索 handler 顺序执行器。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-rag/src/main/java/com/aizuda/snail/ai/features/rag/search/pipeline/handler</span></td><td>检索各阶段真实顺序和启停条件。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/RagDocumentController.java</span></td><td>文档上传和管理入口。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/RagSearchController.java</span></td><td>知识库 CRUD、config、搜索调试和流式问答入口。</td></tr>
+      <tr><td><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/controller/RagChunkController.java</span></td><td>chunk 分页、详情、新增、编辑和删除入口。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>摄入链路</h2>
+  <div class="filetree">snail-ai-feature-rag/
+├── pipeline/
+│   ├── DocumentPipeline.java          ← 摄入核心，处理单个 documentId
+│   ├── DocumentChunkingService.java   ← 读取 config.chunkParams 并选择分片策略
+│   └── DocumentContentResolver.java   ← 文件内容流 SPI，当前管线主要走 ResourceService
+├── strategy/
+│   ├── importer/                      ← 本地文件和 URL 导入策略
+│   ├── parser/                        ← 6 类源码 parser
+│   └── chunker/                       ← 4 类分片策略
+└── dedup/                             ← 上传预览和提交的去重判定模型</div>
+  <table>
+    <thead><tr><th>阶段</th><th>入口或类</th><th>职责</th><th>后续切片</th></tr></thead>
+    <tbody>
+      <tr><td>上传入口</td><td><code>RagDocumentController</code></td><td><code>/document/upload</code>、<code>/upload/preview</code>、<code>/upload/commit</code>、<code>/import/url</code> 等接口。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td>文档入库</td><td><code>RagDocumentService</code></td><td>导入资源、执行去重决策、写入 <code>RagDocumentPO</code>，状态为 <code>PENDING</code>。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td>定时处理</td><td><code>DocumentProcessingTask</code></td><td>每 10 秒取最多 5 个 pending 文档，逐个调用 <code>DocumentPipeline.processDocument</code>。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td>解析与分片</td><td><code>DocumentPipeline</code></td><td>加载资源、选择 parser、调用 chunking service，生成 <code>ChunkDTO</code>。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td>索引写入</td><td><code>dualWrite</code></td><td>批量写向量库；搜索引擎启用时写全文索引，全文写入失败只记录 warning。</td><td><code>slice-rag-ingestion</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>检索链路</h2>
+  <table>
+    <thead><tr><th>顺序</th><th>Handler</th><th>职责</th><th>关键依赖</th></tr></thead>
+    <tbody>
+      <tr><td>10</td><td><code>ConfigResolveHandler</code></td><td>读取 <code>RagPO</code> 和 config，填充 <code>searchParams</code>、<code>modelParams</code> 与 query。</td><td><code>RagMapper</code></td></tr>
+      <tr><td>20</td><td><code>QueryRewriteHandler</code></td><td>当前空实现，注释说明查询改写已移除。</td><td>无</td></tr>
+      <tr><td>30</td><td><code>VectorSearchHandler</code></td><td>按知识库创建 vector store，使用 queryText 搜索 TopK，并做阈值过滤。</td><td><code>VectorStoreFactory</code></td></tr>
+      <tr><td>40</td><td><code>Bm25SearchHandler</code></td><td>仅在 <code>searchEngineEnable=true</code> 时执行全文检索。</td><td><code>SearchEngineFactory</code></td></tr>
+      <tr><td>50</td><td><code>HybridFusionHandler</code></td><td>BM25 有结果时按 RRF 或 weighted sum 合并向量和全文结果。</td><td><code>RRFFusion</code>、<code>WeightedSumFusion</code></td></tr>
+      <tr><td>60</td><td><code>RerankHandler</code></td><td>启用 rerank 且有模型 ID 时调用 rerank service，否则跳过。</td><td><code>DefaultRerankService</code></td></tr>
+      <tr><td>70</td><td><code>FinalizeHandler</code></td><td>取 TopK、补齐 chunk 与文档名、可扩展相邻切片，并做 lost-in-the-middle 重排。</td><td><code>RagChunkMapper</code>、<code>RagDocumentMapper</code></td></tr>
+    </tbody>
+  </table>
+  <p><span class="tag">后续：slice-rag-retrieval</span> 应从 <code>RagSearchController.search</code>、<code>RagSearchCallbackHandler</code> 和 <code>RagQAService.qaStream</code> 三个入口中挑一个垂直切片，讲清召回结果如何进入 Prompt。</p>
+
+  <h2>策略速查</h2>
+  <h3>Parser</h3>
+  <table>
+    <thead><tr><th>类</th><th>支持格式</th><th>实现要点</th></tr></thead>
+    <tbody>
+      <tr><td><code>PdfParser</code></td><td><code>pdf</code></td><td>PDFBox <code>PDFTextStripper</code> 提取文本。</td></tr>
+      <tr><td><code>WordParser</code></td><td><code>docx</code></td><td>POI <code>XWPFWordExtractor</code>，当前未见 <code>doc</code> 支持。</td></tr>
+      <tr><td><code>ExcelParser</code></td><td><code>xlsx</code>、<code>xls</code></td><td>把 sheet、表头和行内容转为结构化文本。</td></tr>
+      <tr><td><code>MarkdownParser</code></td><td><code>md</code>、<code>markdown</code></td><td>移除 Markdown 标记，保留文本。</td></tr>
+      <tr><td><code>HtmlParser</code></td><td><code>html</code>、<code>htm</code></td><td>去 script/style/tag，解码常见实体。</td></tr>
+      <tr><td><code>PlainTextParser</code></td><td><code>txt</code>、<code>text</code></td><td>按 UTF-8 行读取。</td></tr>
+    </tbody>
+  </table>
+  <h3>Chunker</h3>
+  <table>
+    <thead><tr><th>模式</th><th>类</th><th>一级切分</th><th>二级切分</th></tr></thead>
+    <tbody>
+      <tr><td><code>default</code></td><td><code>LengthChunkStrategy</code></td><td>整篇作为一个段落。</td><td rowspan="4"><code>TokenAwareChunker</code> 调用 LangChain4j recursive splitter，并估算 CJK/英文 token。</td></tr>
+      <tr><td><code>delimiter</code></td><td><code>DelimiterChunkStrategy</code></td><td>按单个分隔符或 JSON 分隔符数组切分。</td></tr>
+      <tr><td><code>regex</code></td><td><code>RegexChunkStrategy</code></td><td>按 Java regex 切分，空 regex 回退到双换行。</td></tr>
+      <tr><td><code>smart</code></td><td><code>SmartChunkStrategy</code></td><td>调用 Chat 模型输出 JSON 语义片段，带并发限制、重试和 fallback。</td></tr>
+    </tbody>
+  </table>
+  <h3>Fusion 与 Rerank</h3>
+  <table>
+    <thead><tr><th>能力</th><th>类</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>RRF</td><td><code>RRFFusion</code></td><td>按 <code>1 / (k + rank)</code> 汇总排名，不依赖向量和 BM25 分数量纲。</td></tr>
+      <tr><td>Weighted Sum</td><td><code>WeightedSumFusion</code></td><td>先按各自最大分归一化，再按 denseWeight 和互补权重合并。</td></tr>
+      <tr><td>Rerank</td><td><code>DefaultRerankService</code></td><td>通过 <code>ModelRuntimeHandler.rerank</code> 调用 rerank 模型；失败时按原 score 排序降级。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>DTO、枚举与配置</h2>
+  <table>
+    <thead><tr><th>类别</th><th>对象</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>检索请求</td><td><code>RagSearchRequestDTO</code></td><td><code>ragId</code>、<code>query</code>、<code>debug</code>，支持 <code>knowledgeId</code> alias。</td></tr>
+      <tr><td>检索响应</td><td><code>RagSearchResponseDTO</code></td><td><code>results</code> 和 debug 时返回的 <code>RagStageMetricsDTO</code>。</td></tr>
+      <tr><td>结果项</td><td><code>SearchResult</code></td><td>公共 DTO，包含 chunk、文档、内容、分数和 metadata。</td></tr>
+      <tr><td>配置</td><td><code>RagConfigDO</code></td><td>包含 <code>chunkParams</code>、<code>searchParams</code>、<code>modelParams</code>；字段本身无内置默认值。</td></tr>
+      <tr><td>分片枚举</td><td><code>ChunkModeEnum</code></td><td><code>default</code>、<code>delimiter</code>、<code>regex</code>、<code>smart</code>，未知值回退 default。</td></tr>
+      <tr><td>文档状态</td><td><code>RagDocumentStatus</code></td><td><code>PENDING</code>、<code>PARSING</code>、<code>PROCESSING</code>、<code>SUCCESS</code>、<code>FAILED</code>；当前管线主要使用 PENDING、PROCESSING、SUCCESS、FAILED。</td></tr>
+      <tr><td>上传去重</td><td><code>DedupStrategy</code>、<code>DedupAction</code></td><td>按名称、内容或二者去重；命中后 reject、skip 或 overwrite。</td></tr>
+      <tr><td>融合策略</td><td><code>FusionStrategy</code></td><td><code>RRF</code>、<code>WEIGHTED_SUM</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Admin 入口与后续切片</h2>
+  <table>
+    <thead><tr><th>控制器</th><th>方法与路径</th><th>用途</th><th>后续主题</th></tr></thead>
+    <tbody>
+      <tr><td><code>RagSearchController</code></td><td><code>POST /rag</code></td><td>创建知识库。</td><td><code>slice-rag-admin</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>PUT /rag/{id}</code></td><td>更新知识库基础信息。</td><td><code>slice-rag-admin</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>PUT /rag/{id}/config</code></td><td>更新知识库切片、搜索和模型配置。</td><td><code>slice-rag-config</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>GET /rag/{id}</code></td><td>查询单个知识库。</td><td><code>slice-rag-admin</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>GET /rag/page</code></td><td>分页查询知识库。</td><td><code>slice-rag-admin</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>DELETE /rag/{id}</code></td><td>删除知识库。</td><td><code>slice-rag-admin</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>POST /document/upload</code></td><td>传统直传，跳过二次确认。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>POST /document/upload/preview</code></td><td>批量上传预览，落临时资源并返回每个文件的去重决策。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>POST /document/upload/commit</code></td><td>基于 previewToken 和用户最终决策入库，提交时重新校验冲突。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>DELETE /document/upload/preview/{token}</code></td><td>取消上传预览，删除临时资源并失效 token。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>POST /document/import/url</code></td><td>按 URL 导入文档。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>DELETE /document/{id}</code></td><td>删除文档及其 chunk、资源和可清理向量。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>POST /document/{id}/reprocess</code></td><td>把文档状态重置为 PENDING，等待定时任务再处理。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagDocumentController</code></td><td><code>GET /document/page</code></td><td>按知识库、名称、状态分页查询文档。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagChunkController</code></td><td><code>GET /chunk/page</code></td><td>按文档或知识库分页查询 chunk。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagChunkController</code></td><td><code>GET /chunk/{id}</code></td><td>查询单个 chunk 详情。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagChunkController</code></td><td><code>POST /chunk</code></td><td>手动新增 chunk，并尝试单 chunk 向量化。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagChunkController</code></td><td><code>PUT /chunk/{id}</code></td><td>编辑 chunk 内容，并尝试重嵌入。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagChunkController</code></td><td><code>DELETE /chunk/{id}</code></td><td>删除 chunk，并清理其向量引用。</td><td><code>slice-rag-ingestion</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>POST /rag/search</code></td><td>Admin 检索调试入口，debug 时返回阶段指标。</td><td><code>slice-rag-retrieval</code></td></tr>
+      <tr><td><code>RagSearchController</code></td><td><code>POST /rag/qa/stream</code></td><td>检索后组装 Prompt，调用问答模型流式输出。</td><td><code>slice-rag-retrieval</code></td></tr>
+      <tr><td><code>Agent callback</code></td><td><code>CALLBACK_RAG_SEARCH</code></td><td>Agent Client 知识搜索工具回调 Server 执行同一套检索服务。</td><td><code>slice-rag-retrieval</code></td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

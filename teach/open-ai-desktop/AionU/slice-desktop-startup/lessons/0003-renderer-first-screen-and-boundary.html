@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>renderer/Router 首屏与失败边界</title>
+  <link rel="stylesheet" href="../assets/aionu-startup.css">
+</head>
+<body>
+  <main class="page">
+    <header>
+      <p class="eyebrow">L2 垂直切片 · 首屏与边界</p>
+      <h1>0003 · renderer 如何收口到首屏</h1>
+      <nav>
+        <a href="0001-flow-map.html">链路地图</a>
+        <a href="0002-main-process-window.html">上一课：窗口装载</a>
+        <a href="../reference/desktop-startup-flow-map.html">完整参考图谱</a>
+        <a href="../../module-renderer-core/reference/renderer-core-overview.html">L1 renderer 参考</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2>学习目标</h2>
+      <p>本课只看 renderer 收口：preload 注入的状态如何影响 React 根渲染，Router 如何决定默认首屏，以及 app-launch E2E 实际证明了什么。主要来源是 <code>open-ai-desktop/AionU/packages/desktop/src/preload/main.ts:54-64</code>、<code>open-ai-desktop/AionU/packages/desktop/src/renderer/main.tsx:269-405</code>、<code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Router.tsx:41-105</code> 和 <code>open-ai-desktop/AionU/tests/e2e/specs/app-launch.e2e.ts:10-27</code>。</p>
+    </section>
+
+    <section>
+      <h2>preload 把 main 状态带进 renderer</h2>
+      <p>BrowserWindow 使用 preload 后，renderer 不是自己猜 backend port。preload 同步询问 main：backend port、初始语言、backend 是否失败、失败详情，然后通过 contextBridge 暴露到 <code>window</code>。</p>
+      <pre><code class="language-typescript">const backendPort = ipcRenderer.sendSync('get-backend-port') as number;
+const initialLanguage = ipcRenderer.sendSync('get-initial-language') as string | null;
+const backendStartupFailed = ipcRenderer.sendSync('get-backend-startup-failed') as boolean;
+const backendStartupFailure = ipcRenderer.sendSync('get-backend-startup-failure') as unknown;
+contextBridge.exposeInMainWorld('__backendPort', backendPort &gt; 0 ? backendPort : 0);
+contextBridge.exposeInMainWorld('__backendStartupFailure', backendStartupFailure ?? null);</code></pre>
+      <p>这解释了为什么 `configService.initialize()` 能在 renderer 早期请求 `/api/settings/client`：Electron renderer 会优先使用 `window.__backendPort` 拼出 `http://127.0.0.1:{port}`。</p>
+    </section>
+
+    <section>
+      <h2>React root 和 Router 首屏</h2>
+      <p><code>renderer/main.tsx</code> 先启动 Sentry、runtime patches、browser adapter、configService、i18n 和 provider 栈。正常路径里，<code>Main</code> 先等待 <code>AuthProvider</code> ready，再等待 <code>bootstrapRendererConfig()</code>；未 ready 时返回 <code>null</code>，避免 Router 提前渲染。</p>
+      <pre><code class="language-tsx">const Main = () =&gt; {
+  const { ready } = useAuth();
+  const [configReady, setConfigReady] = useState(false);
+
+  useEffect(() =&gt; {
+    if (!ready) return;
+    void bootstrapRendererConfig().finally(() =&gt; setConfigReady(true));
+  }, [ready]);
+
+  if (!ready || !configReady) return null;
+  return &lt;Router layout={...} /&gt;;
+};</code></pre>
+      <p>桌面运行时的 `AuthProvider` 会因为 `window.electronAPI` 直接进入 authenticated/ready；WebUI 才会请求用户接口。这是桌面首屏能绕过登录页的关键。</p>
+      <h3>Router 的默认落点</h3>
+      <p>Router 使用 HashRouter。`/login` 在已认证时跳 `/guid`；受保护布局在 checking 时显示 loader，在未认证时跳 `/login`；index route 则跳 `/guid`。因此默认桌面首屏通常落在 `/guid`，再由懒加载页面显示内容。</p>
+      <pre><code class="language-tsx">&lt;Route
+  path='/login'
+  element={status === 'authenticated' ? &lt;Navigate to='/guid' replace /&gt; : withRouteFallback(LoginPage)}
+/&gt;
+&lt;Route element={&lt;ProtectedLayout layout={layout} /&gt;}&gt;
+  &lt;Route index element={&lt;Navigate to='/guid' replace /&gt;} /&gt;
+  &lt;Route path='/guid' element={withRouteFallback(Guid)} /&gt;
+&lt;/Route&gt;</code></pre>
+    </section>
+
+    <section class="quiz">
+      <h2>边界、测试与练习</h2>
+      <div class="failure">
+        <p><strong>异常路径：</strong>如果 backend 启动失败，main 会写入 <code>backendStartupFailureInfo</code>，preload 暴露 <code>window.__backendStartupFailure</code>，renderer 根部改渲染 <code>BackendStartupFailureDialog</code>，而不是正常 provider + Router。</p>
+      </div>
+      <p>`app-launch.e2e.ts` 证明窗口有标题、body 可见且启动期没有关键 console error。它没有证明 `/guid` 的具体业务内容，也没有证明 backend 内部功能可用；它是启动烟雾测试，不是业务验收。</p>
+      <p><strong>练习：</strong>如果 E2E 的 body 可见但出现 backend 失败弹窗，这条测试一定失败吗？</p>
+      <p class="answer"><strong>参考答案：</strong>不一定。前两个断言仍可能通过；第三个取决于错误收集器是否把相关 console 输出归为 critical。要证明正常 `/guid` 首屏，需要新增更具体的路由或文本断言。</p>
+      <p class="muted">下一步建议向 agent 追问：“怎样设计一个覆盖 backend 失败弹窗的 E2E？”</p>
+    </section>
+  </main>
+</body>
+</html>

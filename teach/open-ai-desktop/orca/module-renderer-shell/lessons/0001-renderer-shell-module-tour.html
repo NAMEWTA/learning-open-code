@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Renderer Shell 模块导览</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Renderer Shell：把 React 入口变成桌面工作台</h1>
+        <p class="meta">目标：15 分钟内能说清 renderer 入口、App shell 和全局 store 的分工。</p>
+
+        <h2>先抓三层</h2>
+        <p>
+          Orca 的 renderer 不是普通网页页面，而是 Electron 桌面窗口里的应用外壳。读它时先分三层：
+          <code>src/renderer/src/main.tsx</code> 是启动入口，负责把 React 树挂起来；
+          <code>src/renderer/src/App.tsx</code> 是长期挂载的 shell，负责启动水合、窗口 chrome、全局事件和跨进程同步；
+          <code>src/renderer/src/store/index.ts</code> 是状态总线，把很多 Zustand slice 合成一个 <code>useAppStore</code>。
+          UI 组件很多，但大多数只是被 shell 调度的叶子。
+        </p>
+        <div class="filetree">src/renderer/src/
+├── main.tsx        ← React 根、i18n、主题、crash diagnostics、根级错误边界
+├── App.tsx         ← 页面和 modal 总装配、启动水合、session 写回、runtime 同步
+└── store/
+    └── index.ts    ← 聚合 repo/worktree/terminal/tabs/settings 等 Zustand slice</div>
+        <p>
+          入口文件先安装 renderer crash diagnostics，设置系统主题，检查 DOM 里是否存在 <code>#root</code>。
+          然后它用 <code>StrictMode</code> 包住 <code>I18nProvider</code> 和根级
+          <code>RecoverableRenderErrorBoundary</code>，最后才渲染 <code>App</code>。这说明 Orca 把“应用能不能恢复”
+          放在页面业务之前：根节点缺失直接抛错，渲染错误则被错误边界包住。
+        </p>
+
+        <h2>App 做的是编排，不是单页组件</h2>
+        <p>
+          <code>App.tsx</code> 会 lazy-load 工作区、设置、移动端、终端、状态栏和各种 modal，但它更重要的职责是编排启动。
+          启动时它读取 settings、keybindings 和持久化 UI，拉取 repos、worktrees 与 lineage，再从每个 runtime host 合并
+          workspace session。之后才水合 workspace、tabs、editor、browser，重连 SSH 与 persisted terminals，并解锁 session writer
+          真正写回的门控。
+          这个顺序保护了一个关键不变量：水合失败时不能把空 tab 状态写回磁盘。
+        </p>
+        <pre><code class="language-tsx">createRoot(rootElement).render(
+  &lt;StrictMode&gt;
+    &lt;I18nProvider&gt;
+      &lt;RendererRoot /&gt;
+    &lt;/I18nProvider&gt;
+  &lt;/StrictMode&gt;
+)</code></pre>
+        <p>
+          另一个容易忽略的点是窗口 chrome。Windows 和 Linux 移除原生标题栏后，shell 自己渲染 minimize、maximize、close 按钮，
+          并通过 <code>window.api.ui</code> 调 main 侧能力。renderer 能控制窗口，但仍然只能通过 preload 暴露的受控 API。
+        </p>
+
+        <h2>Store 是 shell 的工作台</h2>
+        <p>
+          <code>store/index.ts</code> 用 Zustand 把 repo、worktree、terminal、tabs、settings、SSH、runtime status、
+          browser、editor 等 slice 合成 <code>useAppStore</code>。App 从 store 读 action 和少量状态，启动流程则直接调用这些 action。
+          为了避免高频 PTY、agent status、tab title 更新拖慢整棵 React 树，App 把 action 聚合在一个 <code>useShallow</code>
+          selector 里，并把 session 写回放到 store subscriber，而不是让每个变化都驱动 JSX。
+        </p>
+
+        <h2>检索练习</h2>
+        <p>
+          如果 Orca 重启后 tabs 丢失，你会先查哪条线？A. React 路由；B. renderer 启动水合；
+          C. Zustand tabs slice；D. main IPC 的文件读写。
+        </p>
+        <div class="answer">
+          参考路径：先看 <code>App.tsx</code> 的 session-get、hydrate-session-stores、reconnect-terminals 和
+          hydrationSucceeded 逻辑，再看 <code>store/index.ts</code> 聚合出的 hydrate actions。确认 shell 没有在水合失败时打开
+          session writer 后，再进入 tabs slice 和 main IPC。更细的 tabs/runtime graph 说明见
+          <a href="../reference/renderer-shell-overview.html">模块总览参考</a>。
+        </div>
+        <p class="meta">
+          主要来源：<code>src/renderer/src/main.tsx</code>、<code>src/renderer/src/App.tsx</code>、
+          <code>src/renderer/src/store/index.ts</code>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>runs execution overview</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f7f9fb; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.62; }
+    main { max-width:1120px; margin:0 auto; padding:36px 22px 56px; }
+    h1 { font-size:2rem; margin:0 0 .5rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .7rem; padding-top:1rem; border-top:1px solid var(--line); letter-spacing:0; }
+    h3 { font-size:1rem; margin:1.15rem 0 .4rem; }
+    p, li { font-size:.97rem; }
+    table { width:100%; border-collapse:collapse; margin:.75rem 0 1.2rem; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:.52rem .6rem; text-align:left; vertical-align:top; }
+    th { background:var(--soft); }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.88em; background:#f3f4f6; padding:.1rem .25rem; border-radius:4px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.65; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; white-space:pre; }
+    .note { border-left:4px solid var(--accent); background:var(--soft); padding:.8rem 1rem; }
+    @media print { main { max-width:none; padding:18mm; } a { color:inherit; text-decoration:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>runs execution 参考图谱</h1>
+  <p class="note">本页承载 L1 的长清单：模块边界、入口、关键依赖、测试佐证和后续 L2 切片。短课只保留分流判断技能。L3 辅助 API 见 <a href="runs-execution-api.html">runs-execution-api.html</a>。</p>
+
+  <h2>1. 模块位置与总流程</h2>
+  <pre>subagent tool / slash / RPC
+  ↓
+agent discovery 得到 AgentConfig[]
+  ↓
+foreground/subagent-executor.ts
+  ├─ action → management/status/resume/interrupt/steer/schedule
+  ├─ async → background/async-execution.ts → subagent-runner.ts
+  ├─ chain → foreground/chain-execution.ts
+  ├─ tasks → foreground parallel path
+  └─ agent → foreground/execution.ts runSync</pre>
+  <p>一句话职责：runs 模块是执行分流和生命周期观测层。它不负责注册 Pi extension，也不负责发现 agent 定义；它消费已解析的 agent/config/context，把运行结果包装成 `Details`、`SingleResult`、status 文本、async 事件和可恢复的 session/artifact。</p>
+
+  <h2>2. 三层职责表</h2>
+  <table>
+    <tr><th>层</th><th>主要源码</th><th>负责什么</th><th>不负责什么</th></tr>
+    <tr><td>foreground</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code></td><td>当前 turn 内完成 single、parallel、chain；维护 foregroundControls；处理输入校验、预算、model fallback、artifact、intercom receipt。</td><td>不轮询后台结果；不注册 tool；不发现 agent 文件来源。</td></tr>
+    <tr><td>background</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/background/run-status.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></td><td>启动 detached runner；写 `status.json`、`events.jsonl`、`output-*.log`、result JSON；恢复 active jobs；格式化 status/fleet/transcript；wait 阻塞到完成或 needs_attention。</td><td>不直接把 child 输出作为当前 tool 返回；不绕过 status/result 文件。</td></tr>
+    <tr><td>shared</td><td><code>open-ai-agent/pi-subagents/src/runs/shared/model-fallback.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/model-scope.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/workflow-graph.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/worktree.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/subagent-prompt-runtime.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/turn-budget.ts</code><br><code>open-ai-agent/pi-subagents/src/runs/shared/tool-budget.ts</code></td><td>提供前台/后台共同使用的模型、预算、输出、控制、并发、worktree、嵌套事件和 graph 工具。</td><td>不拥有顶层流程；具体何时调用由 foreground/background 决定。</td></tr>
+  </table>
+
+  <h2>3. 对外入口清单</h2>
+  <table>
+    <tr><th>入口形态</th><th>参数信号</th><th>进入路径</th><th>输出</th></tr>
+    <tr><td>single foreground</td><td><code>{ agent, task }</code> 且无 `tasks/chain/action`，`async` 为 false</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code> → <code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code> 的 `runSync`</td><td>当前 tool 返回 child 最终输出，details.mode=`single`。</td></tr>
+    <tr><td>parallel foreground</td><td><code>{ tasks: [...] }</code></td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code> 内 top-level parallel path，最终多次 `runSync`</td><td>聚合每个 task 输出，保留顺序，details.mode=`parallel`。</td></tr>
+    <tr><td>chain foreground</td><td><code>{ chain: [...] }</code></td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code></td><td>链式 summary、named outputs、workflowGraph，details.mode=`chain`。</td></tr>
+    <tr><td>async single</td><td><code>{ agent, task, async: true }</code> 或配置强制 async</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code> 的 `executeAsyncSingle` → detached runner</td><td>立即返回 run id、async dir、等待/状态提示。</td></tr>
+    <tr><td>async chain/parallel</td><td><code>{ chain: [...], async: true }</code>；top-level `tasks` 会包装成一个 parallel chain step</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code> 的 `executeAsyncChain` → detached runner</td><td>立即返回 run id、async dir、workflowGraph。</td></tr>
+    <tr><td>status/fleet/transcript</td><td><code>{ action: "status", id?, view? }</code></td><td><code>open-ai-agent/pi-subagents/src/runs/background/run-status.ts</code>；foreground live status 先从 executor state 查</td><td>当前运行、记忆 foreground、async、nested 的状态文本。</td></tr>
+    <tr><td>wait</td><td><code>wait({ id?, all?, timeoutMs? })</code></td><td><code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code></td><td>阻塞直到目标 async run 完成、失败、暂停、needs_attention、超时或 abort。</td></tr>
+    <tr><td>控制/恢复</td><td><code>resume</code>、<code>interrupt</code>、<code>steer</code>、<code>append-step</code></td><td>executor action path + background control channel/status resolver</td><td>恢复 child session、请求中断、发送 steer、向 async chain 追加 step。</td></tr>
+    <tr><td>管理动作</td><td><code>list</code>、<code>get</code>、<code>models</code>、<code>create</code>、<code>update</code>、<code>delete</code>、<code>eject</code>、<code>disable</code>、<code>enable</code>、<code>reset</code>、<code>doctor</code>、<code>schedule*</code></td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code> action 分支；多数转交 agents/extension/background 模块</td><td>管理结果，details.mode=`management`。</td></tr>
+  </table>
+
+  <h2>4. 关键依赖与产物</h2>
+  <table>
+    <tr><th>依赖/产物</th><th>来源</th><th>用途</th></tr>
+    <tr><td>AgentConfig[]</td><td>agent discovery</td><td>运行层选择 system prompt、tools、model、skills、output、context 默认值。</td></tr>
+    <tr><td>ExtensionContext</td><td>Pi runtime</td><td>提供 cwd、sessionManager、model、modelRegistry、UI 和 signal。</td></tr>
+    <tr><td>Details / SingleResult</td><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code></td><td>所有 tool result 的结构化承载：mode、runId、results、progress、artifacts、workflowGraph。</td></tr>
+    <tr><td>artifact dir</td><td><code>open-ai-agent/pi-subagents/src/shared/artifacts.ts</code></td><td>input/output/jsonl/transcript/metadata 文件落点。</td></tr>
+    <tr><td>async dir</td><td><code>open-ai-agent/pi-subagents/src/shared/types.ts</code> 常量与 runner config</td><td>后台运行的 `status.json`、`events.jsonl`、`output-*.log`、runner stdout/stderr。</td></tr>
+    <tr><td>result JSON</td><td><code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code> 写入，<code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code> 消费</td><td>完成通知、intercom result payload、status 回退读取。</td></tr>
+    <tr><td>control event</td><td><code>open-ai-agent/pi-subagents/src/runs/shared/subagent-control.ts</code> 与 foreground/background 运行器</td><td>暴露 `active_long_running` 和 `needs_attention`，让 wait/status/intercom 知道何时需要父会话介入。</td></tr>
+  </table>
+
+  <h2>5. runs 文件索引</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>L2 阅读建议</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code></td><td>核心调度器：action、输入校验、spawn 限额、async 分流、foregroundControls、resume/interrupt/steer。</td><td>先读 `createSubagentExecutor` 与 `runAsyncPath/runSinglePath/runParallelPath/runChainPath`。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code></td><td>单 child Pi 前台执行：spawn、JSONL 解析、progress、timeout、budget、artifact、acceptance。</td><td>从 `runSync` 到 `runSingleAttempt`。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code></td><td>前台 chain、parallel step、dynamic fanout、named outputs、workflowGraph。</td><td>从 `executeChain` 的三类 step 分支读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-clarify.ts</code></td><td>TUI clarify 组件。</td><td>UI 交互课再读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code></td><td>构造 runner steps，写 async config，spawn detached `subagent-runner.ts`，发 started event。</td><td>对照 foreground 分流读 `executeAsyncSingle/executeAsyncChain`。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code></td><td>后台真实执行主循环，维护 status/events/output/result。</td><td>L2 async lifecycle 重点文件。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code></td><td>session job map、widget 刷新、active jobs 恢复、control event 转发。</td><td>配合 UI/widget 状态读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/run-status.ts</code></td><td>status/fleet/transcript 的统一格式化入口。</td><td>按 view 分支读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code></td><td>阻塞等待 async 完成或 needs_attention，事件唤醒 + 轮询兜底。</td><td>适合单独做 wait 语义课。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/result-watcher.ts</code></td><td>监听 result JSON，发 completion/intercom 事件并去重。</td><td>配合 completion batching 读。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/async-status.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/fleet-view.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/stale-run-reconciler.ts</code></td><td>扫描 async runs、格式化 fleet/transcript、修正 stale 状态。</td><td>状态恢复 L2。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/control-channel.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/async-resume.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/chain-append.ts</code></td><td>中断、超时、steer、resume、append-step 的文件/状态协议。</td><td>控制面 L2。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/background/scheduled-runs.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/top-level-async.ts</code></td><td>计划运行与强制顶层 async 策略。</td><td>延后到 scheduling 主题。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/runs/shared/*.ts</code></td><td>model fallback/scope、prompt args、workflow graph、worktree、output、budget、acceptance、control、nested events、parallel utils。</td><td>不要一次读完；随 L2 切片按需进入。</td></tr>
+  </table>
+
+  <h2>6. 测试佐证地图</h2>
+  <table>
+    <tr><th>测试文件</th><th>关键佐证</th><th>对应源码</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/single-execution.test.ts</code></td><td>single alias、未知 action、重复 subagent 调度防护、spawn 限额、management action 可并行查询、usage/cost、completion guard、control event、model fallback。</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/parallel-execution.test.ts</code></td><td>`mapConcurrent` 保序和限流；top-level parallel action alias；每 task output；timeout 保留 sibling 结果；file-only 输出；重复 output path 拒绝。</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/parallel-utils.ts</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/chain-execution.test.ts</code></td><td>2-step/3-step/40-step chain；`{previous}`、`{task}`、`{outputs.name}`；parallel step 聚合；dynamic fanout；workflowGraph；chainDir；unknown agent；worktree cwd 冲突。</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/workflow-graph.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/chain-outputs.ts</code></td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/test/integration/async-execution.test.ts</code></td><td>jiti availability；async runner spawn；status read/cache；timeout/interrupt；async launch message 禁止 sleep-poll；structured output；dynamic fanout；status live tool/path；result file；events cap；live output。</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/run-status.ts</code></td></tr>
+  </table>
+
+  <h2>7. 后续 L2 切片建议</h2>
+  <table>
+    <tr><th>建议顺序</th><th>切片</th><th>目标问题</th><th>主要文件</th></tr>
+    <tr><td>1</td><td>single foreground run</td><td>一次 `{agent, task}` 如何变成 child Pi 进程并返回 `SingleResult`？</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/foreground/execution.ts</code></td></tr>
+    <tr><td>2</td><td>top-level parallel</td><td>并行任务如何限流、聚合、保序、隔离 output/worktree？</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/subagent-executor.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/parallel-utils.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/worktree.ts</code></td></tr>
+    <tr><td>3</td><td>chain 与 parallel group</td><td>`{previous}`、named output、parallel group 和 workflowGraph 如何串起来？</td><td><code>open-ai-agent/pi-subagents/src/runs/foreground/chain-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/chain-outputs.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/shared/workflow-graph.ts</code></td></tr>
+    <tr><td>4</td><td>async lifecycle</td><td>后台 run 从 started event 到 status/result/wait 完成通知经历哪些文件？</td><td><code>open-ai-agent/pi-subagents/src/runs/background/async-execution.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/subagent-runner.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/async-job-tracker.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/wait.ts</code></td></tr>
+    <tr><td>5</td><td>控制与恢复</td><td>interrupt、steer、resume、append-step 如何避免丢状态？</td><td><code>open-ai-agent/pi-subagents/src/runs/background/control-channel.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/async-resume.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/chain-append.ts</code>、<code>open-ai-agent/pi-subagents/src/runs/background/run-id-resolver.ts</code></td></tr>
+  </table>
+
+  <h2>8. 未覆盖但已标记的依赖</h2>
+  <table>
+    <tr><th>对象</th><th>为什么本 L1 不展开</th></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/extension/index.ts</code>、<code>open-ai-agent/pi-subagents/src/extension/schemas.ts</code></td><td>它们定义 tool 注册和 schema，是 runs 上游入口；适合单独的 extension runtime 课。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/agents/*.ts</code></td><td>agent discovery/management 是 runs 输入来源，不是执行层本体。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/intercom/*.ts</code></td><td>runs 会调用 intercom，但协议细节属于 supervisor/intercom 切片。</td></tr>
+    <tr><td><code>open-ai-agent/pi-subagents/src/slash/*.ts</code></td><td>slash 把命令转为 subagent params，最终仍落到 executor。</td></tr>
+  </table>
+</main>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 模型范围、预算与安全边界全链路</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+  <h1>模型范围、预算与安全边界全链路</h1>
+  <p class="lead">学习目标：15 分钟内能按顺序说出一次 subagent run 从配置解析到子进程 runtime 的九跳 guardrails 链路。</p>
+  <p class="meta">
+    <span class="pill">L2 垂直切片</span>
+    <span class="pill">前置：<a href="../../module-profiles/lessons/0001-profiles-module-tour.html">profiles 模块</a></span>
+    <span class="pill">速查：<a href="../reference/model-scope-budget-guardrails-flow-map.html">参考图谱</a></span>
+  </p>
+
+  <h2>1. 切片边界</h2>
+  <p>本课回答：<strong>谁限制子 agent 用什么模型、能做多少工具/轮次、看到什么上下文</strong>。三类机制分工不同：</p>
+  <ul>
+    <li><strong>modelScope</strong> — settings 里的 allow 模式，在模型解析时 enforced</li>
+    <li><strong>toolBudget / turnBudget</strong> — 限制工具调用次数与 assistant 轮次</li>
+    <li><strong>prompt / fork 安全</strong> — 剥离父编排痕迹，fork 时清理不可重放的 thinking 块</li>
+  </ul>
+  <p>profiles 只负责给 builtin agent 填 <code>model</code> 候选；真正拦越界模型的是 <span class="where">model-scope.ts</span> + <span class="where">model-fallback.ts</span>。</p>
+
+  <h2>2. 九跳全链路</h2>
+  <ol class="steps">
+    <li><strong>配置入口</strong> — <code>.pi/settings.json</code> 的 <code>subagents.modelScope</code>、extension <code>toolBudget</code>/<code>turnBudget</code>，或 tool params 覆盖；profile 经 <span class="where">profiles.ts</span> 写入 <code>agentOverrides.model</code>。</li>
+    <li><strong>发现合并</strong> — <span class="where">agents.ts</span> 的 <code>discoverAgents</code> 把 project settings 的 modelScope 盖过 user，随 <code>AgentConfig[]</code> 一起返回。</li>
+    <li><strong>executor 预处理</strong> — <span class="where">subagent-executor.ts</span> 解析 turn/tool budget、<code>createForkContextResolver</code>（<code>context: fork</code> 时分支父 session），组装 <code>ExecutionContextData</code>。</li>
+    <li><strong>模型解析 + scope</strong> — <span class="where">model-fallback.ts</span> 的 <code>resolveSubagentModelOverride</code> / <code>buildModelCandidates</code> 调 <code>checkModelScope</code>：explicit 越界抛错，inherited 越界仅 warn。</li>
+    <li><strong>spawn 前注入</strong> — <span class="where">execution.ts</span> 用 <code>appendTurnBudgetSystemPrompt</code> 拼系统提示；<span class="where">pi-args.ts</span> 把 toolBudget JSON 写入 <code>PI_SUBAGENT_TOOL_BUDGET</code> 环境变量。</li>
+    <li><strong>子进程 runtime 注册</strong> — <span class="where">subagent-prompt-runtime.ts</span> 在子 Pi 里 <code>decodeToolBudgetEnv</code> 并监听 <code>tool_call</code> 事件。</li>
+    <li><strong>prompt 安全重写</strong> — <code>before_agent_start</code> 时 <code>rewriteSubagentPrompt</code> 加 child boundary 指令，按需剥离 project context / skills / 父级 subagent 工具历史。</li>
+    <li><strong>tool budget 执行</strong> — 达 soft 限发 steer nudge；超 hard 且工具在 block 列表（默认 read/grep/find/ls）则 <code>{ block: true }</code>。</li>
+    <li><strong>turn budget 收尾</strong> — runner 侧按 <code>shouldAbortForTurnBudget</code> 在 soft+grace 后 abort；超限时 <code>formatTurnBudgetOutput</code> 附带 partial output。</li>
+  </ol>
+  <div class="callout">
+    <p>记忆口诀：<strong>配置 → 发现 → executor → scope 解析 → spawn 注入 → 子 runtime → prompt 重写 → tool 拦截 → turn 收尾</strong>。modelScope 在 spawn 前已决定候选；tool/turn budget 分别在子进程与 runner 两侧生效。</p>
+  </div>
+
+  <h2>3. 三个关键文件分工</h2>
+  <pre>src/runs/
+├── shared/
+│   ├── model-scope.ts          ← 纯函数：allow 模式匹配 + severity
+│   ├── tool-budget.ts          ← hard/soft/block 状态机
+│   ├── turn-budget.ts          ← 系统提示 + abort 判定
+│   └── subagent-prompt-runtime.ts ← 子进程 enforcement
+├── foreground/
+│   ├── subagent-executor.ts    ← 解析并下发 guardrails
+│   └── execution.ts            ← 前台 spawn 拼接
+└── shared/fork-context.ts      ← fork 分支 + thinking 清理</pre>
+  <p><code>model-scope.ts</code> 不读文件；<code>subagent-prompt-runtime.ts</code> 不解析 settings；<code>fork-context.ts</code> 不管预算。卡住时先判断是「模型被拒」「工具被 block」还是「prompt 仍含父编排」。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="quiz">
+    <p><strong>判断题：</strong>project <code>settings.json</code> 设 <code>modelScope.enforce: true</code>、<code>allow: ["anthropic/*"]</code>；agent frontmatter 继承父会话模型 <code>deepseek/deepseek-v4</code>，用户未传 <code>--model</code>。run 会在哪一跳、以什么严重度处理？</p>
+    <p><strong>参考答案：</strong>第 4 跳 <code>resolveSubagentModelOverride</code>。模型来源为 inherited，<code>checkModelScope</code> 返回 <code>severity: "warn"</code>，不抛错；若用户显式传 <code>--model deepseek/...</code> 则同跳抛 hard error。完整测试矩阵见<a href="../reference/model-scope-budget-guardrails-flow-map.html#tests">参考页 §测试</a>。</p>
+  </div>
+  <p class="source">主要来源：<code>model-scope.ts</code>、<code>tool-budget.ts</code>、<code>turn-budget.ts</code>、<code>subagent-prompt-runtime.ts</code>、<code>fork-context.ts</code>、<code>profiles.ts</code>。profile 生成细节见 <a href="../../module-profiles/lessons/0001-profiles-module-tour.html">profiles 模块</a>。有不清楚的地方，可以继续向 agent 追问。</p>
+</main>
+</body>
+</html>

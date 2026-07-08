@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP 与 Skill 工具注入速查</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #61707f;
+      --line: #d9e0e7;
+      --paper: #ffffff;
+      --soft: #f7f9fb;
+      --blue: #285f9f;
+      --green: #247a5b;
+      --amber: #9a6a16;
+      --red: #a43b37;
+    }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #f3f1ec;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.62;
+    }
+    main {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 30px 20px 56px;
+      background: var(--paper);
+    }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 24px;
+      font-size: 0.92rem;
+    }
+    nav a {
+      color: var(--blue);
+      text-decoration: none;
+      border-bottom: 1px solid #9bb6d5;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 3.1rem);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin-top: 34px;
+      font-size: 1.28rem;
+      letter-spacing: 0;
+    }
+    .lead {
+      max-width: 860px;
+      color: var(--muted);
+      font-size: 1.04rem;
+    }
+    code {
+      padding: 0.08rem 0.25rem;
+      border: 1px solid #dde3ea;
+      border-radius: 5px;
+      background: #f8fafc;
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.9em;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(130px, 1fr));
+      gap: 8px;
+      overflow-x: auto;
+      margin: 18px 0;
+      padding-bottom: 4px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 10px;
+      min-height: 120px;
+    }
+    .step strong {
+      display: block;
+      color: var(--blue);
+      margin-bottom: 6px;
+    }
+    .step small {
+      display: block;
+      color: var(--muted);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 22px;
+      font-size: 0.93rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: #edf3f8;
+      color: #293b4d;
+    }
+    tr:nth-child(even) td {
+      background: #fbfcfd;
+    }
+    .note {
+      border: 1px solid #e1d0a8;
+      border-left: 4px solid var(--amber);
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: #fffaf0;
+      margin: 14px 0;
+    }
+    .ok {
+      color: var(--green);
+      font-weight: 700;
+    }
+    .warn {
+      color: var(--amber);
+      font-weight: 700;
+    }
+    .bad {
+      color: var(--red);
+      font-weight: 700;
+    }
+    .path {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    @media (max-width: 760px) {
+      main { padding: 24px 12px 44px; }
+      .flow { grid-template-columns: repeat(7, 140px); }
+      table { font-size: 0.88rem; }
+      th, td { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-skill-mcp/reference/skill-mcp-overview.html">Skill/MCP L1 参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Client L1 参考</a>
+    <a href="../../module-commons-grpc/reference/commons-grpc-overview.html">gRPC L1 参考</a>
+  </nav>
+
+  <h1>MCP 与 Skill 工具注入速查</h1>
+  <p class="lead">这份参考用于排查一次 Snail AI 对话里的工具从哪里来、什么时候变成 <code>ToolCallback</code>、哪些 transport 当前可用、认证字段是否生效，以及结束时哪些资源会被清理。</p>
+
+  <h2>1. 垂直切片总图</h2>
+  <div class="flow" aria-label="绑定到 cleanup 的流程图">
+    <div class="step"><strong>绑定</strong><small><code>AgentService.create</code> 或 <code>AgentService.update</code> 保存 <code>mcpServerIds</code> 与 <code>skillIds</code>。</small></div>
+    <div class="step"><strong>描述符</strong><small><code>McpHandler</code> 生成 <code>McpServerDescriptor</code>；<code>SkillAgentChatHandler</code> 生成 <code>SkillDescriptor</code>。</small></div>
+    <div class="step"><strong>gRPC dispatch</strong><small><code>LlmCallHandler</code> 把描述符装入 <code>ChatDispatchRequest</code>，通过 <code>/chat/dispatch</code> 发给 Client。</small></div>
+    <div class="step"><strong>Client resolver</strong><small><code>ChatDispatchStreamingHandler</code> 启动 <code>ChatSessionRuntime</code>，再调用 <code>ToolRuntime.resolve</code>。</small></div>
+    <div class="step"><strong>ToolCallback</strong><small><code>ClientMcpToolResolver</code> 连接 MCP；<code>ClientSkillToolResolver</code> 注册 <code>read_skill</code>。</small></div>
+    <div class="step"><strong>模型调用</strong><small><code>DefaultChatClientFactory</code> 注入 <code>defaultTools</code> 与 <code>ToolCallingAdvisor</code>。</small></div>
+    <div class="step"><strong>cleanup</strong><small><code>ChatSessionRuntime.cleanup</code> 调用 <code>ToolResolution.close</code>，关闭本轮 MCP clients。</small></div>
+  </div>
+
+  <h2>2. 绑定入口与表字段</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>源码</th><th>关键字段</th><th>含义</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Agent 请求</td>
+        <td><code>AgentRequestVO</code></td>
+        <td><code>mcpEnabled</code>、<code>skillEnabled</code>、<code>mcpServerIds</code>、<code>skillIds</code></td>
+        <td>开关控制对话时是否读取绑定；ID 列表控制绑定哪些 MCP server 或 Skill。</td>
+      </tr>
+      <tr>
+        <td>创建 Agent</td>
+        <td><code>AgentService.create</code></td>
+        <td><code>mcpServerService.updateAgentMcpServers</code>、<code>skillService.updateAgentSkills</code></td>
+        <td>插入 <code>AgentPO</code> 后，如果请求带 ID 列表，就写关联表。</td>
+      </tr>
+      <tr>
+        <td>更新 Agent</td>
+        <td><code>AgentService.update</code></td>
+        <td><code>mcpServerIds != null</code>、<code>skillIds != null</code></td>
+        <td>传入列表时先删旧关联再插入新关联；传 <code>null</code> 表示不改绑定。</td>
+      </tr>
+      <tr>
+        <td>MCP 关联表</td>
+        <td><code>AgentMcpServerPO</code></td>
+        <td><code>agentId</code>、<code>mcpServerId</code></td>
+        <td><code>McpToolService.getMcpServersForAgent</code> 按 <code>agentId</code> 读取。</td>
+      </tr>
+      <tr>
+        <td>Skill 关联表</td>
+        <td><code>AgentSkillPO</code></td>
+        <td><code>agentId</code>、<code>skillId</code></td>
+        <td><code>SkillHandler.getSkillsWithContentForAgent</code> 按 <code>agentId</code> 读取。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. Server 下发的 DTO 与字段</h2>
+  <table>
+    <thead>
+      <tr><th>DTO</th><th>字段</th><th>来源</th><th>Client 用途</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ChatDispatchRequest</code></td>
+        <td><code>mcpServers</code></td>
+        <td><code>McpHandler</code> 写入 <code>ctx.mcpServerDescriptors</code></td>
+        <td><code>ToolRuntime</code> 交给 <code>ClientMcpToolResolver</code>。</td>
+      </tr>
+      <tr>
+        <td><code>ChatDispatchRequest</code></td>
+        <td><code>skills</code></td>
+        <td><code>SkillAgentChatHandler</code> 写入 <code>ctx.skillDescriptors</code></td>
+        <td><code>ClientSkillToolResolver</code> 构建 Skill 列表并注册 <code>read_skill</code>。</td>
+      </tr>
+      <tr>
+        <td><code>McpServerDescriptor</code></td>
+        <td><code>id</code>、<code>name</code>、<code>transportType</code></td>
+        <td><code>McpServerPO</code> 通过 <code>McpServerRef</code> 暴露</td>
+        <td>选择 transport，日志定位 server，建立 MCP client。</td>
+      </tr>
+      <tr>
+        <td><code>McpServerDescriptor</code></td>
+        <td><code>baseUri</code>、<code>endpoint</code></td>
+        <td><code>McpHandler.toDescriptor</code></td>
+        <td>Streamable HTTP transport 的连接地址。</td>
+      </tr>
+      <tr>
+        <td><code>McpServerDescriptor</code></td>
+        <td><code>command</code>、<code>args</code>、<code>envVars</code></td>
+        <td><code>McpHandler.toDescriptor</code> 解析 JSON</td>
+        <td>Stdio transport 的进程命令、参数和环境变量。</td>
+      </tr>
+      <tr>
+        <td><code>McpServerDescriptor</code></td>
+        <td><code>authType</code>、<code>authConfig</code></td>
+        <td><code>McpHandler.toDescriptor</code> 解析 JSON</td>
+        <td>当前 Client resolver 未消费；只作为下发字段存在。</td>
+      </tr>
+      <tr>
+        <td><code>SkillDescriptor</code></td>
+        <td><code>id</code>、<code>name</code>、<code>description</code>、<code>version</code>、<code>skillPrompt</code></td>
+        <td><code>SkillPO</code></td>
+        <td><code>name</code> 用于 <code>read_skill</code> 参数匹配；<code>version</code> 用于临时目录路径。</td>
+      </tr>
+      <tr>
+        <td><code>SkillContentRequest</code></td>
+        <td><code>skillId</code>、<code>agentId</code></td>
+        <td><code>ReadSkillTool</code></td>
+        <td>当前 <code>ReadSkillTool</code> 设置 <code>skillId</code>，<code>agentId</code> 为 <code>null</code>。</td>
+      </tr>
+      <tr>
+        <td><code>SkillContentResponse</code></td>
+        <td><code>skillContent</code>、<code>version</code>、<code>files</code></td>
+        <td><code>SkillContentCallbackHandler</code></td>
+        <td>返回完整 Skill 指令；支撑文件由 Client 异步写入临时目录。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. Client resolver 顺序</h2>
+  <table>
+    <thead>
+      <tr><th>顺序</th><th>代码位置</th><th>行为</th><th>失败处理</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>0</td>
+        <td><code>ToolRuntime.filterRagMcpDescriptor</code></td>
+        <td>移除名称等于内置 RAG MCP server 的 descriptor。</td>
+        <td>直接修改 <code>dispatchRequest.mcpServers</code> 列表。</td>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td><code>ClientMcpToolResolver.resolve</code></td>
+        <td>逐个连接 MCP server，用 <code>SyncMcpToolCallbackProvider</code> 生成 callbacks。</td>
+        <td>单个 server 失败只记录 warn，继续处理其他 server。</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td><code>BaseToolResolver.resolve</code></td>
+        <td>注册 <code>shell</code> 与 <code>http_request</code>，工作目录按 <code>agentId/conversationId</code> 隔离。</td>
+        <td>目录创建失败只记录 warn，工具仍可能注册。</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td><code>ClientRagToolResolver.resolve</code></td>
+        <td>仅在 RAG 启用、存在 <code>ragIds</code> 且非 forced mode 时注册 <code>rag_search</code>。</td>
+        <td>外层 <code>addResolvedTools</code> 捕获异常并记录 warn。</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td><code>ClientSkillToolResolver.resolve</code></td>
+        <td>向 <code>systemPrompt</code> 追加 Skill 渐进式披露说明，并注册 <code>ReadSkillTool</code>。</td>
+        <td>失败时记录 warn，返回已解析或空工具列表。</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td><code>CustomToolCallbackProvider.getToolCallbacks</code></td>
+        <td>追加 Spring 容器中非内部包的本地 <code>@Tool</code> Bean。</td>
+        <td>扫描发生在初始化阶段；运行时返回缓存数组。</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td><code>DefaultChatClientFactory.build</code></td>
+        <td>把 callbacks 传给 <code>defaultTools</code>，并添加 <code>ToolCallingAdvisor</code>。</td>
+        <td>如果 callbacks 为空，模型只能普通对话。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. MCP transport 边界</h2>
+  <table>
+    <thead>
+      <tr><th>transport</th><th>枚举值</th><th>Server 连接测试</th><th>Client resolver</th><th>结论</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>SSE</td>
+        <td><code>McpTransportTypeEnum.SSE = 1</code></td>
+        <td><code>McpServerService.createTestClient</code> 抛出 deprecated 异常。</td>
+        <td><code>ClientMcpToolResolver.connectMcpServer</code> 记录 warn 并返回 <code>null</code>。</td>
+        <td><span class="bad">字段保留，当前不可用</span>。文档仍有 SSE 说明，但源码按 MCP SDK 2.x deprecated 处理。</td>
+      </tr>
+      <tr>
+        <td>Streamable HTTP</td>
+        <td><code>McpTransportTypeEnum.STREAMABLE_HTTP = 2</code></td>
+        <td>使用 <code>HttpClientStreamableHttpTransport</code>；支持 <code>baseUri</code> 加 <code>endpoint</code>，或仅 <code>endpoint</code>。</td>
+        <td>同样使用 <code>HttpClientStreamableHttpTransport</code> 并调用 <code>client.initialize()</code>。</td>
+        <td><span class="ok">当前主路径</span>。缺少地址时不会注册工具。</td>
+      </tr>
+      <tr>
+        <td>Stdio</td>
+        <td><code>McpTransportTypeEnum.STDIO = 3</code></td>
+        <td>使用 <code>ServerParameters</code>、<code>StdioClientTransport</code>；需要 <code>command</code>。</td>
+        <td>根据 <code>command</code>、<code>args</code>、<code>envVars</code> 启动本地进程并初始化。</td>
+        <td><span class="ok">当前可用</span>。排查重点是命令路径、参数 JSON、环境变量和进程权限。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. 认证现状</h2>
+  <div class="note">当前源码事实：<code>authType</code> 与 <code>authConfig</code> 会在 Admin 保存、在 <code>McpHandler</code> 下发到 <code>McpServerDescriptor</code>，但 <code>ClientMcpToolResolver</code> 和 <code>McpToolService</code> 构造 HTTP/Stdio transport 时没有读取这些字段。因此“配置已存在”和“请求已带认证头”不是一回事。</div>
+  <table>
+    <thead>
+      <tr><th>位置</th><th>源码事实</th><th>排查含义</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>McpAuthTypeEnum</code></td>
+        <td>枚举为 <code>NONE(0)</code>、<code>API_KEY(1)</code>、<code>OAUTH(2)</code>、<code>BASIC(3)</code>。</td>
+        <td>与文档中 Bearer/OAuth 编号描述存在差异，调试时以源码枚举为准。</td>
+      </tr>
+      <tr>
+        <td><code>McpServerService.create</code></td>
+        <td>保存 <code>authType</code>，把 <code>authConfig</code> 序列化为 JSON。</td>
+        <td>数据库有配置不代表 transport 会自动带 header。</td>
+      </tr>
+      <tr>
+        <td><code>McpHandler.toDescriptor</code></td>
+        <td>把 <code>authType</code> 和解析后的 <code>authConfig</code> 放入 descriptor。</td>
+        <td>gRPC 下发层没有丢字段。</td>
+      </tr>
+      <tr>
+        <td><code>ClientMcpToolResolver</code></td>
+        <td>连接 Streamable HTTP 与 Stdio 时只读取地址、命令、参数、环境变量。</td>
+        <td>认证失败时不要误判为 descriptor 丢失；当前更可能是 runtime 未实现认证注入。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>7. Skill support files 边界</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>源码</th><th>字段</th><th>注意点</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>上传 Skill</td>
+        <td><code>SkillService.upload</code></td>
+        <td><code>skillContent</code>、<code>hasFiles</code>、<code>version</code></td>
+        <td>上传 zip 时解析 <code>SKILL.md</code> frontmatter，正文去掉 frontmatter 后存入 <code>skillContent</code>。</td>
+      </tr>
+      <tr>
+        <td>保存支撑文件</td>
+        <td><code>SkillService.saveSkillFilesFromZip</code></td>
+        <td><code>filePath</code>、<code>content</code>、<code>encoding</code></td>
+        <td>当前保存为 <code>utf-8</code> 文本；在线编辑也写 <code>sai_skill_file</code>。</td>
+      </tr>
+      <tr>
+        <td>读取 Skill</td>
+        <td><code>SkillContentCallbackHandler.handle</code></td>
+        <td><code>skillContent</code>、<code>version</code>、<code>files</code></td>
+        <td>按 <code>skillId</code> 查主表和文件表，返回给 Client。</td>
+      </tr>
+      <tr>
+        <td>注册工具</td>
+        <td><code>ClientSkillToolResolver.buildSkillsList</code></td>
+        <td>支撑文件目录为 <code>skillTempDir/skillId/version</code></td>
+        <td>模型在系统提示里只能看到目录路径和 Skill 摘要，完整指令必须通过 <code>read_skill</code> 获取。</td>
+      </tr>
+      <tr>
+        <td>物化文件</td>
+        <td><code>ReadSkillTool.materializeFiles</code></td>
+        <td><code>SKILL.md</code> 与每个 <code>SkillFile</code></td>
+        <td>写入发生在虚拟线程中，<code>read_skill</code> 先返回内容；文件访问存在短暂竞态窗口。</td>
+      </tr>
+      <tr>
+        <td>重复读取</td>
+        <td><code>ReadSkillTool.contentCache</code></td>
+        <td><code>skillId -> skillContent</code></td>
+        <td>同一 <code>ReadSkillTool</code> 实例内重复调用命中缓存，不再回调 Server。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>8. 模型工具调用与 cleanup</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>源码</th><th>关键行为</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>构建 <code>ChatClient</code></td>
+        <td><code>DefaultChatClientFactory.build</code></td>
+        <td>创建模型、创建 <code>ToolCallingManager</code>、添加 <code>ToolCallingAdvisor</code>、调用 <code>defaultTools</code>。</td>
+      </tr>
+      <tr>
+        <td>执行流式调用</td>
+        <td><code>ClientChatExecutor.streamResponses</code></td>
+        <td>把 <code>Prompt</code>、Advisor 参数和工具化后的 <code>ChatClient</code> 连接起来。</td>
+      </tr>
+      <tr>
+        <td>模型发起 tool call</td>
+        <td>Spring AI <code>ToolCallingAdvisor</code></td>
+        <td>Snail AI 的边界是把 callbacks 提供给 Spring AI；具体调用分发由 Spring AI 接管。</td>
+      </tr>
+      <tr>
+        <td>正常结束</td>
+        <td><code>ChatSessionRuntime.completionConsumer</code></td>
+        <td>先转发 completion，再执行 <code>cleanup(currentResolution)</code>。</td>
+      </tr>
+      <tr>
+        <td>异常结束</td>
+        <td><code>ChatSessionRuntime.errorConsumer</code></td>
+        <td>先转发 error，再执行相同 cleanup；启动阶段异常也会 cleanup。</td>
+      </tr>
+      <tr>
+        <td>MCP 关闭</td>
+        <td><code>ToolResolution.close</code> 与 <code>ClientMcpToolResolver.close</code></td>
+        <td>逐个调用 <code>McpSyncClient.close</code>，然后清空 <code>connectedClients</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>9. 失败与调试 checklist</h2>
+  <table>
+    <thead>
+      <tr><th>现象</th><th>优先检查</th><th>判断依据</th><th>下一步</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>模型看不到任何 MCP 工具</td>
+        <td><code>AgentService</code> 绑定、<code>McpHandler</code> descriptor、<code>ToolRuntime.resolveMcpTools</code></td>
+        <td>Server 有 descriptor 但 Client warn 连接失败，说明问题在 transport 或地址。</td>
+        <td>检查 <code>transportType</code>、<code>baseUri</code>、<code>endpoint</code>、<code>command</code>、Client 运行环境网络。</td>
+      </tr>
+      <tr>
+        <td>SSE MCP 没注册</td>
+        <td><code>ClientMcpToolResolver.connectMcpServer</code></td>
+        <td>SSE 当前记录 deprecated warn 并返回 <code>null</code>。</td>
+        <td>改用 Streamable HTTP 或 Stdio 配置。</td>
+      </tr>
+      <tr>
+        <td>配置了认证仍失败</td>
+        <td><code>McpHandler</code> 下发字段、<code>ClientMcpToolResolver</code> transport 构造</td>
+        <td>当前 resolver 不消费 <code>authType</code> 与 <code>authConfig</code>。</td>
+        <td>先确认 MCP server 是否允许无认证或通过环境变量认证；需要源码改造时从 transport builder 注入 header 开始设计。</td>
+      </tr>
+      <tr>
+        <td>Skill 名称可见但没有 <code>read_skill</code></td>
+        <td><code>ClientSkillToolResolver.resolve</code></td>
+        <td>如果 <code>request.getSkills()</code> 为空，不会注册 <code>ReadSkillTool</code>。</td>
+        <td>回查 <code>SkillAgentChatHandler</code> 是否被 <code>skillEnabled</code>、禁用 Skill ID 或关联表过滤。</td>
+      </tr>
+      <tr>
+        <td><code>read_skill</code> 返回 Skill not found</td>
+        <td><code>ReadSkillTool.skillRegistry</code></td>
+        <td>registry key 是 Skill 的 <code>name</code>，参数必须完全匹配。</td>
+        <td>看系统提示里的 Skill 名称，确认模型调用参数没有别名或翻译。</td>
+      </tr>
+      <tr>
+        <td><code>read_skill</code> 回调失败</td>
+        <td><code>RpcClient.fetchSkillContent</code>、<code>GrpcClientInvokeHandler</code>、<code>SkillContentCallbackHandler</code></td>
+        <td>URI 是 <code>/callback/skill/content</code>；Server 返回 <code>status != 1</code> 会抛 <code>CallbackServerErrorException</code>。</td>
+        <td>查 Server 是否能按 <code>skillId</code> 找到 <code>SkillPO</code>，以及 Client 回调 channel 是否可用。</td>
+      </tr>
+      <tr>
+        <td>支撑文件不存在</td>
+        <td><code>SkillContentCallbackHandler</code> 返回 <code>files</code>，再查 <code>ReadSkillTool.materializeFiles</code></td>
+        <td>主内容同步返回，文件异步写入；日志可能有 materialize warn。</td>
+        <td>检查文件路径、父目录创建、编码是否为 <code>base64</code> 或 <code>utf-8</code>，以及模型是否过早访问。</td>
+      </tr>
+      <tr>
+        <td>对话结束后 MCP 进程未退出</td>
+        <td><code>ChatSessionRuntime.cleanup</code> 与 <code>ClientMcpToolResolver.close</code></td>
+        <td>completion/error 正常触发时会关闭本轮 resolver；如果流没有 completion/error，cleanup 可能不执行。</td>
+        <td>查 <code>ChatDispatchStreamingHandler</code> 是否发送 completion/error，Client stream 是否卡住，MCP client close 是否抛异常。</td>
+      </tr>
+      <tr>
+        <td>RAG MCP 被过滤</td>
+        <td><code>ToolRuntime.filterRagMcpDescriptor</code></td>
+        <td>名称等于内置 RAG MCP server 的 descriptor 会被移除。</td>
+        <td>确认是否应改走 <code>ClientRagToolResolver</code> 的 <code>rag_search</code>，不要误判为外部 MCP 丢失。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>10. 关键源码索引</h2>
+  <table>
+    <thead>
+      <tr><th>主题</th><th>路径</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Server MCP 描述符</td><td class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/McpHandler.java</td></tr>
+      <tr><td>Server Skill 描述符</td><td class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/SkillAgentChatHandler.java</td></tr>
+      <tr><td>gRPC dispatch</td><td class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-agent/src/main/java/com/aizuda/snail/ai/feature/agent/chain/LlmCallHandler.java</td></tr>
+      <tr><td>Client 工具运行时</td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/runtime/tool/ToolRuntime.java</td></tr>
+      <tr><td>MCP resolver</td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/resolver/ClientMcpToolResolver.java</td></tr>
+      <tr><td>Skill resolver</td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/resolver/ClientSkillToolResolver.java</td></tr>
+      <tr><td><code>read_skill</code></td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/tool/ReadSkillTool.java</td></tr>
+      <tr><td>Skill 内容回调</td><td class="path">open-java/snail-ai/snail-ai-server/snail-ai-server-features/snail-ai-feature-skill/src/main/java/com/aizuda/snail/ai/features/skill/handle/SkillContentCallbackHandler.java</td></tr>
+      <tr><td>工具注入模型</td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/executor/client/DefaultChatClientFactory.java</td></tr>
+      <tr><td>会话 cleanup</td><td class="path">open-java/snail-ai/snail-ai-agent/snail-ai-agent-executor/snail-ai-agent-executor-core/src/main/java/com/aizuda/snail/ai/agent/core/runtime/ChatSessionRuntime.java</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

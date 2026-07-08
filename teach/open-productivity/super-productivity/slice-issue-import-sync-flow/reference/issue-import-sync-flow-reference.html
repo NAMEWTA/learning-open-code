@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Issue 导入与双向同步边界参考</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main>
+      <article class="doc">
+        <p class="kicker">速查参考</p>
+        <h1>外部 Issue 拉取、映射与双向同步边界</h1>
+        <p>
+          本参考用于排查“为什么没有导入”“为什么重复导入”“为什么没有写回”“为什么写了任务 op-log”。
+          短课入口：<a href="../lessons/0001-flow-map.html">0001-flow-map</a>。
+          相关 L1：<a href="../../module-issue-integrations/lessons/0001-issue-integrations-module-tour.html">Issue Provider 与日历集成</a>、
+          <a href="../../module-task-domain/lessons/0001-task-domain-module-tour.html">任务领域</a>、
+          <a href="../../module-op-log-sync/lessons/0001-op-log-sync-module-tour.html">op-log 同步</a>。
+        </p>
+
+        <h2>入口清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>入口</th>
+              <th>触发</th>
+              <th>核心动作</th>
+              <th>任务写入</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></td>
+              <td>初始同步完成后切项目，或 `pollingMode === 'always'`</td>
+              <td>筛 provider，启动 timer，调用 backlog 导入服务</td>
+              <td>effect 不写；后续 `IssueService.addTaskFromIssue` 才可能创建任务</td>
+            </tr>
+            <tr>
+              <td><code>src/app/features/issue/store/poll-issue-updates.effects.ts</code></td>
+              <td>切上下文、加载数据、always provider timer</td>
+              <td>选出已有 issue task，调用 `refreshIssueTasks`</td>
+              <td>provider 返回更新时，`TaskService.update` 写任务</td>
+            </tr>
+            <tr>
+              <td><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code></td>
+              <td>本地任务 update、schedule、tag、delete、addTask</td>
+              <td>计算 push/delete/create 决策，经 adapter 写远端</td>
+              <td>可能更新 `issueLastSyncedValues` / `issueLastUpdated` 作为同步基线</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>边界速查</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>代表源码</th>
+              <th>责任</th>
+              <th>不是它的责任</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>provider 配置状态</td>
+              <td><code>src/app/features/issue/issue.model.ts</code><br /><code>src/app/features/issue/store/issue-provider.actions.ts</code><br /><code>src/app/features/issue/store/issue-provider.reducer.ts</code></td>
+              <td>保存 provider 配置、启用状态、默认项目、轮询模式、迁移后的 plugin config</td>
+              <td>不创建任务；upsert/import 类 action 通常不带持久化 meta</td>
+            </tr>
+            <tr>
+              <td>provider 能力接口</td>
+              <td><code>src/app/features/issue/issue-service-interface.ts</code><br /><code>src/app/features/issue/base/base-issue-provider.service.ts</code><br /><code>src/app/plugins/issue-provider/plugin-issue-provider-adapter.service.ts</code></td>
+              <td>定义 `getAddTaskData`、`getNewIssuesToAddToBacklog`、`getFreshDataForIssueTask`、`updateIssueFromTask` 等能力</td>
+              <td>不决定任务列表位置；只提供 issue 数据和映射字段</td>
+            </tr>
+            <tr>
+              <td>导入编排</td>
+              <td><code>src/app/features/issue/issue.service.ts</code></td>
+              <td>按 provider 找 service，去重，拉候选 issue，合并默认项目/标签/备注，创建或更新任务</td>
+              <td>不直接实现每个 provider 的 HTTP 查询</td>
+            </tr>
+            <tr>
+              <td>任务 action / op-log</td>
+              <td><code>src/app/root-store/meta/task-shared.actions.ts</code><br /><code>src/app/features/tasks/store/task.actions.ts</code></td>
+              <td>`addTask/updateTask/deleteTask/deleteTasks/addSubTask` 带 `PersistentActionMeta`，进入任务操作边界</td>
+              <td>不负责远端 provider HTTP 写入；写回由 issue sync effect 监听这些 action</td>
+            </tr>
+            <tr>
+              <td>任务落库形状</td>
+              <td><code>src/app/features/tasks/task.model.ts</code><br /><code>src/app/root-store/meta/task-shared-meta-reducers/task-shared-crud.reducer.ts</code></td>
+              <td>保存 `issueId`、`issueProviderId`、`issueType`、`issueLastUpdated`、`issueLastSyncedValues`，并把任务放入项目/Backlog/Tag/Planner</td>
+              <td>不向 provider 拉数据</td>
+            </tr>
+            <tr>
+              <td>双向同步决策</td>
+              <td><code>src/app/features/issue/two-way-sync/compute-push-decisions.ts</code><br /><code>src/app/features/issue/two-way-sync/issue-sync-adapter.interface.ts</code></td>
+              <td>按方向、baseline、fresh provider value 决定 push 或 skip</td>
+              <td>不负责筛出哪些本地 action 应触发；筛选在 effect</td>
+            </tr>
+            <tr>
+              <td>双向同步 adapter</td>
+              <td><code>src/app/features/issue/providers/plainspace/plainspace-sync-adapter.service.ts</code><br /><code>src/app/features/issue/providers/caldav/caldav-sync-adapter.service.ts</code><br /><code>src/app/plugins/issue-provider/plugin-sync-adapter.service.ts</code></td>
+              <td>fetch/push 是 sync adapter 主路径；<code>createIssue</code> / <code>deleteIssue</code> 是 provider 可选能力。plugin adapter 还要看 definition 是否声明 <code>updateIssue</code>、<code>createIssue</code>、<code>deleteIssue</code>。</td>
+              <td>不能替代 backlog 导入；能导入不代表能 push。只读 plugin provider 可以参与搜索、拉取、导入，但不会有写回 adapter。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>主流程分解</h2>
+        <h3>1. 自动导入到 backlog</h3>
+        <ol>
+          <li>`poll-to-backlog` 等待初始同步完成，按 `defaultProjectId`、`isAutoAddToBacklog`、`pollingMode`、agenda view、poll interval 筛 provider。</li>
+          <li>`IssueService.checkAndImportNewIssuesToBacklogForProject` 用 `TaskService.getAllIssueIdsForProviderEverywhere` 收集当前任务和归档任务里的 issue id。</li>
+          <li>provider 实现 `getNewIssuesToAddToBacklog`，例如 Jira 调 `findAutoImportIssues$`，GitLab 调 `getProjectIssues$`，OpenProject 拉最近 100 个 work package，Plainspace 拉 `getMyTasks$`。</li>
+          <li>候选 issue 经过二次过滤后进入 `addTaskFromIssue`，由 provider `getAddTaskData` 产出 `IssueTask` 字段。</li>
+          <li>`TaskService.add` 派发 `TaskSharedActions.addTask`；有 `dueWithTime` 时走 `addAndSchedule`；有关联父 issue 时可能走 `addSubTaskTo`。</li>
+        </ol>
+
+        <h3>2. 远端 issue 更新已有任务</h3>
+        <ol>
+          <li>`poll-issue-updates` 选出已有 issue task：普通 provider 默认限当前上下文，`always` provider 全局，ICAL 与 `plugin:*` provider 走 calendar issue task 全局选择器；迁移后的 `GITHUB/CLICKUP/GITEA/LINEAR/TRELLO/AZURE_DEVOPS` key 不是 `plugin:*`，仍按普通或 `always` 规则。</li>
+          <li>`IssueService.refreshIssueTasks` 按 issue provider key 分组，调用 provider 的 `getFreshDataForIssueTasks`。</li>
+          <li>基础实现用 `issueLastUpdated` 判断远端是否更新，并保护用户本地 schedule：默认删除 `dueDay/dueWithTime`，Calendar/Plainspace 等可覆盖。</li>
+          <li>有更新时调用 `TaskService.update`，落到 `TaskSharedActions.updateTask`；同时通过 `ISSUE_REFRESH_MAP` 通知正在显示的 issue 详情。</li>
+          <li>支持 `getRemovedRemoteTasks` 的 provider 可安全删除无本地投入的孤儿任务，Plainspace 有“全量消失时跳过”的防误删门。</li>
+        </ol>
+
+        <h3>3. 本地任务写回 provider</h3>
+        <ol>
+          <li>`IssueTwoWaySyncEffects` 监听 update、short syntax、schedule、planner、tag、delete、addTask 等本地 action。</li>
+          <li>只有 `isDone`、`title`、`notes`、`dueWithTime`、`dueDay`、`timeEstimate`、`tagIds` 等同步字段会进入 push 计算。</li>
+          <li>含 `issueLastSyncedValues` 或 `issueWasUpdated` 的 poll/bookkeeping 更新会被跳过，避免 pull 后立刻 push 回去。</li>
+          <li>`computePushDecisions` 先检查方向：`off/pullOnly` 跳过；无 baseline 跳过；fresh provider value 与 baseline 不同则 provider wins；否则 push。</li>
+          <li>push 成功后只推进实际写过字段的 baseline；若远端还有未拉取变化，则保持 `issueLastUpdated` stale，让下一轮 poll 拉回来。</li>
+        </ol>
+
+        <h2>动作判断表</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>动作或函数</th>
+              <th>分类</th>
+              <th>会创建/更新任务吗</th>
+              <th>op-log 边界</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>`IssueProviderActions.addIssueProvider/updateIssueProvider/sortIssueProvidersFirst`</td>
+              <td>provider 配置</td>
+              <td>不会</td>
+              <td>显式配置变更带 provider 持久化 meta</td>
+            </tr>
+            <tr>
+              <td>`IssueProviderActions.upsertIssueProvider/upsertIssueProviders/updateIssueProviders`</td>
+              <td>导入/同步 provider 状态</td>
+              <td>不会</td>
+              <td>源码注释标明通常不带持久化 meta</td>
+            </tr>
+            <tr>
+              <td>`getNewIssuesToAddToBacklog`</td>
+              <td>provider 拉取</td>
+              <td>不会</td>
+              <td>无任务 op；只返回候选 issue 数据</td>
+            </tr>
+            <tr>
+              <td>`IssueService.addTaskFromIssue`</td>
+              <td>导入编排</td>
+              <td>会，可能创建主任务、定时任务或子任务</td>
+              <td>通过 `TaskService` 进入任务 action</td>
+            </tr>
+            <tr>
+              <td>`TaskSharedActions.addTask/updateTask/deleteTask/deleteTasks`</td>
+              <td>任务状态</td>
+              <td>会</td>
+              <td>带 `PersistentActionMeta`，是任务 op-log 的主要边界</td>
+            </tr>
+            <tr>
+              <td>`addSubTask`</td>
+              <td>任务状态</td>
+              <td>会创建子任务</td>
+              <td>`src/app/features/tasks/store/task.actions.ts` 中带 `OpType.Create`</td>
+            </tr>
+            <tr>
+              <td>`DeletedTaskIssueSidecarService` / `DeletedTagTitlesSidecarService`</td>
+              <td>本地临时 sidecar</td>
+              <td>不会</td>
+              <td>刻意不进 action payload，不持久化，不同步</td>
+            </tr>
+            <tr>
+              <td>`adapter.pushChanges/createIssue/deleteIssue`</td>
+              <td>远端 provider 写入</td>
+              <td>不直接写任务；成功后可能更新任务同步基线</td>
+              <td>由监听本地任务 action 的 effect 触发</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>故障排查</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>现象</th>
+              <th>先查</th>
+              <th>判断方法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>新 issue 没进 backlog</td>
+              <td><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></td>
+              <td>检查 provider 是否 enabled、`defaultProjectId` 是否匹配、`isAutoAddToBacklog` 是否为真、poll interval 是否大于 0、是否被 agenda view 排除。</td>
+            </tr>
+            <tr>
+              <td>重复导入</td>
+              <td><code>src/app/features/issue/issue.service.ts</code><br /><code>src/app/features/tasks/task.service.ts</code></td>
+              <td>检查 `issueId + issueType + issueProviderId` 是否一致；Calendar 还要看 issue id candidates；Plainspace/Calendar 使用确定性 task id 防跨设备重复。</td>
+            </tr>
+            <tr>
+              <td>远端更新没有反映到任务</td>
+              <td><code>src/app/features/issue/store/poll-issue-updates.effects.ts</code><br /><code>src/app/features/issue/base/base-issue-provider.service.ts</code></td>
+              <td>确认任务被选入轮询范围，provider 是否实现 fresh data，`issueLastUpdated` 是否阻止了更新。</td>
+            </tr>
+            <tr>
+              <td>本地修改没写回 provider</td>
+              <td><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code><br /><code>src/app/features/issue/two-way-sync/compute-push-decisions.ts</code></td>
+              <td>看字段是否在 syncable set，adapter 是否存在，方向是否允许 push，是否缺 baseline，fresh provider value 是否已经变化。</td>
+            </tr>
+            <tr>
+              <td>删除任务没有删远端 issue</td>
+              <td><code>src/app/features/issue/two-way-sync/issue-sync-adapter-resolver.service.ts</code><br /><code>src/app/features/issue/two-way-sync/deleted-task-issue-sidecar.service.ts</code></td>
+              <td>单删需要 adapter 支持 `deleteIssue`；批量删除的 issue 元数据来自 sidecar，若未提前写 sidecar 就无法删除远端。</td>
+            </tr>
+            <tr>
+              <td>push 后下一轮 poll 又覆盖回来</td>
+              <td><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code></td>
+              <td>检查是否只推进了已 push 字段 baseline；provider-owned skip 或未拉取远端变化会保留旧 `issueLastUpdated`。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>后续 L3/L4 线索</h2>
+        <p class="mini">
+          这些线索已登记或待登记为后续 API/deep-dive 主题；当前 L2 只负责把调用方向和持久化边界讲清。
+        </p>
+        <ul>
+          <li>L3：`IssueService.addTaskFromIssue` 的重复检测、默认 project/tag/note 合并、backlog 与 dueDay 互斥。</li>
+          <li>L3：`TaskSharedActions` 与 `task-shared-crud.reducer` 如何把一个任务 action 同步更新 task/project/tag/planner。</li>
+          <li>L3：plugin provider 的 `PluginIssueProviderAdapterService` 与 `createPluginSyncAdapter` 如何共享 field mapping。</li>
+          <li>L4：`computePushDecisions` 的 provider-wins 冲突策略、baseline 语义和互斥字段清理。</li>
+          <li>L4：Plainspace orphan removal 与 delete sidecar 如何降低误删和 op-log 暴露风险。</li>
+        </ul>
+      </article>
+    </main>
+  </body>
+</html>

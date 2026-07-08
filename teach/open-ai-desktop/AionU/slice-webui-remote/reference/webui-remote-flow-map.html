@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebUI 启动与远程访问参考图谱</title>
+  <link rel="stylesheet" href="../assets/webui-remote.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>WebUI 启动与远程访问参考图谱</h1>
+    <p class="subtitle">L2 垂直切片参考：入口点、沿途层次、调用时序、边界路径、文档漂移、测试证据与交叉链接。</p>
+    <div class="meta">
+      <span class="pill">主入口：lessons/0001-flow-map.html</span>
+      <span class="pill">源 commit：0ea13fd</span>
+      <span class="pill">范围：desktop / web-host / web-cli / docs / e2e</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#links">交叉链接</a>
+    <a href="#entries">入口点</a>
+    <a href="#layers">沿途层次</a>
+    <a href="#timeline">调用时序</a>
+    <a href="#edges">异常与边界</a>
+    <a href="#evidence">证据与漂移</a>
+  </nav>
+
+  <h2 id="links">1. 交叉链接</h2>
+  <div class="crosslinks">
+    <a href="../lessons/0001-flow-map.html">本主题短课</a>
+    <a href="../../00-overview/reference/00-overview.html">L0：项目总览</a>
+    <a href="../../module-web-runtime/reference/web-runtime-overview.html">L1：WebHost 与 WebCLI</a>
+    <a href="../../module-main-entry/reference/main-entry-overview.html">L1：Electron 主入口</a>
+    <a href="../../module-docs-resources/reference/docs-resources-overview.html">L1：docs/resources</a>
+  </div>
+  <p>本页只讲“WebUI 从启动到可远程访问”的垂直切片。模块职责、目录全景和其他候选切片请回看上面的 L0/L1 页面。</p>
+
+  <h2 id="entries">2. 入口点</h2>
+  <table>
+    <thead>
+      <tr><th>入口</th><th>源码落点</th><th>配置来源</th><th>backend 来源</th><th>外部结果</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Electron headless WebUI</td><td><code>desktop/src/index.ts:158-181</code>、<code>759-828</code></td><td>CLI flag、env、`webui.config.json`</td><td>复用 `startBackendOrExit()` 已启动的 backend</td><td>无窗口 WebUI，进程保持存活</td></tr>
+      <tr><td>桌面设置页恢复 WebUI</td><td><code>index.ts:887-891</code>、<code>webuiConfig.ts:318-336</code></td><td>backend `/api/settings/client` 偏好</td><td>复用桌面 backend</td><td>普通桌面启动后异步恢复 WebUI</td></tr>
+      <tr><td>独立 WebCLI</td><td><code>web-cli/src/index.ts:366-415</code>、<code>133-270</code></td><td>CLI command、flag、env、默认目录</td><td>通常 `ownBackend`，缺失时可 frontend-only</td><td>打印 local/network URL 和密码提示</td></tr>
+      <tr><td>密码重置</td><td><code>index.ts:747-758</code> 或 <code>web-cli/src/index.ts:278-364</code></td><td>用户名或 data-dir/backend-bin</td><td>临时复用或启动 backend</td><td>打印新密码并使旧会话失效</td></tr>
+    </tbody>
+  </table>
+  <h3>入口代码摘录</h3>
+  <pre><code class="language-typescript">const hasSwitch = (flag: string) =&gt; process.argv.includes(`--${flag}`) || app.commandLine.hasSwitch(flag);
+const getSwitchValue = (flag: string): string | undefined =&gt; {
+  const withEqualsPrefix = `--${flag}=`;
+  const equalsArg = process.argv.find((arg) =&gt; arg.startsWith(withEqualsPrefix));
+  if (equalsArg) return equalsArg.slice(withEqualsPrefix.length);
+  return app.commandLine.getSwitchValue(flag) || undefined;
+};
+const isWebUIMode = hasSwitch('webui');
+const isRemoteMode = hasSwitch('remote');</code></pre>
+  <pre><code class="language-typescript">const { command, flags } = parseArgs(process.argv.slice(2));
+if (command === 'resetpass') {
+  await runResetPassword(flags);
+  return;
+}
+if (command !== 'start') {
+  console.error(`Unknown command: ${command}`);
+  process.exit(1);
+}
+await runStart(flags);</code></pre>
+  <pre><code class="language-typescript">const handle = await startWebHost({
+  staticDir,
+  port,
+  allowRemote,
+  backend: { kind: 'useExistingBackend', port: backendPort },
+});</code></pre>
+
+  <h2 id="layers">3. 沿途每一层</h2>
+  <div class="filetree">WebUI 远程访问切片
+├── 用户入口                         ← AionUi --webui / aionui-web start / 设置页恢复
+├── 参数与偏好解析层                 ← hasSwitch、getSwitchValue、parseArgs、readWebUIDesktopPreferences
+├── 端口与远程访问决策层             ← resolveWebUIPort、resolveRemoteAccess、resolveAllowRemote
+├── backend 生命周期层               ← startBackendOrExit 或 web-cli ownBackend
+├── WebHost 组合层                   ← startWebHost 选择 ownBackend / useExistingBackend
+├── 静态服务与代理层                 ← startStaticServer 服务 SPA、代理 API、转发 WS/STT
+├── 凭据与登录边界                   ← ensureAdminUserOnce、ensureAdminPassword、resetpass
+└── 验证与文档层                     ← docs/guides/webui.md、webui.e2e.ts</div>
+  <table>
+    <thead>
+      <tr><th>层次</th><th>关键代码</th><th>职责边界</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>参数解析</td><td><code>index.ts:158-181</code>、<code>web-cli/index.ts:58-73</code></td><td>只把 argv/env 变成布尔值和字符串，不启动服务。</td></tr>
+      <tr><td>配置决策</td><td><code>webuiConfig.ts:68-160</code>、<code>web-cli/index.ts:108-121</code></td><td>端口优先级、远程访问开关和默认值在这里收敛。</td></tr>
+      <tr><td>后端准备</td><td><code>index.ts:661-724</code>、<code>web-cli/index.ts:163-220</code></td><td>Electron 复用已有 backend；WebCLI 自行解析二进制并启动。</td></tr>
+      <tr><td>组合器</td><td><code>web-host/index.ts:27-79</code></td><td>WebHost 不保存持久配置，只组合 backend handle 与 static handle。</td></tr>
+      <tr><td>网络门面</td><td><code>static-server.ts:120-239</code></td><td>根据 `allowRemote` 绑定 `127.0.0.1` 或 `0.0.0.0`，并返回 URL。</td></tr>
+      <tr><td>凭据自举</td><td><code>ensureAdminPassword.ts:98-143</code></td><td>WebCLI 首启时检查认证状态，必要时生成初始管理员密码。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="timeline">4. 调用时序</h2>
+  <h3>4.1 Electron `--webui`</h3>
+  <pre><code class="language-mermaid">sequenceDiagram
+  participant Desktop as Electron main
+  participant Backend as aioncore backend
+  participant Config as webuiConfig
+  participant Host as WebHost
+  participant Static as Static server
+  Desktop-&gt;&gt;Backend: startBackendOrExit()
+  Backend--&gt;&gt;Desktop: globalThis.__backendPort
+  Desktop-&gt;&gt;Config: loadUserWebUIConfig()
+  Desktop-&gt;&gt;Config: resolveWebUIPort() / resolveRemoteAccess()
+  Desktop-&gt;&gt;Host: startWebHost(useExistingBackend)
+  Host-&gt;&gt;Static: startStaticServer()
+  Static--&gt;&gt;Desktop: localUrl / networkUrl</code></pre>
+  <div class="diagram">app.whenReady()
+  -> handleAppReady()
+  -> initializeProcess()
+  -> startBackendOrExit()
+  -> markBackendReady() 暴露 globalThis.__backendPort
+  -> ensureAdminUserOnce()
+  -> isWebUIMode 分支
+  -> loadUserWebUIConfig()
+  -> resolveWebUIPort() / resolveRemoteAccess()
+  -> startWebHost({ backend: useExistingBackend, port, allowRemote })
+  -> startStaticServer()
+  -> will-quit 防止无窗口模式意外退出</div>
+  <p>关键点：`startWebHost()` 里的 backend 选项是 `useExistingBackend`，端口来自 `globalThis.__backendPort`。如果这个端口不存在，代码直接抛出 `[WebUI] Cannot start`，避免 WebUI 静默跑在无 backend 状态。</p>
+
+  <h3>4.2 桌面设置恢复</h3>
+  <div class="diagram">普通桌面模式
+  -> createWindow()
+  -> restoreDesktopWebUIFromPreferences()
+  -> readWebUIDesktopPreferences()
+  -> enabled=false：不启动
+  -> enabled=true：startDesktopWebUI({ port, allowRemote })
+  -> startWebHost({ backend: useExistingBackend })
+  -> 失败：writeWebUIDesktopEnabled(false)</div>
+  <p>这条路径说明 WebUI 不是只有命令行入口。用户在设置页保存的 `webui.desktop.enabled`、`allowRemote`、`port` 存在 backend 设置表中，启动后异步恢复；失败时会把 enabled 写回 false，避免 UI 继续显示“已开启”但端口拒绝连接。</p>
+
+  <h3>4.3 独立 `aionui-web start`</h3>
+  <div class="diagram">main()
+  -> parseArgs()
+  -> runStart()
+  -> resolveBackendBinary() / resolveStaticDir() / resolveDataDir()
+  -> resolvePort() / resolveAllowRemote()
+  -> backend 存在：startWebHost({ backend: ownBackend })
+  -> backend 缺失：startStaticServer({ backendPort: 0 })
+  -> ensureAdminPassword()
+  -> shouldAutoOpenBrowser()
+  -> SIGINT/SIGTERM 调用 handle.stop()</div>
+  <p>WebCLI 的使用场景更像独立部署包。它默认数据目录是 `~/.aionui-web`，生产默认端口是 `25808`，远程模式默认不自动打开浏览器，本地模式默认会尝试打开。</p>
+
+  <h2 id="edges">5. 异常与边界路径</h2>
+  <table>
+    <thead>
+      <tr><th>边界</th><th>触发条件</th><th>实现行为</th><th>排查意义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>远程访问关闭</td><td>没有 `--remote`、远程 env、host hint 或配置</td><td>static-server 绑定 `127.0.0.1`，不返回 `networkUrl`。</td><td>局域网设备访问失败时先确认 allowRemote。</td></tr>
+      <tr><td>显式远程访问</td><td>`--remote` 或 `AIONUI_ALLOW_REMOTE=true`</td><td>static-server 绑定 `0.0.0.0`，尝试取 LAN IP 并返回 `networkUrl`。</td><td>网络可达还依赖防火墙和同网段。</td></tr>
+      <tr><td>端口配置无效</td><td>端口为空、非数字、越界</td><td>桌面路径 `parsePortValue()` 返回 null，继续使用下一个来源或默认值。</td><td>不要把无效端口当成启动失败根因。</td></tr>
+      <tr><td>Electron backend 未就绪</td><td>`globalThis.__backendPort` 未设置</td><td>Electron WebUI 和桌面恢复都会抛错；headless 分支退出，桌面恢复会回写 enabled=false。</td><td>说明要先查 backend 启动链路。</td></tr>
+      <tr><td>WebCLI backend 缺失</td><td>找不到 `bundled-aioncore` 或 `AIONUI_BACKEND_BIN`</td><td>降级为 frontend-only，只服务 SPA；API 代理会失败。</td><td>页面可打开不等于业务可用。</td></tr>
+      <tr><td>首启密码生成失败</td><td>认证状态超时或 reset 接口失败</td><td>`ensureAdminPassword()` 只警告，不中止服务。</td><td>用户可继续看到登录页，但需要运行 resetpass。</td></tr>
+      <tr><td>WebSocket/STT 路由</td><td>`GET /ws` 或 `GET /api/stt/stream`</td><td>外层 TCP listener 直接 splice 到 backend。</td><td>普通 HTTP 代理正常不代表 WS 路径也正常。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">6. 证据与漂移</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>实现证据</h3>
+      <p>`web-host/src/index.ts` 明确声明 WebHost 不保存持久配置；调用方负责解析端口与远程访问。`static-server.ts` 明确服务 SPA、代理 `/api/*`、`/login`、`/logout`，并对 `/ws` 与 STT stream 做 TCP splice。</p>
+    </section>
+    <section class="panel">
+      <h3>E2E 证据</h3>
+      <p>`webui.e2e.ts` 验证设置页可渲染、启用开关可见、至少两个开关存在、默认端口或 WebUI 面板可见，并尝试启停服务。它是桌面设置路径的外部行为证据。</p>
+    </section>
+    <section class="panel">
+      <h3>文档漂移</h3>
+      <p>`docs/guides/webui.md` 第 25、470、478、497、503 行仍出现 `3000`，而实现默认端口是 `25808` 系列。Android 段和 E2E 更接近当前实现，已写 `25808`。</p>
+    </section>
+  </div>
+  <table>
+    <thead>
+      <tr><th>判断点</th><th>当前结论</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>默认端口</td><td>生产 `25808`，开发 `25809`，多实例开发 `25810`；WebCLI 默认 `25808`。</td><td><code>webuiConfig.ts:129-150</code>、<code>web-cli/index.ts:52-54</code>、<code>108-114</code></td></tr>
+      <tr><td>配置优先级</td><td>Electron headless：CLI port、env、user config、默认值。远程：CLI/env/host/config 任一显式允许即可。</td><td><code>webuiConfig.ts:137-160</code></td></tr>
+      <tr><td>静态服务不是业务后端</td><td>它只服务 SPA、代理 HTTP、转发 WS/STT；业务认证仍在 backend。</td><td><code>static-server.ts:1-11</code>、<code>141-153</code></td></tr>
+      <tr><td>旧 standalone server</td><td>不要作为当前实现推断依据；当前实现以 `@aionui/web-host` 与 `web-cli` 为准。</td><td>L1 docs/resources 的 development 脚本漂移记录、本主题源码链路</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

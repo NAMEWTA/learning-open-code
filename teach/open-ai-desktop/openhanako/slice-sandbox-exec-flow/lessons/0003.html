@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · Bubblewrap 容器执行：bwrap参数构造+spawn+流式输出</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · Bubblewrap 容器执行：bwrap参数构造+spawn+流式输出 <span class="tag">执行引擎</span></h1>
+
+<div class="mission">
+<b>本节目标（对应使命 Success #3）</b>：学完你能解释三种命令执行路径（Direct/Once/TTY）的选择逻辑，掌握 Bubblewrap 的 bwrap 参数构造策略，理解 CommandOutputCollector 的双缓冲设计和输出截断机制。
+</div>
+
+<p>前两课覆盖了命令的"检查层"（分类+路径判决+审批）。当命令通过所有检查后，进入真正的<b>执行层</b>——第 6 层（执行器选择）、第 7 层（OS 沙盒）和第 8 层（输出收集）。这三层是纵深防御的"执行臂"。</p>
+
+<h2>一、三路径执行模型（Layer 6）</h2>
+
+<p>命令通过所有校验后，<code>tool.ts</code> 的 <code>execute</code> 函数根据可用资源和参数选择三种执行路径之一：</p>
+
+<pre><code>// lib/exec-command/tool.ts — 三路径选择
+if (value.tty) {
+  // 路径 A：交互式 PTY 终端
+  return startExecCommandTty({ manager, getAgentId, command, ... });
+}
+if (commandExec) {
+  // 路径 B：Direct 执行（使用 OS 沙盒化的 exec 函数）
+  return runExecCommandDirect({ commandExec, command: renderedCommand, workdir, ... });
+}
+// 路径 C：Once 执行（通过 Pi SDK bash 工具）
+return runExecCommandOnce({ bashTool, toolCallId, command: renderedCommand, ... });</code></pre>
+
+<table>
+<tr><th>路径</th><th>函数</th><th>适用场景</th><th>输出方式</th></tr>
+<tr><td>A. TTY</td><td><code>startExecCommandTty()</code></td><td>交互式长时间运行（dev server、REPL）</td><td>通过 PTY session 持续交互</td></tr>
+<tr><td>B. Direct</td><td><code>runExecCommandDirect()</code></td><td>有 OS 沙盒化 exec 函数时</td><td>CommandOutputCollector 流式收集</td></tr>
+<tr><td>C. Once</td><td><code>runExecCommandOnce()</code></td><td>通过 Pi SDK bash 工具执行</td><td>bashTool.execute 一次性获取结果</td></tr>
+</table>
+
+<div class="step"><span class="num">A</span><b>TTY 路径</b>：通过 <code>node-pty</code> 创建伪终端，支持 <code>cols x rows</code> 尺寸控制和 <code>xterm-256color</code>。返回 <code>terminalId</code>（即 processId），后续通过 <code>write_stdin</code> 工具发送输入。Windows 上用 <code>taskkill /T /F</code> 确保进程树完整终止。<br><span class="where">lib/exec-command/runner.ts + lib/terminal/node-pty-backend.ts</span></div>
+
+<div class="step"><span class="num">B</span><b>Direct 路径（主线）</b>：当沙盒开启且有 <code>commandExec</code>（被 bwrap/seatbelt 包装的 spawn 函数）时走此路径。创建 <code>CommandOutputCollector</code> 进行流式管理，是最常用也最安全的路径。<br><span class="where">lib/exec-command/runner.ts — runExecCommandDirect()</span></div>
+
+<div class="step"><span class="num">C</span><b>Once 路径（兜底）</b>：当没有 OS 沙盒化 exec 函数时，回退到 Pi SDK 的 <code>bashTool.execute()</code> 一次性获取结果。缺少流式输出和细粒度超时控制。<br><span class="where">lib/exec-command/runner.ts — runExecCommandOnce()</span></div>
+
+<div class="side">
+<b>路径 B 是主线：</b>当沙盒开启且有 <code>commandExec</code>（被 bwrap/seatbelt/restricted-token 包装的 spawn 函数）时，走 Direct 路径。这是最常用也最安全的路径。路径 C 是兜底——当没有 OS 沙盒时回退到 Pi SDK 的 bash 工具。
+</div>
+
+<h3>CommandOutputCollector：双缓冲设计</h3>
+
+<p>路径 B 使用 <code>CommandOutputCollector</code>（<code>lib/exec-command/runner.ts</code>）进行流式输出管理，解决了"长时间运行的命令可能产生大量输出，需要同时支持流式回传和最终截断"的关键问题：</p>
+
+<pre><code>// lib/exec-command/runner.ts — CommandOutputCollector 核心逻辑
+class CommandOutputCollector {
+  private chunks: Buffer[] = [];
+  private chunksBytes = 0;
+  private totalBytes = 0;
+  private tempFilePath: string | undefined;
+
+  append(data: Buffer) {
+    this.totalBytes += chunk.length;
+    // 超过 50KB 阈值时自动创建临时文件保存完整输出
+    if (this.totalBytes > DEFAULT_MAX_BYTES) this.ensureTempFile();
+    if (this.tempFileStream) this.tempFileStream.write(chunk);
+    // 内存中保留最近 100KB 用于实时预览（滚动窗口）
+    this.chunks.push(chunk);
+    this.chunksBytes += chunk.length;
+    while (this.chunksBytes > MAX_ROLLING_BYTES && this.chunks.length > 1) {
+      const removed = this.chunks.shift();
+      this.chunksBytes -= removed?.length || 0;
+    }
+  }
+}</code></pre>
+
+<p>收集器采用"双缓冲"策略：内存中的滚动窗口（最近 100KB）用于流式快照回传给 LLM，超过阈值后自动写入临时文件保留完整输出。最终结果构建时优先返回内存内容，超限则附上临时文件路径。</p>
+
+<h2>二、OS 级沙盒执行（Layer 7）</h2>
+
+<p>HanaAgent 在三个平台上采用不同的 OS 级沙盒机制：</p>
+
+<table>
+<tr><th>平台</th><th>机制</th><th>关键文件</th><th>隔离原理</th></tr>
+<tr><td>Linux</td><td>Bubblewrap (bwrap)</td><td><code>lib/sandbox/bwrap.ts</code></td><td>Linux user namespace + bind mount</td></tr>
+<tr><td>macOS</td><td>Seatbelt (sandbox-exec)</td><td><code>lib/sandbox/seatbelt.ts</code></td><td>Apple Sandbox SBPL 策略文件</td></tr>
+<tr><td>Windows</td><td>Restricted Token</td><td><code>lib/sandbox/win32-exec.ts</code></td><td>Windows 访问令牌降权</td></tr>
+</table>
+
+<h3>Shell 命令运行器（command-runner.ts）</h3>
+
+<p><code>lib/shell/command-runner.ts</code> 中的 <code>createCommandRunner()</code> 是连接"工具层"与"OS 沙盒层"的关键桥梁。它根据平台解析 Shell profile（可执行文件路径 + 参数模板），将命令包装为可 spawn 的完整调用：</p>
+
+<pre><code>// lib/shell/command-runner.ts — Shell 命令运行器工厂
+export function createCommandRunner({ resolveProfile, spawnCommand, platform }) {
+  return async function runShellCommand(command, cwd, opts = {}) {
+    const profile = resolveProfile({ platform, profile: opts.profile || "default", env });
+    return spawnCommand({
+      executable: profile.executable,
+      args: profile.argsForCommand(String(command ?? "")),
+      cwd, env: profile.env || env,
+      onData: opts.onData, signal: opts.signal, timeout: opts.timeout,
+    });
+  };
+}</code></pre>
+
+<p>当沙盒开启时，<code>spawnCommand</code> 指向被 OS 沙盒包装后的 spawn 函数，从而在 Shell profile 解析之后、实际进程启动之前插入 OS 级隔离层。</p>
+
+<h3>Linux Bubblewrap 参数构造</h3>
+
+<p><code>buildBwrapArgs()</code>（<code>lib/sandbox/bwrap.ts</code>）构造完整的 bwrap 参数列表，典型调用为：<code>bwrap [args...] -- /bin/bash /tmp/hana-script-XXXX.sh</code></p>
+
+<pre><code>// lib/sandbox/bwrap.ts — 参数构造策略（核心参数）
+const args = [
+  // 1. 根文件系统：只读绑定 / → /（限制系统文件修改）
+  ...(readAll ? ["--ro-bind", "/", "/"] : []),
+  // 2. 虚拟文件系统
+  "--dev", "/dev",        // 设备节点
+  "--proc", "/proc",      // 进程信息
+  "--tmpfs", "/tmp",      // 独立临时目录
+  // 3. 进程隔离
+  "--unshare-pid",        // 新建 PID namespace
+  "--new-session",        // 脱离终端控制
+  "--die-with-parent",    // 父进程退出时自动清理
+];
+if (!allowNetwork) args.push("--unshare-net"); // 可选网络隔离
+
+// 4. 工作目录：可写绑定
+if (cwd && fs.existsSync(cwd)) {
+  addMount(args, "--bind", cwd, cwd, ...);
+  args.push("--chdir", cwd);
+}
+// 5. 受保护路径：在可写范围内覆盖为只读
+for (const p of policy.protectedPaths) addMount(args, "--ro-bind", p, p, ...);
+// 6. 读取拒绝：文件绑 /dev/null，目录绑 tmpfs
+for (const p of policy.denyReadPaths) {
+  fs.statSync(p).isDirectory() ? args.push("--tmpfs", p) : args.push("--bind", "/dev/null", p);
+}</code></pre>
+
+<h3>macOS Seatbelt 沙盒</h3>
+
+<p>macOS 使用 <code>sandbox-exec</code> + SBPL (Sandbox Profile Language) 策略文件：<code>sandbox-exec -f /tmp/hana-profile-XXXX.sb /bin/bash /tmp/hana-script-XXXX.sh</code>。策略文件以 <code>(deny default)</code> 开头，默认拒绝一切，仅显式 allow 的路径可访问。</p>
+
+<h3>exec-helper.ts：跨平台 spawn 底层</h3>
+
+<p>所有平台的 OS 沙盒最终通过 <code>spawnAndStream()</code>（<code>lib/sandbox/exec-helper.ts</code>）执行，处理进程 spawn、流式数据回调、超时机制（<code>killTree</code> 杀进程树）、AbortSignal 中断、退出码处理、以及进程退出后 100ms 的 grace 延迟确保管道排空不丢尾部输出。</p>
+
+<div class="danger">
+<b>沙盒不是全局开关：</b>沙盒通过 <code>getSandboxEnabled</code> 回调在每次工具调用时动态求值。用户可以在运行时切换沙盒偏好而无需重建 session。沙盒关闭时回退到 <code>normalBashTool</code>（直接 spawn，无 OS 隔离）。
+</div>
+
+<h2>三、输出收集与结果回传（Layer 8）</h2>
+
+<p>命令执行完成后，最终阶段是将输出格式化并返回给 Agent。</p>
+
+<h3>输出截断策略</h3>
+
+<p>采用"从末尾向前保留"策略，保留最后 2000 行或 50KB：</p>
+
+<pre><code>// lib/exec-command/runner.ts — 截断策略（核心逻辑）
+function truncateTail(content, { maxLines = 2000, maxBytes = 50 * 1024 } = {}) {
+  const lines = content.split("\n");
+  for (let i = lines.length - 1; i >= 0 && outputLinesArr.length < maxLines; i--) {
+    const lineBytes = Buffer.byteLength(line, "utf-8");
+    if (outputBytesCount + lineBytes > maxBytes) break; // 超过字节上限
+    outputLinesArr.unshift(line);
+    outputBytesCount += lineBytes;
+  }
+  // 截断说明附在返回文本中，含完整输出临时文件路径
+  return { content, truncated, truncatedBy, totalLines, outputLines };
+}</code></pre>
+
+<p>截断不是简单丢弃数据——系统会创建临时文件保存完整输出，并在返回文本中附上路径说明（如 <code>Full output: /tmp/hana-exec-command-a1b2c3d4.log</code>），LLM 可通过 <code>read</code> 工具读取完整文件。</p>
+
+<h3>编码检测</h3>
+
+<p>在 Windows 平台上，命令输出可能是 GBK 编码。先尝试 UTF-8 解码，失败后回退到 GBK：</p>
+<pre><code>export function decodeCommandOutput(buffer: Buffer, { platform } = {}) {
+  if (platform === "win32" && !isValidUtf8(buffer)) {
+    try { return { text: new TextDecoder("gbk").decode(buffer), encoding: "gbk" }; } catch {}
+  }
+  return { text: buffer.toString("utf-8"), encoding: "utf-8" };
+}</code></pre>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. 三路径执行模型中，哪个路径使用了 CommandOutputCollector？</p>
+<span class="opt">A. TTY 路径（startExecCommandTty）</span>
+<span class="opt">B. Direct 路径（runExecCommandDirect）</span>
+<span class="opt">C. Once 路径（runExecCommandOnce）</span>
+<span class="opt">D. 三个路径都使用</span>
+<details><summary>看答案</summary><b>B</b>。只有 Direct 路径创建 <code>new CommandOutputCollector()</code> 进行流式输出收集。TTY 路径通过 PTY session 持续交互，Once 路径通过 <code>bashTool.execute</code> 一次性获取结果。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Bubblewrap 的 <code>--die-with-parent</code> 参数的作用是什么？</p>
+<span class="opt">A. 当子进程退出时杀死父进程</span>
+<span class="opt">B. 当父进程（HanaAgent）退出时自动清理沙盒进程，防止孤儿进程泄漏</span>
+<span class="opt">C. 当沙盒内的进程崩溃时重启它</span>
+<span class="opt">D. 当网络断开时终止沙盒</span>
+<details><summary>看答案</summary><b>B</b>。<code>--die-with-parent</code> 确保当 HanaAgent 进程退出或被 kill 时，bwrap 沙盒内的所有子进程也会被自动清理，避免孤儿进程残留。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. CommandOutputCollector 为什么使用"双缓冲"设计？</p>
+<span class="opt">A. 为了支持同时输出到 stdout 和 stderr</span>
+<span class="opt">B. 内存滚动窗口（最近 100KB）用于实时流式回传 LLM，临时文件保存完整输出用于最终结果构建</span>
+<span class="opt">C. 为了支持 UTF-8 和 GBK 双编码</span>
+<span class="opt">D. 为了同时支持 Linux 和 Windows</span>
+<details><summary>看答案</summary><b>B</b>。双缓冲解决了"长输出需要流式实时反馈"和"最终结果需要完整或截断后返回"的矛盾。内存中的 100KB 滚动窗口保证实时快照的低延迟，临时文件保证不丢失数据。</details>
+</div>
+
+<div class="cite">推荐一手资料：打开 <code>lib/sandbox/bwrap.ts</code> 阅读 <code>buildBwrapArgs()</code> 的完整实现（约 120 行），关注 <code>addMount</code> 函数的目录自动创建逻辑；打开 <code>lib/exec-command/runner.ts</code> 查看 <code>CommandOutputCollector</code> 的 <code>snapshot()</code> 和 <code>finalize()</code> 方法的差异。</div>
+
+<div class="reminder">有疑问？直接问我——我是你的 AI 教师。可以问：「如果 bwrap 未安装，Direct 路径会发生什么？」「为什么输出截断是保留"最后 2000 行"而不是"前 2000 行"？」下一课我们聚焦 <b>权限审批与沙盒逃逸防护</b>——四种会话权限模式、安全策略中的 Git 危险操作拦截、以及 7 条异常路径的深度分析。</div>
+
+<div class="nav">课程 0003 / 沙盒执行全链路 · <a href="0002.html">← 上一课：路径守卫与命令分类</a> · <a href="0004.html">下一课：权限审批与沙盒逃逸 →</a></div>
+
+</body>
+</html>

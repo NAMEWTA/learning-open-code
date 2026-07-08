@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · OS 级沙盒实现对比：bwrap / seatbelt / Restricted Token</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · OS 级沙盒实现对比：三平台的隔离艺术 <span class="tag">跨平台</span></h1>
+
+<div class="mission">
+&#127919; <b>本节目标：</b>学完你能讲清 Linux bwrap、macOS seatbelt、Windows Restricted Token 三种 OS 沙盒的参数构造流程、核心差异和适用场景，理解为什么不同平台选择了不同的安全原语。
+</div>
+
+<p>OS 级沙盒是三层防线的第二层——在 PathGuard 通过语义判定后，由 OS 原生机制提供真正的进程级隔离。三个平台使用了三种<b>截然不同</b>的安全原语，各自遵循不同的匹配语义和限制。</p>
+
+<h2>一、Linux Bubblewrap：命名空间 + bind mount 的轻量容器</h2>
+
+<p><strong>源码位置：</strong><code>lib/sandbox/bwrap.ts</code> — <code>buildBwrapArgs()</code> 函数（116-200 行）</p>
+
+<p>Bubblewrap（bwrap）利用 Linux user namespace + bind mount 实现文件系统隔离。不需要 root 权限，不需要 daemon，启动时间约 <b>5-15ms</b>。核心逻辑分 8 个阶段构建参数：</p>
+
+<h3>阶段 1：基础隔离</h3>
+<pre><code>--ro-bind / /          # 将整个根文件系统只读挂载（read-all 模式）
+--dev /dev             # 挂载设备文件系统
+--proc /proc           # 挂载进程文件系统（PID 命名空间）
+--tmpfs /tmp           # /tmp 用独立的 tmpfs
+--unshare-pid          # 创建新的 PID 命名空间
+[--unshare-net]        # 可选：创建新的网络命名空间（断网模式）
+--new-session          # 创建新的会话
+--die-with-parent      # 父进程退出时自动清理</code></pre>
+
+<h3>阶段 2：私有运行时环境</h3>
+<pre><code>--dir /tmp/hana-home       # 私有 HOME
+--dir /tmp/hana-cache      # 私有 XDG 缓存
+--setenv HOME /tmp/hana-home
+--setenv XDG_CACHE_HOME /tmp/hana-cache
+--setenv npm_config_cache /tmp/hana-npm-cache     # 私有 npm 缓存
+--setenv PIP_CACHE_DIR /tmp/hana-pip-cache        # 私有 pip 缓存</code></pre>
+
+<h3>阶段 3-5：路径挂载（mount order matters）</h3>
+<pre><code>// 阶段 3：可写挂载工作目录
+--bind {cwd} {cwd}       # 可写挂载工作目录
+--chdir {cwd}            # 设置当前工作目录
+
+// 阶段 4：可写路径逐一覆盖挂载
+for each path in policy.writablePaths:
+  --bind {path} {path}   # 以可写模式覆盖全局只读
+
+// 阶段 5：只读授权路径
+for each path in [policy.readablePaths, externalReadPaths]:
+  --ro-bind {path} {path}</code></pre>
+
+<h3>阶段 6-8：写保护 + 拒绝 + 遮蔽</h3>
+<pre><code>// 阶段 6：写保护（在可写范围内再限制）
+for each path in policy.protectedPaths:
+  --ro-bind {path} {path}    # .git 和 session-files 无法被写入
+
+// 阶段 7：读取拒绝
+for each path in policy.denyReadPaths:
+  目录 → --tmpfs {path}      # 用空 tmpfs 遮蔽整个目录
+  文件 → --ro-bind /dev/null {path}  # 绑定到 /dev/null
+
+// 阶段 8：宿主机缓存遮蔽
+if HOME/.cache 存在且未被授予写入权限:
+  --tmpfs {path}             # 防止回落到真实用户缓存</code></pre>
+
+<div class="side">
+&#128161; <b>核心技巧：mount order matters</b><br>
+bwrap 使用<b>后挂载覆盖先挂载</b>语义。先 <code>--ro-bind / /</code> 将整个系统设为只读，再用 <code>--bind</code> 把特定路径覆盖为可写。这避免了显式白名单模式的复杂度——不需要列举所有需要读的系统路径，只需要标注需要写的少数路径。当 <code>readAll=false</code> 时，跳过 root 绑定，改为显式列出 <code>SYSTEM_READONLY_PATHS</code>（/bin, /usr, /lib, /etc/ssl 等），形成真正的白名单模式。
+</div>
+
+<div class="danger">
+&#9888; <b>注意：Linux 上 bwrap 不可用时的行为</b><br>
+当 bwrap 未安装时，沙盒创建逻辑（index.ts 262-267 行）不会降级到仅 PathGuard——而是返回一个<b>始终输出错误消息</b>的 bash 工具，提示用户安装 bwrap。这意味着 Linux 上<b>要么有完整 OS 沙盒保护，要么命令完全不可执行</b>。这与 macOS 的行为不同。
+</div>
+
+<h2>二、macOS Seatbelt：SBPL 声明式沙盒</h2>
+
+<p><strong>源码位置：</strong><code>lib/sandbox/seatbelt.ts</code>（129 行）</p>
+
+<p>Seatbelt 通过 <code>sandbox-exec -f profile.sb</code> 包裹子进程，使用 SBPL (Sandbox Profile Language) 声明式语言定义沙盒规则。</p>
+
+<pre><code>(version 1)
+(deny default)              ← 默认拒绝一切
+
+;; 进程权限
+(allow process-exec* process-fork signal)
+(allow sysctl-read)
+(allow mach*)               ← macOS 特有的 Mach 内核通信
+(allow ipc-posix*)
+
+;; 全局可读 → 对应 read-all 契约
+(allow file-read*)
+
+;; 可写路径 → 白名单
+(allow file-write* (subpath "/path/to/workspace"))
+(allow file-write* (subpath "/private/tmp"))
+
+;; 写保护 → deny 覆盖 allow（SBPL last-match-wins）
+(deny file-write* (subpath "/path/to/workspace/.git"))
+
+;; 读取拒绝 → 敏感数据遮蔽
+(deny file-read* (subpath "/path/to/hanakoHome/auth.json"))
+
+;; 终端 + PTY
+(allow file-write* (literal "/dev/null"))
+(allow pseudo-tty)
+
+;; 网络控制
+(allow network-outbound)    ← 允许出站
+; 或
+(deny network*)             ← 完全封死</code></pre>
+
+<div class="step"><span class="num">!</span><b>关键差异 vs. Bubblewrap：</b><br>
+&#8226; Seatbelt 没有命名空间隔离——所有路径使用真实文件系统，仅通过 SBPL 规则限制<br>
+&#8226; SBPL 使用 <b>last-match-wins</b> 语义，deny 规则必须放在 allow 规则<b>之后</b>（与 bwrap 的 mount order 类似但方向相反）<br>
+&#8226; Mach port 权限必须显式授予，否则 macOS 上基础操作（如获取进程列表）会失败<br>
+&#8226; 没有 <code>--die-with-parent</code> 等价能力，子进程生命周期管理较弱<br>
+<span class="where">lib/sandbox/seatbelt.ts</span></div>
+
+<div class="danger">
+&#9888; <b>macOS 15+ 废弃风险：</b>Apple 已将 sandbox-exec 标记为 deprecated。如果 <code>checkAvailability()</code> 检测到 seatbelt 不可用，HanaAgent <b>降级到仅 PathGuard</b>（无 OS 层沙盒），安全强度大幅降低。可能的替代方案：App Sandbox（需应用签名、无法动态调整策略）、XPC Service（增加架构复杂度）。
+</div>
+
+<h2>三、Windows Restricted Token：NTFS ACL + 令牌降权</h2>
+
+<p><strong>源码位置：</strong><code>lib/sandbox/win32-exec.ts</code>（1645 行）+ <code>desktop/native/HanaWindowsSandboxHelper/main.cpp</code>（1509 行）</p>
+
+<p>Windows 沙盒是三平台中最复杂的实现，通过 5 个阶段完成进程隔离：</p>
+
+<h3>阶段 1：SID 生成</h3>
+<pre><code>// win32-policy.ts → buildWin32SandboxGrants()
+writePaths = [cwd]
+optionalWritePaths = policy.writablePaths
+denyWritePaths = policy.protectedPaths
+
+// main.cpp → sidForWritableRoot()
+// 每个可写根路径通过确定性哈希生成 S-1-5-21-* SID
+// 哈希输入: "hana-win32-write-root-v3:" + fullPathForKey(root)
+// 确定性保证同一路径在不同进程中生成相同 SID</code></pre>
+
+<h3>阶段 2：NTFS ACL 应用</h3>
+<pre><code>// main.cpp → applyWriteAcls()
+for each writableRoot:
+  ensureAce(root.path, root.sid, GRANT_ACCESS, WRITE_ALLOW_MASK)
+  // WRITE_ALLOW_MASK = FILE_GENERIC_READ | FILE_GENERIC_WRITE |
+  //                    FILE_GENERIC_EXECUTE | DELETE | FILE_DELETE_CHILD
+
+for each denyWritePath:
+  ensureAce(denyPath, matched.sid, DENY_ACCESS, WRITE_DENY_MASK)
+  // DENY ACE 的优先级高于 ALLOW ACE，保证 .git 目录写保护</code></pre>
+
+<h3>阶段 3-5：Token 创建 + Desktop + 启动</h3>
+<pre><code>// 阶段 3：CreateRestrictedToken
+HANDLE baseToken = OpenProcessToken(...)
+CreateRestrictedToken(baseToken,
+  DISABLE_MAX_PRIVILEGE |  // 移除所有特权
+  LUA_TOKEN |              // 转换为低权限令牌
+  WRITE_RESTRICTED,        // 只有列出的 SID 可写
+  ..., restrictingSids, &restrictedToken)
+
+// 阶段 4：独立 Desktop + Job Object
+CreateDesktopW("hana-win-sandbox-{pid}-{tick}", ...)
+CreateJobObjectW(...) + JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+// 阶段 5：CreateProcessAsUserW 启动
+CreateProcessAsUserW(restrictedToken, executable, commandLine,
+  CREATE_SUSPENDED | CREATE_NO_WINDOW, ...)
+AssignProcessToJobObject(job, process.hProcess)
+ResumeThread(process.hThread)</code></pre>
+
+<div class="danger">
+&#9888; <b>Windows 网络隔离缺失：</b>macOS 可通过 <code>(deny network*)</code> 阻断网络，Linux 可通过 <code>--unshare-net</code> 创建独立网络命名空间。但 Windows Restricted Token <b>无法控制网络访问</b>——网络能力绑定在 token 的登录会话中，而非 token 本身。代码中 <code>assertSandboxNetworkSupported()</code> 函数直接抛出错误："Windows restricted-token sandbox does not support network-off mode."
+</div>
+
+<h2>四、三平台综合对比</h2>
+
+<table>
+<tr><th>维度</th><th><span style="color:#b45309;">Linux bwrap</span></th><th><span style="color:#6366f1;">macOS Seatbelt</span></th><th><span style="color:#0f766e;">Windows RT</span></th></tr>
+<tr><td>隔离机制</td><td>user namespace + bind mount</td><td>SBPL 声明式规则</td><td>Restricted Token + NTFS ACL</td></tr>
+<tr><td>策略语义</td><td>后挂载覆盖前挂载</td><td>last-match-wins</td><td>DENY ACE 优先于 ALLOW ACE</td></tr>
+<tr><td>文件系统</td><td>虚拟文件系统层</td><td>真实文件系统 + 规则限制</td><td>真实文件系统 + ACL 权限</td></tr>
+<tr><td>进程隔离</td><td>PID namespace</td><td>SBPL 规则限制</td><td>Token 降权 + Sandbox Desktop</td></tr>
+<tr><td>网络隔离</td><td>&#9989; --unshare-net</td><td>&#9989; (deny network*)</td><td>&#10060; 不支持</td></tr>
+<tr><td>启动开销</td><td>~8ms（最快）</td><td>~15ms</td><td>~30-90ms（最慢）</td></tr>
+<tr><td>不可用时的行为</td><td>拒绝执行</td><td>降级到仅 PathGuard</td><td>拒绝执行</td></tr>
+<tr><td>可执行文件</td><td>bwrap（系统安装）</td><td>/usr/bin/sandbox-exec</td><td>自编译 C++ helper</td></tr>
+<tr><td>维护风险</td><td>低（活跃项目）</td><td><b>高（已 deprecated）</b></td><td>中（自维护 C++）</td></tr>
+</table>
+
+<h2>五、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. bwrap 使用 --ro-bind / / 后再用 --bind 覆盖特定路径，利用了 bwrap 的什么语义？</p>
+<span class="opt">A. 先挂载的优先级更高</span>
+<span class="opt">B. 后挂载覆盖先挂载——先设全局只读，再用可写 mount 覆盖特定路径</span>
+<span class="opt">C. 所有挂载点平等，互相不影响</span>
+<span class="opt">D. mount 选项与顺序无关，由 bwrap 内部排序</span>
+<details><summary>看答案</summary><b>B</b>。这是 bwrap 设计的核心技巧——利用后挂载覆盖前挂载的语义，避免显式白名单的复杂度。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. macOS Seatbelt SBPL 的 deny 规则为何放在 allow 规则之后？</p>
+<span class="opt">A. 这是 Apple 的编码风格约定</span>
+<span class="opt">B. SBPL 使用 last-match-wins 语义——deny 放在后面才能覆盖前面的 allow</span>
+<span class="opt">C. SBPL 使用 first-match-wins 语义</span>
+<span class="opt">D. 顺序无关紧要，SBPL 引擎会自动排序</span>
+<details><summary>看答案</summary><b>B</b>。SBPL 的 last-match-wins 语义要求 deny 规则写在 allow 规则之后才能生效。这与 bwrap 的 mount order 语义类似但方向相反。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. Windows Restricted Token 模式下无法断网的根本原因是什么？</p>
+<span class="opt">A. Windows API 不支持网络控制</span>
+<span class="opt">B. 网络能力绑定在登录会话中而非 token 本身——Restricted Token 无法修改网络权限</span>
+<span class="opt">C. 为了性能考虑故意不实现</span>
+<span class="opt">D. NTFS ACL 不支持网络权限</span>
+<details><summary>看答案</summary><b>B</b>。macOS 的 seatbelt 和 Linux 的 network namespace 都可以在网络层面做隔离，但 Windows 的 Restricted Token 机制设计上不涉及网络控制。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 哪个平台的 OS 沙盒在不可用时选择"拒绝执行"而非"降级到仅 PathGuard"？</p>
+<span class="opt">A. macOS</span>
+<span class="opt">B. 只有 Linux</span>
+<span class="opt">C. Linux 和 Windows</span>
+<span class="opt">D. 三个平台全部拒绝执行</span>
+<details><summary>看答案</summary><b>C</b>。Linux 上 bwrap 不可用时拒绝执行（提示安装 bwrap），Windows 上 helper 不可用时也拒绝执行。只有 macOS 在 seatbelt 不可用时降级到仅 PathGuard。</details>
+</div>
+
+<div class="cite">&#128214; 推荐一手资料：对比阅读 <code>lib/sandbox/bwrap.ts</code>（201 行）、<code>lib/sandbox/seatbelt.ts</code>（129 行）和 <code>lib/sandbox/win32-exec.ts</code>（1645 行）的沙盒参数构建逻辑。三者都从同一个 <code>policy</code> 对象推导参数，但输出格式完全不同。</div>
+
+<div class="reminder">&#128161; 有疑问？直接问我——我是你的 AI 教师。可以问："为什么 Windows 不用 AppContainer 而改用 Restricted Token？""如果 bwrap 的 mount order 写反了会有什么后果？"下一课我们聚焦 <strong>权限审批与配置守卫</strong>——approval-review-context + managed-config-guard + 三重门禁如何形成最后一道防线。</div>
+
+<div class="nav">上一课：<a href="0002.html">PathGuard 深度拆解</a> · 课程 0003 / 沙盒架构深度剖析 · 下一课预告：权限审批与配置守卫——三重门禁</div>
+
+</body>
+</html>

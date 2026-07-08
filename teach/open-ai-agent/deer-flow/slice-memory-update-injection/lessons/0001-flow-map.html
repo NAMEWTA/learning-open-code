@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟读懂 memory 注入与异步更新</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5d6b78; --line:#d9e1e8; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:2rem; line-height:1.18; margin:0 0 10px; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟读懂 memory 注入与异步更新</h1>
+  <p class="lede">学习目标：读完后，你能把「本轮 agent 跑完」到「下一轮模型看到 <code>&lt;memory&gt;</code>」串成一条链。配置项、存储路径与 token 预算见 <a href="../reference/memory-update-injection-flow-map.html">参考页</a>。</p>
+
+  <h2>1. 两条 middleware 各管一半</h2>
+  <p>memory 不是同步写进当轮 prompt 的。<span class="where">MemoryMiddleware</span>（链上约第 19 位）在 <code>after_agent</code> 把对话入队；<span class="where">DynamicContextMiddleware</span>（约第 12 位）在下一轮 <code>before_agent</code> 读取已落盘的 <code>memory.json</code> 并注入。因此<strong>本轮聊完 ≠ 本轮立刻记住</strong>，通常要等防抖窗口（默认 30s）加 LLM 抽取完成后，下一次用户发言才会带上新 memory。</p>
+
+  <h2>2. 入队：过滤、捕获身份、防抖合并</h2>
+  <p><code>MemoryMiddleware.after_agent</code> 先检查 <code>memory.enabled</code>，再用 <code>filter_messages_for_memory</code> 只保留用户输入与最终 AI 回复（跳过 tool call 中间态）。至少一对 human+ai 才入队。入队时显式捕获 <code>user_id</code> 与 <code>deerflow_trace_id</code>——因为后续 <code>threading.Timer</code> 线程拿不到 ContextVar。<code>get_memory_queue().add()</code> 按 <code>(thread_id, user_id, agent_name)</code> 去重：同线程在防抖期内多次回合只保留最新一批消息。</p>
+
+  <h2>3. 异步更新：Timer → updater → 原子写盘</h2>
+  <p><span class="where">agents/memory/queue.py</span> 的 <code>MemoryUpdateQueue</code> 在 <code>debounce_seconds</code> 后调用 <code>MemoryUpdater.update_memory</code>。updater 用独立 sync LLM 路径抽取 user 摘要与 facts，经 <code>storage.save</code> 以临时文件 + rename 写入 <code>users/{user_id}/memory.json</code>（或 per-agent 路径）。整个过程不阻塞当轮 SSE 流式返回。</p>
+
+  <h2>4. 注入：首条 HumanMessage 的 ID-swap</h2>
+  <p>下一轮 <code>DynamicContextMiddleware._inject</code> 通过 <code>_get_memory_context</code> 加载 memory，格式化为 <code>&lt;memory&gt;...&lt;/memory&gt;</code>。首条真实用户消息会被拆成三条：带日期的 <code>SystemMessage</code>（框架数据）、隐藏的 memory <code>HumanMessage</code>（用户数据，防 OWASP LLM01）、以及 <code>{id}__user</code> 的原始用户文本。日期与 memory 分离后，system prompt 前缀可缓存复用。若 tiktoken 冷启动超时（5s），本回合会跳过注入而非挂死请求。</p>
+
+  <div class="diagram">回合 N（用户发消息）
+  │
+  ├── DynamicContextMiddleware.before_agent  ← 读上一轮已写好的 memory.json
+  ├── … lead agent 执行 …
+  └── MemoryMiddleware.after_agent
+        filter → queue.add(user_id, messages) → Timer(debounce)
+
+debounce 到期（后台线程）
+  └── MemoryUpdater → LLM 抽取 → atomic save memory.json
+
+回合 N+1
+  └── DynamicContextMiddleware 注入更新后的 &lt;memory&gt;</div>
+
+  <div class="exercise">
+    <strong>检索练习：</strong>用户在回合 N 纠正了 agent 的错误，希望尽快写入 memory。下面哪项<strong>一定</strong>为真？ A. 回合 N 的模型调用已包含新 facts B. <code>MemoryMiddleware</code> 在 <code>before_agent</code> 运行 C. 回合 N+1 的注入可能仍用旧 memory，若防抖与 LLM 尚未完成 D. <code>user_id</code> 在 Timer 线程里由 ContextVar 自动恢复
+    <div class="answer">参考答案：C。更新是异步的；注入只读已落盘文件。A 错——当轮不注入新抽取结果。B 错——MemoryMiddleware 在 after_agent。D 错——user_id 必须在入队时显式写入 ConversationContext。</div>
+  </div>
+
+  <p class="note">主要来源：<code>memory_middleware.py</code>、<code>queue.py</code>、<code>dynamic_context_middleware.py</code>。想沿 correction 信号或 <code>format_memory_for_injection</code> 预算继续展开，向 agent 追问即可。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>15 分钟串起上传 → sandbox → artifact</title>
+    <link rel="stylesheet" href="../assets/slice-lesson.css" />
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>15 分钟串起上传 → sandbox → artifact</h1>
+        <p class="lead">
+          学习目标：用户在聊天框附加文件后，你能从前端上传请求一直指到 sandbox 里的
+          <code>/mnt/user-data/uploads/...</code>，并说出 UI 预览同一份文件时走的 artifacts URL。
+          完整接口表与 chmod / 同步分支见
+          <a href="../reference/upload-sandbox-artifact-flow-map.html">链路参考页</a>。
+        </p>
+        <div class="meta">
+          <span class="pill">L2 垂直切片</span>
+          <span class="pill">关联：<a href="../../module-frontend-core/lessons/0001-frontend-core-module-tour.html">frontend-core</a> · <a href="../../module-frontend-workspace/lessons/0001-frontend-workspace-module-tour.html">workspace</a> · <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">gateway</a> · <a href="../../module-sandbox/lessons/0001-sandbox-module-tour.html">sandbox</a></span>
+        </div>
+
+        <h2>1. 前端：先上传，再 submit run</h2>
+        <p>
+          用户选文件后点发送，
+          <span class="where">frontend/src/core/threads/hooks.ts</span> 的
+          <code>sendMessage</code> 不会把原始 <code>File</code> 直接塞进 LangGraph input，而是先调
+          <span class="where">frontend/src/core/uploads/api.ts</span> 的
+          <code>uploadFiles(threadId, files)</code>，即
+          <code>POST /api/threads/{thread_id}/uploads</code>（multipart <code>files</code>）。
+          返回的 <code>virtual_path</code> 写入乐观消息的 <code>additional_kwargs.files</code>，再随用户消息一起
+          <code>thread.submit</code>。
+        </p>
+        <pre>InputBox 选文件 → sendMessage
+  → uploadFiles (FormData)
+  → POST .../uploads
+  → 响应 files[].virtual_path + artifact_url
+  → submit({ messages, additional_kwargs.files })</pre>
+
+        <h2>2. Gateway：落盘、chmod、按需同步 sandbox</h2>
+        <p>
+          <span class="where">backend/app/gateway/routers/uploads.py</span> 的
+          <code>upload_files</code> 委托
+          <span class="where">backend/packages/harness/deerflow/uploads/manager.py</span>
+          做路径校验与分块写入：先写到 <code>.upload-*.part</code> 暂存文件，校验大小后
+          <code>os.replace</code> 提交。文件落在
+          <code>users/{user_id}/threads/{thread_id}/user-data/uploads/</code>。
+          随后对 written paths 加 group/other 读权限，避免 Docker sandbox 内非 root 进程读不到。
+        </p>
+        <p>
+          若 sandbox provider <strong>没有</strong> bind-mount 线程目录（<code>uses_thread_data_mounts=false</code>），Gateway 会
+          <code>acquire_async</code> sandbox 并对每个文件调用
+          <code>sandbox.update_file(virtual_path, bytes)</code>；本地 sandbox 则主要靠挂载，跳过远程同步。
+          响应里 <code>upload_artifact_url</code> 生成预览地址。
+        </p>
+        <pre>upload_files
+  → ensure_uploads_dir + staged write
+  → chmod 可读
+  → [可选] sandbox.update_file(/mnt/user-data/uploads/…)
+  → UploadResponse.files[].artifact_url</pre>
+
+        <h2>3. Artifact：虚拟路径回到浏览器</h2>
+        <p>
+          <code>artifact_url</code> 形如
+          <code>/api/threads/{id}/artifacts/mnt/user-data/uploads/{filename}</code>。
+          <span class="where">backend/app/gateway/routers/artifacts.py</span> 的
+          <code>get_artifact</code> 用 <code>resolve_thread_virtual_path</code> 把
+          <code>mnt/user-data/uploads/...</code> 映射回 host 文件，再按 MIME 内联或下载返回。
+          前端 <span class="where">frontend/src/core/artifacts/utils.ts</span> 的
+          <code>urlOfArtifact</code> 拼同样前缀；
+          <span class="where">frontend/src/core/artifacts/loader.ts</span> 拉取文本供 workspace 侧栏预览。
+          HTML/SVG 等 active content 一律强制 attachment，防 XSS。
+        </p>
+        <div class="mermaid-wrap">
+          <pre class="mermaid">sequenceDiagram
+    participant UI as ChatPage
+    participant Up as uploadFiles
+    participant RT as uploads.upload_files
+    participant M as uploads/manager
+    participant SB as Sandbox
+    participant AR as artifacts.get_artifact
+
+    UI->>Up: POST multipart files
+    Up->>RT: /api/threads/{id}/uploads
+    RT->>M: staged write + enrich listing
+    RT->>SB: update_file (非 mount 模式)
+    RT-->>Up: virtual_path + artifact_url
+    Up-->>UI: submit 带 files 元数据
+    UI->>AR: GET artifact_url 预览
+    AR-->>UI: 文件内容</pre>
+        </div>
+
+        <h2>4. 异常路径：超限与不安全文件名</h2>
+        <p>
+          默认限制见 <code>uploads.max_files / max_file_size / max_total_size</code>（10 文件、50 MiB、100 MiB）；
+          超出返回 <strong>413</strong>，Gateway 会清理本请求已写入的路径。
+          含路径遍历或非常规文件名的条目进入 <code>skipped_files</code> 而非静默覆盖。
+          删除走 <code>DELETE .../uploads/{filename}</code>，同样经 <code>manager.delete_file_safe</code> 防穿越。
+          更多状态码见
+          <a href="../reference/upload-sandbox-artifact-flow-map.html#errors">参考页错误表</a>。
+        </p>
+
+        <h3>检索练习</h3>
+        <div class="callout">
+          <p>判断对错（不看上文）：</p>
+          <p>A. <code>sendMessage</code> 把 <code>File</code> 对象直接 POST 到 <code>/runs/stream</code>。</p>
+          <p>B. Agent 在 sandbox 里读上传文件应使用 <code>/mnt/user-data/uploads/foo.pdf</code>。</p>
+          <p>C. 所有部署模式下 Gateway 都会对每个上传调用 <code>sandbox.update_file</code>。</p>
+        </div>
+        <div class="answer">
+          <p><strong>参考答案：</strong>A 错，文件先走独立 uploads 路由。B 对，<code>upload_virtual_path</code> 即此前缀。C 错，bind-mount 模式（<code>uses_thread_data_mounts=true</code>）跳过远程同步。</p>
+        </div>
+
+        <p>
+          主要来源：<code>backend/docs/FILE_UPLOAD.md</code>、<code>uploads.py</code>、<code>artifacts.py</code>。
+          想继续下钻，向 agent 追问「<code>UploadsMiddleware</code> 如何注入文件列表」或「<code>present_files</code> 产出 outputs artifact」。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

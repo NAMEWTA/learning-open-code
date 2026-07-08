@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team 创建并运行全链路短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <link rel="stylesheet" href="../assets/team-run.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true });</script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Team 创建并运行：从表单到 run 事件回流</h1>
+    <p class="subtitle">学习目标：15 分钟内能按层说清 Team 创建、成员 slot、发送动作、HTTP adapter 和事件回流如何连成一条可验证链路。</p>
+    <div class="meta">
+      <span class="pill">L2 垂直切片</span>
+      <span class="pill">主入口：TeamCreateModal</span>
+      <span class="pill">证据：team-create / team-agent-lifecycle E2E</span>
+    </div>
+  </section>
+
+  <p class="muted">回链：<a href="../../00-overview/reference/00-overview.html">L0 项目总览</a>。交叉参考：<a href="../../module-team-mode/reference/team-mode-overview.html">Team Mode L1</a>、<a href="../../module-common-adapter/reference/common-adapter-overview.html">common adapter L1</a>、<a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">conversation runtime L1</a>。完整速查见 <a href="../reference/team-run-flow-map.html">Team run flow map</a>。</p>
+
+  <h2>1. 先把层次压成一张图</h2>
+  <p>这条链不是“创建一个 React 组件”这么简单。用户在创建 modal 中选择 leader，renderer 通过 <code>ipcBridge.team.create</code> 进入 common adapter 的 Team HTTP 域；创建成功后页面跳到 <code>/team/:id</code>，<code>TeamIndex</code> 再读 <code>TTeam</code>，<code>TeamPage</code> 把 assistant 数组拆成 slot，最后 <code>TeamChatView</code> 给 ACP / aionrs 会话注入 team send。</p>
+  <div class="diagram">
+    <div class="mermaid">
+sequenceDiagram
+  participant User as 用户
+  participant Modal as TeamCreateModal
+  participant TeamAPI as ipcBridge.team
+  participant Page as TeamIndex/TeamPage
+  participant Slot as TeamTabs/ChatSlot
+  participant Runtime as TeamChatView/useTeamRunView
+  participant WS as WebSocket 事件
+  User->>Modal: 填名称并选择 leader
+  Modal->>TeamAPI: create({ name, workspace, assistants })
+  TeamAPI-->>Modal: TTeam 或 bridge error
+  Modal->>Page: onCreated 后进入 /team/:id
+  Page->>TeamAPI: get({ id })
+  Page->>Slot: assistants -> slot tab 与 chat slot
+  User->>Runtime: 在 leader/member tab 发送
+  Runtime->>TeamAPI: sendMessage 或 sendMessageToAgent
+  TeamAPI-->>Runtime: ITeamRunAck
+  WS-->>Runtime: run*/childTurn*/agent* 事件校准
+  Runtime-->>Slot: slot gate、状态点、stop 能力
+    </div>
+  </div>
+
+  <h2>2. 真实入口：创建 payload 在 modal 里形成</h2>
+  <p><code>packages/desktop/src/renderer/pages/team/components/TeamCreateModal.tsx</code> 先挡住两个边界：没有名称、没有 leader 都不发请求。下面是真实连续节选，从 <code>try</code> 内的 payload 组装开始；<code>__bridgeError</code> 会阻断 <code>onCreated</code>。</p>
+  <pre><code class="language-tsx">const assistants: TeamAssistantInput[] = [];
+
+const leaderAssistant = leaderAssistantId ? assistantFromId(leaderAssistantId, allAssistants) : undefined;
+const resolvedModel = await resolveDefaultTeamAgentModel({
+  assistant_id: leaderAssistant?.id,
+  assistant_backend: leaderAssistant?.backend,
+});
+assistants.push({
+  role: 'leader',
+  assistant_name: leaderAssistant?.name || 'Leader',
+  assistant_id: leaderAssistant?.id,
+  model: resolvedModel,
+});
+
+const team = await ipcBridge.team.create.invoke({
+  user_id,
+  name,
+  workspace,
+  workspace_mode: 'shared',
+  assistants,
+});
+
+// The platform bridge swallows provider errors and returns a sentinel object
+const result = team as unknown as { __bridgeError?: boolean; message?: string };
+if (result.__bridgeError) {
+  Message.error(getConversationCreateErrorMessage(result.message ?? t('team.create.error'), t));
+  return;
+}
+
+onCreated(team);
+handleClose();</code></pre>
+
+  <h2>3. 运行主线：TeamChatView 只接管发送分流</h2>
+  <p>Team 页面不是重写聊天系统，而是复用 conversation runtime。关键分叉在 <code>isLeader</code>：leader 输入发给团队 run，member tab 输入发给指定 <code>slot_id</code>。ack 先进入 <code>useTeamRunView.applyAck()</code>，随后由 WebSocket 事件持续校准。</p>
+  <pre><code class="language-tsx">const teamSendMessage = useCallback(async ({ input, files }) =&gt; {
+  if (!team_id) throw new Error('Missing team id for team send');
+  if (isLeader) {
+    const ack = await ipcBridge.team.sendMessage.invoke({ team_id, input, files });
+    onTeamRunAck?.(ack);
+    return;
+  }
+  if (!slot_id) throw new Error('Missing slot id for team agent send');
+  const ack = await ipcBridge.team.sendMessageToAgent.invoke({ team_id, slot_id, input, files });
+  onTeamRunAck?.(ack);
+}, [isLeader, onTeamRunAck, slot_id, team_id]);</code></pre>
+  <pre><code class="language-tsx">const unsubs = [
+  ipcBridge.team.runAccepted.on(applyRunEvent),
+  ipcBridge.team.runStarted.on(applyRunEvent),
+  ipcBridge.team.runUpdated.on(applyRunEvent),
+  ipcBridge.team.runCompleted.on(applyRunEvent),
+  ipcBridge.team.runCancelled.on(applyRunEvent),
+  ipcBridge.team.runFailed.on(applyRunEvent),
+  ipcBridge.team.childTurnStarted.on(applyChildStarted),
+  ipcBridge.team.childTurnCompleted.on(applyChildTerminal),
+  ipcBridge.team.childTurnCancelled.on(applyChildTerminal),
+  ipcBridge.realtime.reconnected.on(() =&gt; {
+    void reconcile('realtime.reconnected');
+  }),
+  ipcBridge.team.listChanged.on((event) =&gt; {
+    if (event.team_id === team_id) void reconcile('team.listChanged');
+  }),
+  ipcBridge.team.sessionChanged.on((event) =&gt; {
+    if (event.team_id === team_id) void reconcile('team.sessionChanged');
+  }),
+  ipcBridge.team.agentSpawned.on((event) =&gt; {
+    if (event.team_id === team_id) void reconcile('team.agentSpawned');
+  }),
+  ipcBridge.team.agentRemoved.on((event) =&gt; {
+    if (event.team_id === team_id) void reconcile('team.agentRemoved');
+  }),
+  ipcBridge.team.agentRenamed.on((event) =&gt; {
+    if (event.team_id === team_id) void reconcile('team.agentRenamed');
+  }),
+];</code></pre>
+
+  <h2>4. 边界与练习</h2>
+  <div class="boundary">
+    <p><strong>关键边界：</strong>创建页没有可用 assistant 时，E2E 允许截图后跳过；provider sentinel error 会显示创建错误并阻断导航；Team run stop 遇到后端返回 “no active team run to pause” 时，<code>teamSendRuntime</code> 不直接报死错，而是触发 <code>getRunState</code> reconcile。</p>
+    <p><strong>证据边界：</strong>run 发送与 WebSocket 事件回流在本课由源码证明；本轮两条 E2E 只覆盖创建、导航、成员添加、成员 tab 可见和 <code>assistant_id</code> 保留。</p>
+  </div>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>为什么创建成功后不能只相信 modal 返回的 <code>TTeam</code>，还要让 <code>TeamIndex</code> 再通过 <code>team.get</code> 装载页面？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>因为页面状态需要以路由中的 team id 为入口重新进入 SWR 缓存，随后由 <code>useTeamSession</code>、<code>TeamTabsProvider</code>、<code>useTeamRunView</code> 接管事件订阅和 slot 状态。modal 返回值只证明创建请求成功，不等价于团队工作台已经具备成员 tab、conversation、run gate 和事件回流。</p>
+    </details>
+  </div>
+  <p class="muted">主来源：先读 <code>TeamCreateModal.tsx</code>、<code>TeamPage.tsx</code>、<code>TeamChatView.tsx</code>、<code>useTeamRunView.ts</code>，再用两条 E2E 对照验证。</p>
+</main>
+</body>
+</html>

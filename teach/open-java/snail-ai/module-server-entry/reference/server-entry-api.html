@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Server Admin/OpenAPI 对外 API 参考</title>
+  <link rel="stylesheet" href="../assets/server-entry.css" />
+</head>
+<body>
+  <h1>Server Admin/OpenAPI 对外 API 参考</h1>
+  <p class="lead"><strong>L3 速查：</strong>按业务域列出 <code>snail-ai-server-admin</code> 与 <code>snail-ai-server-openapi</code> 的全部 REST 端点、请求/响应 VO 字段与流式事件类型。默认外部 URL 前缀为 <span class="endpoint">/snail-ai</span>（context path）。返回 <a href="server-entry-overview.html">L1 入口概览</a> · <a href="../lessons/0001-server-entry-module-tour.html">短课</a> · <a href="../../slice-admin-agent-chat/reference/admin-agent-chat-flow-map.html">Admin 对话切片</a> · <a href="../../slice-openapi-chat/reference/openapi-chat-flow-map.html">OpenAPI 对话切片</a>。</p>
+  <div class="meta">
+    <span class="tag">Admin 13 Controller</span>
+    <span class="tag">OpenAPI 5 Controller</span>
+    <span class="tag stream">3 种 Admin 流式</span>
+    <span class="tag stream">OpenAPI SSE</span>
+  </div>
+
+  <nav class="toc" aria-label="分节导航">
+    <a href="#envelope">响应包装</a>
+    <a href="#stream">流式事件</a>
+    <a href="#user">用户/认证</a>
+    <a href="#agent">智能体</a>
+    <a href="#chat">对话/会话</a>
+    <a href="#rag">RAG</a>
+    <a href="#knowledge">知识库</a>
+    <a href="#memory">记忆 VO</a>
+    <a href="#skill">Skill</a>
+    <a href="#mcp">MCP</a>
+    <a href="#model">模型</a>
+    <a href="#app">应用</a>
+    <a href="#resource">资源/存储</a>
+    <a href="#openapi">OpenAPI</a>
+    <a href="#infra">异常与基础设施</a>
+  </nav>
+
+  <p class="warn"><strong>认证易错：</strong>Admin 使用 <code>Snail-Ai-Auth</code>（JWT）；OpenAPI 使用 <code>Snail-Ai-App-Id</code> + <code>Snail-Ai-Token</code>。二者不可混用。带 <span class="tag auth">@LoginRequired</span> 的 Admin 端点才校验登录态。</p>
+
+  <h2 id="envelope">通用响应包装</h2>
+  <table>
+    <thead><tr><th>类型</th><th>字段</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Result&lt;T&gt;</code></td><td><code>status</code>, <code>message</code>, <code>data</code></td><td>多数 Admin/OpenAPI JSON 响应。成功通常 <code>status=200</code>。</td></tr>
+      <tr><td><code>PageResult&lt;T&gt;</code></td><td>继承 <code>Result</code>，额外 <code>page</code>, <code>size</code>, <code>total</code></td><td>分页列表。部分 Admin 接口直接返回 <code>PageResult</code>，由 <code>GlobalRestfulResponseBodyAdvice</code> 透传。</td></tr>
+      <tr><td><code>LoginResponseVO</code></td><td><code>username</code>, <code>nickname</code>, <code>token</code></td><td>登录接口<strong>不</strong>包 <code>Result</code>，直接返回 JWT 字符串于 <code>token</code>。</td></tr>
+      <tr><td>裸类型</td><td>—</td><td><code>AiModelController</code> 部分接口返回 <code>Long</code>/<code>boolean</code>/<code>List</code>，由 Advice 自动包成 <code>Result</code>。</td></tr>
+      <tr><td>流式</td><td>—</td><td><code>TEXT_EVENT_STREAM</code> 或 <code>application/x-ndjson</code> 响应不被 Advice 包装。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="stream">流式事件类型</h2>
+  <table>
+    <thead><tr><th>入口</th><th>Media-Type</th><th>帧格式</th><th>事件 <code>type</code></th><th>载荷字段</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="endpoint">POST /agent/{id}/chat</span></td>
+        <td><code>text/event-stream</code></td>
+        <td>行分隔 JSON（经 <code>ChatStreamWriter</code>）</td>
+        <td><code>text</code>, <code>thinking</code></td>
+        <td><code>type</code>, <code>content</code>（<code>ChatStreamEvent</code>）</td>
+      </tr>
+      <tr>
+        <td><span class="endpoint">POST /agent/create/stream</span></td>
+        <td><code>application/x-ndjson</code></td>
+        <td>每行一个 JSON + <code>\n</code></td>
+        <td><code>start</code>, <code>field_done</code>, <code>done</code>, <code>error</code></td>
+        <td><code>type</code>, <code>field</code>（name/description/greeting/presetQuestions/instruction）, <code>data</code>, <code>agentId</code>, <code>message</code></td>
+      </tr>
+      <tr>
+        <td><span class="endpoint">POST /rag/qa/stream</span></td>
+        <td><code>application/x-ndjson</code></td>
+        <td>每行一个 JSON + <code>\n</code></td>
+        <td><code>text</code>, <code>done</code>, <code>error</code></td>
+        <td><code>type</code>, <code>data</code>, <code>message</code></td>
+      </tr>
+      <tr>
+        <td><span class="endpoint">POST /openapi/v1/agent/chat</span></td>
+        <td><code>text/event-stream</code></td>
+        <td>标准 SSE：<code>event</code> + <code>data</code></td>
+        <td><code>text</code>, <code>thinking</code>, <code>done</code>, <code>error</code></td>
+        <td><code>data</code> 为字符串；<code>done</code> 的 data 为 JSON：<code>conversationId</code>, <code>fullText</code></td>
+      </tr>
+      <tr>
+        <td><span class="endpoint">POST /openapi/v1/agent/chat/sync</span></td>
+        <td><code>application/json</code></td>
+        <td>同步收集流式输出</td>
+        <td>—</td>
+        <td><code>OpenApiChatSyncResponse</code>：<code>conversationId</code>, <code>content</code>, <code>durationMs</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="user">用户与认证（Admin）</h2>
+  <p>Controller：<code>UserController</code> · 基础路径 <span class="endpoint">/snail-ai/user</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>认证</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/login</code></td><td>无</td><td><code>LoginRequestVO</code></td><td><code>LoginResponseVO</code></td><td>账号密码登录，返回 JWT</td></tr>
+      <tr><td>POST</td><td><code>/register</code></td><td>无</td><td><code>LoginRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>用户自助注册</td></tr>
+      <tr><td>GET</td><td><code>/</code></td><td>USER</td><td>—</td><td><code>UserInfoVO</code></td><td>当前登录用户信息</td></tr>
+      <tr><td>POST</td><td><code>/</code></td><td>ADMIN</td><td><code>UserCreateRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>管理员创建用户</td></tr>
+      <tr><td>GET</td><td><code>/page/list</code></td><td>ADMIN</td><td><code>UserQueryVO</code></td><td><code>PageResult&lt;List&lt;UserInfoVO&gt;&gt;</code></td><td>用户分页</td></tr>
+      <tr><td>POST</td><td><code>/authorize/code</code></td><td>ADMIN</td><td><code>AuthorizeRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>授权码/额度授权</td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td>ADMIN</td><td><code>UserUpdateRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>更新用户资料</td></tr>
+      <tr><td>PUT</td><td><code>/{id}/role</code></td><td>ADMIN</td><td>query <code>role</code></td><td><code>Result&lt;String&gt;</code></td><td>更新角色</td></tr>
+      <tr><td>PUT</td><td><code>/password</code></td><td>USER</td><td><code>ChangePasswordRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>自助改密</td></tr>
+      <tr><td>PUT</td><td><code>/{id}/password</code></td><td>ADMIN</td><td><code>ResetPasswordRequestVO</code></td><td><code>Result&lt;String&gt;</code></td><td>管理员重置密码</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>ADMIN</td><td>—</td><td><code>Result&lt;String&gt;</code></td><td>删除用户</td></tr>
+    </tbody>
+  </table>
+  <h3>用户域 VO 字段</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>LoginRequestVO</code></td><td><code>username</code>, <code>password</code></td></tr>
+      <tr><td><code>LoginResponseVO</code></td><td><code>username</code>, <code>nickname</code>, <code>token</code></td></tr>
+      <tr><td><code>UserCreateRequestVO</code></td><td><code>username</code>, <code>email</code>, <code>password</code>, <code>role</code></td></tr>
+      <tr><td><code>UserUpdateRequestVO</code></td><td><code>role</code>, <code>email</code>, <code>password</code>, <code>resourceId</code>, <code>avatarCleared</code></td></tr>
+      <tr><td><code>UserInfoVO</code></td><td><code>id</code>, <code>role</code>, <code>roleName</code>, <code>username</code>, <code>nickname</code>, <code>email</code>, <code>avatarUrl</code>, <code>tokens</code>, <code>totals</code>, <code>expireDt</code>, <code>createDt</code>, <code>updateDt</code></td></tr>
+      <tr><td><code>UserQueryVO</code></td><td><code>email</code></td></tr>
+      <tr><td><code>AuthorizeRequestVO</code></td><td><code>email</code>, <code>days</code>, <code>totals</code></td></tr>
+      <tr><td><code>ChangePasswordRequestVO</code></td><td><code>oldPassword</code>, <code>newPassword</code></td></tr>
+      <tr><td><code>ResetPasswordRequestVO</code></td><td><code>password</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="agent">智能体（Admin）</h2>
+  <p>Controller：<code>AgentController</code> · 基础路径 <span class="endpoint">/snail-ai/agent</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>认证</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/page</code></td><td>登录</td><td><code>AgentQueryVO</code></td><td><code>PageResult&lt;List&lt;AgentResponseVO&gt;&gt;</code></td><td>智能体分页</td></tr>
+      <tr><td>GET</td><td><code>/{id}</code></td><td>USER</td><td>—</td><td><code>Result&lt;AgentResponseVO&gt;</code></td><td>详情</td></tr>
+      <tr><td>POST</td><td><code>/</code></td><td>登录</td><td><code>AgentRequestVO</code></td><td><code>Result&lt;AgentResponseVO&gt;</code></td><td>创建</td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td>登录</td><td><code>AgentRequestVO</code></td><td><code>Result&lt;AgentResponseVO&gt;</code></td><td>更新</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>登录</td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除</td></tr>
+      <tr><td>GET</td><td><code>/chat-models</code></td><td>登录</td><td>—</td><td><code>Result&lt;List&lt;Map&gt;&gt;</code></td><td>可选对话模型列表</td></tr>
+      <tr><td>POST</td><td><code>/create/stream</code></td><td>登录</td><td><code>AgentCreateRequestVO</code></td><td><span class="tag stream">ndjson 流</span></td><td>AI 描述式创建</td></tr>
+      <tr><td>GET</td><td><code>/{id}/mcp-servers</code></td><td>登录</td><td>—</td><td><code>Result&lt;List&lt;McpServerResponseVO&gt;&gt;</code></td><td>已绑定 MCP</td></tr>
+      <tr><td>PUT</td><td><code>/{id}/mcp-servers</code></td><td>登录</td><td><code>AgentMcpServersUpdateRequestVO</code></td><td><code>Result&lt;Void&gt;</code></td><td>更新 MCP 绑定</td></tr>
+      <tr><td>GET</td><td><code>/{id}/analytics</code></td><td>登录</td><td><code>AgentAnalyticsQueryVO</code></td><td><code>Result&lt;AgentAnalyticsVO&gt;</code></td><td>统计总览</td></tr>
+      <tr><td>GET</td><td><code>/{id}/usage-detail</code></td><td>登录</td><td><code>AgentUsageDetailQueryVO</code></td><td><code>PageResult&lt;List&lt;AgentUsageDetailVO&gt;&gt;</code></td><td>用量明细</td></tr>
+      <tr><td>GET</td><td><code>/market</code></td><td>USER</td><td>—</td><td><code>Result&lt;List&lt;AgentResponseVO&gt;&gt;</code></td><td>市场列表</td></tr>
+      <tr><td>GET</td><td><code>/my</code></td><td>USER</td><td>—</td><td><code>Result&lt;List&lt;AgentResponseVO&gt;&gt;</code></td><td>我的智能体</td></tr>
+      <tr><td>POST</td><td><code>/{id}/subscribe</code></td><td>USER</td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>订阅</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}/subscribe</code></td><td>USER</td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>取消订阅</td></tr>
+    </tbody>
+  </table>
+  <h3>智能体域核心 VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段（摘要）</th></tr></thead>
+    <tbody>
+      <tr><td><code>AgentRequestVO</code></td><td><code>name</code>, <code>description</code>, <code>avatar</code>, <code>instruction</code>, <code>greeting</code>, <code>presetQuestions</code>, <code>chatModelId</code>, <code>mcpEnabled</code>, <code>skillEnabled</code>, <code>webSearchEnabled</code>, <code>ragEnabled</code>, <code>memoryEnabled</code>, <code>memoryConfigId</code>, <code>ragIds</code>, <code>ragCallMode</code>, <code>shortTermMemorySize</code>, <code>isFeatured</code>, <code>mcpServerIds</code>, <code>skillIds</code>, <code>appId</code></td></tr>
+      <tr><td><code>AgentResponseVO</code></td><td>同请求字段 + <code>id</code>, <code>chatModel</code>, <code>mcpServers</code>, <code>skills</code>, <code>creator</code>, <code>viewCount</code>, <code>status</code>, <code>subscribed</code>, 时间戳</td></tr>
+      <tr><td><code>AgentCreateRequestVO</code></td><td><code>description</code></td></tr>
+      <tr><td><code>AgentQueryVO</code></td><td><code>keyword</code>, <code>featured</code>, <code>sort</code></td></tr>
+      <tr><td><code>AgentMcpServersUpdateRequestVO</code></td><td><code>mcpServerIds</code></td></tr>
+      <tr><td><code>AgentAnalyticsQueryVO</code></td><td><code>start</code>, <code>end</code></td></tr>
+      <tr><td><code>AgentAnalyticsVO</code></td><td><code>activeUsers</code>, <code>conversationCount</code>, <code>totalMessages</code>, <code>totalToolCalls</code>, <code>avgResponseTime</code>, 趋势数组</td></tr>
+      <tr><td><code>AgentUsageDetailVO</code></td><td><code>userId</code>, <code>userName</code>, <code>messageCount</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="chat">对话与会话（Admin）</h2>
+  <p>同属 <code>AgentController</code>，USER 角色可访问对话相关端点。</p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/{id}/chat</code></td><td><code>AgentChatRequestVO</code></td><td><span class="tag stream">SSE 流</span></td><td>发起智能体对话</td></tr>
+      <tr><td>GET</td><td><code>/{id}/conversations</code></td><td><code>AgentConversationQueryVO</code></td><td><code>PageResult&lt;List&lt;ConversationSummaryVO&gt;&gt;</code></td><td>会话列表</td></tr>
+      <tr><td>GET</td><td><code>/{id}/conversation/{conversationId}/messages</code></td><td>—</td><td><code>Result&lt;List&lt;ConversationRecordVO&gt;&gt;</code></td><td>会话消息</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}/conversation/{conversationId}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除单会话</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}/conversations</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>清空全部会话</td></tr>
+      <tr><td>POST</td><td><code>/{id}/conversations/batch-delete</code></td><td><code>List&lt;String&gt;</code> conversationIds</td><td><code>Result&lt;Void&gt;</code></td><td>批量删除</td></tr>
+    </tbody>
+  </table>
+  <h3>对话域 VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>AgentChatRequestVO</code></td><td><code>conversationId</code>, <code>content</code>, <code>disabledMcpServerIds</code>, <code>disabledSkillIds</code></td></tr>
+      <tr><td><code>ConversationSummaryVO</code></td><td><code>conversationId</code>, <code>title</code>, <code>userName</code>, <code>messageCount</code>, <code>toolCallCount</code>, <code>createDt</code>, <code>lastMessageDt</code></td></tr>
+      <tr><td><code>ConversationRecordVO</code></td><td><code>role</code>, <code>content</code>, <code>thinking</code>, <code>status</code>, <code>createDt</code></td></tr>
+      <tr><td><code>AgentConversationQueryVO</code></td><td><code>start</code>, <code>end</code></td></tr>
+      <tr><td><code>UpdateConversationTitleRequestVO</code></td><td><code>title</code>, <code>conversationId</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="rag">RAG 检索与问答（Admin）</h2>
+  <p>Controllers：<code>RagSearchController</code>（<span class="endpoint">/rag</span>）、<code>RagDocumentController</code>（<span class="endpoint">/document</span>）、<code>RagChunkController</code>（<span class="endpoint">/chunk</span>）</p>
+  <h3>知识库 CRUD 与搜索（/rag）</h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/rag</code></td><td><code>KnowledgeRequestVO</code></td><td><code>Result&lt;KnowledgeResponseVO&gt;</code></td><td>创建知识库</td></tr>
+      <tr><td>PUT</td><td><code>/rag/{id}</code></td><td><code>KnowledgeRequestVO</code></td><td><code>Result&lt;KnowledgeResponseVO&gt;</code></td><td>更新</td></tr>
+      <tr><td>PUT</td><td><code>/rag/{id}/config</code></td><td><code>KnowledgeConfigRequestVO</code></td><td><code>Result&lt;Void&gt;</code></td><td>更新检索/分块配置</td></tr>
+      <tr><td>DELETE</td><td><code>/rag/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除</td></tr>
+      <tr><td>GET</td><td><code>/rag/{id}</code></td><td>—</td><td><code>Result&lt;KnowledgeResponseVO&gt;</code></td><td>详情</td></tr>
+      <tr><td>GET</td><td><code>/rag/page</code></td><td><code>KnowledgeQueryVO</code></td><td><code>PageResult&lt;List&lt;KnowledgeResponseVO&gt;&gt;</code></td><td>分页</td></tr>
+      <tr><td>POST</td><td><code>/rag/search</code></td><td><code>RagSearchRequestVO</code></td><td><code>Result&lt;RagSearchResponseVO&gt;</code></td><td>检索调试</td></tr>
+      <tr><td>POST</td><td><code>/rag/qa/stream</code></td><td><code>RagQARequestVO</code></td><td><span class="tag stream">ndjson 流</span></td><td>RAG 问答</td></tr>
+    </tbody>
+  </table>
+  <h3>文档摄入（/document）</h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/document/upload</code></td><td>multipart + <code>RagDocumentUploadRequestVO</code></td><td><code>Result&lt;RagDocumentResponseVO&gt;</code></td><td>直接上传</td></tr>
+      <tr><td>POST</td><td><code>/document/upload/preview</code></td><td>multipart</td><td><code>Result&lt;UploadPreviewResultVO&gt;</code></td><td>上传预览（去重）</td></tr>
+      <tr><td>POST</td><td><code>/document/upload/commit</code></td><td><code>UploadCommitRequestVO</code></td><td><code>Result&lt;UploadCommitResultVO&gt;</code></td><td>确认提交</td></tr>
+      <tr><td>DELETE</td><td><code>/document/upload/preview/{token}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>取消预览</td></tr>
+      <tr><td>POST</td><td><code>/document/import/url</code></td><td><code>ImportRequestVO</code></td><td><code>Result&lt;RagDocumentResponseVO&gt;</code></td><td>URL 导入</td></tr>
+      <tr><td>DELETE</td><td><code>/document/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除文档</td></tr>
+      <tr><td>POST</td><td><code>/document/{id}/reprocess</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>重新分块</td></tr>
+      <tr><td>GET</td><td><code>/document/page</code></td><td><code>RagDocumentQueryVO</code></td><td><code>PageResult&lt;List&lt;RagDocumentResponseVO&gt;&gt;</code></td><td>文档分页</td></tr>
+    </tbody>
+  </table>
+  <h3>切片管理（/chunk）</h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/chunk/page</code></td><td><code>RagChunkQueryVO</code></td><td><code>PageResult&lt;List&lt;RagChunkResponseVO&gt;&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/chunk/{id}</code></td><td>—</td><td><code>Result&lt;RagChunkResponseVO&gt;</code></td></tr>
+      <tr><td>POST</td><td><code>/chunk</code></td><td><code>RagChunkCreateRequestVO</code></td><td><code>Result&lt;RagChunkResponseVO&gt;</code></td></tr>
+      <tr><td>PUT</td><td><code>/chunk/{id}</code></td><td><code>RagChunkUpdateRequestVO</code></td><td><code>Result&lt;RagChunkResponseVO&gt;</code></td></tr>
+      <tr><td>DELETE</td><td><code>/chunk/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td></tr>
+    </tbody>
+  </table>
+  <h3>RAG 域核心 VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段（摘要）</th></tr></thead>
+    <tbody>
+      <tr><td><code>KnowledgeRequestVO</code></td><td><code>name</code>, <code>description</code>, <code>icon</code>, <code>vectorStoreInstanceId</code>, <code>embeddingModelId</code>, <code>rerankModelId</code>, 分块/去重/上传确认等配置</td></tr>
+      <tr><td><code>KnowledgeResponseVO</code></td><td>创建字段 + <code>id</code>, <code>config</code>, <code>documentCount</code>, <code>chunkCount</code>, 时间戳</td></tr>
+      <tr><td><code>KnowledgeConfigRequestVO</code></td><td>检索参数、分块参数、rerank、融合策略、prompt 等</td></tr>
+      <tr><td><code>RagSearchRequestVO</code></td><td><code>ragId</code>, <code>query</code>, <code>debug</code></td></tr>
+      <tr><td><code>RagSearchResponseVO</code></td><td><code>results</code>, <code>metrics</code></td></tr>
+      <tr><td><code>RagQARequestVO</code></td><td><code>ragId</code>, <code>query</code>, <code>conversationId</code></td></tr>
+      <tr><td><code>RagDocumentResponseVO</code></td><td><code>id</code>, <code>ragId</code>, <code>name</code>, <code>fileType</code>, <code>status</code>, <code>chunkCount</code>, <code>previewUrl</code>, <code>downloadUrl</code>, 去重决策字段</td></tr>
+      <tr><td><code>RagChunkResponseVO</code></td><td><code>id</code>, <code>ragId</code>, <code>documentId</code>, <code>content</code>, <code>tokenCount</code>, <code>vectorId</code></td></tr>
+      <tr><td><code>UploadPreviewResultVO</code></td><td><code>previewToken</code>, <code>ragId</code>, <code>items[]</code></td></tr>
+      <tr><td><code>UploadCommitRequestVO</code></td><td><code>previewToken</code>, <code>items[]</code>（<code>tempResourceId</code>, <code>decision</code>）</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="knowledge">知识库（与 RAG 同域）</h2>
+  <p class="note"><code>/rag</code> 路径在源码中对应知识库实体；<code>Knowledge*VO</code> 是知识库 CRUD 的入参/出参。文档与切片分别由 <code>/document</code>、<code>/chunk</code> 管理。详见上一节 RAG 表格。</p>
+
+  <h2 id="memory">记忆（VO 预备，无独立 Controller）</h2>
+  <p class="warn"><strong>源码现状：</strong><code>vo/memory/</code> 下已定义完整记忆 VO，但 <code>snail-ai-server-admin</code> 当前<strong>没有</strong> <code>MemoryController</code>。记忆能力通过智能体配置字段 <code>memoryEnabled</code>、<code>memoryConfigId</code>、<code>shortTermMemorySize</code> 在 <code>AgentRequestVO</code> 中启用，运行时由 feature-memory 模块处理。</p>
+  <table>
+    <thead><tr><th>VO</th><th>用途</th><th>主要字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>MemoryConfigRequestVO</code></td><td>记忆配置模板</td><td><code>name</code>, 向量库/嵌入模型, <code>maxRecall</code>, rerank, 提取间隔, <code>extractionModelId</code>, 自定义 prompt</td></tr>
+      <tr><td><code>MemoryConfigResponseVO</code></td><td>配置响应</td><td>请求字段 + <code>id</code>, 时间戳</td></tr>
+      <tr><td><code>AddMemoryRequestVO</code></td><td>写入记忆</td><td><code>agentId</code>, <code>userId</code>, <code>conversationId</code>, <code>messages[]</code></td></tr>
+      <tr><td><code>SearchMemoryRequestVO</code></td><td>检索</td><td><code>query</code>, <code>agentId</code>, <code>userId</code>, <code>conversationId</code></td></tr>
+      <tr><td><code>MemoryItemResponseVO</code></td><td>记忆条目</td><td><code>id</code>, <code>title</code>, <code>content</code>, <code>memoryType</code>, <code>tags</code>, <code>relevanceScore</code></td></tr>
+      <tr><td><code>ConversationMemoryVO</code></td><td>会话级记忆</td><td><code>memoryType</code>, <code>category</code>, <code>title</code>, <code>content</code>, 评分与时间戳</td></tr>
+      <tr><td><code>MemoryStatsVO</code></td><td>统计</td><td><code>totalMemories</code>, <code>byType</code>, <code>retrievalEffectiveness</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="skill">Skill（Admin）</h2>
+  <p>Controller：<code>SkillController</code> · <span class="endpoint">/snail-ai/skill</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/upload</code></td><td>multipart</td><td><code>Result&lt;SkillResponseVO&gt;</code></td><td>ZIP 上传</td></tr>
+      <tr><td>GET</td><td><code>/page</code></td><td><code>SkillQueryVO</code></td><td><code>PageResult</code></td><td>分页</td></tr>
+      <tr><td>GET</td><td><code>/list</code></td><td>—</td><td><code>Result&lt;List&lt;SkillResponseVO&gt;&gt;</code></td><td>全量列表</td></tr>
+      <tr><td>POST</td><td><code>/</code></td><td><code>SkillCreateRequestVO</code></td><td><code>Result&lt;SkillResponseVO&gt;</code></td><td>创建</td></tr>
+      <tr><td>GET</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;SkillResponseVO&gt;</code></td><td>详情</td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td><code>SkillUpdateRequestVO</code></td><td><code>Result&lt;SkillResponseVO&gt;</code></td><td>更新元数据</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除</td></tr>
+      <tr><td>GET</td><td><code>/{id}/download</code></td><td>—</td><td>文件流</td><td>下载 ZIP</td></tr>
+      <tr><td>GET</td><td><code>/{skillId}/files</code></td><td>—</td><td><code>Result&lt;SkillFileTreeNodeVO&gt;</code></td><td>文件树</td></tr>
+      <tr><td>GET</td><td><code>/{skillId}/files/content</code></td><td>query path</td><td><code>Result&lt;SkillFileContentRequestVO&gt;</code></td><td>读文件</td></tr>
+      <tr><td>PUT</td><td><code>/{skillId}/files/content</code></td><td><code>SkillFileContentRequestVO</code></td><td><code>Result&lt;Void&gt;</code></td><td>写文件</td></tr>
+      <tr><td>POST</td><td><code>/{skillId}/files</code></td><td><code>SkillCreateFileRequestVO</code></td><td><code>Result&lt;Void&gt;</code></td><td>新建文件/目录</td></tr>
+      <tr><td>DELETE</td><td><code>/{skillId}/files</code></td><td>query path</td><td><code>Result&lt;Void&gt;</code></td><td>删除文件</td></tr>
+      <tr><td>PUT</td><td><code>/{skillId}/files/rename</code></td><td><code>SkillRenameFileRequestVO</code></td><td><code>Result&lt;Void&gt;</code></td><td>重命名</td></tr>
+    </tbody>
+  </table>
+  <h3>Skill VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>SkillResponseVO</code></td><td><code>id</code>, <code>name</code>, <code>description</code>, <code>fileName</code>, <code>fileSize</code>, 时间戳</td></tr>
+      <tr><td><code>SkillCreateRequestVO</code></td><td><code>name</code>, <code>description</code></td></tr>
+      <tr><td><code>SkillUpdateRequestVO</code></td><td><code>name</code>, <code>description</code></td></tr>
+      <tr><td><code>SkillQueryVO</code></td><td><code>keyword</code></td></tr>
+      <tr><td><code>SkillFileTreeNodeVO</code></td><td><code>name</code>, <code>type</code>, <code>size</code>, <code>children</code></td></tr>
+      <tr><td><code>SkillCreateFileRequestVO</code></td><td><code>path</code>, <code>type</code></td></tr>
+      <tr><td><code>SkillRenameFileRequestVO</code></td><td><code>oldPath</code>, <code>newPath</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="mcp">MCP 服务（Admin）</h2>
+  <p>Controller：<code>McpServerController</code> · <span class="endpoint">/snail-ai/mcp-server</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/page</code></td><td><code>McpServerQueryVO</code></td><td><code>PageResult</code></td><td>分页</td></tr>
+      <tr><td>GET</td><td><code>/list</code></td><td>—</td><td><code>Result&lt;List&lt;McpServerResponseVO&gt;&gt;</code></td><td>列表</td></tr>
+      <tr><td>GET</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;McpServerResponseVO&gt;</code></td><td>详情</td></tr>
+      <tr><td>POST</td><td><code>/</code></td><td><code>McpServerRequestVO</code></td><td><code>Result&lt;McpServerResponseVO&gt;</code></td><td>创建</td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td><code>McpServerRequestVO</code></td><td><code>Result&lt;McpServerResponseVO&gt;</code></td><td>更新</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除</td></tr>
+      <tr><td>POST</td><td><code>/{id}/test-connection</code></td><td>—</td><td><code>Result&lt;Boolean&gt;</code></td><td>连接测试</td></tr>
+    </tbody>
+  </table>
+  <h3>MCP VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>McpServerRequestVO</code></td><td><code>name</code>, <code>description</code>, <code>transportType</code>, <code>baseUri</code>, <code>endpoint</code>, <code>command</code>, <code>args</code>, <code>envVars</code>, <code>authType</code>, <code>authConfig</code>, <code>capabilities</code></td></tr>
+      <tr><td><code>McpServerResponseVO</code></td><td>请求字段 + <code>id</code>, <code>version</code>, <code>lastConnectDt</code>, 时间戳</td></tr>
+      <tr><td><code>McpServerQueryVO</code></td><td><code>keyword</code>, <code>transportType</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="model">AI 模型（Admin）</h2>
+  <p>Controller：<code>AiModelController</code> · <span class="endpoint">/snail-ai/ai-model</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/providers</code></td><td>—</td><td><code>List&lt;AiModelProviderVO&gt;</code></td><td>启用中的提供商</td></tr>
+      <tr><td>GET</td><td><code>/adapters</code></td><td>query <code>modelType</code></td><td><code>List&lt;ModelAdapterOptionVO&gt;</code></td><td>适配器选项</td></tr>
+      <tr><td>GET</td><td><code>/all-providers</code></td><td><code>AiModelProviderQueryVO</code></td><td><code>PageResult</code></td><td>全部提供商</td></tr>
+      <tr><td>GET</td><td><code>/provider/{id}</code></td><td>—</td><td><code>AiModelProviderVO</code></td><td>提供商详情</td></tr>
+      <tr><td>POST</td><td><code>/provider</code></td><td><code>AiModelProviderRequestVO</code></td><td><code>Long</code> id</td><td>新增提供商</td></tr>
+      <tr><td>PUT</td><td><code>/provider/{id}</code></td><td><code>AiModelProviderRequestVO</code></td><td><code>boolean</code></td><td>更新</td></tr>
+      <tr><td>DELETE</td><td><code>/provider/{id}</code></td><td>—</td><td><code>boolean</code></td><td>删除</td></tr>
+      <tr><td>PUT</td><td><code>/provider/{id}/enable</code></td><td>—</td><td><code>boolean</code></td><td>启用</td></tr>
+      <tr><td>PUT</td><td><code>/provider/{id}/disable</code></td><td>—</td><td><code>boolean</code></td><td>禁用</td></tr>
+      <tr><td>POST</td><td><code>/config</code></td><td><code>AiModelConfigRequestVO</code></td><td><code>Long</code></td><td>新增模型配置</td></tr>
+      <tr><td>PUT</td><td><code>/config/{id}</code></td><td><code>AiModelConfigRequestVO</code></td><td><code>boolean</code></td><td>更新配置</td></tr>
+      <tr><td>DELETE</td><td><code>/config/{id}</code></td><td>—</td><td><code>boolean</code></td><td>删除配置</td></tr>
+      <tr><td>GET</td><td><code>/config/{id}</code></td><td>—</td><td><code>AiModelConfigVO</code></td><td>配置详情</td></tr>
+      <tr><td>GET</td><td><code>/configs</code></td><td><code>AiModelConfigQueryVO</code></td><td><code>PageResult&lt;List&lt;AiModelConfigVO&gt;&gt;</code></td><td>配置分页</td></tr>
+      <tr><td>GET</td><td><code>/by-type/{modelType}</code></td><td>—</td><td><code>AiModelListResponseVO</code></td><td>按类型列出</td></tr>
+      <tr><td>GET</td><td><code>/by-provider-type</code></td><td><code>AiModelByProviderTypeQueryVO</code></td><td><code>List&lt;AiModelConfigVO&gt;</code></td><td>按提供商+类型</td></tr>
+      <tr><td>GET</td><td><code>/default</code></td><td>—</td><td><code>AiModelConfigVO</code></td><td>默认 Chat 模型</td></tr>
+      <tr><td>GET</td><td><code>/default/{modelType}</code></td><td>—</td><td><code>AiModelConfigVO</code></td><td>按类型默认</td></tr>
+      <tr><td>PUT</td><td><code>/switch-default/{modelId}</code></td><td>—</td><td><code>boolean</code></td><td>切换默认</td></tr>
+      <tr><td>PUT</td><td><code>/config/{id}/enable</code></td><td>—</td><td><code>boolean</code></td><td>启用配置</td></tr>
+      <tr><td>PUT</td><td><code>/config/{id}/disable</code></td><td>—</td><td><code>boolean</code></td><td>禁用配置</td></tr>
+      <tr><td>GET</td><td><code>/usage/stat/{modelId}</code></td><td>—</td><td><code>AiModelUsageStatVO</code></td><td>单模型统计</td></tr>
+      <tr><td>GET</td><td><code>/usage/user-stats</code></td><td><code>AiModelUsageStatsQueryVO</code></td><td><code>PageResult</code></td><td>用户维度</td></tr>
+      <tr><td>GET</td><td><code>/usage/global-stats</code></td><td><code>AiModelUsageStatsQueryVO</code></td><td><code>PageResult</code></td><td>全局统计</td></tr>
+    </tbody>
+  </table>
+  <h3>模型 VO（摘要）</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>AiModelConfigRequestVO</code></td><td><code>providerId</code>, <code>modelName</code>, <code>modelKey</code>, <code>modelType</code>, <code>adapterKey</code>, <code>apiKey</code>, <code>apiEndpoint</code>, <code>configJson</code>, <code>scope</code>, <code>isDefault</code></td></tr>
+      <tr><td><code>AiModelConfigVO</code></td><td>配置字段 + <code>id</code>, <code>providerName</code>, <code>isEnabled</code>, 时间戳</td></tr>
+      <tr><td><code>AiModelProviderVO</code></td><td><code>id</code>, <code>providerName</code>, <code>providerKey</code>, <code>iconUrl</code>, <code>isEnabled</code></td></tr>
+      <tr><td><code>AiModelUsageStatVO</code></td><td><code>modelId</code>, <code>totalCalls</code>, <code>successRate</code>, <code>totalTokensUsed</code>, <code>avgResponseTime</code></td></tr>
+      <tr><td><code>ModelAdapterOptionVO</code></td><td><code>adapterKey</code>, <code>name</code>, <code>modelType</code>, <code>isDefault</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="app">应用与客户端节点（Admin）</h2>
+  <p>Controller：<code>AppController</code> · <span class="endpoint">/snail-ai/app</span></p>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/</code></td><td><code>AppRequestVO</code></td><td><code>Result&lt;AppResponseVO&gt;</code></td><td>创建 OpenAPI 应用</td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td><code>AppRequestVO</code></td><td><code>Result&lt;AppResponseVO&gt;</code></td><td>更新</td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>删除</td></tr>
+      <tr><td>POST</td><td><code>/{id}/toggle-status</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>启停</td></tr>
+      <tr><td>GET</td><td><code>/page</code></td><td><code>AppQueryVO</code></td><td><code>PageResult</code></td><td>分页</td></tr>
+      <tr><td>GET</td><td><code>/list</code></td><td>—</td><td><code>Result&lt;List&lt;AppResponseVO&gt;&gt;</code></td><td>列表</td></tr>
+      <tr><td>GET</td><td><code>/{appId}/nodes</code></td><td>—</td><td><code>Result&lt;List&lt;ClientNodeVO&gt;&gt;</code></td><td>应用节点</td></tr>
+      <tr><td>GET</td><td><code>/all-nodes</code></td><td>—</td><td><code>Result&lt;List&lt;ClientNodeVO&gt;&gt;</code></td><td>全部节点</td></tr>
+      <tr><td>DELETE</td><td><code>/{appId}/nodes/{hostId}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td><td>摘除节点</td></tr>
+    </tbody>
+  </table>
+  <h3>应用 VO</h3>
+  <table>
+    <thead><tr><th>VO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>AppRequestVO</code></td><td><code>appId</code>, <code>appName</code>, <code>description</code>, <code>routeStrategy</code></td></tr>
+      <tr><td><code>AppResponseVO</code></td><td><code>id</code>, <code>appId</code>, <code>appName</code>, <code>token</code>, <code>routeStrategy</code>, <code>status</code>, <code>onlineNodes</code>, 时间戳</td></tr>
+      <tr><td><code>ClientNodeVO</code></td><td><code>hostId</code>, <code>hostIp</code>, <code>grpcPort</code>, <code>maxConcurrent</code>, <code>activeChats</code>, <code>labels</code>, <code>online</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="resource">资源、存储与文件（Admin）</h2>
+  <h3>资源上传 — <code>ResourceController</code> <span class="endpoint">/resource</span></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/upload</code></td><td>multipart + <code>ResourceUploadRequestVO</code></td><td><code>Result&lt;ResourceResponseVO&gt;</code></td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/page</code></td><td><code>ResourceQueryVO</code></td><td><code>PageResult</code></td></tr>
+    </tbody>
+  </table>
+  <h3>向量存储实例 — <code>StoreInstanceController</code> <span class="endpoint">/store-instance</span></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/</code></td><td>—</td><td><code>Result&lt;List&lt;StoreInstanceVO&gt;&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/page</code></td><td><code>StoreInstanceQueryVO</code></td><td><code>PageResult</code></td></tr>
+      <tr><td>GET</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;StoreInstanceVO&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/{id}/dimension-constraint</code></td><td>—</td><td><code>Result&lt;VectorDimensionConstraintVO&gt;</code></td></tr>
+      <tr><td>POST</td><td><code>/</code></td><td><code>StoreInstanceRequestVO</code></td><td><code>Result&lt;StoreInstanceVO&gt;</code></td></tr>
+      <tr><td>PUT</td><td><code>/{id}</code></td><td><code>StoreInstanceRequestVO</code></td><td><code>Result&lt;StoreInstanceVO&gt;</code></td></tr>
+      <tr><td>DELETE</td><td><code>/{id}</code></td><td>—</td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td>POST</td><td><code>/test</code></td><td><code>StoreInstanceTestRequestVO</code></td><td><code>Result&lt;Boolean&gt;</code></td></tr>
+    </tbody>
+  </table>
+  <h3>文件访问 — <code>FileAccessController</code> <span class="endpoint">/files/**</span></h3>
+  <p>GET 通配路径，不走 Admin 拦截器；返回 <code>ResponseEntity&lt;InputStreamResource&gt;</code>。</p>
+  <h3>页面转发 — <code>WebController</code></h3>
+  <p><span class="endpoint">GET /root</span> — 管理后台 SPA 转发入口。</p>
+
+  <h2 id="openapi">OpenAPI 对外接口</h2>
+  <p>前缀 <span class="endpoint">/snail-ai/openapi/v1</span>（源码常量 <code>OpenApiPathConstants.OPEN_API_V1_PREFIX</code>）。全部端点经 <code>OpenApiAuthInterceptor</code> 校验应用凭证。</p>
+
+  <h3>用户 — <code>OpenApiUserController</code></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/user/register</code></td><td><code>OpenApiUserRegisterRequest</code></td><td><code>Result&lt;OpenApiUserVO&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/user</code></td><td>query <code>openId</code></td><td><code>Result&lt;OpenApiUserVO&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>智能体 — <code>OpenApiAgentController</code></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/agents</code></td><td><code>OpenApiAgentQueryRequest</code>（page, size）</td><td><code>PageResult&lt;List&lt;OpenApiAgentVO&gt;&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/agent</code></td><td>query <code>agentId</code></td><td><code>Result&lt;OpenApiAgentVO&gt;</code></td></tr>
+      <tr><td>GET</td><td><code>/user/agents</code></td><td>query <code>openId</code></td><td><code>Result&lt;List&lt;OpenApiAgentVO&gt;&gt;</code></td></tr>
+      <tr><td>POST</td><td><code>/user/agent</code></td><td><code>OpenApiUserAgentRequest</code></td><td><code>Result&lt;Void&gt;</code></td></tr>
+      <tr><td>DELETE</td><td><code>/user/agent</code></td><td>query openId + agentId</td><td><code>Result&lt;Void&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>会话 — <code>OpenApiConversationController</code></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/agent/conversations</code></td><td><code>OpenApiConversationQueryRequest</code></td><td><code>PageResult</code></td><td>列表</td></tr>
+      <tr><td>POST</td><td><code>/agent/conversations</code></td><td><code>OpenApiCreateConversationRequest</code></td><td><code>Result&lt;OpenApiConversationVO&gt;</code></td><td>创建</td></tr>
+      <tr><td>DELETE</td><td><code>/agent/conversations?conversationId=</code></td><td><code>OpenApiConversationIdentityRequest</code></td><td><code>Result&lt;Void&gt;</code></td><td>删单个</td></tr>
+      <tr><td>DELETE</td><td><code>/agent/conversations</code>（无 conversationId）</td><td><code>OpenApiConversationClearRequest</code></td><td><code>Result&lt;Void&gt;</code></td><td>清空</td></tr>
+      <tr><td>GET</td><td><code>/agent/conversations/messages</code></td><td><code>OpenApiConversationIdentityRequest</code></td><td><code>Result&lt;List&lt;OpenApiMessageVO&gt;&gt;</code></td><td>消息</td></tr>
+    </tbody>
+  </table>
+
+  <h3>对话 — <code>OpenApiChatController</code></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/agent/chat</code></td><td><code>OpenApiChatRequest</code></td><td><span class="tag stream">SSE</span></td></tr>
+      <tr><td>POST</td><td><code>/agent/chat/sync</code></td><td><code>OpenApiChatRequest</code></td><td><code>Result&lt;OpenApiChatSyncResponse&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>嵌入 Token — <code>OpenApiEmbedController</code></h3>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>请求</th><th>响应</th></tr></thead>
+    <tbody>
+      <tr><td>GET</td><td><code>/embed-token</code></td><td>query <code>openId</code></td><td><code>Result&lt;OpenApiEmbedTokenResponse&gt;</code></td></tr>
+      <tr><td>POST</td><td><code>/embed-token</code></td><td><code>OpenApiEmbedTokenRequest</code></td><td><code>Result&lt;OpenApiEmbedTokenResponse&gt;</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>OpenAPI DTO 字段</h3>
+  <table>
+    <thead><tr><th>DTO</th><th>字段</th></tr></thead>
+    <tbody>
+      <tr><td><code>OpenApiUserRegisterRequest</code></td><td><code>externalId</code>, <code>nickname</code>, <code>avatarUrl</code></td></tr>
+      <tr><td><code>OpenApiUserVO</code></td><td><code>openId</code>, <code>externalId</code>, <code>nickname</code>, <code>avatarUrl</code>, <code>created</code></td></tr>
+      <tr><td><code>OpenApiAgentVO</code></td><td><code>id</code>, <code>name</code>, <code>description</code>, <code>avatar</code>, <code>greeting</code>, <code>presetQuestions</code>, MCP/Skill 开关与列表, <code>webSearchEnabled</code>, <code>subscribed</code></td></tr>
+      <tr><td><code>OpenApiChatRequest</code></td><td><code>agentId</code>*, <code>openId</code>*, <code>conversationId</code>*, <code>content</code>*, <code>disabledMcpServerIds</code>, <code>disabledSkillIds</code>, <code>deepPlanEnabled</code>, <code>webSearchEnabled</code>, <code>sid</code>, <code>timeout</code></td></tr>
+      <tr><td><code>OpenApiConversationVO</code></td><td><code>conversationId</code>, <code>agentId</code>, <code>title</code>, <code>createDt</code>, <code>updateDt</code></td></tr>
+      <tr><td><code>OpenApiMessageVO</code></td><td><code>role</code>, <code>content</code>, <code>thinking</code>, <code>status</code>, <code>createDt</code></td></tr>
+      <tr><td><code>OpenApiEmbedTokenResponse</code></td><td><code>token</code>, <code>tokenType</code>, <code>authHeader</code>, <code>expiresAt</code>, <code>ttlSeconds</code>, <code>openId</code>, <code>nickname</code>, <code>avatarUrl</code></td></tr>
+    </tbody>
+  </table>
+  <p class="note">带 * 字段为 <code>@NotNull</code> / <code>@NotBlank</code> 必填校验。</p>
+
+  <h2 id="infra">异常处理与基础设施</h2>
+  <table>
+    <thead><tr><th>组件</th><th>路径</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>RestExceptionHandler</code></td><td><span class="where">admin/handler/RestExceptionHandler.java</span></td><td>Admin 包统一异常 → <code>Result</code>；流式请求（Accept 含 SSE/ndjson）返回 JSON 行错误。</td></tr>
+      <tr><td><code>GlobalRestfulResponseBodyAdvice</code></td><td><span class="where">admin/handler/GlobalRestfulResponseBodyAdvice.java</span></td><td>非流式响应自动包 <code>Result</code>；已是 <code>Result</code> 或流式则透传。</td></tr>
+      <tr><td><code>AgentCreateStreamHttpAdapter</code></td><td><span class="where">admin/stream/AgentCreateStreamHttpAdapter.java</span></td><td>智能体创建流 NDJSON 编码。</td></tr>
+      <tr><td><code>RagQaStreamHttpAdapter</code></td><td><span class="where">admin/stream/RagQaStreamHttpAdapter.java</span></td><td>RAG 问答流 NDJSON 编码。</td></tr>
+      <tr><td><code>CollectingChatStreamWriter</code></td><td><span class="where">openapi/stream/CollectingChatStreamWriter.java</span></td><td>OpenAPI 同步对话收集流式 chunk，默认超时 300000 ms。</td></tr>
+      <tr><td><code>JacksonConfig</code></td><td><span class="where">admin/config/JacksonConfig.java</span></td><td>Admin JSON 序列化配置。</td></tr>
+      <tr><td><code>RoleEnum</code></td><td><span class="where">admin/enums/RoleEnum.java</span></td><td><code>ADMIN</code> / <code>USER</code> 角色，配合 <code>@LoginRequired</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <p class="summary"><span class="tag">下一步</span> 从本参考定位 Controller 后，沿 Service 进入 <a href="../../slice-admin-agent-chat/reference/admin-agent-chat-flow-map.html">Admin 对话切片</a>、<a href="../../module-rag/reference/rag-overview.html">RAG 模块</a> 或 <a href="../../module-memory/reference/memory-overview.html">记忆模块</a> 深入实现层。</p>
+</body>
+</html>

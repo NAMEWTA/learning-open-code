@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>15 分钟理解 DeerFlow 前端 core 数据层</title>
+    <link rel="stylesheet" href="../assets/core-lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>15 分钟理解 DeerFlow 前端 core 数据层</h1>
+        <p class="lead">
+          本课只教一个目标：看到 <code>frontend/src/core/</code> 里的代码时，能判断它属于哪条出站通道、与
+          <a href="../../module-frontend-workspace/lessons/0001-frontend-workspace-module-tour.html">workspace 页面层</a>
+          的分工是什么。
+        </p>
+        <div class="meta">
+          <span class="pill">目标读者：React Query 基础</span>
+          <span class="pill">主线：SDK 与 REST 双通道</span>
+          <span class="pill">参考：<a href="../reference/frontend-core-overview.html">完整清单</a></span>
+        </div>
+
+        <h2>1. core 与 workspace 的边界</h2>
+        <p>
+          在 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>里，Next.js frontend 分成两层：
+          <a href="../../module-frontend-workspace/reference/frontend-workspace-overview.html">workspace</a>
+          负责路由壳与可见组件；<code>frontend/src/core/</code> 负责业务数据、API 适配与 React Query 缓存。
+          workspace 组件调用 core hooks，core 再连 Gateway。
+        </p>
+        <div class="filetree">frontend/src/
+├── app/workspace/              ← 页面路由（workspace 模块）
+├── components/workspace/       ← 聊天、侧栏等 UI（workspace 模块）
+└── core/                       ← 本课：数据层与 API client
+    ├── api/                    ← LangGraph SDK + REST fetch wrapper
+    ├── auth/                   ← 会话守卫与 AuthProvider
+    ├── threads/                ← 线程流式主链路
+    ├── skills/                 ← skills 配置 REST
+    ├── mcp/                    ← MCP 配置 REST
+    └── uploads/                ← 线程文件上传 REST</div>
+        <p>
+          读代码时先问：这是拼 UI，还是取数/提交？后者几乎总在 core。
+        </p>
+
+        <h2>2. 两条出站通道</h2>
+        <p>
+          DeerFlow 前端有两条固定出站路径。<strong>通道 A</strong>：
+          <span class="where">frontend/src/core/api/api-client.ts</span> 的
+          <code>getAPIClient()</code> 创建 LangGraph SDK Client，走
+          <code>/api/langgraph</code>，负责 threads、runs、stream、joinStream。
+          <strong>通道 B</strong>：
+          <span class="where">frontend/src/core/api/fetcher.ts</span> 包装
+          <code>fetch</code>，走 Gateway REST（<code>/api/skills</code>、<code>/api/mcp/config</code>、
+          <code>/api/threads/{id}/uploads</code> 等），统一带 cookie 与 CSRF。
+        </p>
+        <pre>// 通道 A：聊天流式提交
+getAPIClient() -> client.runs.stream(threadId, assistantId, payload)
+
+// 通道 B：配置类 REST
+fetch(`${getBackendBaseURL()}/api/skills`)  // skills/api.ts
+fetch(`${getBackendBaseURL()}/api/mcp/config`)  // mcp/api.ts
+fetch(`${getBackendBaseURL()}/api/threads/${threadId}/uploads`, { method: "POST" })  // uploads/api.ts</pre>
+        <p>
+          判断口诀：涉及 thread/run 流式生命周期 → SDK；其余 CRUD/配置 → <code>fetcher.ts</code>。
+        </p>
+
+        <h2>3. 认证外壳与线程主链路</h2>
+        <p>
+          认证分服务端与客户端两层。
+          <span class="where">frontend/src/core/auth/server.ts</span> 的
+          <code>getServerSideUser()</code> 在 layout 阶段用 cookie 向 Gateway 求证，决定跳转登录或 setup。
+          <span class="where">frontend/src/core/auth/AuthProvider.tsx</span> 只保存展示用 <code>user</code>，不持有 JWT。
+          聊天主链路在
+          <span class="where">frontend/src/core/threads/hooks.ts</span>：
+          <code>chats/[thread_id]/page.tsx</code> 持有 <code>useThreadStream</code>；
+          workspace 的 <code>InputBox</code> 通过 <code>onSubmit</code> 回调触发 <code>sendMessage</code>，不直接碰 SDK。
+        </p>
+        <pre>page.tsx 持有 useThreadStream
+  -> InputBox.onSubmit
+  -> sendMessage
+  -> uploadFiles (uploads/api.ts，通道 B)
+  -> getAPIClient().runs.stream (通道 A)
+  -> thread.messages 更新 -> MessageList 重渲染</pre>
+
+        <h2>4. skills / mcp / uploads 的同构模式</h2>
+        <p>
+          这三个域都遵循 <code>api.ts</code>（纯 HTTP）+ <code>hooks.ts</code>（React Query）分工。
+          <code>skills/hooks.ts</code> 的 <code>useSkills</code> 读列表、<code>useEnableSkill</code> 写开关；
+          <code>mcp/hooks.ts</code> 的 <code>useMCPConfig</code> / <code>useEnableMCPServer</code> 同理；
+          <code>uploads/hooks.ts</code> 用 <code>useUploadLimits</code>、<code>useUploadFiles</code> 管线程附件。
+          设置页、工具页、输入框附件按钮都消费这些 hooks，而不是在组件里写裸 <code>fetch</code>。
+        </p>
+
+        <h3>练习：30 秒通道判断</h3>
+        <div class="callout">
+          <p>
+            你要排查「用户在设置页切换 MCP server 开关后 UI 不刷新」。按本课结构，你会先看哪个 hooks 文件？底层请求走通道 A 还是 B？
+          </p>
+        </div>
+        <div class="answer">
+          <p>
+            参考答案：先看
+            <span class="where">frontend/src/core/mcp/hooks.ts</span> 的
+            <code>useEnableMCPServer</code>，确认 mutation 成功后是否
+            <code>invalidateQueries({ queryKey: ["mcpConfig"] })</code>；
+            再看 <span class="where">frontend/src/core/mcp/api.ts</span> 的
+            <code>updateMCPConfig</code>。底层走<strong>通道 B</strong>（REST PUT
+            <code>/api/mcp/config</code>），不是 LangGraph SDK。
+          </p>
+        </div>
+
+        <p>
+          主要来源：本地 <code>frontend/AGENTS.md</code> 与
+          <a href="https://tanstack.com/query/latest/docs/framework/react/overview">TanStack Query 文档</a>。
+          若你想继续，可以让 agent 追问 L2 方向：聊天流式 run、文件上传进 sandbox，或 skills 激活链路。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -12,10 +12,12 @@
 - CLI 命令执行（参数解析 → 配置加载 → 核心逻辑 → 结果输出）
 - 事件驱动流程（消息到达 → 反序列化 → 业务处理 → 确认/重试）
 
-## 每篇垂直切片文档必须包含 5 要素
+## 每个垂直切片主题必须覆盖 5 要素
+
+这些要素不要求塞进同一节课。复杂链路必须拆成同一 `slice-*` 主题下的多节短课。
 
 1. **入口点**：HTTP 路由 / CLI 命令 / 事件监听 / UI 事件处理等，附真实代码片段
-2. **沿途每一层**：中间件 → Controller → Service → Repository/DAO → 外部依赖（DB、缓存、消息队列、第三方 API），每一层附真实代码片段
+2. **沿途每一层**：中间件 → Controller → Service → Repository/DAO → 外部依赖（DB、缓存、消息队列、第三方 API），每节课只展开少量关键层
 3. **调用时序**：mermaid 时序图或 ASCII 时序描述，清晰展示调用链
 4. **至少一条异常/边界路径**：如认证失败、参数非法、超时、资源不存在，展示错误如何逐层传播与处理
 5. **交叉链接**：与相关 L1 模块总览、L3 API 参考的链接
@@ -50,15 +52,20 @@ sequenceDiagram
 
 ## 命名规范
 
-每个垂直切片是一个独立 teach 主题目录 `slice-<功能-slug>/`，课程文件命名 `lessons/<功能-slug>.html`（与 output-structure.md 一致）。
+每个垂直切片是一个独立 teach 主题目录 `slice-<功能-slug>/`，课程文件沿用 `.agents/skills/teach/SKILL.md` 的编号命名。
 
 - `<功能-slug>`：短横线命名的功能英文简述（如 `auth-login-flow`、`order-checkout-flow`）
-- 由于一个切片主题目录只含一节课，不使用 teach SKILL 默认的递增编号前缀；任务单中的 `output_path` 为最终权威路径
+- 简单切片至少生成 `lessons/0001-flow-map.html`
+- 复杂切片拆成 `lessons/0001-flow-map.html`、`lessons/0002-main-path.html`、`lessons/0003-error-path.html` 等多节短课
+- 长源码索引、接口列表、状态表放入 `reference/<功能-slug>-flow-map.html`
+- 任务单中的 `output_path` 只是主入口，不代表全部交付物
 
-## 与 teach SKILL 的协作
+## L2 垂直切片的内容生成
 
-垂直切片文档作为 HTML 课程产出，由 teach SKILL 按课程格式生成。teach-goal 在任务单中提供：
+垂直切片作为 teach 主题产出，**subagent 必须 Read 并激活 `.agents/skills/teach/SKILL.md`**，按短课合约生成一组可完成的 HTML 课程。teach-goal 在任务单中提供：
 - 垂直切片涉及的所有源码文件及行号
 - 层级顺序（如"路由 → 中间件 → Service → DAO → 数据库"）
 - 必须覆盖的异常路径
 - 关联的 L1/L3 文档路径
+
+如果任务单涉及源码超过 3 个文件或链路超过 4 个阶段，subagent 必须先拆 lesson manifest，再逐节生成短课。

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subagent 系统：task tool 怎样生成可追踪 step</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main>
+  <h1>Subagent 系统：task tool 怎样生成可追踪 step</h1>
+  <p class="lead">目标：15 分钟内看懂一条主链路。lead agent 发出一次 <code>task</code> tool call 后，deer-flow 怎样启动 subagent、直播进度、持久化 step，并让前端 subtask card 能刷新后回看。</p>
+
+  <h2>1. 边界与入口</h2>
+  <p>在 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>里，subagent delegation 是长任务的核心能力；<a href="../../module-runtime-persistence/reference/runtime-persistence-overview.html">runtime/persistence</a> 已说明 subagent step 会进入 run event store；<a href="../../module-frontend-workspace/reference/frontend-workspace-overview.html">frontend workspace</a> 已说明 subtask card 是用户可见入口。本模块位于 lead agent 和 runtime 之间：它不决定“该不该做这个任务”，而是把已经发生的 <code>task</code> 调用变成隔离执行、可追踪、可恢复展示的子任务。</p>
+  <p>最短入口是 <code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code>。模型给出的调用形状大致如下：</p>
+  <pre><code class="language-json">{
+  "name": "task",
+  "id": "call_123",
+  "args": {
+    "description": "调查 run events",
+    "prompt": "检查 subagent step 如何持久化",
+    "subagent_type": "general-purpose"
+  }
+}</code></pre>
+  <p><code>tool_call_id</code> 会被复用为 <code>task_id</code>。这是一条很重要的线索：后端事件、ToolMessage 元数据、delegation ledger、前端卡片都靠同一个 id 对齐。</p>
+
+  <h2>2. 委托变成后台任务</h2>
+  <p><code>task_tool</code> 先查 <code>get_subagent_config()</code>，未知类型会直接返回 failed ToolMessage；<code>bash</code> 还要通过 host bash 安全开关。之后它从 runtime 继承 sandbox、thread、user、run、trace、tool groups、skills allowlist，并调用 <code>get_available_tools(subagent_enabled=False)</code>。这个参数防止 subagent 再拿到 <code>task</code> 工具形成递归委托。</p>
+  <p>真正执行由 <code>SubagentExecutor.execute_async(prompt, task_id=tool_call_id)</code> 启动：executor 在后台线程池登记 <code>SubagentResult</code>，在隔离事件循环中跑 LangGraph agent，并用 <code>capture_new_step_messages()</code> 抓取 step。单次模型响应内并行 <code>task</code> 调用数由 <code>SubagentLimitMiddleware</code> 限制（默认最多 3，范围 2–4）；超出会被截断。详见 <a href="../reference/subagents-overview.html#entrypoints">reference 入口表</a>。</p>
+
+  <h2>3. step 如何可追踪</h2>
+  <p><code>task_tool</code> 不等整条 run 结束才报告。它每 5 秒轮询后台结果，把生命周期写成自定义 stream chunk：</p>
+  <pre><code class="language-text">task_started   -> subagent.start  -> 卡片出现
+task_running   -> subagent.step   -> 追加 AI/tool step
+task_completed -> subagent.end    -> 卡片完成并显示结果
+task_failed    -> subagent.end    -> 卡片失败并显示错误</code></pre>
+  <p>映射逻辑在 <code>backend/packages/harness/deerflow/subagents/step_events.py</code>。<code>build_subagent_step()</code> 把消息压成 <code>{kind, text, tool_calls/tool_name, message_index}</code>，并限制大文本长度。runtime worker 的 <code>_SubagentEventBuffer</code> 再批量写入 <code>RunEventStore</code>。前端直播时消费 <code>task_running</code>；刷新后，<code>subtask-card.tsx</code> 展开卡片会调用 <code>fetchSubtaskSteps(threadId, runId, taskId)</code>，按 <code>event_types=subagent.step</code> 和 <code>task_id</code> 回填。</p>
+  <p>主参考页在 <a href="../reference/subagents-overview.html">subagents-overview.html</a>。长状态契约、executor 责任表、事件表和测试矩阵都放在那里。</p>
+
+  <h2>4. 检索练习</h2>
+  <p>暂停 60 秒，先从记忆回答：如果用户刷新页面后 subtask card 能看到卡片标题，但展开后没有 step，你会优先查哪三个边界？如果 lead agent 重复委托同一件事，应该先看哪份 durable 上下文？</p>
+  <div class="callout answer">
+    <p><strong>参考答案：</strong>先查 <code>step_events.py</code> 是否生成 <code>subagent.step</code>，再查 <code>worker.py</code> 的 `_SubagentEventBuffer` 是否写入 run event store，最后查 <code>frontend/src/core/tasks/api.ts</code> 是否用正确 <code>threadId/runId/taskId</code> 回填。重复委托先看 <code>delegation_ledger.py</code> 渲染的 “Work already delegated”。</p>
+  </div>
+  <p>主要来源建议先读 <code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code>，再顺着 <code>SubagentExecutor</code> 和 <code>step_events.py</code> 追一次。下一步可追问：“帮我只讲 max_turns_reached 这条异常路径”。</p>
+</main>
+</body>
+</html>

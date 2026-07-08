@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Planner 到 Schedule 投影路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断任务计划如何变成 Schedule 视图条目</p>
+    <h1>任务计划到日程渲染的全链路</h1>
+    <p class="lead">这条链路的核心不是“有一张日程表”。Super Productivity 保存的是任务事实和 Planner 索引，Schedule 每次从 selectors 读取任务、Planner day map、repeat cfg 和 calendar events，再投影成只读 UI entries。</p>
+
+    <h2>1. 路径图</h2>
+    <pre class="diagram">flowchart TD
+  A[弹窗 / Planner 拖拽 / Schedule 拖拽]
+  A --> B{用户选择具体时间?}
+  B -->|是| C[TaskSharedActions.scheduleTaskWithTime]
+  B -->|否| D[PlannerActions.planTaskForDay]
+  C --> E[task-shared-scheduling.reducer: dueWithTime, 清 dueDay]
+  D --> F[planner-shared.reducer + task.reducer: dueDay, Planner/Today 排序]
+  E --> G[selectTimelineTasks: planned / unPlanned]
+  F --> H[selectPlannerDayMap / selectPlannerDays]
+  G --> I[mapToScheduleDays]
+  H --> I
+  J[CalendarIntegrationService] --> K[ScheduleCalendarMapEntry]
+  K --> I
+  I --> L[ScheduleDay.entries]
+  L --> M[mapScheduleDaysToScheduleEvents]
+  M --> N[ScheduleWeekComponent / ScheduleEventComponent]</pre>
+    <p>首查入口是 <span class="where">src/app/features/planner/dialog-schedule-task/dialog-schedule-task.component.ts</span> 和 <span class="where">src/app/features/schedule/schedule-week/schedule-week-drag.service.ts</span>：有有效时间时进入 `scheduleTaskWithTime`，没有时间或 Shift 按日拖拽时进入 `planTaskForDay`。</p>
+
+    <h2>2. 四类条目的边界</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>条目</th><th>保存在哪里</th><th>投影到哪里</th><th>不要误判</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>scheduled task</td><td>`Task.dueWithTime`，同时清 `dueDay`</td><td>`SVEType.ScheduledTask`，也出现在 Planner 的 `scheduledIItems`</td><td>它不是 `planner.days` 里的普通计划任务。</td></tr>
+          <tr><td>due-only / planned-for-day</td><td>`Task.dueDay`；未来日可在 `PlannerState.days[day]` 保存顺序，Today 用 `TODAY_TAG.taskIds` 保存顺序</td><td>Planner `tasks`；Schedule 里可变成 `TaskPlannedForDay`</td><td>Today membership 由 due 字段推导，不靠 `task.tagIds`。</td></tr>
+          <tr><td>repeat projection</td><td>`TaskRepeatCfg`，不是 Task 实体</td><td>有 startTime 是 scheduled repeat projection；无 startTime 是流动 repeat projection</td><td>已有真实实例时会去重，避免投影和任务重复显示。</td></tr>
+          <tr><td>calendar block</td><td>`CalendarIntegrationService.calendarEvents$` 的外部事件</td><td>CalendarEvent 或 blocked block</td><td>日历块不是任务；只有创建为任务或移动可写 provider 事件时才写回。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>拖到 Schedule 网格且不是 Shift 模式，首查 <span class="where">src/app/features/schedule/schedule-week/schedule-week-drag.service.ts</span>，它会把落点换成 timestamp 并派发 `scheduleTaskWithTime` 或 `reScheduleTaskWithTime`。</p>
+    <p><strong>判断二：</strong>弹窗选了日期但没有有效时间，首查 <span class="where">src/app/features/planner/dialog-schedule-task/dialog-schedule-task.component.ts</span>，它派发 `PlannerActions.planTaskForDay`；随后 <span class="where">src/app/root-store/meta/task-shared-meta-reducers/planner-shared.reducer.ts</span> 维护 `planner.days` 和 Today 顺序。</p>
+    <p><strong>判断三：</strong>Schedule 是否展示某个任务，首查 <span class="where">src/app/features/work-context/store/work-context.selectors.ts</span> 的 `selectTimelineTasks`，再进 <span class="where">src/app/features/schedule/map-schedule-data/map-to-schedule-days.ts</span>。`dueWithTime` 进 planned；Today 的未定时任务进 unPlanned。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：任务 A 目前 `dueDay=2026-07-08`，没有 `dueWithTime`；用户在 Schedule 周视图把它拖到 `2026-07-09 10:00`，随后又按住 Shift 把它拖到 `2026-07-10` 的列尾。请判断：第一次和第二次分别写哪一层？最终 Schedule 会把它当 scheduled task 还是 due-only task？</p>
+    <div class="answer">参考答案：第一次普通拖拽写 `Task.dueWithTime`，由 `task-shared-scheduling.reducer.ts` 清掉 `dueDay`，Planner reducer 还会从 `planner.days` 移除该 task id；Schedule mapper 把它作为 `ScheduledTask` blocked block。第二次 Shift 按日拖拽派发 `PlannerActions.planTaskForDay`，写回 `dueDay=2026-07-10`、清 `dueWithTime/remindAt`，并由 `planner-shared.reducer.ts` 把顺序放到目标日或 Today 顺序中。最终它是 due-only / planned-for-day，不再是 scheduled task。</div>
+    <p>主要来源：<a href="../reference/planner-schedule-flow-reference.html">Planner/Schedule 全链路速查</a>。相邻主题：<a href="../../module-planning-time/">规划与时间模块</a>、<a href="../../module-task-domain/">任务领域模块</a>、<a href="../../slice-task-create-flow/">新增任务链路</a>、<a href="../../slice-time-tracking-flow/">时间追踪链路</a>。如果某一步不清楚，可以向 agent 追问：“请从这个 action 反查所有 reducer 和 selector”。</p>
+  </article>
+</main>
+</body>
+</html>

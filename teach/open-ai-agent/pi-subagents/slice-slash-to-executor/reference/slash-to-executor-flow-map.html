@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>slash 到 executor 流程图谱</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+  <style>
+    main { width: min(1120px, calc(100% - 40px)); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; margin: 1rem 0; }
+    th, td { border: 1px solid var(--line); padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); }
+    .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem; white-space: pre-wrap; }
+    @media print { main { width: 100%; padding: 0; } a { color: inherit; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Slash 到 executor 流程图谱</h1>
+  <p class="lead">L2 参考页：事件名、文件职责、executor 分流与测试索引。短课 <a href="../lessons/0001-flow-map.html">0001-flow-map</a> 只保留八跳记忆。</p>
+
+  <h2 id="flow">1. 垂直切片五要素</h2>
+  <table>
+    <tr><th>要素</th><th>本切片落点</th></tr>
+    <tr><td>入口</td><td><code>registerSlashCommands</code> handler → <code>runSlashSubagent</code>；或 <code>prompt-template-bridge</code> 的 <code>prompt-template:subagent:request</code></td></tr>
+    <tr><td>沿途层</td><td>slash-live-state placeholder → 事件桥 → <code>executeSubagentCollapsed</code> → executor 门卫与分流</td></tr>
+    <tr><td>时序</td><td>见 <a href="../lessons/0001-flow-map.html">0001 八跳图</a></td></tr>
+    <tr><td>异常路径</td><td>无 bridge / 无 ctx / 15s start timeout / Esc 取消 / pending cancel before start</td></tr>
+    <tr><td>交叉链接</td><td><a href="../../module-slash-workflows/reference/slash-workflows-overview.html">slash L1</a> · <a href="../../slice-single-foreground-run/reference/single-foreground-run-flow-map.html">single run L2</a></td></tr>
+  </table>
+
+  <h2>2. 事件总线时序</h2>
+  <div class="diagram">slash-commands                    slash-bridge                 subagent-executor
+    |                                   |                              |
+ runSlashSubagent                       |                              |
+    |-- sendMessage (initial) --------->|                              |
+    |-- emit slash:request ------------>|-- emit slash:started         |
+    |                                   |-- execute(id,params,...) ---->|
+    |                                   |<-- onUpdate ------------------|
+    |<-- emit slash:update -------------|                              |
+    |                                   |<-- AgentToolResult -----------|
+    |<-- emit slash:response -----------|                              |
+    |-- finalizeSlashResult             |                              |
+    |-- sendMessage (final)             |                              |</div>
+  <table>
+    <tr><th>事件常量</th><th>方向</th><th>载荷要点</th></tr>
+    <tr><td><code>subagent:slash:request</code></td><td>commands → bridge</td><td><code>requestId</code>、<code>params</code>、可选 <code>ctx</code></td></tr>
+    <tr><td><code>subagent:slash:started</code></td><td>bridge → commands</td><td><code>requestId</code>；须在 request 处理中同步发出</td></tr>
+    <tr><td><code>subagent:slash:update</code></td><td>bridge → commands</td><td><code>progress</code>、<code>currentTool</code>、<code>toolCount</code></td></tr>
+    <tr><td><code>subagent:slash:response</code></td><td>bridge → commands</td><td><code>result</code>、<code>isError</code>、<code>errorText</code></td></tr>
+    <tr><td><code>subagent:slash:cancel</code></td><td>commands → bridge</td><td>Esc 或显式取消；abort 正在执行的 signal</td></tr>
+  </table>
+
+  <h2>3. 源码文件与首读符号</h2>
+  <table>
+    <tr><th>文件</th><th>职责</th><th>首读符号</th></tr>
+    <tr><td><code>slash/slash-commands.ts</code></td><td>命令注册、params 组装、live card、request 等待</td><td><code>registerSlashCommands</code>、<code>runSlashSubagent</code>、<code>requestSlashRun</code></td></tr>
+    <tr><td><code>slash/slash-bridge.ts</code></td><td>slash 事件桥、ctx 选择、取消</td><td><code>registerSlashSubagentBridge</code></td></tr>
+    <tr><td><code>slash/prompt-template-bridge.ts</code></td><td>Pi prompt 模板委派；tasks 转并行 params</td><td><code>registerPromptTemplateDelegationBridge</code></td></tr>
+    <tr><td><code>slash/slash-live-state.ts</code></td><td>live / final snapshot</td><td><code>buildSlashInitialResult</code>、<code>finalizeSlashResult</code></td></tr>
+    <tr><td><code>extension/index.ts</code></td><td>bridge 与 executor 注册接缝</td><td><code>executeSubagentCollapsed</code>、bridge 块</td></tr>
+    <tr><td><code>runs/foreground/subagent-executor.ts</code></td><td>execute 门卫、分流、run*Path</td><td><code>createSubagentExecutor</code>、<code>execute</code></td></tr>
+  </table>
+
+  <h2>4. executor.execute 分流（slash 到达后）</h2>
+  <table>
+    <tr><th>条件</th><th>路径</th><th>details.mode</th></tr>
+    <tr><td><code>params.action</code> 存在</td><td>doctor / status / management / steer …</td><td><code>management</code> 等</td></tr>
+    <tr><td><code>effectiveAsync === true</code></td><td><code>runAsyncPath</code></td><td>async started（非阻塞父 turn）</td></tr>
+    <tr><td><code>chain.length &gt; 0</code></td><td><code>runChainPath</code> → <code>executeChain</code></td><td><code>chain</code></td></tr>
+    <tr><td><code>tasks.length &gt; 0</code></td><td><code>runParallelPath</code></td><td><code>parallel</code></td></tr>
+    <tr><td><code>agent</code> 且无 chain/tasks</td><td><code>runSinglePath</code> → <code>runSync</code></td><td><code>single</code></td></tr>
+  </table>
+
+  <h2 id="tests">5. 测试证据（slash-commands.test.ts）</h2>
+  <table>
+    <tr><th>用例</th><th>保护的行为</th></tr>
+    <tr><td><code>/run accepts an agent without a task</code></td><td>命令边界允许空 task；params 仍发往 bridge</td></tr>
+    <tr><td><code>/run finalizes the slash snapshot before the last UI redraw</code></td><td>成功/失败路径均先 finalize 再最终 sendMessage</td></tr>
+    <tr><td><code>/run collapses tool detail before showing the initial live card</code></td><td><code>setToolsExpanded(false)</code> 在初始消息前</td></tr>
+    <tr><td><code>/parallel forwards inline output behavior config</code></td><td>inline token 解析进入 <code>SubagentParamsLike</code></td></tr>
+    <tr><td><code>/parallel no longer hard-blocks runs above the old 8-task limit</code></td><td>任务数限制下沉到 executor，不在命令层硬拦</td></tr>
+    <tr><td><code>/run-chain maps --bg to async execution</code></td><td><code>--bg</code> → <code>params.async</code></td></tr>
+    <tr><td><code>/run-chain maps --fork to forked context</code></td><td><code>--fork</code> → <code>params.context = "fork"</code></td></tr>
+  </table>
+  <p class="source">关联单测：<code>test/unit/slash-bridge.test.ts</code>（request ctx 优先）、<code>test/unit/prompt-template-bridge.test.ts</code>（委派生命周期）。</p>
+</main>
+</body>
+</html>

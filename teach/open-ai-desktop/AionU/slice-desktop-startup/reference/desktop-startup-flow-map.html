@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>桌面启动到首屏全链路参考图谱</title>
+  <link rel="stylesheet" href="../assets/aionu-startup.css">
+</head>
+<body>
+  <main class="page">
+    <header>
+      <p class="eyebrow">L2 参考文档 · desktop startup flow map</p>
+      <h1>桌面启动到首屏全链路参考图谱</h1>
+      <nav>
+        <a href="../lessons/0001-flow-map.html">课程 0001</a>
+        <a href="../lessons/0002-main-process-window.html">课程 0002</a>
+        <a href="../lessons/0003-renderer-first-screen-and-boundary.html">课程 0003</a>
+        <a href="../../00-overview/reference/00-overview.html">L0 总览</a>
+        <a href="../../module-main-entry/reference/main-entry-overview.html">L1 main-entry</a>
+        <a href="../../module-process-infra/reference/process-infra-overview.html">L1 process-infra</a>
+        <a href="../../module-renderer-core/reference/renderer-core-overview.html">L1 renderer-core</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2>1. 五要素覆盖清单</h2>
+      <table>
+        <thead>
+          <tr><th>要素</th><th>本切片落点</th><th>主要证据</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>入口点</td><td>Electron main 顶层加载与 <code>app.whenReady().then(handleAppReady)</code>。</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:7-23</code>、<code>open-ai-desktop/AionU/packages/desktop/src/index.ts:943-950</code></td></tr>
+          <tr><td>沿途每一层</td><td>main 顶层前置 → process 初始化 → backend lifecycle → BrowserWindow/preload → renderer bootstrap → Router 首屏 → E2E 烟雾测试。</td><td>本页阶段表与三节短课。</td></tr>
+          <tr><td>调用时序</td><td>见“主成功路径时序”。</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:603-850</code></td></tr>
+          <tr><td>异常/边界路径</td><td>backend 启动失败在默认桌面模式下不立即退出，而是进入 renderer failure dialog。</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:283-287</code>、<code>open-ai-desktop/AionU/packages/desktop/src/renderer/main.tsx:385-405</code></td></tr>
+          <tr><td>交叉链接</td><td>回链 L0，关联 L1 main-entry、process-infra、renderer-core。</td><td>页首导航与每节课导航。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>2. 主成功路径时序</h2>
+      <pre><code class="language-mermaid">sequenceDiagram
+  participant User as 用户
+  participant Main as Electron main
+  participant Process as process 初始化
+  participant Backend as aioncore backend
+  participant Window as BrowserWindow/preload
+  participant Renderer as React renderer
+  participant Router as Router
+  User-&gt;&gt;Main: 启动桌面 App
+  Main-&gt;&gt;Main: 顶层 import / 单实例 / 模式标志
+  Main-&gt;&gt;Process: initializeProcess()
+  Process--&gt;&gt;Main: storage / bridge / i18n 前置完成
+  Main-&gt;&gt;Backend: startBackendOrExit()
+  alt backend 成功
+    Backend--&gt;&gt;Main: backend port
+    Main-&gt;&gt;Window: createWindow()
+    Window-&gt;&gt;Renderer: preload 注入 port / language
+    Renderer-&gt;&gt;Router: Auth 与 config ready
+    Router--&gt;&gt;User: /guid 首屏
+  else backend 失败
+    Backend--&gt;&gt;Main: startup failure
+    Main-&gt;&gt;Window: 默认桌面模式继续建窗
+    Window-&gt;&gt;Renderer: preload 注入 failure
+    Renderer--&gt;&gt;User: BackendStartupFailureDialog
+  end</code></pre>
+      <div class="diagram">用户启动桌面 App
+  ↓
+Electron 加载 main bundle
+  ↓ 顶层 import：Chromium、Sentry、console、process、bridge、backend resolver
+单实例锁 / PATH 修复 / 模式标志解析
+  ↓
+app.whenReady()
+  ↓
+handleAppReady()
+  ↓
+initializeProcess()
+  ↓ initStorage 完成，bridge 与 i18n 已由顶层 import 前置
+startBackendOrExit()
+  ↓ backendManager.start() 返回 port
+exposeBackendPort() / markBackendReady()
+  ↓
+默认桌面模式分支
+  ↓ close-to-tray 设置、窗口初始 bounds、zoom
+createWindow()
+  ↓ BrowserWindow(preload)
+loadURL(dev renderer) 或 loadFile(packaged renderer)
+  ↓
+preload sendSync(get-backend-port / get-backend-startup-failure)
+  ↓
+renderer/main.tsx createRoot
+  ↓
+正常：AppProviders → Main → Router → /guid
+失败：BackendStartupFailureDialog</div>
+    </section>
+
+    <section>
+      <h2>3. 阶段表</h2>
+      <table>
+        <thead>
+          <tr><th>阶段</th><th>源码位置</th><th>职责</th><th>下一跳</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>入口顶层前置</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:7-76</code></td><td>Chromium 配置、Sentry、console、Electron API、process/backend/bridge 导入。</td><td>单实例锁与模式标志。</td></tr>
+          <tr><td>单实例与平台路径</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:77-191</code></td><td>E2E 可跳过单实例锁；修复 macOS/Linux PATH 或 Windows PATH；识别 webui、remote、resetpass、version。</td><td><code>handleAppReady()</code> 前的全局状态。</td></tr>
+          <tr><td>process 模块载入</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/index.ts:7-29</code></td><td>注册 Electron platform、二次确保 Chromium 配置、导入 storage、bridge、main i18n。</td><td><code>initializeProcess()</code>。</td></tr>
+          <tr><td>bridge 注册</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/utils/initBridge.ts:7-12</code>、<code>open-ai-desktop/AionU/packages/desktop/src/process/bridge/index.ts:18-27</code></td><td>顶层 side effect 触发 `initAllBridges()`，注册 renderer 可调用的 main bridge。</td><td>BrowserWindow 创建前 bridge 已存在。</td></tr>
+          <tr><td>backend resolver</td><td><code>open-ai-desktop/AionU/packages/desktop/src/process/backend/index.ts:1</code></td><td>向 main 入口导出 `resolveBinaryPath()`，供 `BackendLifecycleManager` 定位 aioncore。</td><td>backend manager 构造。</td></tr>
+          <tr><td>app ready 编排</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:603-651</code></td><td>安装 devtools、处理 version 短路、设置 device id、等待 <code>initializeProcess()</code>。</td><td>backend 启动。</td></tr>
+          <tr><td>backend 启动</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:653-724</code>、<code>open-ai-desktop/AionU/packages/desktop/src/process/startup/backendStartup.ts:22-38</code></td><td>架构兼容检查、启动 backend、暴露 port、失败分类与 Sentry 采集。</td><td>zoom、窗口尺寸和模式分支。</td></tr>
+          <tr><td>桌面模式分支</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:829-850</code></td><td>E2E 禁用托盘；普通模式读取 close-to-tray；创建窗口并标记 <code>appReadyDone</code>。</td><td><code>createWindow()</code>。</td></tr>
+          <tr><td>窗口创建</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:411-545</code></td><td>建立 BrowserWindow、绑定 preload、初始化 main adapter、menu、zoom、bounds，加载 dev URL 或 renderer HTML。</td><td>preload 与 renderer。</td></tr>
+          <tr><td>窗口边界事件</td><td><code>open-ai-desktop/AionU/packages/desktop/src/index.ts:465-600</code></td><td>`ready-to-show`/`did-finish-load` 显示窗口，失败加载和 renderer crash 记录或重载。</td><td>首屏可见性。</td></tr>
+          <tr><td>preload 状态注入</td><td><code>open-ai-desktop/AionU/packages/desktop/src/preload/main.ts:18-64</code></td><td>暴露 <code>electronAPI</code>，同步读取 backend port、初始语言、backend failure 并写入 <code>window</code>。</td><td>renderer early bootstrap。</td></tr>
+          <tr><td>renderer config</td><td><code>open-ai-desktop/AionU/packages/desktop/src/common/config/configService.ts:11-18</code>、<code>open-ai-desktop/AionU/packages/desktop/src/renderer/services/bootstrapRenderer.ts:15-18</code></td><td>按 Electron port 或 WebUI same-origin 获取 client settings；bootstrap 失败只记录日志。</td><td>`Main` 的 `configReady`。</td></tr>
+          <tr><td>认证 ready</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/hooks/context/AuthContext.tsx:50-116</code></td><td>桌面运行时检测到 `window.electronAPI` 后直接 authenticated/ready。</td><td>Router 可渲染。</td></tr>
+          <tr><td>React root</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/main.tsx:269-405</code></td><td>正常路径渲染 `AppProviders` + `App`；backend failure 路径渲染 `BackendStartupFailureDialog`。</td><td>Router 或失败弹窗。</td></tr>
+          <tr><td>首屏路由</td><td><code>open-ai-desktop/AionU/packages/desktop/src/renderer/components/layout/Router.tsx:41-105</code></td><td>受保护布局、登录跳转、默认 index 到 `/guid`，未知路由按认证状态兜底。</td><td>用户可见首屏。</td></tr>
+          <tr><td>E2E 证据</td><td><code>open-ai-desktop/AionU/tests/e2e/specs/app-launch.e2e.ts:10-27</code></td><td>窗口有标题、body 可见、启动无 critical console error。</td><td>启动烟雾测试结论。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>4. 关键边界路径：backend 启动失败</h2>
+      <div class="failure">
+        <p><strong>触发：</strong>`backendManager.start()` 抛出非取消错误，或 debug 注入 `AIONUI_DEBUG_BACKEND_STARTUP_FAILURE`。</p>
+        <p><strong>main 处理：</strong><code>markBackendStartupFailed()</code> 设置 <code>backendStartupFailed</code>、<code>backendStartupFailureInfo</code> 和 <code>globalThis.__backendStartupFailed</code>；<code>startBackendOrExit()</code> 采集失败。在默认桌面模式下 <code>exitOnFailure</code> 为 false，所以流程继续走向窗口。</p>
+        <p><strong>preload 传播：</strong>preload 通过 `get-backend-startup-failed` 和 `get-backend-startup-failure` 同步读取失败状态，暴露给 renderer。</p>
+        <p><strong>renderer 收口：</strong>`renderer/main.tsx` 检查 `window.__backendStartupFailure`，若 reason 属于已知集合，则直接渲染 `BackendStartupFailureDialog`，不进入正常 Router。</p>
+      </div>
+      <p>这个边界解释了一个容易误判的现象：窗口出现不等于 backend 成功；body 有内容也不等于首屏业务可用。要证明正常首屏，需要在 E2E 中继续断言 `/guid` 或关键 UI 文案。</p>
+    </section>
+
+    <section>
+      <h2>5. E2E 如何证明</h2>
+      <table>
+        <thead>
+          <tr><th>断言</th><th>证明了什么</th><th>没有证明什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>窗口 title truthy</td><td>Electron 窗口已打开，renderer document 至少有标题。</td><td>不证明 Router 进入 `/guid`。</td></tr>
+          <tr><td>body visible 且 text truthy</td><td>renderer DOM 已加载并有可见文本。</td><td>不区分正常首屏、登录页或失败弹窗。</td></tr>
+          <tr><td>critical console errors 为 0</td><td>启动期没有被 collector 归类为 critical 的 console error。</td><td>不证明 backend API 完整可用，也不覆盖每条边界 UI。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>6. 阅读顺序建议</h2>
+      <div class="steps">
+        <div class="step">先读课程 0001，背出阶段图。</div>
+        <div class="step">再读课程 0002，对照 main/process/backend/window 四段源码。</div>
+        <div class="step">最后读课程 0003，确认 preload、React root、Router 与 E2E 的边界。</div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

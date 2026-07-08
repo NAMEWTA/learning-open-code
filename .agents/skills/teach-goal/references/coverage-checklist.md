@@ -10,8 +10,14 @@
 - [ ] 生成了一份 `00-index.md` 总导航，能从宏观一路点进到任意微观细节
 - [ ] 进度台账中不存在任何 `pending` / `in_progress` / `needs_fix` 状态的条目
 - [ ] 所有 done 状态 goal 的 `review_status` 为 `passed` / `conditional_pass` / `skipped`（不存在 `failed` 或 `pending`）
-- [ ] 每个 teach 主题目录已生成 SNAPSHOT.md（运行 `generate_snapshot.py <project-path> --all`）
+- [ ] 每个 teach 主题目录已生成 SNAPSHOT.md（运行 `.agents/skills/teach/scripts/generate_snapshot.py <project-path> --all`，用法见 `.agents/skills/teach/SKILL.md`）
+- [ ] 每个 teach 主题目录都通过 `.agents/skills/teach/scripts/audit_topic.py <project-path> --all`
+- [ ] 不存在 reference-only 主题；每个主题至少有 1 个 `lessons/*.html`
+- [ ] `MISSION.md`、`RESOURCES.md`、`SNAPSHOT.md` 无 init_topic.sh 占位符残留
+- [ ] 所有 lesson 符合 `.agents/skills/teach/SKILL.md` 的短课合约，不存在巨型单页课程
 - [ ] `teach/<project>/index.md` 中所有主题条目已填写实际名称与描述（无 init_topic.sh 占位符残留）
+- [ ] 所有 goal 的 `output_path` 均以 `teach/` 开头，不含 `.agents/`
+- [ ] `.agents/` 下（排除 `.agents/skills/`）无教学产出残留（MISSION.md、lessons/、reference/、_progress.json 等）
 
 在此之前，**不要**声称任务完成，也不要停止循环。`blocked` goal 不阻塞 DoD，但必须在完成报告中单独列出。
 
@@ -22,6 +28,9 @@
 - [ ] 测试用例是否被当作"行为佐证"引用，帮助说明该功能的预期行为与边界情况？
 - [ ] 本轮新发现的依赖/引用是否已经生成对应 goal 并入队，而不是随手带过？
 - [ ] `_progress.md` 是否已同步更新？
+- [ ] 本轮所有产出 `output_path` 是否均以 `teach/` 开头？（路径违规 → goal 不得标记 done）
+- [ ] 本轮新增/修改的主题是否运行 `audit_topic.py` 并通过？（失败 → goal 标记 `needs_fix`）
+- [ ] 是否出现单节 lesson 承载 5 个以上源码文件、多个异常路径或多个设计决策？（出现 → 拆成同主题多节短课）
 
 ## 源码豁免清单
 
@@ -56,9 +65,9 @@
 产出:
   - L0 项目总览: 1 篇
   - L1 模块总览: {N} 篇
-  - L2 垂直切片: {N} 篇
+  - L2 垂直切片主题: {N} 个，短课: {M} 节
   - L3 微观 API: {N} 篇
-  - L4 深度剖析: {N} 篇
+  - L4 深度剖析主题: {N} 个，短课: {M} 节
 覆盖:
   - 源码文件: {N} / {M}（{百分比}%）
   - 公共函数/类: {N} / {M}（{百分比}%）

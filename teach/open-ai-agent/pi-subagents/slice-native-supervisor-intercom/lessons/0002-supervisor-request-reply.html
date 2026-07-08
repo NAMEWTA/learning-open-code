@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>0002 运行中 supervisor 请求与回复</title>
+	<link rel="stylesheet" href="../../module-intercom/assets/topic.css">
+</head>
+<body>
+<main>
+	<header>
+		<p class="eyebrow">L2-native-supervisor-intercom 短课 0002</p>
+		<h1>运行中 supervisor 请求与回复</h1>
+		<p>学习目标：给定一次 <code>contact_supervisor({ reason: "need_decision" })</code>，你能从子端 tool call 指到父端 reply 文件，并说出 session 过滤与超时清理规则。</p>
+	</header>
+
+	<section>
+		<h2>1. 子端前提：metadata 必须完整</h2>
+		<p><span class="where">pi-args.ts</span> 在 orchestrator target、父 session id、run id、child agent name 齐全时创建 <code>supervisor-channels/&lt;run&gt;-&lt;agent&gt;-&lt;index&gt;/</code>，并写入 <code>PI_SUBAGENT_SUPERVISOR_CHANNEL_DIR</code> 等环境变量。子进程里 <code>registerNativeSupervisorClient</code> 读取这些 env；任一缺失则不会注册 <code>contact_supervisor</code>，调用时报 <em>Native supervisor channel is not available</em>。</p>
+	</section>
+
+	<section>
+		<h2>2. 发请求：三种 reason 的等待语义</h2>
+		<p><code>sendSupervisorRequest</code> 把请求写成 <code>requests/&lt;id&gt;.json</code>，类型为 <code>subagent.supervisor.request</code>。<code>need_decision</code> 与 <code>interview_request</code> 设置 <code>expectsReply: true</code>，子端轮询 <code>replies/&lt;id&gt;.json</code> 直至超时（默认 10 分钟，可用 <code>PI_INTERCOM_ASK_TIMEOUT_MS</code> 覆盖）。<code>progress_update</code> 不等待，写完 request 即返回 queued。</p>
+		<pre>reason              expectsReply    子端行为
+need_decision       true            阻塞等待 reply 文件
+interview_request   true            同上 + 尝试 JSON 解析 structuredReply
+progress_update     false           立即返回，父端展示后删 request</pre>
+	</section>
+
+	<section>
+		<h2>3. 父端轮询与回复</h2>
+		<p><span class="where">extension/index.ts</span> 在 session 启动时调用 <code>supervisorChannel.start()</code>，每 500ms 扫描所有 channel 的 request 文件。只有 <code>orchestratorSessionId</code> 匹配当前父 session 的请求会进入 pending map，并通过 <code>pi.sendMessage</code> 展示。父会话用 <code>subagent_supervisor({ action: "reply", replyTo, message })</code> 写 reply 文件并删除 request；子端 <code>waitForReply</code> 读到后返回给 tool result。</p>
+		<p>生命周期状态 <code>resolved</code>、<code>expired</code>、<code>inactive</code>（子 run 已结束）会触发 request 文件清理，避免父端看到陈旧 pending。若已有外部 <code>intercom</code> 工具，native 模块仍注册 <code>subagent_supervisor</code> 作为不冲突的 reply path。</p>
+	</section>
+
+	<section class="quiz">
+		<h2>检索练习</h2>
+		<p>子 agent 发出 <code>need_decision</code> 后父会话始终看不到 pending。下列排查顺序哪项最合理？</p>
+		<ol>
+			<li>先查 result-intercom delivery 是否超时。</li>
+			<li>先查 bridge mode 是否为 off，再查 request 的 orchestratorSessionId 是否匹配当前父 session。</li>
+			<li>先查 TUI 主题色配置。</li>
+		</ol>
+		<div class="answer">
+			<p><strong>参考答案：2。</strong>看不到 pending 属于运行中通道问题：bridge off 时子端可能根本没有 <code>contact_supervisor</code>；若工具存在但父端无展示，多半是 session id 不匹配或请求已 expired/inactive（见 <code>native-supervisor-channel.test.ts</code>）。</p>
+		</div>
+	</section>
+
+	<section class="source-list">
+		<h3>主要来源</h3>
+		<p><code>native-supervisor-channel.ts</code> 的 <code>sendSupervisorRequest</code>、<code>createNativeSupervisorChannel.poll</code>、<code>writeReply</code>。</p>
+		<p>上一节：<a href="0001-flow-map.html">0001 全链路流程图</a> · 下一节：<a href="0003-result-delivery.html">0003 完成结果 delivery</a>。</p>
+	</section>
+
+	<nav class="lesson-nav">
+		<p>课程导航 · <a href="0001-flow-map.html">0001 流程图</a> · <a href="0003-result-delivery.html">0003 result delivery</a> · <a href="../reference/native-supervisor-intercom-flow-map.html">参考图谱</a></p>
+	</nav>
+</main>
+</body>
+</html>

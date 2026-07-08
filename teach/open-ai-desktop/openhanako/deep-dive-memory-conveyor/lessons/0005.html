@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · 设计权衡与综合测验：存储vs检索、精度vs成本、已知局限</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>第 5 课 · 设计权衡与综合测验：存储vs检索、精度vs成本、已知局限 <span class="tag">综合回顾</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能评估传送带模型的性能特征与成本，理解六个已知局限及其改进方向，并通过综合测验检验对整套系统的掌握程度。完成本课即完成"记忆传送带模型"深度剖析全部课程。
+</div>
+
+<p>前四课从设计哲学、编译流水线、装配机制到注入优化，逐层拆解了传送带模型。最后一课我们站远一步，审视这套系统的性能特征、成本模型、已知局限，然后通过综合测验巩固全部知识。</p>
+
+<h2>一、性能特征与成本估算</h2>
+
+<h3>1.1 LLM 调用频率与时机</h3>
+
+<table>
+<tr><th>触发条件</th><th>调用的编译器</th><th>LLM 调用次数</th><th>频率</th></tr>
+<tr><td>每 10 轮对话</td><td>compileToday</td><td>1 次</td><td>高频（每天 2-10 次）</td></tr>
+<tr><td>Session 结束</td><td>compileToday</td><td>1 次</td><td>中频（每个 session 1 次）</td></tr>
+<tr><td>日期切换（_doDaily）</td><td>compileDaily + compileToday + compileLongterm + compileEditableFacts</td><td>3-5 次</td><td>每天 1 次</td></tr>
+<tr><td>滚动窗口溢出</td><td>compileLongterm (via rollDailyWindow)</td><td>0-1 次</td><td>每天 1 次（可能为 0）</td></tr>
+</table>
+
+<h3>1.2 每日成本估算</h3>
+
+<table>
+<tr><th>场景</th><th>compileToday</th><th>compileDaily</th><th>compileLongterm</th><th>compileFacts</th><th>合计</th></tr>
+<tr><td>安静日（1 session，5轮）</td><td>1 次</td><td>1 次</td><td>0 次</td><td>1 次</td><td><b>3 次</b></td></tr>
+<tr><td>活跃日（5 sessions，各10轮）</td><td>5-7 次</td><td>1 次</td><td>1 次</td><td>1 次</td><td><b>8-10 次</b></td></tr>
+<tr><td>高密度日（10+ sessions）</td><td>10-15 次</td><td>1 次</td><td>1 次</td><td>1 次</td><td><b>13-18 次</b></td></tr>
+</table>
+
+<p>以 Claude Sonnet 4 定价（$3/$15 per 1M input/output tokens）为基准：</p>
+
+<table>
+<tr><th>项目</th><th>估算</th></tr>
+<tr><td>编译链每日成本</td><td>~$0.03-0.05/天</td></tr>
+<tr><td>滚动摘要成本（含对话历史）</td><td>~$0.05-0.15/次</td></tr>
+<tr><td>综合日成本</td><td><b>~$0.10-0.50/天</b></td></tr>
+<tr><td>综合月成本</td><td><b>~$3-15/月</b></td></tr>
+</table>
+
+<div class="side">
+💡 <b>成本优化的四个关键点：</b>
+<ul>
+  <li><b>指纹去重</b>——compileDaily 和 compileLongterm 的指纹机制使相同输入的重复调用被跳过（成本为零）</li>
+  <li><b>水位线增量</b>——compileToday 和 compileEditableFacts 只处理新增摘要，避免每天全量扫描</li>
+  <li><b>零 LLM week</b>——assembleWeekFromDaily 纯文件操作，完全无 LLM 成本</li>
+  <li><b>token 预算紧缩</b>——每层编译器的 maxTokens 都经过精心校准，不浪费任何 token</li>
+</ul>
+</div>
+
+<h2>二、六大已知局限与改进方向</h2>
+
+<h3>2.1 相关性排序缺失</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>记忆系统目前只按<b>时间维度</b>组织信息（today → daily → week → longterm），缺少<b>主题相关性排序</b>。例如，当用户讨论"记忆系统"时，today.md 可能讲的是"桌面自动化"，而 longterm.md 中关于"记忆系统"的内容虽然更相关，却排在后面。<br>
+<b>改进方向：</b>在 assemble 阶段引入轻量语义重排，把与当前对话最相关的段落放在最前面。
+</div>
+
+<h3>2.2 遗忘曲线不精确</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>当前的时间衰减是离散的阶梯函数——今天(today) → 昨天(daily) → 6天内(week) → 长期(longterm)。真实的人类记忆遗忘服从连续的艾宾浩斯曲线，而非阶梯跳跃。今天 23:59 的对话属于 today.md，明天 00:01 就变成 60 字日记——信息细节度在分钟级别发生巨大跳跃。<br>
+<b>改进方向：</b>引入连续衰减权重——today.md 条目带上"距现在多少小时"的权重字段，week 段按天数衰减排序。
+</div>
+
+<h3>2.3 中文时间提取精度</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>时间条目标题提取依赖正则匹配 <code>YYYY-MM-DD HH:MM</code> 格式，但 LLM 有时输出"2024年1月15日 下午3点"或"昨天 14:30"，这些格式会被正则完全跳过。中文语境的相对时间表达（"昨天下午"、"上周五"）也无法被正则提取。<br>
+<b>改进方向：</b>引入轻量 NLP 时间解析器，在正则失败后做第二级提取；对相对时间结合消息时间戳推算绝对时间。
+</div>
+
+<h3>2.4 compileDaily 输入依赖的脆弱性</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>compileDaily 的输入链（timeline → today.md → 摘要回落）有两个脆弱点：today.md 可能因 runningSummary 持续失败而为空；compileDaily 必须先于 compileToday 执行的顺序约束仅靠 <code>DAILY_STEP_KEYS</code> 数组维护，没有代码层面的 enforce。<br>
+<b>改进方向：</b>在日期切换前保存 today.md 的快照副本，确保"昨天的草稿"在任何执行顺序下都能读取。
+</div>
+
+<h3>2.5 longterm.md 的不可逆转性</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>一旦 daily 条目被 fold 进 longterm.md 并删除源文件，原始 daily 内容永久丢失。如果 compileLongterm 做了不恰当的抽象（比如把"喜欢爵士乐"概括成"喜欢古典音乐"），没有回溯修正的机制。<br>
+<b>改进方向：</b>保留 daily 文件的快照备份（压缩归档而非删除），或在 longterm.md 中保留对源 daily 日期的引用（traceability link）。
+</div>
+
+<h3>2.6 无跨 session 的语义关联</h3>
+
+<div class="danger">
+⚠️ <b>问题：</b>每个 session 的滚动摘要是独立生成的，跨 session 的语义关联完全依赖后续编译链。如果用户周一讨论"想学 Rust"，周三又讨论"在看 Rust 教程"，两个 session 会独立记录，没有跨天关联概览。<br>
+<b>改进方向：</b>在 compileToday 之前新增"跨 session 主题聚类"步骤，把多个 session 摘要中相同主题的事件合并成带跨天时间范围的事件。
+</div>
+
+<h2>三、设计精髓总结</h2>
+
+<div class="side">
+<p>HanaAgent v4 记忆传送带模型用一套精心校准的多层编译器，解决了"有限 token 预算内提供最高信号密度"这一核心问题。<b>三个关键工程决策：</b></p>
+<ol>
+  <li><b>week 段零 LLM</b>——不再对已蒸馏内容做二次蒸馏，改为纯文件装配。这不只是降本，更是保证信息稳定性。</li>
+  <li><b>指纹 + 水位线双重去重</b>——指纹防止相同内容被重复编译（compileDaily/compileLongterm），水位线防止每天全量扫描（compileToday/compileEditableFacts）。</li>
+  <li><b>每层可编辑</b>——用户可以对 facts.md、today.md、daily/{date}.md、longterm.md 的每一层手动编辑。用户永远是记忆的最终权威。</li>
+</ol>
+</div>
+
+<h2>四、综合测验（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1.（综合）以下哪项不属于 HanaAgent v4 传送带模型的编译器？</p>
+<span class="opt">A. compileToday —— 今天草稿水位线增量编译</span>
+<span class="opt">B. compileDaily —— 日记条目指纹编译</span>
+<span class="opt">C. compileWeek —— 每周摘要 LLM 编译</span>
+<span class="opt">D. compileEditableFacts —— 重要事实增量编译</span>
+<details><summary>看答案</summary><b>C</b>。compileWeek 是旧版 v3 的设计，v4 已废弃。v4 用 assembleWeekFromDaily（零 LLM 文件拼接）替代了 compileWeek。五个编译器是：compileToday、compileDaily、compileLongterm、compileEditableFacts、以及 assembleWeekFromDaily（装配器而非编译器）。</details>
+</div>
+
+<div class="quiz">
+<p>Q2.（综合）compileDaily 的"零占位策略"意味着什么？</p>
+<span class="opt">A. 每天必定产出一个 daily 文件，即使内容为空</span>
+<span class="opt">B. 当天确实没有任何内容时不产文件，同时清理旧指纹，防止后续真实编译被过期指纹挡住</span>
+<span class="opt">C. daily 文件占用零字节磁盘空间</span>
+<span class="opt">D. 用空字符串占位，等待后续补充</span>
+<details><summary>看答案</summary><b>B</b>。零占位策略的核心是"没有内容就不产文件"——不会在 daily/ 目录写入空文件。同时清理可能存在的旧 .fingerprint 指纹文件，确保之后有内容需要编译时不会被旧指纹误判为"已处理"而跳过。</details>
+</div>
+
+<div class="quiz">
+<p>Q3.（综合）rollDailyWindow 和 compileLongterm 的关系是什么？</p>
+<span class="opt">A. rollDailyWindow 是 compileLongterm 的替代品，两者互斥</span>
+<span class="opt">B. rollDailyWindow 负责筛选溢出条目并拼接内容，compileLongterm 是通用 fold 引擎负责指纹去重和 LLM 合并；rollDailyWindow 调用 compileLongterm</span>
+<span class="opt">C. compileLongterm 是 rollDailyWindow 的别名</span>
+<span class="opt">D. 两者完全独立，没有调用关系</span>
+<details><summary>看答案</summary><b>B</b>。rollDailyWindow 是"调度层"——计算窗口边界、筛选溢出条目、拼接内容、管理文件删除。compileLongterm 是"引擎层"——接受内容字符串、做指纹去重、调 LLM 合并、落盘。rollDailyWindow 调用 compileLongterm 完成实际的 fold 操作。</details>
+</div>
+
+<div class="quiz">
+<p>Q4.（综合）以下哪个场景体现了传送带模型的"断点续跑"设计？</p>
+<span class="opt">A. 用户关闭应用后重新打开，记忆从零开始重建</span>
+<span class="opt">B. 如果 compileDaily 执行失败（网络错误），daily 文件不会丢失——compileToday 仍然正常执行，下一轮 daily 任务重试 compileDaily</span>
+<span class="opt">C. 用户每天必须手动触发记忆编译</span>
+<span class="opt">D. 记忆系统每次启动都重新编译所有历史数据</span>
+<details><summary>看答案</summary><b>B</b>。断点续跑体现在两个层面：1）daily 任务中各步骤独立执行，前一步失败不阻塞后续独立步骤（compileFacts 和 deepMemory 与前三步独立）；2）rollDailyWindow 失败时保留源文件，下一轮重试。系统不会因为单次失败而丢失数据。</details>
+</div>
+
+<div class="quiz">
+<p>Q5.（综合）如果让你为传送带模型增加一个"月度总结"功能，最合理的设计是？</p>
+<span class="opt">A. 新增 compileMonth 编译器，对 longterm.md 再做一次 LLM 蒸馏</span>
+<span class="opt">B. 参考 assembleWeekFromDaily 的零 LLM 设计——从 daily/ 目录取最近 30 天的日记条目拼接，不做 LLM 编译</span>
+<span class="opt">C. 直接把 longterm.md 改名为 month.md</span>
+<span class="opt">D. 让用户每天手动写月度总结</span>
+<details><summary>看答案</summary><b>B</b>。遵循 v4 的设计哲学——"对已蒸馏内容不做二次蒸馏"。assembleWeekFromDaily 已经证明零 LLM 文件拼接既能降本又能保证信息稳定性。月度总结可以类似地从 daily/ 目录取 30 天条目拼接，配合超长截断策略（从最老条目开始丢弃）。如果确实需要抽象，可以让 compileLongterm 的 fold 过程自然完成月度级别的信息沉淀。</details>
+</div>
+
+<div class="quiz">
+<p>Q6.（综合）以下哪个是传送带模型的正确数据流路径？</p>
+<span class="opt">A. session 摘要 → compileDaily → today.md → compileToday → daily/{date}.md</span>
+<span class="opt">B. session 摘要 → compileToday → today.md → (日期切换) → compileDaily → daily/{date}.md → (滚出窗口) → compileLongterm → longterm.md</span>
+<span class="opt">C. session 摘要 → compileLongterm → longterm.md → compileToday → today.md</span>
+<span class="opt">D. longterm.md → compileDaily → daily/{date}.md → compileToday → today.md</span>
+<details><summary>看答案</summary><b>B</b>。正确路径：session 摘要 → compileToday（当天高频更新 today.md）→ 日期切换 → compileDaily（蒸馏昨天为 diary 条目）→ 滚出 6 日窗口 → compileLongterm（fold 进 longterm）。同时 facts.md 通过 compileEditableFacts 独立于这条主线增量更新。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：<code>open-ai-desktop/openhanako/lib/memory/compile.ts</code>（1130 行）是整套系统的核心实现；<code>lib/memory/memory-ticker.ts</code>（1063 行）是双触发调度器；<code>lib/memory/prompts/compile.ts</code>（164 行）是四个编译 Prompt 的定义；<code>lib/memory/llm-budget.ts</code>（33 行）是推理缓冲区逻辑。</div>
+
+<div class="reminder">💡 完成全部五课！你对记忆传送带模型已有深度理解。可以继续探索：<b>1)</b> 阅读 <code>memory-ticker.ts</code> 的完整调度逻辑（双触发：对话轮次 + 日期切换）；<b>2)</b> 阅读 <code>rolling-summary-format.ts</code> 理解 session 摘要的格式契约（它决定了所有编译器的输入质量）；<b>3)</b> 对比其他记忆方案（Mem0、MemGPT、Letta）的设计取舍。有任何疑问随时问我——我是你的 AI 教师。</div>
+
+<div class="nav"><a href="0004.html">← 上一课：检索与注入优化</a> · 课程 0005 / 记忆传送带深度剖析 · 全部课程完成 ✓</div>
+
+</body>
+</html>

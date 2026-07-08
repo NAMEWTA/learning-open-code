@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Renderer 核心与 UI Shell 参考</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Renderer 核心与 UI Shell 参考</h1>
+    <p class="subtitle">L1 速查文档：模块职责、入口清单、provider 栈、路由表、shell 分层、关键依赖与测试证据。</p>
+    <div class="meta">
+      <span class="pill">主题：module-renderer-core</span>
+      <span class="pill">核心入口：main.tsx / Router.tsx / Layout.tsx</span>
+      <span class="pill">辅助证据：bootstrapRenderer、hooks、tests</span>
+    </div>
+  </section>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#position">1. 模块定位</a>
+    <a href="#entries">2. 对外接口与入口清单</a>
+    <a href="#providers">3. Provider 栈</a>
+    <a href="#layers">4. 内部分层结构</a>
+    <a href="#routes">5. 主要路由表</a>
+    <a href="#hooks">6. Shell 级 hooks</a>
+    <a href="#deps">7. 关键依赖</a>
+    <a href="#evidence">8. 测试与阅读示例</a>
+  </nav>
+
+  <h2 id="position">1. 模块定位</h2>
+  <p>Renderer 核心位于 <code>packages/desktop/src/renderer/</code>，职责不是承载单个业务功能，而是为所有页面提供统一启动序列、上下文状态、路由守卫和 UI shell。它在整体架构中的位置介于 preload/common adapter 之上、具体页面之下：向上接收桌面环境和 backend 的事件，向下把这些能力组织成 React 可消费的 provider 与导航框架。</p>
+  <p class="muted">L0 回链：如果要先确认整个仓库里 renderer 处在什么层级，先回看 <a href="../../00-overview/reference/00-overview.html">00-overview 参考总览</a>，再进入本页看局部骨架。</p>
+  <table>
+    <thead>
+      <tr><th>能力面</th><th>主文件</th><th>职责</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>根挂载</td><td><code>main.tsx</code></td><td>初始化 Sentry、i18n、样式、配置 bootstrap、provider 栈与根渲染。</td></tr>
+      <tr><td>路由分发</td><td><code>components/layout/Router.tsx</code></td><td>认证保护、懒加载页面、旧路由重定向、默认落点。</td></tr>
+      <tr><td>UI shell</td><td><code>components/layout/Layout.tsx</code></td><td>标题栏、侧栏、移动端折叠、全局导航、系统事件接入。</td></tr>
+      <tr><td>启动准备</td><td><code>services/bootstrapRenderer.ts</code></td><td>等待 renderer 配置初始化，避免空配置进入业务页面。</td></tr>
+      <tr><td>共享上下文层</td><td><code>hooks/context/*.tsx</code></td><td>认证、主题、布局、导航历史、反馈、会话历史等全局共享状态。</td></tr>
+      <tr><td>预览上下文层</td><td><code>pages/conversation/Preview/context/PreviewContext.tsx</code></td><td><code>PreviewProvider</code> 的真实定义位置，负责预览面板与标签页状态，不属于 <code>hooks/context</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="entries">2. 对外接口与入口清单</h2>
+  <table>
+    <thead>
+      <tr><th>入口 / 接口</th><th>形式</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>createRoot(...).render(...)</code></td><td>DOM 挂载点</td><td>把 renderer 接到 `#root`，并根据 `window.__backendStartupFailure` 选择正常应用或失败对话框。</td></tr>
+      <tr><td><code>AppProviders</code></td><td>Provider 组合器</td><td>按 `Auth → Theme → Preview → Feedback` 顺序包裹全局上下文。</td></tr>
+      <tr><td><code>Config</code></td><td>UI 配置包装器</td><td>为 Arco Design 注入主题色和当前语言 locale。</td></tr>
+      <tr><td><code>&lt;Router layout={...} /&gt;</code></td><td>路由入口组件</td><td>从根入口把会话历史 provider 包起来的 `Layout` 交给路由层承载。</td></tr>
+      <tr><td><code>bootstrapRendererConfig()</code></td><td>启动服务函数</td><td>等待 `configService.initialize()`，出错只记录日志，不阻断启动流程。</td></tr>
+      <tr><td><code>useAuth()</code></td><td>上下文接口</td><td>给出 `ready`、`status`、登录/登出/刷新能力，驱动路由守卫。</td></tr>
+      <tr><td><code>LayoutContext</code></td><td>上下文接口</td><td>暴露 `isMobile`、`siderCollapsed` 与折叠控制，供 shell 内组件消费。</td></tr>
+      <tr><td><code>NavigationHistoryProvider</code></td><td>上下文接口</td><td>在应用内部维护 back/forward 栈，给标题栏等控件使用。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="providers">3. Provider 栈</h2>
+  <table>
+    <thead>
+      <tr><th>顺序</th><th>Provider</th><th>核心状态 / 作用</th><th>为什么放在这里</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><code>AuthProvider</code></td><td>认证状态、用户、登录登出、刷新</td><td>路由守卫和后续启动闸门都依赖它。</td></tr>
+      <tr><td>2</td><td><code>ThemeProvider</code></td><td>主题模式、样式状态</td><td>进入任意页面前先确定视觉主题。</td></tr>
+      <tr><td>3</td><td><code>PreviewProvider</code></td><td>预览上下文</td><td>对会话与文档预览跨页共享。</td></tr>
+      <tr><td>4</td><td><code>FeedbackProvider</code></td><td>反馈相关 UI 与上下文</td><td>包住运行时故障弹窗与后续页面。</td></tr>
+      <tr><td>5</td><td><code>ConversationHistoryProvider</code></td><td>会话历史共享状态</td><td>只在主应用布局下需要，因此不放到最顶层。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="layers">4. 内部分层结构</h2>
+  <p>先看 renderer 根骨架，再把 provider 的来源单独拆开。这样既能保持文件树可读，也不会把 <code>PreviewProvider</code> 误并到 <code>hooks/context</code>。</p>
+  <p class="muted">L0 回链：想先回到项目层级地图，可打开 <a href="../../00-overview/lessons/0001-project-map.html">00-overview / 项目地图短课</a>。</p>
+  <div class="filetree">packages/desktop/src/renderer/
+├── main.tsx                        ← 根挂载、provider 组装、启动闸门
+├── components/
+│   └── layout/
+│       ├── Router.tsx              ← HashRouter、ProtectedLayout、路由挂点
+│       ├── Layout.tsx              ← 标题栏、侧栏、Outlet、系统级 hooks
+│       ├── Sider.tsx               ← 左侧导航实体
+│       └── AppLoader.tsx           ← checking / lazy fallback
+├── services/
+│   ├── bootstrapRenderer.ts        ← 配置初始化等待
+│   ├── i18n.ts                     ← i18n 初始化
+│   └── registerPwa.ts              ← PWA 注册
+├── hooks/
+│   ├── context/                    ← 全局 provider 与共享状态
+│   ├── system/                     ← deep link、通知、环境监听
+│   ├── ui/                         ← 快捷键与交互手势
+│   └── file/                       ← 目录选择等文件交互
+└── pages/
+    └── conversation/
+        └── Preview/                ← 预览工作区与预览上下文来源</div>
+  <div class="filetree">hooks/context/
+├── AuthContext.tsx                 ← AuthProvider 与 useAuth
+├── ThemeContext.tsx                ← ThemeProvider
+├── FeedbackContext.tsx             ← FeedbackProvider
+├── LayoutContext.tsx               ← LayoutContext
+├── NavigationHistoryContext.tsx    ← NavigationHistoryProvider
+└── ConversationHistoryContext.tsx  ← ConversationHistoryProvider
+
+pages/conversation/Preview/context/
+├── PreviewContext.tsx              ← PreviewProvider 与 usePreviewContext
+└── index.ts                        ← 预览上下文导出入口</div>
+
+  <h2 id="routes">5. 主要路由表</h2>
+  <table>
+    <thead>
+      <tr><th>路径</th><th>页面 / 动作</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>/login</code></td><td>LoginPage</td><td>未认证入口；已认证时重定向到 <code>/guid</code>。</td></tr>
+      <tr><td><code>/</code></td><td>重定向</td><td>受保护区域默认跳到 <code>/guid</code>。</td></tr>
+      <tr><td><code>/guid</code></td><td>Guid</td><td>默认工作台。</td></tr>
+      <tr><td><code>/conversation/:id</code></td><td>Conversation</td><td>单会话工作区。</td></tr>
+      <tr><td><code>/team/:id</code></td><td>TeamIndex</td><td>只有 `TEAM_MODE_ENABLED` 时可访问。</td></tr>
+      <tr><td><code>/assistants</code></td><td>AssistantSettings</td><td>已从 settings 内移出，保留旧路径重定向。</td></tr>
+      <tr><td><code>/settings/agent</code></td><td>AgentSettings</td><td>Agent / ACP 配置页。</td></tr>
+      <tr><td><code>/settings/skills</code></td><td>SkillsSettings</td><td>技能管理页；兼容 import-history 子路径。</td></tr>
+      <tr><td><code>/settings/tools</code></td><td>ToolsSettings</td><td>MCP / Tools 页。</td></tr>
+      <tr><td><code>/settings/appearance</code></td><td>AppearanceSettings</td><td>显示设置；旧 <code>/settings/display</code> 重定向到这里。</td></tr>
+      <tr><td><code>/settings/system</code></td><td>SystemSettings</td><td>系统与关于页入口之一。</td></tr>
+      <tr><td><code>/scheduled</code></td><td>ScheduledTasksPage</td><td>Cron 任务总览。</td></tr>
+      <tr><td><code>/scheduled/:job_id</code></td><td>TaskDetailPage</td><td>Cron 单任务详情。</td></tr>
+      <tr><td><code>*</code></td><td>兜底重定向</td><td>按认证状态回到 <code>/guid</code> 或 <code>/login</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="hooks">6. Shell 级 hooks</h2>
+  <table>
+    <thead>
+      <tr><th>Hook</th><th>事件源</th><th>对 shell 的影响</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>useDeepLink()</code></td><td><code>ipcBridge.deepLink.received</code></td><td>白名单允许的深链可直接跳到会话、团队或模型设置页。</td></tr>
+      <tr><td><code>useNotificationClick()</code></td><td><code>ipcBridge.notification.clicked</code></td><td>点击系统通知后导航回对应会话。</td></tr>
+      <tr><td><code>useBrowserNotification()</code></td><td>会话响应流 + 浏览器 Notification API</td><td>后台页面收到完成或确认事件时弹通知。</td></tr>
+      <tr><td><code>useConversationShortcuts()</code></td><td><code>window.keydown</code></td><td>桌面环境下支持 Ctrl+Tab 切会话、Ctrl/Cmd+T 新建会话。</td></tr>
+      <tr><td><code>useDirectorySelection()</code></td><td>目录选择对话框上下文</td><td>把目录选择器的宿主 context 挂到 shell 顶层。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="deps">7. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>用途</th><th>在本模块的体现</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>React 19 / React DOM</td><td>根渲染与 hooks 机制</td><td><code>createRoot</code>、provider、lazy/Suspense。</td></tr>
+      <tr><td>React Router</td><td>hash 路由与嵌套路由</td><td><code>HashRouter</code>、<code>Routes</code>、<code>Navigate</code>、<code>Outlet</code>。</td></tr>
+      <tr><td>Arco Design</td><td>UI 基础设施</td><td><code>ConfigProvider</code>、<code>Modal</code>、布局组件。</td></tr>
+      <tr><td>i18next</td><td>多语言</td><td>切换 Arco locale、生成错误文案与资源标签。</td></tr>
+      <tr><td><code>configService</code></td><td>配置初始化</td><td>驱动 renderer bootstrap 的准备阶段。</td></tr>
+      <tr><td><code>ipcBridge</code></td><td>桌面事件桥</td><td>托盘、日志流、深链、通知点击、任务停止等能力接入 shell。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="evidence">8. 测试与阅读示例</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>E2E：导航主链</h3>
+      <p><code>tests/e2e/specs/navigation.e2e.ts</code> 验证 guid 页、设置页与 URL 级跨页切换，说明路由和 shell 是可观察的产品主路径。</p>
+    </section>
+    <section class="panel">
+      <h3>Unit：品牌返回逻辑</h3>
+      <p><code>tests/unit/renderer/LayoutSiderBrandHome.dom.test.tsx</code> 验证设置页点击品牌字样会回到最近的非设置路径，直接对应 <code>Layout.tsx</code> 的 shell 行为。</p>
+    </section>
+    <section class="panel">
+      <h3>Unit：浏览器通知</h3>
+      <p><code>tests/unit/renderer/useBrowserNotification.dom.test.tsx</code> 证明 shell hooks 不只是监听系统事件，还会在点击通知时把用户带回会话。</p>
+    </section>
+  </div>
+  <div class="callout">
+    <p><strong>推荐阅读顺序：</strong><code>main.tsx</code> 看启动闸门，<code>Router.tsx</code> 看入口分发，<code>Layout.tsx</code> 看共享交互；之后再按 hook 名称回跳到 <code>hooks/system</code>、<code>hooks/context</code>，以及 <code>pages/conversation/Preview/context/PreviewContext.tsx</code>。</p>
+  </div>
+</main>
+</body>
+</html>

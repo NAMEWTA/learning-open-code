@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · executeIsolated 隔离执行：子Agent/Workflow/Cron 共用模型</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .arch { background: #f7f9fc; border: 1px solid #d6e4ff; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; text-align: center; font-size: 0.88rem; line-height: 2.2; }
+  .arch .layer { display: inline-block; background: #eef4ff; border: 1.5px solid #1d6fd6; border-radius: 6px; padding: 0.2rem 1rem; margin: 0.15rem; font-weight: 600; }
+  .arch .arrow { color: #1d6fd6; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>第 3 课 · executeIsolated 隔离执行：子Agent/Workflow/Cron 共用模型 <span class="tag">隔离模型</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：学完你能画出 executeIsolated 的完整执行流程图，讲清独立 session 目录的创建策略，理解 resume 机制如何在中断后恢复运行，以及子 Agent / Workflow / Cron 三者如何共用同一执行模型。
+</div>
+
+<p><code>executeIsolated</code> 位于 L4799，是 SessionCoordinator 的"后台引擎"。它与 promptSession 的区别不是技术实现的不同，而是<b>场景语义的不同</b>——用户在等回复 vs 后台静默执行。</p>
+
+<h2>一、三种使用场景，一种执行模型</h2>
+
+<table>
+<tr><th>场景</th><th>触发方式</th><th>session 行为</th><th>结果处理</th></tr>
+<tr><td><b>子 Agent (Subagent)</b></td><td>主 Agent 的 tool_use 触发</td><td>创建独立 session，注入子 Agent 的 system prompt</td><td>结果通过 <code>turnContext</code> 回传主 session</td></tr>
+<tr><td><b>Workflow</b></td><td>插件 <code>defineTask()</code> 或手动触发</td><td>创建独立 session，可能使用不同的 Agent</td><td>结果写入 task 输出，通过事件通知</td></tr>
+<tr><td><b>Cron / 定时任务</b></td><td><code>scheduleTask()</code> 调度触发</td><td>每次执行创建新 session（或复用上次的 resume）</td><td>结果更新 task 状态，支持下次 resume</td></tr>
+</table>
+
+<div class="side">
+💡 <b>设计洞察：</b>三种场景共享同一个 executeIsolated 方法。这得益于"隔离执行"的抽象——不管是子 Agent 调用、Workflow 步骤还是 Cron 触发，都需要：(1) 独立 session 目录避免污染主对话；(2) 独立的 prompt 构建不受主 session 快照限制；(3) resume 能力支持长任务的中断恢复。
+</div>
+
+<h2>二、执行流程：7 步从接收到完成</h2>
+
+<div class="step"><span class="num">1</span><b>参数校验与 session 目录创建</b>：为 isolate 创建独立的 session 目录（区别于主 session 的 agents/{id}/sessions/*.jsonl）。如果 resume，读取已有 session 的状态。<br><span class="where">independent session directory</span></div>
+
+<div class="step"><span class="num">2</span><b>Prompt 构建</b>：独立构建 system prompt——不复用主 session 的冻结快照。根据场景类型注入不同的上下文（子 Agent 的 task description、Workflow 的步骤定义、Cron 的任务描述）。<br><span class="where">fresh prompt build</span></div>
+
+<div class="step"><span class="num">3</span><b>工具集选择</b>：可指定工具子集或独立工具列表。子 Agent 可能只拥有主 Agent 的部分工具；Workflow 可能使用专属工具。<br><span class="where">tool subset selection</span></div>
+
+<div class="step"><span class="num">4</span><b>Pi SDK 执行</b>：调用 <code>AgentSession.prompt()</code>，与主 session 相同的 LLM 调用管道。但 session 对象是独立的，不影响主对话的状态。<br><span class="where">isolated AgentSession</span></div>
+
+<div class="step"><span class="num">5</span><b>中断处理</b>：如果执行被中断（进程退出、超时、用户取消），session 目录中的 JSONL 文件保留已完成的 turns。下次 resume 时从断点继续。<br><span class="where">resume from JSONL</span></div>
+
+<div class="step"><span class="num">6</span><b>结果序列化</b>：执行完成后，将结果序列化为标准格式（文本 + tool_use 记录 + token 用量）。<br><span class="where">result serialization</span></div>
+
+<div class="step"><span class="num">7</span><b>结果回传</b>：子 Agent → 通过 <code>turnContext</code> 注入主 session 的下一个 turn。Workflow/Cron → 更新 task 状态，触发事件通知。<br><span class="where">result delivery</span></div>
+
+<h2>三、Resume 机制详解</h2>
+
+<p>Resume 是 executeIsolated 区别于 promptSession 的核心能力。实现原理：</p>
+
+<pre><code>// 伪代码：resume 逻辑
+async function executeIsolated(opts) {
+  let sessionEntry;
+  if (opts.resumeSessionPath) {
+    // 1. 从磁盘恢复已有 session
+    sessionEntry = await restoreSessionFromJsonl(
+      opts.resumeSessionPath
+    );
+    // 2. JSONL 中已包含之前所有的 user/assistant/tool_result 消息
+    // 3. Pi SDK 会自动跳过已完成的消息，从断点继续
+  } else {
+    // 创建全新 session
+    sessionEntry = await createIsolatedSession(opts);
+  }
+  // 继续执行...
+  const result = await sessionEntry.session.prompt(opts.prompt);
+  // 结果 + 中间状态全部在独立 JSONL 中
+  return result;
+}</code></pre>
+
+<div class="danger">
+⚠️ <b>Resume 的限制：</b>Resume 只能从中断的 turn 边界恢复（JSONL 以 turn 为单位）。如果一个 turn 内部正执行 tool_use 时中断，恢复后该 tool_use 会重新执行（不是继续执行）。这是因为 LLM API 不支持"恢复半个 turn"。工具设计时应考虑幂等性。
+</div>
+
+<h2>四、三种场景的 session 目录策略</h2>
+
+<table>
+<tr><th>场景</th><th>session 目录位置</th><th>清理策略</th></tr>
+<tr><td>子 Agent</td><td>主 session 目录下的子目录（如 <code>sessions/{main}/subagents/{sub-id}/</code>）</td><td>随主 session 关闭时清理</td></tr>
+<tr><td>Workflow</td><td>插件 dataDir 下的独立目录</td><td>workflow 完成后清理（或保留用于审计）</td></tr>
+<tr><td>Cron</td><td>Agent 的任务目录（如 <code>agents/{id}/tasks/{task-id}/</code>）</td><td>保留最后一次执行的 session 用于下次 resume</td></tr>
+</table>
+
+<div class="side">
+💡 <b>为什么不用内存缓存？</b>子 Agent / Workflow / Cron 的执行可能跨进程生命周期（进程重启、崩溃恢复），必须持久化到磁盘。JSONL 格式天然支持追加写——每完成一个 turn 就追加一行，即使进程崩溃也只丢失最后一个 turn。
+</div>
+
+<h3>Resume 的边界条件处理</h3>
+
+<p>Resume 不仅是"从文件恢复"，还涉及多个边界条件：</p>
+
+<ul>
+<li><b>Agent 变更：</b>如果子 Agent 的定义在两次执行之间被修改（如更新了 system prompt），resume 后的行为取决于 <code>capabilityDrift</code> 检测——如果 prompt 快照与当前 Agent 不一致，Coordinator 可能拒绝 resume 或提示用户。</li>
+<li><b>工具集变更：</b>如果插件的工具定义在 resume 前后不同，<code>markCapabilitySnapshotsStale()</code> 会标记漂移，提示用户刷新 session。此时 resume 仍可继续，但使用旧工具快照。</li>
+<li><b>模型切换：</b>如果 resume 时使用了与创建时不同的模型，可能触发 compact 流程——因为不同模型的上下文窗口大小不同。</li>
+<li><b>超时处理：</b>长时间未完成的 isolate（如 Cron 任务执行超过 24 小时）会被标记为 abandoned，需要显式重新触发而非自动 resume。</li>
+</ul>
+
+<h2>五、检验一下</h2>
+
+<div class="quiz">
+<p>Q1. executeIsolated 支持哪些使用场景？</p>
+<span class="opt">A. 仅子 Agent 调用</span>
+<span class="opt">B. 子 Agent、Workflow、Cron 定时任务——三种场景共用同一执行模型</span>
+<span class="opt">C. 子 Agent 和 Workflow，但不包括 Cron</span>
+<span class="opt">D. 仅限插件发起的后台任务</span>
+<details><summary>看答案</summary><b>B</b>。三种场景共享 executeIsolated：子 Agent 由 tool_use 触发，Workflow 由 defineTask 触发，Cron 由 scheduleTask 触发。它们都需要独立 session 目录、独立 prompt 构建和 resume 能力。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. Resume 机制的限制是什么？</p>
+<span class="opt">A. 只能 resume 一次，不能多次 resume</span>
+<span class="opt">B. 只能从 turn 边界恢复——如果一个 turn 内部的 tool_use 执行中断，恢复后该 tool_use 会重新执行而非继续</span>
+<span class="opt">C. 只能 resume 最近 24 小时内的 session</span>
+<span class="opt">D. Resume 后无法使用任何工具</span>
+<details><summary>看答案</summary><b>B</b>。JSONL 以 turn 为单位记录，LLM API 不支持"恢复半个 turn"。如果 tool_use 正在执行时进程崩溃，恢复后该 tool_use 会重新执行。工具应设计为幂等操作以应对这种场景。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 子 Agent 的执行结果如何回传到主 session？</p>
+<span class="opt">A. 通过 WebSocket 推送到 UI 前端</span>
+<span class="opt">B. 通过 turnContext 机制——在下一个主 session prompt 时，turnContext 被注入到扩展中</span>
+<span class="opt">C. 写入共享数据库，主 session 轮询读取</span>
+<span class="opt">D. 通过 process.send() IPC 消息</span>
+<details><summary>看答案</summary><b>B</b>。子 Agent 完成后，结果存入 turnContext。在下一个 promptSession 调用的第 1 步 normalizeSessionTurnContext 和第 7 层的 turnContextExtension 中被注入到 system prompt，作为上下文提供给主 Agent。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 子 Agent 的 session 目录为什么放在主 session 的子目录下而非独立位置？</p>
+<span class="opt">A. 为了减少文件系统的 inode 消耗</span>
+<span class="opt">B. 确保子 Agent session 随主 session 关闭时一起清理，避免孤立的 session 文件累积；同时便于用户理解 session 的层级关系</span>
+<span class="opt">C. 因为文件系统不支持跨目录的原子操作</span>
+<span class="opt">D. 这是 Pi SDK 的限制，Coordinator 无法选择其他位置</span>
+<details><summary>看答案</summary><b>B</b>。子 Agent 的 session 与主 session 有生命周期绑定——主 session 关闭时子 session 的对话历史通常不再有意义。放在子目录下确保批量清理的原子性（删除主目录即可），且为用户提供了清晰的 session 层级视图。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：阅读 <code>session-coordinator.ts</code> L4799 之后的 executeIsolated 方法实现 + createSession 中的 turnContext 处理逻辑（L1459-1465）。</div>
+
+<div class="reminder">💡 有疑问？直接问我。可以问：「如果子 Agent 执行超过 30 分钟，主 session 会超时吗？」「Workflow 的多个步骤之间如何传递中间结果？」下一课聚焦 <strong>并发控制与错误恢复</strong>——Turn 停滞看门狗、Token 超限压缩、工具执行失败重试。</div>
+
+<div class="nav">课程 0003 / SessionCoordinator 架构剖析 · 上一课：<a href="0002.html">0002 promptSession 流程</a> · 下一课：<a href="0004.html">0004 并发控制与错误恢复</a></div>
+
+</body>
+</html>

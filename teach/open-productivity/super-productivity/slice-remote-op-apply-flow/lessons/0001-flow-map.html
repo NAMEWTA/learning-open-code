@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 远端 operation apply 分流图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断远端 ops 下载后进入哪条 apply 或冲突路径</p>
+    <h1>远端 operation 下载后的分流图</h1>
+    <p class="lead">这节只练一个判断：下载到的 ops 不是马上写 NgRx。它们先经过下载过滤、full-state gate、schema migration、clean-slate 过滤和 vector clock 判定，最后才进入 direct apply、LWW 或 destructive full-state 分支。</p>
+    <p>父级 L1：<a href="../../module-op-log-sync/lessons/0001-op-log-sync-module-tour.html">Operation Log 与同步模块</a>。相关 L2：<a href="../../slice-op-log-sync-flow/lessons/0001-flow-map.html">本地操作到同步的路径图</a>。源码锚点见 <a href="../reference/remote-op-apply-flow-reference.html#source-anchors">参考文档</a>。</p>
+
+    <h2>1. 先看总分流</h2>
+    <pre class="mermaid">sequenceDiagram
+  participant Wrapper as SyncWrapperService
+  participant Sync as OperationLogSyncService
+  participant Download as OperationLogDownloadService
+  participant Process as RemoteOpsProcessingService
+  participant Apply as applyRemoteOperations
+  participant Applier as OperationApplierService
+  participant Meta as bulk meta-reducer
+  Wrapper->>Sync: downloadRemoteOps(provider, options)
+  Sync->>Download: downloadRemoteOps(provider, options)
+  Download-->>Sync: newOps / snapshot / latest seq
+  alt incoming full-state conflict gate
+    Sync->>Sync: checkIncomingFullStateConflict()
+    Sync-->>Wrapper: cancelled or force download
+  else normal remote ops
+    Sync->>Process: processRemoteOps(newOps)
+    Process->>Process: migration + clean-slate filter
+    alt batch SYNC_IMPORT or BACKUP_IMPORT
+      Process->>Apply: applyNonConflictingOps(full-state ops)
+    else skipConflictDetection
+      Process->>Apply: applyNonConflictingOps(ops)
+    else vector clock CONFLICT
+      Process->>Process: autoResolveConflictsLWW()
+      Process->>Apply: applyRemoteOperations(resolved ops)
+    else no conflict
+      Process->>Apply: applyNonConflictingOps(nonConflicting)
+    end
+    Apply->>Applier: applyOperations(ops)
+    Applier->>Meta: bulkApplyOperations()
+    Meta-->>Applier: updated state
+    Apply-->>Process: mark applied + merge clocks
+  end</pre>
+
+    <p>入口锚点：<span class="where">src/app/imex/sync/sync-wrapper.service.ts</span> 在 super sync 下载阶段调用 <code>OperationLogSyncService.downloadRemoteOps()</code>，并在用户取消 conflict dialog 时提前返回。</p>
+    <pre class="diagram">// sync-wrapper.service.ts — download phase entry
+const isNeverSyncedAtSyncStart = !(await this._opLogSyncService.hasSyncedOps());
+
+const downloadResult = await this._opLogSyncService.downloadRemoteOps(
+  syncCapableProvider,
+  {
+    forceFromSeq0: isProviderSwitch || undefined,
+    isNeverSynced: isNeverSyncedAtSyncStart,
+  },
+);
+this._consecutiveSuperSyncAuthFailures = 0;
+
+if (downloadResult.kind === 'cancelled') {
+  return 'HANDLED_ERROR';
+}</pre>
+
+    <pre class="diagram">SyncWrapperService.sync()
+  ↓ capture isNeverSynced, then download phase
+OperationLogSyncService.downloadRemoteOps()
+  ↓ delegates I/O
+OperationLogDownloadService.downloadRemoteOps()
+  ↓ pagination, dedupe applied ids, decrypt → newOps
+OperationLogSyncService (orchestrator branches)
+  ├─ fileSnapshotOps + snapshotState → hydrate snapshot，不创建 SYNC_IMPORT
+  ├─ incoming SYNC_IMPORT/BACKUP_IMPORT → conflict gate 先问是否丢本地 pending
+  └─ 普通 newOps → RemoteOpsProcessingService.processRemoteOps()
+       ↓ schema migration
+       ↓ SyncImportFilterService clean-slate 过滤
+       ├─ SYNC_IMPORT/BACKUP_IMPORT 在 batch 内 → 跳过普通冲突检测，直接 full-state apply
+       ├─ skipConflictDetection=true → force download 后直接 apply
+       ├─ CONCURRENT → ConflictResolutionService.autoResolveConflictsLWW()
+       └─ 无冲突 → applyNonConflictingOps()</pre>
+    <div class="callout decision">不要把四类路径合并：普通 remote ops 走 vector clock；incoming full-state 先过 gate；`SYNC_IMPORT` / `BACKUP_IMPORT` 在 `processRemoteOps()` 内直接 full-state apply；`REPAIR` 属于 full-state 过滤和 store 清理分类，但不是这个 direct full-state 分支的触发条件。</div>
+
+    <h2>2. 四个判断点</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>判断点</th><th>问什么</th><th>去哪里看</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>下载后能否推进游标</td><td>ops 是否已经写入或应用成功？失败时不能提前 `setLastServerSeq()`。</td><td><code>src/app/op-log/sync/operation-log-sync.service.ts</code></td></tr>
+          <tr><td>是否会丢本地 pending</td><td>incoming full-state op 是否遇到 meaningful pending ops？有则走 conflict dialog。</td><td><code>src/app/op-log/sync/sync-import-conflict-gate.service.ts</code></td></tr>
+          <tr><td>普通 ops 是否冲突</td><td>远端 op 的 clock 与本地 entity frontier 是 `CONCURRENT`、`LESS_THAN`、`GREATER_THAN` 还是 `EQUAL`？</td><td><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></td></tr>
+          <tr><td>本地状态如何落地</td><td>新远端 op 是否先写成 `remote/pending`，批量 replay 后才标 `applied`？</td><td><code>packages/sync-core/src/remote-apply.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. apply handler 的入口</h2>
+    <p>普通无冲突 ops 会进入 <span class="where">src/app/op-log/sync/remote-ops-processing.service.ts</span> 的 <code>applyNonConflictingOps()</code>。它调用 <span class="where">packages/sync-core/src/remote-apply.ts</span>：先 <code>appendBatchSkipDuplicates(..., 'remote', { pendingApply: true })</code>，再让 <span class="where">src/app/op-log/apply/operation-applier.service.ts</span> 批量 replay。</p>
+    <p>replay 不是逐个 dispatch 原始 action，而是发 <code>bulkApplyOperations()</code>。随后 <span class="where">src/app/op-log/apply/bulk-hydration.meta-reducer.ts</span> 逐 op 调用 <span class="where">src/app/op-log/apply/operation-converter.util.ts</span>，转换出的 action 带 <code>meta.isRemote</code>，防止远端 replay 又被 capture 成本地 op。LWW 生成的 <code>[TASK] LWW Update</code> 最终由 <span class="where">src/app/root-store/meta/task-shared-meta-reducers/lww-update.meta-reducer.ts</span> 替换或重建实体。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：Client A 下载到 Client B 的 `SYNC_IMPORT`，同时 A 有一个未上传的用户新建任务。应该先把 `SYNC_IMPORT` 交给 `processRemoteOps()` 直接应用，还是先跑 conflict gate？如果用户选择使用远端数据，哪些本地 op-log 写入会发生？</p>
+    <div class="answer">参考答案：先跑 <code>SyncImportConflictGateService.checkIncomingFullStateConflict()</code>，因为 incoming full-state 会丢弃 meaningful pending。若用户选择使用远端数据，<code>forceDownloadRemoteState()</code> 会先保存可撤销备份，清理本地 full-state ops，标记 unsynced ops 为 rejected，重置 lastServerSeq 后从 0 下载；随后用 <code>processRemoteOps(..., { skipConflictDetection: true })</code> 应用远端 ops。普通 remote ops 不走这个 destructive 分支。</div>
+    <p>主要来源：<a href="../../../../../open-productivity/super-productivity/src/app/op-log/sync/remote-ops-processing.service.ts"><code>src/app/op-log/sync/remote-ops-processing.service.ts</code></a>。下一步可向 agent 追问“用一条 TASK update 逐步追到 bulk meta-reducer”。</p>
+  </article>
+</main>
+</body>
+</html>

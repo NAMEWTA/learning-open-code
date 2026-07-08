@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capacitor 移动端与 PWA 宿主参考</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 参考文档 · 移动端/PWA 入口清单、模块骨架、职责边界与判断表</p>
+    <h1>Capacitor 移动端与 PWA 宿主参考</h1>
+    <p>职责一句话：本模块把 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>中的 Angular SPA 放进 Web/PWA、Android、iOS 三种运行外壳，并为系统能力建立受控桥接。Angular 壳层详见 <a href="../../module-angular-app-shell/reference/angular-app-shell-overview.html">Angular L1</a>；桌面 IPC 边界详见 <a href="../../module-electron-host/reference/electron-host-overview.html">Electron L1</a>。</p>
+
+    <h2>模块骨架</h2>
+    <div class="filetree">super-productivity/
+├── src/
+│   ├── main.ts                                      ← Angular bootstrap、SW/native 生命周期
+│   ├── manifest.json                               ← PWA manifest
+│   └── app/
+│       ├── features/
+│       │   ├── android/                            ← Android 专用 Angular effects/bridge 类型
+│       │   ├── ios/                                ← iOS resume/background tracking
+│       │   └── mobile/                             ← iOS/Android 通用 native notification
+│       └── core/
+│           └── platform/                           ← Capacitor 平台与提醒服务
+├── capacitor.config.ts                             ← Capacitor app/webDir/plugins 配置
+├── ngsw-config.json                                ← Angular service worker 缓存策略
+├── android/                                       ← Android 原生壳、Gradle、Manifest、services
+└── ios/                                           ← iOS 原生壳、Xcode、Swift plugins</div>
+
+    <h2>入口清单</h2>
+    <table>
+      <thead>
+        <tr><th>入口</th><th>源码</th><th>职责</th><th>先看场景</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular bootstrap</td><td><code>src/main.ts</code></td><td>注册 Angular providers、ServiceWorkerModule、Capacitor App listeners、Android back button、后台 flush。</td><td>首屏、退后台、service worker、native 生命周期。</td></tr>
+        <tr><td>Capacitor config</td><td><code>capacitor.config.ts</code></td><td>声明 <code>appId</code>、<code>appName</code>、<code>webDir: dist/browser</code>、plugin 配置、Android includePlugins、iOS WebView 行为。</td><td>native 壳配置、插件是否被打进 Android、safe area/keyboard/status bar。</td></tr>
+        <tr><td>PWA cache</td><td><code>ngsw-config.json</code></td><td>配置 app shell、关键资产、懒加载静态资源和 API freshness cache。</td><td>PWA 离线、资源更新、Web API 缓存。</td></tr>
+        <tr><td>PWA manifest</td><td><code>src/manifest.json</code></td><td>声明 standalone、portrait、start_url、scope、icons、theme/background color。</td><td>安装体验、启动 URL、图标、显示模式。</td></tr>
+        <tr><td>Android Manifest</td><td><code>android/app/src/main/AndroidManifest.xml</code></td><td>声明权限、launcher activity、Capacitor activity、OAuth intent、foreground services、reminder receivers、home widget。</td><td>Android 系统入口、权限、通知、Widget、分享、深链。</td></tr>
+        <tr><td>Android Capacitor activity</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code></td><td>注册 native plugins，初始化 WebView，注入 <code>window.SUPAndroid</code>，处理 share/reminder/widget/lifecycle。</td><td>Android Capacitor 壳、离线模式、桥接事件。</td></tr>
+        <tr><td>Android legacy activity</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/FullscreenActivity.kt</code></td><td>旧在线 WebView/TWA 风格入口，按 LaunchDecider 可切到 CapacitorMainActivity。</td><td>升级迁移、旧数据用户、在线/离线启动模式。</td></tr>
+        <tr><td>Android bridge</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code></td><td>暴露 storage、share、foreground service、focus mode、reminder、widget、startup overlay、SuperSync credential 等 native 方法。</td><td>TypeScript 调 native、native 回调 JS。</td></tr>
+        <tr><td>Android TS bridge</td><td><code>src/app/features/android/android-interface.ts</code></td><td>读取 <code>window.SUPAndroid</code>，定义接口、Promise wrapper、ReplaySubject/Subject 事件。</td><td>Angular 侧如何订阅 native 事件或调用 native 方法。</td></tr>
+        <tr><td>Feature effects 注册</td><td><code>src/app/root-store/feature-stores.module.ts</code></td><td>按 <code>IS_ANDROID_WEB_VIEW</code>、<code>IS_IOS_NATIVE</code>、<code>IS_NATIVE_PLATFORM</code> 条件注册 Android/iOS/mobile effects。</td><td>effect 没触发、平台判断错误。</td></tr>
+        <tr><td>iOS bridge controller</td><td><code>ios/App/App/CustomViewController.swift</code></td><td>继承 <code>CAPBridgeViewController</code>，注册 <code>WebDavHttpPlugin</code> 与 <code>StoreReviewPlugin</code>。</td><td>iOS 自定义 native plugin。</td></tr>
+        <tr><td>iOS WebDAV plugin</td><td><span class="where">ios/App/App/WebDavHttpPlugin.swift</span></td><td>以 <code>URLSession</code> 发 WebDAV 请求并禁用 HTTP cache，避免同步读到旧数据。</td><td>iOS WebDAV 同步、缓存、网络错误分类。</td></tr>
+        <tr><td>mobile notifications</td><td><code>src/app/features/mobile/store/mobile-notification.effects.ts</code></td><td>在 native 平台调度任务提醒、due-date、重复任务预提醒、iOS deadline reminder。</td><td>移动端提醒调度、权限、exact alarm。</td></tr>
+        <tr><td>构建脚本</td><td><code>package.json</code></td><td><code>dist:android</code>、<code>dist:android:prod</code>、<code>sync:android</code>、<code>sync:ios</code>、<code>dist:ios:prod</code> 串联 Web build 与 Capacitor sync。</td><td>移动构建链路、webDir 产物同步。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>职责边界</h2>
+    <table>
+      <thead>
+        <tr><th>层</th><th>能做什么</th><th>不能假设什么</th><th>代表文件</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular app</td><td>路由、UI、NgRx、op-log、effects、同步 provider、平台 service 调用。</td><td>不能直接拥有 Android AlarmManager、home widget、iOS URLSession、系统通知 action。</td><td><code>src/main.ts</code>、<code>src/app/root-store/feature-stores.module.ts</code></td></tr>
+        <tr><td>PWA/service worker</td><td>浏览器安装体验、静态资源缓存、Web API freshness cache。</td><td>native 平台不会使用当前 Angular service worker；源码会在 native/Electron 下注销已有 SW。</td><td><code>ngsw-config.json</code>、<code>src/manifest.json</code></td></tr>
+        <tr><td>Capacitor shell</td><td>把 <code>dist/browser</code> 放进 WebView，提供 App lifecycle、插件配置、native plugin 通道。</td><td>配置文件不是业务逻辑；具体系统行为在 Android Kotlin/Swift 或 Angular effects 中。</td><td><code>capacitor.config.ts</code>、<code>android/</code>、<code>ios/</code></td></tr>
+        <tr><td>Android native</td><td>WebView 初始化、JavaScriptInterface、foreground service、AlarmManager、receiver、widget、share intent、startup overlay。</td><td>不能直接修改 Angular store；通常通过 <code>window.SUPAndroid</code> subject、队列或 get-and-clear 方法交给 Angular。</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code>、<code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code>、<code>android/app/src/main/AndroidManifest.xml</code></td></tr>
+        <tr><td>iOS native</td><td>Capacitor view controller、Swift plugin、URLSession、StoreReview、AppDelegate deep link 转发。</td><td>当前 iOS feature 面较窄，许多提醒调度仍走 Capacitor LocalNotifications，而非自写 Swift receiver。</td><td><span class="where">ios/App/App/CustomViewController.swift</span>、<span class="where">ios/App/App/WebDavHttpPlugin.swift</span>、<span class="where">ios/App/App/AppDelegate.swift</span></td></tr>
+        <tr><td>平台桥接</td><td>把 native 事件转成 RxJS subject，把 Angular 请求转成 native 方法调用。</td><td>桥接不是业务真相；业务状态仍要回到 NgRx/task/sync/op-log 层判断。</td><td><code>src/app/features/android/android-interface.ts</code>、<code>src/app/features/ios/ios-interface.ts</code>、<code>src/app/core/platform/capacitor-reminder.service.ts</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>关键依赖</h2>
+    <table>
+      <thead>
+        <tr><th>依赖/机制</th><th>当前源码用法</th><th>判断要点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>@capacitor/app</code></td><td><code>src/main.ts</code> 注册 backButton、appStateChange、appUrlOpen；<code>src/app/features/ios/ios-interface.ts</code> 发 resume。</td><td>App lifecycle 负责后台 flush 和 resume signal，不等于 PWA lifecycle。</td></tr>
+        <tr><td><code>@capawesome/capacitor-background-task</code></td><td>Android/iOS 退后台时用 <code>BackgroundTask.beforeExit()</code> 包住 op-log flush。</td><td>用于争取 native 暂停前的持久化预算。</td></tr>
+        <tr><td><code>@capacitor/local-notifications</code></td><td>iOS 和非 Android native fallback 调度提醒；Android Capacitor/legacy WebView 都优先走 <code>SUPAndroid.scheduleNativeReminder</code> 到 AlarmManager。</td><td>Android 精确提醒优先看 AlarmManager 桥，iOS 看 Capacitor LocalNotifications。</td></tr>
+        <tr><td>Android AlarmManager</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/service/ReminderNotificationHelper.kt</code> 使用 exact/inexact alarm，触发 <code>android/app/src/main/java/com/superproductivity/superproductivity/receiver/ReminderAlarmReceiver.kt</code>。</td><td>提醒不是 JS timer；App 关闭后由 OS 广播唤起 receiver。</td></tr>
+        <tr><td>Android WorkManager</td><td>Gradle 引入 <code>work-runtime-ktx</code>，native SuperSync credential bridge 支持后台 sync reminder worker。</td><td>后台服务器检查不依赖 WebView 常驻。</td></tr>
+        <tr><td>Angular Service Worker</td><td><code>ngsw-config.json</code> 控制 PWA 缓存；<code>src/main.ts</code> 在 native/Electron 下禁用/注销。</td><td>PWA 缓存问题不要误查 Android receiver 或 iOS plugin。</td></tr>
+        <tr><td>Android <code>addJavascriptInterface</code></td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code> 将 <code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code> 注入为 <code>SUPAndroid</code>。</td><td>任何从 native 拼 JS 字符串回调的路径都要留意转义、队列与冷启动时序。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>阅读示例</h2>
+    <table>
+      <thead>
+        <tr><th>问题</th><th>阅读路径</th><th>边界判断</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>退后台后最近操作丢失。</td><td><code>src/main.ts</code> → <code>OperationWriteFlushService</code> → <code>BackgroundTask.beforeExit()</code>。</td><td>这是 native lifecycle + op-log flush，不是 PWA cache。</td></tr>
+        <tr><td>Android 回退键从 tab 切换历史里乱跳。</td><td><code>src/main.ts</code> backButton listener → <code>src/app/features/android/android-back-button.service.ts</code>。</td><td>Capacitor App event 进入 Angular service，再按 route/dialog/store overlay 分类。</td></tr>
+        <tr><td>Android 分享文本生成空任务。</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code> share intent → <code>src/app/features/android/android-interface.ts</code> → <code>src/app/features/android/store/android.effects.ts</code> 的 <code>buildTaskTitle()</code>。</td><td>native 接收 intent，Angular 决定 task title 和 attachment。</td></tr>
+        <tr><td>Widget 勾选后任务稍后才更新。</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/widget/TaskListWidgetProvider.kt</code> → <code>WidgetDoneQueue</code> → <code>src/app/features/android/store/android-widget.effects.ts</code> drain。</td><td>Widget 先写 native 队列，Angular 在 resume 或 drain signal 后读队列并修改 store。</td></tr>
+        <tr><td>iOS WebDAV 同步读到旧响应。</td><td><span class="where">ios/App/App/CustomViewController.swift</span> → <span class="where">ios/App/App/WebDavHttpPlugin.swift</span>。</td><td>这是 iOS native HTTP cache 策略，不是 Angular service worker。</td></tr>
+        <tr><td>PWA 访问 GitHub/GitLab/Atlassian API 缓慢或过期。</td><td><code>ngsw-config.json</code> dataGroups <code>api-freshness</code>。</td><td>只影响浏览器 PWA 的 service worker 数据缓存。</td></tr>
+      </tbody>
+    </table>
+
+    <h2>边界判断表</h2>
+    <table>
+      <thead>
+        <tr><th>看到的线索</th><th>优先归属</th><th>第一文件</th><th>第二文件</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Angular runtime 注册 ngsw-worker.js、installMode、dataGroups、manifest icon。</td><td>PWA/service worker</td><td><code>ngsw-config.json</code></td><td><code>src/manifest.json</code></td></tr>
+        <tr><td><code>CapacitorApp.addListener('appStateChange')</code>、<code>backButton</code>。</td><td>Capacitor lifecycle</td><td><code>src/main.ts</code></td><td><code>src/app/util/is-native-platform.ts</code></td></tr>
+        <tr><td><code>window.SUPAndroid</code>、<code>@JavascriptInterface</code>、native queue。</td><td>Android bridge</td><td><code>src/app/features/android/android-interface.ts</code></td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/webview/JavaScriptInterface.kt</code></td></tr>
+        <tr><td>AlarmManager、receiver、notification action、exact alarm。</td><td>Android native reminder</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/service/ReminderNotificationHelper.kt</code></td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/receiver/ReminderAlarmReceiver.kt</code></td></tr>
+        <tr><td>Home screen widget、RemoteViews、AppWidgetProvider。</td><td>Android native widget</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/widget/TaskListWidgetProvider.kt</code></td><td><code>src/app/features/android/store/android-widget.effects.ts</code></td></tr>
+        <tr><td><code>CAPBridgeViewController</code>、Swift <code>CAPPlugin</code>。</td><td>iOS native plugin</td><td><span class="where">ios/App/App/CustomViewController.swift</span></td><td><span class="where">ios/App/App/WebDavHttpPlugin.swift</span></td></tr>
+        <tr><td><code>IS_ANDROID_WEB_VIEW</code>、<code>IS_IOS_NATIVE</code>、<code>IS_NATIVE_PLATFORM</code>。</td><td>平台条件注册</td><td><code>src/app/root-store/feature-stores.module.ts</code></td><td><code>src/app/util/is-native-platform.ts</code></td></tr>
+        <tr><td><code>dist:android</code>、<code>sync:ios</code>、<code>webDir</code>。</td><td>移动构建/同步</td><td><code>package.json</code></td><td><code>capacitor.config.ts</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>后续 L2 线索</h2>
+    <table>
+      <thead>
+        <tr><th>候选切片</th><th>入口</th><th>要讲清的链路</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>后台 flush 防丢操作</td><td><code>src/main.ts</code></td><td>appStateChange → BackgroundTask.beforeExit → TaskService/OperationWriteFlushService → IndexedDB。</td></tr>
+        <tr><td>Android native reminder</td><td><code>src/app/features/mobile/store/mobile-notification.effects.ts</code></td><td>task selector → CapacitorReminderService → SUPAndroid → AlarmManager → receiver/action queue。</td></tr>
+        <tr><td>Android share intent</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/CapacitorMainActivity.kt</code></td><td>ACTION_SEND → pending queue → onShareWithAttachment$ → task/attachment 创建。</td></tr>
+        <tr><td>Android home widget</td><td><code>src/app/features/android/store/android-widget.effects.ts</code></td><td>NgRx selector → widget_data snapshot → RemoteViews → done queue drain。</td></tr>
+        <tr><td>iOS WebDAV bridge</td><td><span class="where">ios/App/App/WebDavHttpPlugin.swift</span></td><td>Angular sync provider → Capacitor plugin call → URLSession no-cache → typed error。</td></tr>
+        <tr><td>PWA 缓存更新</td><td><code>ngsw-config.json</code></td><td>assetGroups/dataGroups → install/update mode → API freshness → native 平台注销 SW。</td></tr>
+        <tr><td>Android 离线启动迁移</td><td><code>android/app/src/main/java/com/superproductivity/superproductivity/app/LaunchDecider.kt</code></td><td>FullscreenActivity launcher → stored launch mode/legacy data → CapacitorMainActivity。</td></tr>
+      </tbody>
+    </table>
+
+    <p>配套短课：<a href="../lessons/0001-mobile-pwa-host-module-tour.html">0001 Capacitor 移动端与 PWA 宿主</a>。</p>
+  </article>
+</main>
+</body>
+</html>

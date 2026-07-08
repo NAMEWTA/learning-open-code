@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>资源上传和访问流程地图</title>
+  <link rel="stylesheet" href="../assets/resource-upload-access.css" />
+</head>
+<body>
+  <h1>资源上传和访问流程地图</h1>
+  <p class="lead">这一课只做一件事：把 Admin 资源上传到公开访问 URL 的主链路画清楚。学完后，你应该能判断问题卡在入口权限、资源元数据、存储后端、<code>storageKey</code> 校验还是 <code>/files/**</code> 响应。</p>
+  <div class="meta">
+    <span class="pill">学习目标：画出上传到访问主链路</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<span class="where">ResourceService.java</span></span>
+    <span class="pill"><a href="../reference/resource-upload-access-flow-map.html">资源访问参考图谱</a></span>
+  </div>
+
+  <h2>1. Admin 入口只收请求</h2>
+  <p><code>ResourceController</code> 暴露三条入口：<code>POST /resource/upload</code>、<code>DELETE /resource/{id}</code> 和 <code>GET /resource/page</code>。三者都有 <code>@LoginRequired</code>，按当前注解默认值是管理员角色入口。真正业务在 <code>ResourceAdminService</code>：上传时取当前用户作为 <code>creatorId</code>，如果请求没有传 <code>bizType</code>，默认写 <code>GENERAL</code>；分页按 <code>bizType</code>、<code>originalName</code>、<code>bizId</code> 和时间范围过滤；删除前会做资源存在性和所有者校验。</p>
+
+  <h2>2. 上传先写文件，再写资源行</h2>
+  <pre class="diagram">Admin multipart file
+  ↓
+ResourceController.upload
+  ↓
+ResourceAdminService.upload
+  ↓
+ResourceService.upload
+  ↓
+ResourceStorageFactory.getDefault()
+  ↓
+LocalResourceStorageService 或 MinioResourceStorageService
+  ↓
+sai_resource(storageKey, storageType, accessUrl, bizType, creatorId)</pre>
+  <p><code>ResourceService.upload</code> 先让默认存储策略执行 <code>store</code>，拿到 <code>storageKey</code>，再检测 <code>mimeType</code> 并插入 <code>ResourcePO</code>。插入后才调用 <code>getAccessUrl(resourceId, storageKey)</code> 回写 <code>accessUrl</code>。当前 <code>LOCAL</code> 和 <code>MINIO</code> 都生成 <code>/files/{storageKey}</code>，所以 URL 看起来一样，差异在底层文件位置和对象存储配置。</p>
+  <pre class="snippet"><code>ResourceStorageService storage = storageFactory.getDefault();
+String storageKey = storage.store(bizType, originalName, inputStream);
+ResourcePO resource = ResourcePO.builder()
+        .storageKey(storageKey)
+        .storageType(storage.getType())
+        .bizType(bizType)
+        .creatorId(creatorId)
+        .build();
+resourceMapper.insert(resource);
+resource.setAccessUrl(storage.getAccessUrl(resource.getId(), storageKey));
+resourceMapper.updateById(resource);</code></pre>
+
+  <h2>3. 访问入口按 storageKey 反查</h2>
+  <pre class="diagram">sequenceDiagram
+  participant Browser as Browser
+  participant Files as FileAccessController
+  participant DB as ResourceMapper
+  participant Factory as ResourceStorageFactory
+  participant Store as LOCAL/MINIO
+  Browser->>Files: GET /files/{storageKey}?download=true
+  Files->>Files: 解码 URI 并校验 storageKey 正则
+  Files->>DB: getByStorageKey(storageKey)
+  alt 资源不存在或 storageType=EXTERNAL
+    Files-->>Browser: 404
+  else LOCAL 或 MINIO
+    Files->>Factory: get(resource.storageType)
+    Files->>Store: load(storageKey)
+    Files-->>Browser: InputStreamResource + Content-Type
+  end</pre>
+  <p><code>/files/**</code> 被认证拦截器排除，因此访问不再看登录态，而是依赖难猜的 <code>storageKey</code>。<code>FileAccessController</code> 会要求路径符合 <code>{bizType}/{yyyy}/{MM}/{dd}/{uuid}</code> 加可选扩展名的形态，再查 <code>sai_resource.storage_key</code>。它只代理 <code>LOCAL</code> 和 <code>MINIO</code>；<code>EXTERNAL</code> 是外部 URL 资源，不应通过 <code>/files/**</code> 读取。</p>
+
+  <h2>4. 排障先定位边界</h2>
+  <p>上传成功但访问失败时，先查 <code>sai_resource</code>：确认 <code>access_url</code> 是否是 <code>/files/...</code>，<code>storage_type</code> 是否为 <code>LOCAL</code> 或 <code>MINIO</code>，<code>storage_key</code> 是否满足日期路径和 UUID 格式。若是 <code>LOCAL</code>，检查 <code>snail-ai.resource.upload-dir</code> 下文件是否存在；若是 <code>MINIO</code>，检查 <code>endpoint</code>、凭据、bucket 和对象 key；若是删除问题，要记住文件删除失败只记录 warning，资源行仍会被删除。</p>
+  <div class="practice"><strong>暂停回忆：</strong>不看流程图，判断三件事：<code>accessUrl</code> 是在资源行插入前还是插入后生成？<code>/files/**</code> 会检查登录 token 吗？<code>EXTERNAL</code> 能否由 <code>FileAccessController</code> 代理读取？<br><strong>参考答案：</strong><code>accessUrl</code> 在插入后生成并回写；<code>/files/**</code> 被拦截器排除，不检查登录 token；<code>EXTERNAL</code> 会被文件访问入口返回 404，应直接使用它自己的外部 <code>accessUrl</code>。</div>
+  <p>主要推荐来源：先读 <code>ResourceService.java</code>，再对照 <a href="../reference/resource-upload-access-flow-map.html">资源访问参考图谱</a> 查 API、字段、存储策略差异和调试 checklist。遇到生产环境 404 或权限边界问题时，继续向 agent 追问具体部署配置和日志样本。</p>
+</body>
+</html>

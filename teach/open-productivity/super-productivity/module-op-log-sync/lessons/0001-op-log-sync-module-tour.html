@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Operation Log 与同步模块导览</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L1 模块总览 · 预计 15 分钟 · 目标：能从一个本地 action 追到 op-log 持久化与同步入口</p>
+    <h1>Operation Log、本地持久化与同步架构</h1>
+    <p class="lead">一句话：这个模块把 NgRx action 记录成可回放的 operation，先写入本地 <code>SUP_OPS</code>，再通过统一 provider 口同步到文件型远端或 SuperSync 服务端。</p>
+
+    <h2>1. 它接在 L0 地图的哪一层</h2>
+    <p><a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>把 NgRx 视为运行时状态，把 <code>SUP_OPS</code> 和 operation log 视为可回放持久化来源。本课只看边界：<code>src/app</code> 负责 Angular/NgRx 接线，<code>@sp/sync-core</code> 放框架无关算法，<code>@sp/sync-providers</code> 放 provider 协议，SuperSync server 是远端 append-only log。</p>
+    <pre class="diagram">NgRx action
+  ↓ capture
+Operation
+  ↓ local durable write
+SUP_OPS: ops + state_cache + vector_clock
+  ↓ orchestration
+OperationSyncCapable provider
+  ├─ fileSnapshotOps: 例如 Dropbox / WebDAV / Nextcloud / OneDrive / LocalFile
+  └─ superSyncOps: Fastify / Prisma / PostgreSQL</pre>
+
+    <h2>2. 先认四个入口</h2>
+    <p><span class="where">src/app/root-store/meta/task-shared.actions.ts</span> 给 action 加 <code>meta.isPersistent</code>、<code>entityType</code>、<code>opType</code>。<span class="where">src/app/op-log/capture/operation-log.effects.ts</span> 监听这些本地 action，创建 operation、校验 payload、写入 store，并触发即时上传。<span class="where">src/app/imex/sync/sync-wrapper.service.ts</span> 是用户触发或周期触发的一轮 sync 入口：它取得 <code>OperationSyncCapable</code> provider 后，先调用 <code>downloadRemoteOps()</code>，再调用 <code>uploadPendingOps()</code>。<span class="where">src/app/op-log/sync/operation-log-sync.service.ts</span> 则负责 op-log 层的下载/上传方法，以及 fresh-client gate、piggyback、force upload/download 等保护逻辑。</p>
+    <p>完整入口清单见 <a href="../reference/op-log-sync-overview.html">模块参考</a>：那里包括 <code>OperationCaptureService</code>、persistence adapters、provider factory、sync-core public exports 与 SuperSync API。</p>
+
+    <h2>3. 阅读示例：更新任务如何进日志</h2>
+    <pre class="diagram">updateTask: (...) =&gt; ({
+  ...taskProps,
+  meta: {
+    isPersistent: true,
+    entityType: 'TASK',
+    entityId: taskProps.task.id,
+    opType: OpType.Update,
+  },
+})</pre>
+    <p>这个 meta 是捕获开关。meta-reducer 只登记非远端 persistent action；effect 再顺序处理，避免 remote replay 再次写入日志。</p>
+    <pre class="diagram">const op: Operation = {
+  id: uuidv7(),
+  actionType: action.type as ActionType,
+  opType,
+  entityType: action.meta.entityType,
+  entityId,
+  payload: multiEntityPayload,
+  vectorClock: newClock,
+};
+await this.opLogStore.appendWithVectorClockUpdate(op, 'local');
+this.immediateUploadService.trigger();</pre>
+    <p>写入点是 <code>appendWithVectorClockUpdate()</code>：operation 和 vector clock 在同一事务中更新。这样 UI 的乐观状态和磁盘日志即使在离线时也有可回放来源。</p>
+    <pre class="diagram">await this.writeFlushService.flushPendingWrites();
+const result = await this.uploadService.uploadPendingOps(syncProvider, ...);</pre>
+    <p>同步前的 flush 是关键保护：如果用户刚点完任务就立刻同步，编排器必须等 action 对应的 operation 落盘后再上传，否则远端会少一条本地变更。</p>
+
+    <h2>4. 检索练习</h2>
+    <p>暂停 60 秒，凭记忆回答：为什么 replay 远端 operation 时不会再次生成新的本地 operation？</p>
+    <div class="answer">参考答案：远端 operation 会先转换回带 <code>meta.isRemote: true</code> 的 persistent action；capture meta-reducer 和 persist effect 都会过滤远端 action，所以 reducer 能应用状态变化，但 op-log 不会二次追加同一意图。</div>
+    <p>主要来源：<a href="../../../../../open-productivity/super-productivity/docs/sync-and-op-log/operation-log-architecture.md"><code>docs/sync-and-op-log/operation-log-architecture.md</code></a>。如果你想继续，可以向 agent 追问“从 <code>OperationLogStoreService</code> 到 IndexedDB schema 怎么读”。</p>
+  </article>
+</main>
+</body>
+</html>

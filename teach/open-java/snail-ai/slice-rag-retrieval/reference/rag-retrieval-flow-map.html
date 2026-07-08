@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG 检索注入参考图谱</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.68;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:32px;margin:0 0 8px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px}
+    th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .warn{border-left:4px solid #b45309;background:#fffbeb;padding:10px 14px;margin:16px 0}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.84rem;line-height:1.65;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+    .xrefs{border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;padding:10px 14px;margin:16px 0}
+    .xrefs a{display:inline-block;margin:3px 10px 3px 0}
+    .source-card{border:1px solid #e5e7eb;border-radius:8px;background:#fcfcfd;padding:12px 14px;margin:14px 0}
+    .source-card h3{margin-top:0}
+    pre.source{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#0f172a;color:#e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+  <h1>RAG 检索注入参考图谱</h1>
+  <p class="summary"><strong>一句话：</strong>Snail AI 的 Agent RAG 有两条注入路径：<code>FORCED</code> 在 Server 端用用户消息预检索所有绑定知识库，并把结果追加到 <code>systemPrompt</code>；<code>SMART</code> 在 Server 端提示可用知识库，在 Client 端注册 <code>rag_search</code> 工具，模型按需回调 Server 执行同一套 <code>RagSearchPipeline</code>。</p>
+  <p class="warn"><strong>源码边界：</strong><code>QueryRewriteHandler</code> 当前没有实现；<code>RagStageMetricsDTO.embeddingMs</code> 当前没有被显式设置；<code>RagSearchTool</code> 保存了构造时的 <code>ragIds</code>，但工具方法没有校验传入 <code>ragId</code> 是否属于该列表；<code>FinalizeHandler</code> 直接访问 <code>modelParams.nearbySliceCount</code>，空配置是需要重点检查的风险点。</p>
+  <nav class="xrefs" aria-label="相关主题">
+    <strong>交叉阅读：</strong>
+    <a href="../../module-rag/reference/rag-overview.html">RAG 模块</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">Agent 责任链</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client</a>
+    <a href="../../module-persistence/reference/persistence-overview.html">持久化模块</a>
+    <a href="../../module-models/reference/models-overview.html">模型模块</a>
+  </nav>
+
+  <h2>端到端主链路</h2>
+  <pre class="diagram">AgentChatService.chat
+  ↓
+AgentChatChainService handlers by @Order
+  ↓
+SystemPromptHandler: instruction -> systemPrompt
+  ↓
+RagHandler: ragEnabled + ragIds + RagCallModeEnum
+  ├─ FORCED: parallelSearch(ctx.content) -> RagSearchService -> append Knowledge Base Reference
+  └─ SMART: append Available Knowledge Bases -> ClientRagToolResolver registers rag_search
+  ↓
+LlmCallHandler: build ChatDispatchRequest and send /chat/dispatch
+  ↓
+Client: DefaultPromptFactory builds SystemMessage; DefaultChatClientFactory registers tools
+  ↓
+LLM answer or tool call</pre>
+
+  <h2>调用模式速查</h2>
+  <table>
+    <thead><tr><th>模式</th><th>触发位置</th><th>query 来源</th><th>检索执行点</th><th>注入形态</th><th>空结果/失败</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>SMART=1</code></td>
+        <td><code>RagHandler.buildSmartPrompt</code> 写入知识库清单；<code>ClientRagToolResolver.resolve</code> 注册工具。</td>
+        <td>模型调用 <code>rag_search</code> 时传入的 <code>queryQuestion</code>，由 <code>RagSearchTool.search</code> trim。Server prompt 中可用自然语言称为 query，但排查工具 schema 时要看 Java 参数名。</td>
+        <td><code>RagSearchTool</code> -> <code>RpcClient.searchRag</code> -> <code>RagSearchCallbackHandler</code> -> <code>RagSearchService</code>。</td>
+        <td>工具返回编号资料字符串，作为工具结果进入模型上下文。</td>
+        <td>参数缺失返回错误；检索空返回 <code>未找到相关参考资料。</code>；异常返回 <code>搜索失败: ...</code>。</td>
+      </tr>
+      <tr>
+        <td><code>FORCED=2</code></td>
+        <td><code>RagHandler.handle</code> 在 Server 端预检索。</td>
+        <td>本轮用户消息 <code>ctx.getContent()</code>。</td>
+        <td><code>parallelSearch</code> 为每个绑定知识库创建 <code>RagSearchRequestDTO</code> 并调用 <code>RagSearchService.search</code>。</td>
+        <td>追加到 <code>systemPrompt</code> 的 <code>Knowledge Base Reference</code> 段落。</td>
+        <td>单个知识库异常被捕获并返回空列表；所有结果为空时注入 <code>（未找到相关参考资料）</code>。</td>
+      </tr>
+      <tr>
+        <td>默认值</td>
+        <td><code>RagCallModeEnum.of</code></td>
+        <td>取决于回退后的智能调用。</td>
+        <td>空值或未知值回退 <code>SMART</code>。</td>
+        <td>注册工具并提示模型自行调用。</td>
+        <td>如果用户期望强制检索，先检查 <code>sai_agent.rag_call_mode</code>。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>关键 DTO 与配置字段</h2>
+  <table>
+    <thead><tr><th>对象</th><th>字段</th><th>来源/去向</th><th>注意点</th></tr></thead>
+    <tbody>
+      <tr><td><code>AgentPO</code></td><td><code>ragEnabled</code>、<code>ragIds</code>、<code>ragCallMode</code></td><td>Agent 配置，Server 责任链读取。</td><td><code>ragIds</code> 是逗号分隔字符串；解析失败会抛出数字转换异常。</td></tr>
+      <tr><td><code>ChatDispatchRequest.AgentConfig</code></td><td><code>ragEnabled</code>、<code>ragIds</code>、<code>ragCallMode</code></td><td><code>LlmCallHandler</code> 从 <code>AgentPO</code> 拷贝到 Client。</td><td>Client 工具解析只依赖这些字段判断是否注册 <code>rag_search</code>。</td></tr>
+      <tr><td><code>RagSearchRequestDTO</code></td><td><code>ragId</code>、<code>query</code>、<code>debug</code></td><td>Admin、强制调用、callback 都会转换到该 DTO。</td><td><code>knowledgeId</code> 是 <code>ragId</code> 的 JSON alias。</td></tr>
+      <tr><td><code>RagSearchTool.search</code></td><td><code>ragId</code>、<code>queryQuestion</code></td><td>智能调用时由模型按工具 schema 传入。</td><td>不要把源码里的 Server prompt 文案 <code>query</code> 误当成 Java 工具参数名。</td></tr>
+      <tr><td><code>RagSearchContext</code></td><td><code>originalQuery</code>、<code>query</code>、<code>vectorResults</code>、<code>bm25Results</code>、<code>results</code></td><td><code>RagSearchService</code> 创建，pipeline 逐步填充。</td><td><code>query</code> 在 <code>ConfigResolveHandler</code> 中等于 <code>originalQuery</code>；当前没有改写。</td></tr>
+      <tr><td><code>RagConfigDO.SearchParams</code></td><td><code>resultCount</code>、<code>thresholdEnabled</code>、<code>threshold</code>、<code>fusionStrategy</code>、<code>denseWeight</code>、<code>rrfK</code>、<code>rerankEnabled</code>、<code>rerankModelId</code>、<code>enterRerankCount</code></td><td><code>sai_rag.config</code> JSON 或 Admin QA 外部传入配置。</td><td>源码没有在检索 handler 内补齐所有默认值，空 <code>resultCount</code> 或 <code>enterRerankCount</code> 可能直接影响执行。</td></tr>
+      <tr><td><code>RagConfigDO.ModelParams</code></td><td><code>modelId</code>、<code>nearbySliceCount</code>、<code>prompt</code></td><td>Admin QA 和 <code>FinalizeHandler</code> 使用。</td><td><code>RagQAService</code> 会为空时创建新对象；通用 pipeline 的 <code>ConfigResolveHandler</code> 不会补齐空对象。</td></tr>
+      <tr><td><code>RagSearchResponseDTO</code></td><td><code>results</code>、<code>metrics</code></td><td>返回给 Admin、callback 或强制调用聚合器。</td><td><code>metrics</code> 只有 <code>debug=true</code> 时返回。</td></tr>
+      <tr><td><code>SearchResult</code></td><td><code>chunkId</code>、<code>content</code>、<code>score</code>、<code>documentId</code>、<code>documentName</code>、<code>metadata</code></td><td>向量/BM25/融合/rerank/finalize 的统一结果对象。</td><td>融合算法按 <code>chunkId</code> 汇总；缺失 <code>chunkId</code> 会降低补全质量。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>检索 pipeline 顺序</h2>
+  <table>
+    <thead><tr><th>顺序</th><th>Handler</th><th>职责</th><th>关键字段</th><th>跳过/终止条件</th></tr></thead>
+    <tbody>
+      <tr><td><code>10</code></td><td><code>ConfigResolveHandler</code></td><td>读取 <code>RagPO</code> 和 <code>RagConfigDO</code>，设置 <code>query</code>。</td><td><code>ragId</code>、<code>config</code></td><td>知识库不存在则 <code>terminated=true</code>。</td></tr>
+      <tr><td><code>20</code></td><td><code>QueryRewriteHandler</code></td><td>当前空实现。</td><td><code>questionRewrite</code></td><td>无实际动作。</td></tr>
+      <tr><td><code>30</code></td><td><code>VectorSearchHandler</code></td><td>创建向量库，搜索 <code>rag_{ragId}</code>，按阈值过滤。</td><td><code>resultCount</code>、<code>threshold</code></td><td>空 query 在向量存储层返回空；向量配置异常会抛出。</td></tr>
+      <tr><td><code>40</code></td><td><code>Bm25SearchHandler</code></td><td>启用搜索引擎时搜索同名全文索引。</td><td><code>searchEngineEnable</code>、<code>searchEngineInstanceId</code></td><td><code>searchEngineEnable</code> 不为 true 时直接返回。</td></tr>
+      <tr><td><code>50</code></td><td><code>HybridFusionHandler</code></td><td>使用 <code>RRF</code> 或 <code>WEIGHTED_SUM</code> 合并向量和 BM25。</td><td><code>fusionStrategy</code>、<code>denseWeight</code>、<code>rrfK</code></td><td><code>bm25Results</code> 为空时跳过，保留向量结果。</td></tr>
+      <tr><td><code>60</code></td><td><code>RerankHandler</code></td><td>取候选结果调用 rerank 模型精排。</td><td><code>rerankEnabled</code>、<code>rerankModelId</code>、<code>enterRerankCount</code></td><td>未启用或无模型 ID 时跳过；模型异常在服务内降级排序。</td></tr>
+      <tr><td><code>70</code></td><td><code>FinalizeHandler</code></td><td>截断 TopK、补齐 chunk 内容和文档名、扩展邻近切片、重排避免 lost-in-the-middle。</td><td><code>nearbySliceCount</code>、<code>resultCount</code></td><td><code>modelParams</code> 为空时有空指针风险。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>向量、搜索与表边界</h2>
+  <table>
+    <thead><tr><th>边界</th><th>名称/字段</th><th>负责源码</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td>业务库</td><td><code>sai_agent.rag_enabled</code>、<code>rag_ids</code>、<code>rag_call_mode</code></td><td><code>AgentPO</code>、<code>RagHandler</code></td><td>决定一次 Agent 对话是否进入 RAG 以及使用哪种模式。</td></tr>
+      <tr><td>业务库</td><td><code>sai_rag</code></td><td><code>RagPO</code>、<code>ConfigResolveHandler</code></td><td>知识库名称、描述、向量实例、搜索实例、embedding/rerank 模型和配置 JSON。</td></tr>
+      <tr><td>业务库</td><td><code>sai_rag_chunk</code></td><td><code>RagChunkPO</code>、<code>FinalizeHandler</code></td><td>按 <code>chunkId</code> 补齐内容、文档 ID 和邻近切片。</td></tr>
+      <tr><td>业务库</td><td><code>sai_rag_document</code></td><td><code>RagDocumentPO</code>、<code>FinalizeHandler</code></td><td>按 <code>documentId</code> 补齐文档名。</td></tr>
+      <tr><td>向量索引</td><td><code>rag_{ragId}</code></td><td><code>IndexNameBuilder.KNOWLEDGE</code>、<code>VectorSearchHandler</code></td><td>向量召回主索引名。PgVector 用作 vector table，Milvus 用作 collection，ES vector 用作 index。</td></tr>
+      <tr><td>全文索引</td><td><code>rag_{ragId}</code></td><td><code>Bm25SearchHandler</code>、<code>ElasticsearchSearchEngine</code></td><td>BM25 搜索索引名，字段主要是 <code>content</code> 和 <code>metadata</code>。</td></tr>
+      <tr><td>metadata</td><td><code>ragId</code>、<code>documentId</code>、<code>chunkId</code></td><td><code>SearchMetadataKeys</code>、摄入链路</td><td>把向量/搜索命中映射回业务 chunk 和文档。</td></tr>
+      <tr><td>模型运行时</td><td><code>ModelRuntimeHandler.buildEmbeddingModel</code>、<code>ModelRuntimeHandler.rerank</code></td><td><code>VectorStoreFactory</code>、<code>DefaultRerankService</code></td><td>向量检索 query embedding 和 rerank 精排的模型入口。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Admin 检索与 QA</h2>
+  <table>
+    <thead><tr><th>入口</th><th>路径</th><th>行为</th><th>注入点</th></tr></thead>
+    <tbody>
+      <tr><td><code>RagSearchController.search</code></td><td><code>POST /rag/search</code></td><td>把 <code>RagSearchRequestVO</code> 转成 <code>RagSearchRequestDTO</code>，直接调用 <code>RagSearchService.search</code>。</td><td>不调用 LLM；用于调试检索结果和 metrics。</td></tr>
+      <tr><td><code>RagQAService.qaStream</code></td><td><code>POST /rag/qa/stream</code></td><td>读取 <code>sai_rag.config</code>，检索后构造资料文本。</td><td>若 <code>ModelParams.prompt</code> 有值，替换 <code>&lt;Documents&gt;</code>；否则使用默认 system prompt 前缀。</td></tr>
+      <tr><td><code>RagSearchCallbackHandler</code></td><td><code>/callback/rag/search</code></td><td>Client 工具调用的 Server 回调入口。</td><td>返回 <code>RagSearchResponse.results</code>，由 <code>RagSearchTool</code> 格式化成工具结果。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>失败、空结果与调试 checklist</h2>
+  <table>
+    <thead><tr><th>现象</th><th>优先检查</th><th>对应源码</th></tr></thead>
+    <tbody>
+      <tr><td>Agent 完全没有 RAG 行为</td><td><code>sai_agent.rag_enabled</code> 是否为 true；<code>rag_ids</code> 是否为空；<code>RagHandler</code> 是否在责任链中执行。</td><td><code>RagHandler.handle</code></td></tr>
+      <tr><td>期望强制检索但模型只拿到工具说明</td><td><code>rag_call_mode</code> 是否为 <code>2</code>；空值和未知值会回退 <code>SMART</code>。</td><td><code>RagCallModeEnum.of</code></td></tr>
+      <tr><td>智能模式没有工具</td><td>检查 <code>ChatDispatchRequest.AgentConfig</code> 中 <code>ragEnabled</code>、<code>ragIds</code>、<code>ragCallMode</code>；强制模式不会注册工具。</td><td><code>ClientRagToolResolver.resolve</code></td></tr>
+      <tr><td><code>rag_search</code> 调用了但返回空</td><td>确认工具传入的 <code>queryQuestion</code> 非空；检查对应 <code>ragId</code> 是否有已摄入 chunk；检查向量索引 <code>rag_{ragId}</code>。</td><td><code>RagSearchTool.search</code>、<code>VectorSearchHandler</code></td></tr>
+      <tr><td>向量检索失败</td><td>检查 <code>vectorStoreInstanceId</code>、<code>embeddingModelId</code>、模型 API Key、维度和后端注册。</td><td><code>VectorStoreFactory.create</code></td></tr>
+      <tr><td>BM25 没生效</td><td><code>searchEngineEnable</code> 是否为 true；<code>searchEngineInstanceId</code> 是否存在；ES 索引 <code>rag_{ragId}</code> 是否有文档。</td><td><code>Bm25SearchHandler</code>、<code>ElasticsearchSearchEngine.search</code></td></tr>
+      <tr><td>融合没有执行</td><td><code>bm25Results</code> 是否为空；当前 BM25 空时直接跳过融合。</td><td><code>HybridFusionHandler.handle</code></td></tr>
+      <tr><td>rerank 没执行</td><td><code>rerankEnabled</code> 是否为 true；<code>rerankModelId</code> 或知识库默认 rerank 模型是否存在；<code>enterRerankCount</code> 是否非空。</td><td><code>RerankHandler</code></td></tr>
+      <tr><td>rerank 后结果仍像原排序</td><td>检查 rerank 模型调用日志；异常、空返回或无有效 index 会降级为按原 score 排序。</td><td><code>DefaultRerankService.rerank</code></td></tr>
+      <tr><td>检索接口空指针或 500</td><td>重点看 <code>searchParams.resultCount</code>、<code>searchParams.enterRerankCount</code>、<code>modelParams</code> 是否为空。</td><td><code>VectorSearchHandler</code>、<code>RerankHandler</code>、<code>FinalizeHandler</code></td></tr>
+      <tr><td>debug 指标不完整</td><td><code>debug=true</code> 才返回 <code>metrics</code>；当前源码没有显式设置 <code>embeddingMs</code>。</td><td><code>RagSearchService.search</code>、<code>RagStageMetricsDTO</code></td></tr>
+      <tr><td>检索命中但回答没引用资料</td><td>强制模式检查 <code>systemPrompt</code> 是否含 <code>Knowledge Base Reference</code>；智能模式检查工具是否被模型实际调用。</td><td><code>RagHandler.buildForcedPrompt</code>、<code>DefaultPromptFactory.build</code></td></tr>
+      <tr><td>Admin QA 提示未替换资料</td><td>检查 <code>ModelParams.prompt</code> 是否包含 <code>&lt;Documents&gt;</code>；没有模板时会用默认前缀拼接资料。</td><td><code>RagQAService.buildSystemPrompt</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="source-snippets">真实源码片段</h2>
+  <div class="source-card">
+    <h3>1. <code>RagHandler.handle</code>：强制/智能模式分流</h3>
+    <p>先解析 Agent 绑定的知识库，再用 <code>RagCallModeEnum.of</code> 决定注入路径。强制模式立即检索，智能模式只追加可用知识库说明。</p>
+    <pre class="source"><code>RagCallModeEnum callMode = RagCallModeEnum.of(ctx.getAgent().getRagCallMode());
+
+if (callMode == RagCallModeEnum.FORCED) {
+    // 强制调用：服务端直接并行检索所有知识库，结果注入 prompt
+    String retrievedContent = parallelSearch(ragIds, ctx.getContent());
+    ctx.setSystemPrompt(ctx.getSystemPrompt() + buildForcedPrompt(ragList, retrievedContent));
+} else {
+    // 智能调用：注入可用知识库信息，由 LLM 通过 rag_search tool 决定
+    ctx.setSystemPrompt(ctx.getSystemPrompt() + buildSmartPrompt(ragList));
+}</code></pre>
+  </div>
+
+  <div class="source-card">
+    <h3>2. <code>RagSearchService.search</code>：创建检索上下文</h3>
+    <p><code>request.query</code> 先进入 <code>originalQuery</code>，pipeline 后续 handler 再把配置、召回结果、融合结果和指标写回同一个 <code>RagSearchContext</code>。</p>
+    <pre class="source"><code>public RagSearchResponseDTO search(RagSearchRequestDTO request, RagConfigDO configDO) {
+    RagSearchContext ctx = RagSearchContext.builder()
+            .originalQuery(request.getQuery())
+            .ragId(request.getRagId())
+            .debug(Boolean.TRUE.equals(request.getDebug()))
+            .externalConfigDO(configDO)
+            .metrics(new RagStageMetricsDTO())
+            .build();
+
+    pipeline.execute(ctx);
+
+    return RagSearchResponseDTO.builder()
+            .results(ctx.getResults())
+            .metrics(ctx.isDebug() ? ctx.getMetrics() : null)
+            .build();
+}</code></pre>
+  </div>
+
+  <div class="source-card">
+    <h3>3. <code>ClientRagToolResolver.resolve</code>：注册 <code>rag_search</code> 工具</h3>
+    <p>Client 端只在非强制模式注册 <code>RagSearchTool</code>。该类的 <code>@Tool(name = "rag_search")</code> 暴露工具名；工具方法参数是 <code>ragId</code> 和 <code>queryQuestion</code>，不是 <code>query</code>。</p>
+    <pre class="source"><code>public List&lt;ToolCallback&gt; resolve(ChatDispatchRequest request) {
+    ChatDispatchRequest.AgentConfig agentConfig = request.getAgentConfig();
+    if (agentConfig == null
+            || !Boolean.TRUE.equals(agentConfig.getRagEnabled())
+            || StrUtil.isBlank(agentConfig.getRagIds())) {
+        return List.of();
+    }
+
+    // 强制调用模式不注册 tool（服务端已预检索注入 prompt）
+    if (RagCallModeEnum.FORCED.getMode() == agentConfig.getRagCallMode()) {
+        return List.of();
+    }
+
+    List&lt;Long&gt; ragIds = Arrays.stream(agentConfig.getRagIds().split(","))
+            .map(String::trim)
+            .filter(StrUtil::isNotBlank)
+            .map(Long::parseLong)
+            .toList();
+
+    log.info("RAG tool resolved (smart mode): ragIds={}", ragIds);
+    return Arrays.asList(ToolCallbacks.from(
+            new RagSearchTool(ragIds, rpcClient)
+    ));
+}</code></pre>
+  </div>
+
+  <h2>推荐阅读顺序</h2>
+  <ol>
+    <li>先读 <a href="../../module-agent-chain/reference/agent-chain-overview.html">Agent 责任链</a> 与 <code>RagHandler.java</code>，确认 <code>FORCED</code> 与 <code>SMART</code> 的分流。</li>
+    <li>再读 <a href="../../module-rag/reference/rag-overview.html">RAG 模块</a>、<code>RagSearchService.java</code> 和 <code>search/pipeline/handler</code>，把检索顺序画出来。</li>
+    <li>然后读 <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client</a>、<code>ClientRagToolResolver.java</code>、<code>RagSearchTool.java</code> 和 <code>RagSearchCallbackHandler.java</code>，追智能调用工具闭环。</li>
+    <li>最后对照 <a href="../../module-persistence/reference/persistence-overview.html">持久化模块</a>、<a href="../../module-models/reference/models-overview.html">模型模块</a>、<code>VectorStoreFactory.java</code>、<code>DefaultRerankService.java</code>、<code>ElasticsearchSearchEngine.java</code> 排查存储和模型后端。</li>
+  </ol>
+</body>
+</html>

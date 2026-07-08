@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L2：Electron 主路径，从进程入口到 APP_READY</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topline">L2 垂直切片 · 15 分钟短课</div>
+      <h1>Electron 主路径：从进程入口到 APP_READY</h1>
+      <p class="lead">
+        本课把启动主路径拆细：Electron 先建立进程、窗口和 IPC 管道；Angular renderer 再自己 bootstrap；业务 ready 只能由 renderer 通过
+        <code>APP_READY</code> 回报给 main process。
+      </p>
+
+      <div class="meta">
+        <span>上一课：<a href="./0001-flow-map.html">链路地图</a></span>
+        <span>下一课：<a href="./0003-close-protection-path.html">关闭前保护</a></span>
+        <span>相关 L1：<a href="../../module-electron-host/">Electron 宿主</a></span>
+      </div>
+
+      <h2>主路径分层</h2>
+      <div class="flow-map">electron/main.ts
+  -> requestSingleInstanceLock()
+  -> startApp()
+
+electron/start-app.ts
+  -> initializeProtocolHandling()
+  -> initIpcInterfaces()
+  -> app ready
+  -> createMainWin()
+
+electron/main-window.ts
+  -> new BrowserWindow({ preload, contextIsolation: true, nodeIntegration: false })
+  -> loadURL(dev server 或 dist index.html)
+  -> ready-to-show: 只代表窗口可显示
+
+src/main.ts
+  -> bootstrapApplication(AppComponent, ...)
+
+src/app/core/startup/startup.service.ts
+  -> window.ea.informAboutAppReady()
+  -> electron IPC.APP_READY
+  -> gpu-startup-guard mark launch successful</div>
+
+      <h2>三个不要混淆的 ready</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>信号</th>
+            <th>来源</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>app ready</code></td>
+            <td><span class="where">electron/start-app.ts</span></td>
+            <td>Electron app 初始化完成，可以创建窗口和初始化部分本地能力。</td>
+          </tr>
+          <tr>
+            <td><code>ready-to-show</code></td>
+            <td><span class="where">electron/main-window.ts</span></td>
+            <td>窗口内容可显示，不保证 Angular 数据、store、sync 或插件已初始化。</td>
+          </tr>
+          <tr>
+            <td><code>APP_READY</code></td>
+            <td><span class="where">src/app/core/startup/startup.service.ts</span></td>
+            <td>renderer 完成业务启动后主动通知 main；GPU startup guard 也依赖这个信号，而不是 <code>ready-to-show</code>。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>最小源码锚点</h2>
+      <pre class="language-ts"><code>appIN.on('ready', () => createMainWin());
+
+mainWin.once('ready-to-show', () => {
+  mainWin.show();
+});
+
+// renderer 业务启动完成后
+window.ea.informAboutAppReady();</code></pre>
+
+      <div class="callout">
+        排查启动白屏时，先看 main 是否建窗，再看 renderer 是否加载，最后才看 <code>APP_READY</code> 是否发回。一个窗口能显示，不代表业务状态已经可用。
+      </div>
+
+      <h2>60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          窗口已经 <code>ready-to-show</code> 并显示了，但下次启动仍被 GPU startup guard 认为上次启动失败。最可能缺的是哪个信号？
+        </p>
+        <div class="answer">
+          <strong>参考答案：</strong>缺 <code>APP_READY</code>。源码注释明确 GPU guard 的成功标记应在 Angular boot 后的
+          <code>IPC.APP_READY</code> handler 中发生，不能用 <code>ready-to-show</code> 替代。
+        </div>
+      </div>
+
+      <p class="footer">
+        继续下钻可读 <a href="../reference/electron-startup-close-flow-reference.html">参考文档</a> 的“窗口生命周期与 renderer 交接”。
+      </p>
+    </main>
+  </body>
+</html>

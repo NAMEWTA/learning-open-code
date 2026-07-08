@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型范围、预算与安全边界 — 速查</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body class="reference">
+<main>
+  <h1>模型范围、预算与安全边界 — 速查</h1>
+  <p class="callout">L2 垂直切片参考页。短课入口：<a href="../lessons/0001-flow-map.html">0001 全链路</a> · L1：<a href="../../module-profiles/lessons/0001-profiles-module-tour.html">profiles 模块</a> · <a href="../../module-runs-execution/lessons/0001-runs-execution-module-tour.html">运行核心模块</a></p>
+
+  <h2>1. 调用时序（guardrails 主路径）</h2>
+  <div class="diagram">settings / extension config / tool params
+  → discoverAgents → modelScope
+  → subagent-executor.execute
+      → resolveTurnBudget / resolveToolBudget
+      → createForkContextResolver (context=fork)
+      → ExecutionContextData { modelScope, turnBudget, toolBudget }
+  → execution.runSingle / chain / parallel
+      → resolveSubagentModelOverride + buildModelCandidates
+          → checkModelScope (explicit=error, inherited=warn)
+      → appendTurnBudgetSystemPrompt
+      → buildPiArgs → PI_SUBAGENT_TOOL_BUDGET env
+  → child Pi: registerSubagentPromptRuntime
+      → rewriteSubagentPrompt + stripParentOnlySubagentMessages
+      → tool_call handler → soft nudge / hard block
+  → subagent-runner: turn count → shouldAbortForTurnBudget</div>
+
+  <h2>2. modelScope 规则</h2>
+  <table>
+    <tr><th>规则</th><th>结论</th><th>证据</th></tr>
+    <tr><td>配置来源</td><td>project <code>subagents.modelScope</code> 优先于 user</td><td><code>agents.ts</code> · <code>model-scope-settings.test.ts</code></td></tr>
+    <tr><td>匹配对象</td><td>完整 <code>provider/id</code>，glob 仅 <code>*</code>，忽略 thinking 后缀</td><td><code>model-scope.ts</code> <code>matchesScopePattern</code></td></tr>
+    <tr><td>explicit 越界</td><td><code>severity: "error"</code>，抛异常终止</td><td><code>model-fallback.ts</code> · <code>model-scope.test.ts</code></td></tr>
+    <tr><td>inherited 越界</td><td><code>severity: "warn"</code>，默认 console.warn</td><td>同上</td></tr>
+    <tr><td>fallback 候选</td><td>index&gt;0 的 fallback 一律按 inherited 处理</td><td><code>buildModelCandidates</code></td></tr>
+    <tr><td>enforce 无 allow</td><td>settings 解析期拒绝；运行时 <code>checkModelScope</code> 为 no-op</td><td><code>parseModelScopeConfig</code></td></tr>
+  </table>
+
+  <h2>3. budget 规则</h2>
+  <table>
+    <tr><th>类型</th><th>解析优先级</th><th>enforcement 位置</th><th>默认 block 工具</th></tr>
+    <tr><td>toolBudget</td><td>step &gt; run params &gt; agent.frontmatter &gt; extension config</td><td>子进程 <code>subagent-prompt-runtime</code> 的 <code>tool_call</code></td><td>read, grep, find, ls</td></tr>
+    <tr><td>turnBudget</td><td>params &gt; extension config</td><td>spawn 前写系统提示；runner 计轮 abort</td><td>—</td></tr>
+    <tr><td>soft 行为</td><td>tool: steer nudge；turn: wrap-up-requested 状态</td><td colspan="2">不硬停，引导收尾</td></tr>
+    <tr><td>hard 行为</td><td>tool: block 列表内工具；turn: 超 soft+grace 后 abort</td><td colspan="2">grace 轮允许 terminal assistant stop</td></tr>
+  </table>
+
+  <h2>4. prompt / fork 安全边界</h2>
+  <table>
+    <tr><th>机制</th><th>作用</th><th>触发条件</th></tr>
+    <tr><td><code>CHILD_SUBAGENT_BOUNDARY_INSTRUCTIONS</code></td><td>声明子 agent 不得再委派、忽略父编排历史</td><td>默认 child；非 fanout</td></tr>
+    <tr><td><code>stripParentOnlySubagentMessages</code></td><td>移除父级 custom 消息与 subagent 工具调用痕迹</td><td><code>context</code> 事件；fanout 可保留当前工具历史</td></tr>
+    <tr><td><code>stripProjectContext</code> / <code>stripInheritedSkills</code></td><td>按 env 剥离项目上下文与 skills 段</td><td><code>PI_SUBAGENT_INHERIT_*</code> 为 0</td></tr>
+    <tr><td><code>createForkContextResolver</code></td><td>从父 session 分支 JSONL；清理 unsafe Anthropic thinking</td><td><code>context: "fork"</code> 且父 session 已持久化</td></tr>
+    <tr><td>thinkingOverride <code>"off"</code></td><td>fork 后若剥离了 thinking 块则强制关闭 thinking</td><td><code>fork-context.ts</code> sanitize 后</td></tr>
+  </table>
+
+  <h2>5. profiles 与 scope 的关系</h2>
+  <p><code>profiles.ts</code> 生成 <code>subagents.agentOverrides.{agent}.model</code>，经 <code>applySubagentProfile</code> 写入 user settings。它不直接设置 modelScope，但改变了 inherited 模型候选。scope enforcement 仍在第 4 跳 <code>resolveSubagentModelOverride</code> 发生。</p>
+
+  <h2 id="tests">6. 测试证据索引</h2>
+  <table>
+    <tr><th>文件</th><th>覆盖行为</th></tr>
+    <tr><td><code>test/unit/model-scope.test.ts</code></td><td>glob 匹配、explicit/inherited severity、parseModelScopeConfig 校验</td></tr>
+    <tr><td><code>test/unit/model-scope-settings.test.ts</code></td><td>discoverAgents 暴露 project/user modelScope 优先级</td></tr>
+    <tr><td><code>test/unit/tool-budget.test.ts</code></td><td>校验、env 编解码、soft/hard 状态与 block 决策</td></tr>
+    <tr><td><code>test/unit/turn-budget.test.ts</code></td><td>系统提示拼接、shouldAbortForTurnBudget、partial output 格式</td></tr>
+    <tr><td><code>test/unit/profiles.test.ts</code></td><td>profile 应用、路径遍历拒绝、catalog 生成</td></tr>
+    <tr><td><code>test/unit/types-fork-preamble.test.ts</code></td><td>fork 上下文与 thinking 清理相关类型/行为</td></tr>
+  </table>
+</main>
+</body>
+</html>

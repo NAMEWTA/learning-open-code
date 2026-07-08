@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 责任链到 gRPC 分发速查</title>
+  <link rel="stylesheet" href="../assets/slice-agent-chain-grpc.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-agent-chain/reference/agent-chain-overview.html">责任链 L1 参考</a>
+    <a href="../../module-commons-grpc/reference/commons-grpc-overview.html">gRPC L1 参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Client L1 参考</a>
+  </nav>
+
+  <h1>Agent 责任链到 gRPC 分发速查</h1>
+  <p class="lead">这份参考用于排查一次 Agent 对话如何从 Server handler chain 变成 <code>/chat/dispatch</code> server-streaming 调用，并被 Agent Client streaming handler 消费。</p>
+
+  <h2>1. 垂直切片总图</h2>
+  <div class="flow">
+    <div class="step"><strong>HTTP/SSE 入口</strong><small><code>AgentChatService</code> 创建 <code>AgentChatContext</code>，复制 <code>sid</code>、禁用 MCP/Skill 和输入消息。</small></div>
+    <div class="step"><strong>Handler Chain</strong><small><code>AgentChatChainService</code> 顺序调用 Spring 注入的 <code>AgentChatHandler</code> 列表。</small></div>
+    <div class="step"><strong>上下文汇总</strong><small>Handler 写入模型、MCP、Skill、RAG prompt、历史和目标 Client。</small></div>
+    <div class="step"><strong>DTO 构造</strong><small><code>LlmCallHandler</code> 把上下文组装成 <code>ChatDispatchRequest</code> JSON。</small></div>
+    <div class="step"><strong>gRPC 信封</strong><small><code>GrpcChannelUtil</code> 写入 <code>GrpcSnailAiRequest(reqId, metadata, body)</code>。</small></div>
+    <div class="step"><strong>Client 消费</strong><small><code>ChatDispatchStreamingHandler</code> 解析 body，调用 <code>ChatSessionRuntime</code>，流式返回结果。</small></div>
+  </div>
+
+  <h2>2. Handler 顺序与上下文字段</h2>
+  <p class="note warn">当前源码以 <code>@Order</code> 为准；<code>AgentChatChainService</code> 自身不会在循环层停止，短路依赖每个 Handler 检查 <code>ctx.isTerminated()</code>。<code>WebSearchHandler</code> 的 <code>@Component</code> 和 <code>@Order</code> 被注释，默认不进入链路。</p>
+  <table>
+    <thead>
+      <tr><th>order</th><th>Handler</th><th>读入</th><th>写入或副作用</th><th>失败边界</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>10</td>
+        <td><code>InitContextHandler</code></td>
+        <td><code>agentId</code>、<code>requestUser</code></td>
+        <td><code>user</code>、<code>agent</code></td>
+        <td>Agent 不存在时写错误、complete、<code>terminated=true</code>。</td>
+      </tr>
+      <tr>
+        <td>20</td>
+        <td><code>ConversationHandler</code></td>
+        <td><code>agentId</code>、<code>conversationId</code>、<code>content</code>、<code>user</code></td>
+        <td>创建会话；插入用户消息 RUNNING 记录。</td>
+        <td>只在入口检查 terminated；数据库异常会向外抛出。</td>
+      </tr>
+      <tr>
+        <td>30</td>
+        <td><code>ModelResolveHandler</code></td>
+        <td><code>agent.chatModelId</code> 或默认 chat 模型</td>
+        <td><code>modelId</code>、<code>modelConfig</code></td>
+        <td>未配置模型或装配模型失败时写错误并终止。</td>
+      </tr>
+      <tr>
+        <td>40</td>
+        <td><code>McpHandler</code></td>
+        <td><code>agent.mcpEnabled</code>、禁用 MCP ID</td>
+        <td><code>mcpServers</code>、<code>mcpServerDescriptors</code></td>
+        <td>JSON args/env/auth 解析失败时回退空集合，不终止。</td>
+      </tr>
+      <tr>
+        <td>50</td>
+        <td><code>SystemPromptHandler</code></td>
+        <td><code>agent.instruction</code></td>
+        <td><code>systemPrompt</code></td>
+        <td>instruction 为空时使用默认英文助手提示。</td>
+      </tr>
+      <tr>
+        <td>60</td>
+        <td><code>RagHandler</code></td>
+        <td><code>agent.ragEnabled</code>、<code>ragIds</code>、<code>ragCallMode</code></td>
+        <td>追加 forced RAG 检索结果或 smart RAG 工具提示到 <code>systemPrompt</code></td>
+        <td>RAG 不存在或检索失败时记录 warn，多数情况下不中断分发。</td>
+      </tr>
+      <tr>
+        <td>70</td>
+        <td><code>SkillAgentChatHandler</code></td>
+        <td><code>agent.skillEnabled</code>、禁用 Skill ID</td>
+        <td><code>skillDescriptors</code></td>
+        <td>没有 Skill 时保持空列表。</td>
+      </tr>
+      <tr>
+        <td>75</td>
+        <td><code>ContextCollectorHandler</code></td>
+        <td><code>agent.appId</code>、app 状态、Client 实例表、短期记忆</td>
+        <td><code>targetClient</code>、<code>historyMessages</code></td>
+        <td>appId 缺失、app 停用、无 alive Client 时写错误并终止。</td>
+      </tr>
+      <tr>
+        <td>80</td>
+        <td><code>LlmCallHandler</code></td>
+        <td>前序 Handler 写入的全部分发字段</td>
+        <td><code>ChatDispatchRequest</code>、gRPC server-streaming 调用、<code>streamDispatchStarted</code></td>
+        <td>targetClient 或 modelConfig 缺失时写错误；gRPC 同步抛出时向外抛。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. <code>AgentChatContext</code> 到 <code>ChatDispatchRequest</code> 映射</h2>
+  <table>
+    <thead>
+      <tr><th>目标字段</th><th>来源字段或阶段</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>requestId</code></td><td><code>LlmCallHandler</code> 生成 UUID</td><td>Client 日志和 completion 回调使用；不同于 gRPC <code>reqId</code>。</td></tr>
+      <tr><td><code>sid</code></td><td><code>AgentChatService</code> 从 command 复制到 context</td><td>用于区分同一会话中的并发提交；Client 回流时带回。</td></tr>
+      <tr><td><code>agentConfig.agentId/name/instruction</code></td><td><code>InitContextHandler</code> 加载的 <code>agent</code></td><td>Client 执行期知道当前 Agent 基本配置。</td></tr>
+      <tr><td><code>agentConfig.mcpEnabled/skillEnabled/ragEnabled/memoryEnabled</code></td><td><code>agent</code> 开关字段</td><td>让 Client runtime 和工具解析阶段判断能力开关。</td></tr>
+      <tr><td><code>agentConfig.embeddingModelId</code></td><td><code>ctx.modelId</code></td><td>当前源码把已解析模型 ID 写入该字段；命名上要小心，不要只按字段名理解。</td></tr>
+      <tr><td><code>conversationId</code></td><td>输入 context</td><td>Server 持久化、短期历史和 Client 回流都用同一个会话 ID。</td></tr>
+      <tr><td><code>userMessage</code></td><td><code>ctx.content</code></td><td>用户本轮输入；用户消息已在 order 20 先写入数据库。</td></tr>
+      <tr><td><code>modelConfig</code></td><td><code>ModelResolveHandler</code></td><td>包含 provider、adapter、model、endpoint、apiKey 和扩展配置；日志中避免泄露密钥。</td></tr>
+      <tr><td><code>mcpServers</code></td><td><code>McpHandler</code></td><td>从 MCP ref 转成 Client 可消费 descriptor，含 command、args、env、auth。</td></tr>
+      <tr><td><code>skills</code></td><td><code>SkillAgentChatHandler</code></td><td>含 Skill 名称、描述、版本和完整 <code>skillPrompt</code>。</td></tr>
+      <tr><td><code>historyMessages</code></td><td><code>ContextCollectorHandler</code></td><td>短期记忆启用时 append 当前用户消息后再 load history。</td></tr>
+      <tr><td><code>memoryContext</code></td><td><code>AgentChatContext</code></td><td>字段存在；当前优先范围内未看到本切片前序 Handler 写入长期记忆文本。</td></tr>
+      <tr><td><code>systemPrompt</code></td><td><code>SystemPromptHandler</code>，可能被 <code>RagHandler</code> 追加</td><td>Skill 当前通过 descriptor 下发，不在 Server 端直接追加到 systemPrompt。</td></tr>
+      <tr><td><code>serverHttpPort</code></td><td><code>@Value("${server.port:8080}")</code></td><td>随分发请求下发给 Client，供 Client 工具或回调知道 Server Web 端口。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. URI、metadata 与 gRPC 方法</h2>
+  <table>
+    <thead>
+      <tr><th>层级</th><th>当前源码事实</th><th>排查含义</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>proto 信封</td>
+        <td><code>GrpcSnailAiRequest</code> 有 <code>reqId</code>、<code>metadata</code>、<code>body</code>；<code>Metadata</code> 有 <code>uri</code> 和 <code>headers</code>。</td>
+        <td>业务字段不在 proto message 中，而在 JSON body 中。</td>
+      </tr>
+      <tr>
+        <td>方法名</td>
+        <td>server-streaming 使用 <code>ServerStreamingRequest/serverStreamingRequest</code>。</td>
+        <td>多个业务 streaming URI 可以共用同一个 gRPC 方法。</td>
+      </tr>
+      <tr>
+        <td>业务 URI</td>
+        <td>聊天分发使用 <code>UriConstants.CHAT_DISPATCH</code>，值为 <code>/chat/dispatch</code>。</td>
+        <td>Client 侧 handler 是否命中，取决于 metadata URI。</td>
+      </tr>
+      <tr>
+        <td>metadata headers</td>
+        <td><code>LlmCallHandler</code> 调用 <code>sendServerStreaming(..., Map.of(), ...)</code>，聊天分发 headers 为空。</td>
+        <td>不要在 <code>/chat/dispatch</code> 上找 appId/token header；Client 在线身份来自此前心跳注册。</td>
+      </tr>
+      <tr>
+        <td>reqId</td>
+        <td><code>GrpcChannelUtil</code> 用进程内 <code>AtomicLong</code> 自增生成。</td>
+        <td>它只用于 gRPC 请求/响应匹配；不要和业务 <code>requestId</code> 混用。</td>
+      </tr>
+      <tr>
+        <td>CallOptions</td>
+        <td>server-streaming 调用使用 <code>CallOptions.DEFAULT</code>。</td>
+        <td>桥接工具层没有统一 deadline；超时要继续看 channel、网络、上层请求生命周期和 Client runtime。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>5. Client 在线、路由和心跳</h2>
+  <table>
+    <thead>
+      <tr><th>步骤</th><th>源码</th><th>关键字段</th><th>失败症状</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Client 启动</td>
+        <td><code>SnailAiAgentAutoConfiguration</code> 创建 <code>ClientGrpcServer</code> 并启动心跳任务。</td>
+        <td><code>snail-ai.agent.port</code>、Server host/port、appId、token。</td>
+        <td>Client 没启动 gRPC server 时，Server 可有旧节点但 streaming 连接失败。</td>
+      </tr>
+      <tr>
+        <td>心跳发送</td>
+        <td><code>ClientHeartbeatScheduler</code> 每 10 秒 unary 调 <code>/beat</code>。</td>
+        <td>headers: hostId、hostIp、hostPort、appId、token、version；body: maxConcurrentChats、activeChats。</td>
+        <td>token 错误会被 Server 拒绝；Server 端不会把该 Client 加入 alive 表。</td>
+      </tr>
+      <tr>
+        <td>心跳处理</td>
+        <td><code>BeatRequestHandler</code> 校验 token 后调用 <code>ClientInstanceManager.registerOrUpdate</code>。</td>
+        <td>appId/token、hostId、hostIp、grpcPort。</td>
+        <td>app 停用或 token 不匹配时返回失败状态。</td>
+      </tr>
+      <tr>
+        <td>在线判断</td>
+        <td><code>ClientInstanceManager.getAliveInstances</code></td>
+        <td>40 秒心跳阈值、channel 非 shutdown、DB 未过期节点降级发现。</td>
+        <td><code>ContextCollectorHandler</code> 报“没有可用的客户端实例”。</td>
+      </tr>
+      <tr>
+        <td>路由选择</td>
+        <td><code>ClientRouteStrategyManager</code> + 默认 <code>LeastLoadClientRoute</code></td>
+        <td><code>activeChats / maxConcurrent</code> 最小者优先。</td>
+        <td>maxConcurrent 小于等于 0 会被视为极高负载。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. Streaming 生命周期</h2>
+  <table>
+    <thead>
+      <tr><th>阶段</th><th>发生位置</th><th>事件</th><th>结束条件</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>发起</td>
+        <td>Server <code>LlmCallHandler</code></td>
+        <td>序列化 <code>ChatDispatchRequest</code>，调用 <code>GrpcChannelUtil.sendServerStreaming</code>。</td>
+        <td>方法调用返回后设置 <code>streamDispatchStarted=true</code>；这不代表已经收到第一个 chunk。</td>
+      </tr>
+      <tr>
+        <td>入站分发</td>
+        <td>Client <code>ClientGrpcServer</code> + <code>ClientRequestDispatcher</code></td>
+        <td>server-streaming service 收到统一请求，从 metadata 取 URI 并委托 <code>GrpcRequestDispatcher</code>。</td>
+        <td>找不到 streaming handler 时返回 Unknown URI 并 completed。</td>
+      </tr>
+      <tr>
+        <td>业务执行</td>
+        <td>Client <code>ChatDispatchStreamingHandler</code> + <code>ChatSessionRuntime</code></td>
+        <td>解析 body，active chat +1，解析工具，执行流式模型调用。</td>
+        <td>completion 或 error 回调都会清理 ToolResolution 并 active chat -1。</td>
+      </tr>
+      <tr>
+        <td>增量回流</td>
+        <td>Client handler</td>
+        <td>text/thinking 变成 <code>ChatStreamResponse</code> JSON，再放入 <code>GrpcSnailAiResult.data</code>。</td>
+        <td>发送失败只记录 warn，不会自动补偿。</td>
+      </tr>
+      <tr>
+        <td>完成回流</td>
+        <td>Client handler</td>
+        <td>completion 包含 fullText、fullThinking、promptTokens、completionTokens、cacheTokens、durationMs。</td>
+        <td>发送 completion 后调用 <code>observer.onCompleted()</code>。</td>
+      </tr>
+      <tr>
+        <td>Server 回写</td>
+        <td>Server <code>ChatStreamObserver</code></td>
+        <td>解析 <code>ChatStreamResponse</code>，text/thinking 写前端流；completion 提交异步持久化。</td>
+        <td>gRPC <code>onCompleted</code> 时调用 <code>streamWriter.complete()</code>。</td>
+      </tr>
+      <tr>
+        <td>错误回流</td>
+        <td>Client handler 或 gRPC observer</td>
+        <td>Client runtime error 变成 type=error；网络/连接异常进入 Server observer 的 <code>onError</code>。</td>
+        <td>Client error 会 completed；Server observer onError 会写“Client disconnected”并 complete。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>7. 错误、超时和不在线边界</h2>
+  <table>
+    <thead>
+      <tr><th>现象</th><th>优先检查</th><th>依据</th><th>下一步</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>前端立刻收到 Agent not found</td>
+        <td><code>InitContextHandler</code></td>
+        <td>找不到 Agent 时直接写错误并终止。</td>
+        <td>核对 agentId、数据库和入口权限上下文。</td>
+      </tr>
+      <tr>
+        <td>前端立刻收到未配置对话模型或模型配置加载失败</td>
+        <td><code>ModelResolveHandler</code></td>
+        <td>默认 chat 模型不存在或 dispatch model config 装配异常。</td>
+        <td>核对 Agent chatModelId、默认模型、provider/adapter 配置和密钥解密。</td>
+      </tr>
+      <tr>
+        <td>前端收到 appId 或应用停用错误</td>
+        <td><code>ContextCollectorHandler.findEnabledApp</code></td>
+        <td>分发前必须有启用状态的 app。</td>
+        <td>核对 Agent appId、App 表 status、routeStrategy。</td>
+      </tr>
+      <tr>
+        <td>前端收到没有可用 Client</td>
+        <td><code>ClientInstanceManager.getAliveInstances</code></td>
+        <td>40 秒内无心跳、channel shutdown、DB 无未过期节点都会导致候选为空。</td>
+        <td>看 Client 心跳日志、Server <code>/beat</code> 返回、token、host/port、DB client_node 过期时间。</td>
+      </tr>
+      <tr>
+        <td>已选中 Client，但 streaming 建连失败</td>
+        <td><code>LlmCallHandler</code> catch 和 <code>ChatStreamObserver.onError</code></td>
+        <td>同步发起异常会向外抛；异步连接或流异常由 observer onError 写前端错误。</td>
+        <td>核对 Client gRPC 端口、网络、channel 状态、防火墙和 Client server 是否启动。</td>
+      </tr>
+      <tr>
+        <td>Client 收到请求但返回 Unknown URI</td>
+        <td><code>GrpcRequestDispatcher.dispatchStreaming</code></td>
+        <td>metadata URI 未命中任何 <code>GrpcStreamingRequestHandler.supports</code>。</td>
+        <td>确认发送的是 <code>UriConstants.CHAT_DISPATCH</code>，Client 自动配置已创建 <code>ChatDispatchStreamingHandler</code>。</td>
+      </tr>
+      <tr>
+        <td>请求长时间无 completion</td>
+        <td><code>ChatSessionRuntime</code>、模型流、工具解析、网络</td>
+        <td><code>GrpcChannelUtil.sendServerStreaming</code> 没有设置 deadline。</td>
+        <td>查看 Client activeChats 是否增长后未下降、模型 SDK 日志、工具调用是否阻塞、上层 HTTP/SSE 是否超时。</td>
+      </tr>
+      <tr>
+        <td>收到 completion 但数据库没有助手消息</td>
+        <td><code>ChatStreamObserver.handleCompletion</code> 与 <code>ChatResultPersistService</code></td>
+        <td>completion 时只提交异步持久化命令。</td>
+        <td>看 persistService 异步任务日志、Agent/user/conversationId、token 字段和短期记忆写入。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>8. 调试 checklist</h2>
+  <table>
+    <thead>
+      <tr><th>检查点</th><th>命令或源码位置</th><th>期望信号</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>确认 Handler 是否注册并排序</td>
+        <td><code>chain/*Handler.java</code> 的 <code>@Component</code> 与 <code>@Order</code></td>
+        <td>10、20、30、40、50、60、70、75、80 按序存在；WebSearch 默认不注册。</td>
+      </tr>
+      <tr>
+        <td>确认上下文是否在 gRPC 前已终止</td>
+        <td><code>ctx.isTerminated()</code> 检查点</td>
+        <td>若已终止，<code>LlmCallHandler</code> 不会发送 <code>/chat/dispatch</code>。</td>
+      </tr>
+      <tr>
+        <td>确认分发 DTO 是否完整</td>
+        <td><code>LlmCallHandler.buildDispatchRequest</code></td>
+        <td>modelConfig、targetClient、systemPrompt、historyMessages、skills、mcpServers 符合预期。</td>
+      </tr>
+      <tr>
+        <td>确认业务 URI</td>
+        <td><code>UriConstants.CHAT_DISPATCH</code></td>
+        <td>metadata.uri 为 <code>/chat/dispatch</code>，headers 为空是当前聊天分发的正常状态。</td>
+      </tr>
+      <tr>
+        <td>确认 Client 在线来源</td>
+        <td><code>ClientHeartbeatScheduler</code> 与 <code>BeatRequestHandler</code></td>
+        <td>10 秒心跳成功；Server 注册 appId/hostId/hostIp/grpcPort；40 秒内未过期。</td>
+      </tr>
+      <tr>
+        <td>确认 Client streaming service 已启动</td>
+        <td><code>ClientGrpcServer.start</code> 日志</td>
+        <td>Client gRPC server 监听配置端口，并注册 unary 与 server-streaming 服务。</td>
+      </tr>
+      <tr>
+        <td>确认 Client handler 命中</td>
+        <td><code>ChatDispatchStreamingHandler.supports</code> 与日志</td>
+        <td>日志出现 requestId 和 sid；未命中时检查 URI 或自动配置条件 <code>snail-ai.enabled=true</code>。</td>
+      </tr>
+      <tr>
+        <td>确认回流类型</td>
+        <td><code>ChatStreamResponse.TYPE_TEXT/THINKING/COMPLETION/ERROR</code></td>
+        <td>text/thinking 可多次，completion 或 error 结束流。</td>
+      </tr>
+      <tr>
+        <td>确认持久化触发点</td>
+        <td><code>ChatStreamObserver.handleCompletion</code></td>
+        <td>只有 completion 会提交助手消息、thinking 和 token 的异步保存。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="note">阅读顺序建议：先从 <code>ContextCollectorHandler</code> 判断是否真的会走到 gRPC，再看 <code>LlmCallHandler.buildDispatchRequest</code> 的 DTO 完整性，然后检查 <code>GrpcChannelUtil</code> 的 metadata URI，最后到 Client 的 <code>ChatDispatchStreamingHandler</code> 和 <code>ChatSessionRuntime</code> 看流是否被消费并完成。</p>
+</main>
+</body>
+</html>

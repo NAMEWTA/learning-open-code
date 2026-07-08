@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>goal 续跑：问题背景与设计备选</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    table { width:100%; border-collapse:collapse; margin:12px 0; font-size:.9rem; }
+    th, td { border:1px solid var(--line); padding:8px 10px; vertical-align:top; text-align:left; }
+    th { background:#f1f5f9; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>goal 续跑：问题背景与设计备选</h1>
+  <p class="lede">学习目标：读完后，你能说明「为什么要在 worker 里做隐藏续跑」，并对比 deer-flow 与几种常见备选架构的取舍。下一节：<a href="0002-core-mechanism.html">核心机制拆解</a>。</p>
+
+  <h2>1. 要解决的具体问题</h2>
+  <p>用户用 <code>/goal</code> 或 <code>PUT /goal</code> 设定长期目标后，一次可见 agent 回合往往不足以完成。若只靠用户反复发「继续」，体验差且容易漏掉中间状态。Claude Code 的 goal loop 思路是：<strong>可见回合结束后，由系统静默判断是否还需工作</strong>，必要时在同一 <code>run_id</code> 内再跑隐藏回合。</p>
+  <p>难点不在「再调一次模型」，而在三件事同时成立：① 不能把未落盘的半成品当证据；② 用户并发发消息或清空 goal 时，evaluator 的滞后结论不能覆盖新状态；③ 续跑必须有硬顶，防止 token 与工具调用空转。这三条约束直接塑造了 <span class="where">worker.py</span> + <span class="where">goal.py</span> 的分工。</p>
+
+  <h2>2. 三种备选架构</h2>
+  <table>
+    <tr><th>方案</th><th>做法</th><th>优点</th><th>deer-flow 未采用的原因</th></tr>
+    <tr><td>前端轮询续跑</td><td>UI 检测 goal 未满足后再次 <code>POST /runs</code></td><td>实现简单</td><td>多一次 HTTP 往返；竞态与 run 生命周期难与 checkpointer 对齐</td></tr>
+    <tr><td>外部任务队列</td><td>Cron/队列在 run 结束后投递新 job</td><td>与 agent 解耦</td><td>需额外调度器与 run 归属；IM/TUI 也要走同一语义</td></tr>
+    <tr><td><strong>worker 内 while 环</strong>（现行）</td><td><code>run_agent</code> 流式结束后调用 <code>_prepare_goal_continuation_input</code></td><td>同一 run、同一 evaluator 模型缓存；与 SSE 流一致</td><td>worker 变复杂；单次 run 可能变长</td></tr>
+  </table>
+  <p>类型化 <code>GoalBlocker</code>（见 <span class="where">goal_state.py</span>）是另一项设计选择：只有 <code>goal_not_met_yet</code> 可续跑，其余 blocker 只写 <code>last_evaluation</code> 并 stand down，避免用自由文本 reason 驱动分支。</p>
+
+  <h2>3. 模块边界为何这样切</h2>
+  <p><code>goal_state.py</code> 只放 TypedDict，让 harness 与 Gateway 共享契约而不引 FastAPI。<code>goal.py</code> 放纯函数与 checkpoint 读写，便于单测。<code>worker.py</code> 只管编排：何时调 evaluator、何时三次重读、何时注入 <code>hide_from_ui</code> 消息。evaluator 本身是无 thinking 的小模型（<code>create_goal_evaluator_model</code>），与 lead agent 分离，降低「自己判自己完成」的偏差。</p>
+  <p class="note">若你已读过 <a href="../../slice-goal-continuation/lessons/0001-flow-map.html">L2 流程课</a>，本节回答的是「为什么链路长这样」；机制逐步拆解见 <a href="0002-core-mechanism.html">0002</a>，速查表见 <a href="../reference/goal-continuation-notes.html">参考笔记</a>。</p>
+
+  <div class="exercise">
+    <strong>判断题：</strong>把续跑做成「前端在 run success 后再 POST 一次 /runs」与现行 worker 内环相比，主要损失的是哪一项？ A. 类型化 blocker B. 与 checkpointer 同一 run 内的原子续跑语义 C. evaluator 使用非 thinking 模型
+    <div class="answer">参考答案：B。前端二次 POST 会新建 run，难以复用同一 run 内的 abort 信号、evaluator 模型缓存，且与「隐藏续跑不新增 run_id」的产品语义不一致。A、C 在两种架构下都可以保留。</div>
+  </div>
+  <p class="note">主要来源：<code>backend/AGENTS.md</code> Thread Runs 合约、<code>goal.py</code> 模块头注释。不清楚某条取舍时，可向 agent 追问具体函数。</p>
+</main>
+</body>
+</html>

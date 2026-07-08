@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relay Reconnect 问题框架</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Relay Reconnect：先判断守住了哪一个不变量</h1>
+        <p class="meta">目标：15 分钟内能把一次 SSH/relay 断线恢复归类到部署层、socket 接入层或 dispatcher client 层。</p>
+
+        <h2>先把故障分成三类</h2>
+        <p>
+          Orca 的远端终端不是靠 SSH exec channel 本身保活，而是靠 detached relay daemon 保住 PTY。
+          所以“断线后还能回来”依赖三个不变量：主进程必须找到正确 daemon；daemon 必须只在安全握手后接入新 socket；
+          旧 client 的迟到请求和响应必须被隔离。读源码时先抓三个文件：
+          <code>src/main/ssh/ssh-relay-deploy.ts</code>、<code>src/relay/relay.ts</code>、
+          <code>src/relay/dispatcher.ts</code>。
+        </p>
+        <div class="flow">main deploy
+  └─ 找到旧 socket 或启动新 detached daemon
+remote relay
+  └─ handshake 通过后才把 socket 交给 dispatcher
+dispatcher
+  └─ 用 client generation 丢弃旧 client 的迟到工作</div>
+
+        <h2>不变量一：找对 daemon，而不是只看到 socket</h2>
+        <p>
+          <code>ssh-relay-deploy.ts</code> 先用 target id 生成专属 socket，再 probe。socket alive 时走
+          <code>relay.js --connect --sock-path ...</code>，连接旧 daemon；socket dead 或 bridge 失败时，才 fresh launch
+          detached relay，再通过同一个 <code>--connect</code> 桥过去。这里的判断不是“文件存在即可”，因为 stale socket
+          可能残留，Windows named pipe 也不能像 Unix socket 那样直接 unlink。
+        </p>
+        <p>
+          <code>relay.ts</code> 负责另一半保护：它记录自己 bind 成功时的 socket identity，shutdown 或
+          <code>EADDRINUSE</code> 重试时只清理仍然属于自己的 socket。这样旧 relay 不会在退出时删掉新 relay
+          刚创建的 socket。
+        </p>
+
+        <h2>不变量二：新 client 接入前，先过握手和隔离</h2>
+        <p>
+          <code>--connect</code> bridge 只有在版本握手通过后才向 main stdout 写 ready sentinel。daemon 侧在
+          <code>relay.ts</code> 的 socket accept 阶段先完成握手，再调用 <code>attachAcceptedSocket()</code>。
+          接入第一个 socket client 时，它会暂停旧 stdin 并移除旧 data listener，避免 SSH 旧 channel 的残留 bytes
+          与新 socket 数据交错。
+        </p>
+        <p>
+          <code>dispatcher.ts</code> 把 primary client 和 socket client 分开维护 decoder、seq、ack 和 generation。
+          socket client 关闭会 detach；primary stdin 断开会 invalidate。长请求返回时如果 generation 已变，response 会被丢弃，
+          request context 的 signal 也会被 abort。这就是“旧 client 不能在新会话里继续落地副作用”的核心。
+        </p>
+
+        <h2>检索练习</h2>
+        <p>
+          你看到日志：旧 socket probe 为 alive，随后 `--connect` 没有输出 ready sentinel，最终 UI 进入 terminal relay error。
+          这更像哪一类问题？
+        </p>
+        <div class="answer">
+          参考答案：先归到 socket 接入层，而不是 PTY grace 过期。POSIX 的 <code>ALIVE</code> 只说明 socket inode 存在；
+          Windows 的 <code>READY</code> 才来自连接 probe。两者都还需要 <code>--connect</code>、handshake 和 sentinel 才能判定可用。
+          如果最终是 terminal relay error，重点查 handshake mismatch、bridge exit 42 和 session 的 terminal callback。
+          若只是 socket dead 或普通 connect 失败，部署层通常会 fresh launch 新 daemon。详细证据见
+          <a href="../reference/relay-reconnect-notes.html">Relay Reconnect 参考</a>。
+        </div>
+
+        <p class="meta">
+          主要来源：<code>src/main/ssh/ssh-relay-deploy.ts</code>、
+          <code>src/relay/relay.ts</code>、<code>src/relay/dispatcher.ts</code>。
+          后续可以继续追问：给一段日志，判断它卡在这三层中的哪一层。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>goal 续跑：算法拆解与性能边界</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --accent:#1f6feb; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 56px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .3rem; border-radius:5px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-left:4px solid var(--accent); border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:#245b3a; }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>goal 续跑：算法拆解与性能边界</h1>
+  <p class="lede">学习目标：读完后，你能按顺序说出 <code>_prepare_goal_continuation_input</code> 的决策步骤，并解释性能开销与已知局限。上一节：<a href="0001-problem-frame.html">问题背景</a>。</p>
+
+  <h2>1. 决策树（单次续跑判定）</h2>
+  <div class="diagram">read_thread_goal → 非 active 则结束
+  ↓
+_has_durable_goal_turn_receipt?  (无 pending_writes + 末条可见 AI)
+  ↓ 否 → blocker=run_failed, stand down
+evaluate_goal_completion (LLM, O(对话长度))
+  ↓
+compute_no_progress_count (progress_key = blocker + AI 文本 SHA256)
+  ↓
+重读 goal 实例 + 可见对话签名 → 竞态则 stand down
+  ↓
+satisfied? → write_thread_goal(None)
+  ↓
+_stand_down_reason / should_continue_goal? → 只写 last_evaluation
+  ↓
+continuation_count++ → 第三次重读 → make_goal_continuation_message</div>
+  <p><code>_goal_instance_matches</code> 用 <code>objective + created_at + status</code> 识别「同一条 goal」，防止 evaluator 期间用户换了新目标却被旧结论写回。</p>
+
+  <h2>2. 性能特征</h2>
+  <p>每次 while 迭代至少 <strong>2～3 次 checkpointer 读</strong>（评估前、评估后、排队续跑前），写 goal 时还有一次带 <code>expected_checkpoint_id</code> 的乐观写。对话证据截断在 30 条 / 12000 字符（<code>goal.py</code> 常量），evaluator 单次 LLM 调用 dominates 延迟。</p>
+  <p>最坏情况：可见回合 1 次 + 8 次隐藏续跑 ×（1 次 lead agent 流 + 1 次 evaluator）≈ <strong>9 倍可见回合成本</strong>，且受 <code>max_no_progress_continuations=2</code> 提前熔断。同一 run 内 evaluator 模型通过 <code>_get_goal_evaluator_model</code> 缓存，避免重复构造。</p>
+
+  <h2>3. 已知局限与改进方向</h2>
+  <ul>
+    <li><strong>证据仅可见对话</strong>：沙箱里改了文件但 assistant 没说出来 → <code>missing_evidence</code>，续跑停住。改进需扩展证据源（工具结果摘要、workspace diff），但会增大 evaluator 输入与误判面。</li>
+    <li><strong>LLM evaluator 非确定</strong>：同一线程可能因措辞抖动得到不同 blocker；<code>progress_key</code> 故意忽略 reason 文本，只盯 blocker + 可见 AI 签名防空转。</li>
+    <li><strong>单 worker 串行续跑</strong>：长 goal 占用 run 槽位；外部队列方案可缓解，但牺牲当前的原子语义。</li>
+    <li><strong>无 checkpointer 时完全禁用</strong>：<code>checkpointer is None</code> 直接 return，memory 后端无法续跑。</li>
+  </ul>
+
+  <pre><code>def compute_goal_progress_key(evaluation, *, evidence_signature=""):
+    return json.dumps({
+        "satisfied": evaluation["satisfied"],
+        "blocker": evaluation["blocker"],
+        "evidence_signature": evidence_signature,
+    }, sort_keys=True)</code></pre>
+  <p><code>evidence_signature</code> 来自 <code>latest_visible_assistant_signature</code>（最新可见 AI 文本的 SHA256），故意不用 evaluator 的 <code>reason</code> 文本。</p>
+
+  <div class="exercise">
+    <strong>检索练习：</strong>连续两次续跑后可见 assistant 文本完全相同，<code>no_progress_count</code> 会是多少（默认配置）？续跑还会继续吗？
+    <div class="answer">参考答案：第二次续跑后 <code>no_progress_count</code> 达到 2，等于 <code>max_no_progress_continuations</code>，<code>should_continue_goal</code> 返回 false，<code>stand_down_reason=no_progress_detected</code>，不再注入隐藏消息。</div>
+  </div>
+  <p class="note">细节表与 <code>stand_down_reason</code> 全集见 <a href="../reference/goal-continuation-notes.html">goal-continuation-notes</a>。有疑点继续追问 agent。</p>
+</main>
+</body>
+</html>

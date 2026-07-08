@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Focus session 与追踪联动路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断一次专注/休息/追踪动作会改哪层状态</p>
+    <h1>Focus session、break、metric 与当前任务追踪联动</h1>
+    <p class="lead">Super Productivity 把专注模式做成<strong>本地 timer 状态机</strong>，再经 effect 与 <code>currentTaskId</code> 双向锁步。session 完成才写 metric；break 是否暂停追踪取决于配置；idle 会先把 focus session pause 住。完整索引见 <a href="../reference/focus-mode-flow-reference.html">参考文档</a>；相邻主题：<a href="../../module-planning-time/lessons/0001-planning-time-module-tour.html">规划与时间模块</a>、<a href="../../slice-time-tracking-flow/lessons/0001-flow-map.html">时间追踪链路</a>。</p>
+
+    <h2>1. Mermaid 时序图</h2>
+    <pre class="mermaid">sequenceDiagram
+  participant UI as Task / Focus UI
+  participant TaskSvc as TaskService
+  participant FocusFx as FocusModeEffects
+  participant FocusStore as focusMode reducer
+  participant Metric as MetricService
+  participant Idle as openIdleDialog
+
+  alt 用户开始追踪
+    UI->>TaskSvc: setCurrentId(taskId)
+    TaskSvc->>FocusFx: currentTaskId$ _emit
+    FocusFx->>FocusStore: unPause / startFocusSession / skipBreak
+    FocusFx->>TaskSvc: setCurrentTask (session start 且无 current)
+  else 用户停止追踪
+    TaskSvc->>FocusFx: currentTaskId$ -> null
+    FocusFx->>FocusStore: pauseFocusSession
+    FocusFx->>TaskSvc: unsetCurrentTask (session pause 反向)
+  end
+
+  alt Pomodoro work 计时到点
+    FocusStore->>FocusFx: timer 停止且 elapsed >= duration
+    FocusFx->>FocusStore: completeFocusSession
+    FocusFx->>Metric: logFocusSession(duration)
+    FocusFx->>FocusStore: incrementCycle -> startBreak
+    FocusFx->>TaskSvc: unsetCurrentTask (若 isPauseTrackingDuringBreak)
+  end
+
+  alt idle 弹窗
+    Idle->>FocusFx: openIdleDialog
+    FocusFx->>FocusStore: pauseFocusSession
+  end</pre>
+    <p>首查文件是 <span class="where">src/app/features/focus-mode/store/focus-mode.effects.ts</span>：它以 <code>TaskService.currentTaskId$</code> 和 focus action 为两条输入轴，负责 session ↔ tracking 的双向同步、break 自动启动与 metric 写入。</p>
+
+    <h2>2. 三类状态别混读</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>层</th><th>保存在哪</th><th>代表什么</th><th>常见误判</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>focus timer</td><td><code>focusMode.timer</code> + screen</td><td>work/break 是否在跑、剩余/已用时长</td><td>它不是任务耗时；Flowtime 的 duration 为 0。</td></tr>
+          <tr><td>current task</td><td><code>task.currentTaskId</code></td><td>当前正在 wall-clock 追踪哪条任务</td><td>本地 UI 状态，不带 op-log meta；秒级 tick 另写 timeSpent。</td></tr>
+          <tr><td>focus metric</td><td><code>metric[day].focusSessions[]</code></td><td>已完成 session 的 duration 列表</td><td>只在 <code>completeFocusSession</code> 后写入，break 本身不进 metric。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Pomodoro 的 break 链是：<code>completeFocusSession</code> → <code>incrementCycle</code> → <code>startBreak</code>。若开启 <code>isPauseTrackingDuringBreak</code>，break 开始前会 <code>unsetCurrentTask</code> 并把 task id 存进 action 的 <code>pausedTaskId</code>，break 完成或 skip 后再 <code>setCurrentTask</code> 恢复。</p>
+
+    <h2>3. 三个判断点</h2>
+    <p><strong>判断一：</strong>用户点任务行 play，focus 没开 overlay 也会联动。查 <span class="where">syncTrackingStartToSession$</span>：work session 暂停会 <code>unPauseFocusSession</code>；break 中手动追踪会 <code>skipBreak</code>；无 session 且开启 <code>autoStartFocusOnPlay</code> 会静默 <code>startFocusSession</code>。</p>
+    <p><strong>判断二：</strong>session 结束是否还追踪任务，看 <code>isPauseTrackingDuringBreak</code> 与 mode strategy。Pomodoro 自动 break 走 <span class="where">autoStartBreakOnSessionComplete$</span>；Flowtime 手动结束走 <span class="where">autoStartFlowtimeBreakOnSessionEnd$</span>，action 顺序刻意避免与 <span class="where">syncTrackingStopToSession$</span> 竞态。</p>
+    <p><strong>判断三：</strong>metric 何时增加，查 <span class="where">logFocusSession$</span>。它监听 <code>completeFocusSession</code>，用 <code>selectLastSessionDuration</code> 调 <span class="where">MetricService.logFocusSession</span>；duration 低于门槛则 no-op。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：Pomodoro 模式，<code>isPauseTrackingDuringBreak=true</code>。25 分钟 work session 自动结束，用户休息 5 分钟后点「完成休息」，期间没有手动 play 其他任务。请判断：session 结束时 current task 是否还在追踪？metric 何时 +1？break 完成后 tracking 如何恢复？</p>
+    <div class="answer">参考答案：session 自动完成时 <code>autoStartBreakOnSessionComplete$</code> 会先 <code>unsetCurrentTask</code> 再 <code>startBreak</code>，因此 break 期间不在追踪。metric 在 <code>completeFocusSession</code> 时经 <code>logFocusSession$</code> 写入当日 <code>focusSessions</code>。用户点完成休息后 <code>completeBreak</code> 触发 <code>resumeTrackingOnBreakComplete$</code>，若当前无 current task 且 action 携带 <code>pausedTaskId</code>，则 <code>setCurrentTask</code> 恢复；若 strategy 允许还会 <code>startFocusSession</code> 开下一轮。</div>
+    <p>主要来源：<a href="../reference/focus-mode-flow-reference.html">Focus 联动速查</a>。若某条 effect 顺序仍不清楚，可以向 agent 追问：“请从 <code>completeFocusSession</code> 列出所有订阅它的 effect 及 dispatch 顺序”。</p>
+  </article>
+</main>
+</body>
+</html>

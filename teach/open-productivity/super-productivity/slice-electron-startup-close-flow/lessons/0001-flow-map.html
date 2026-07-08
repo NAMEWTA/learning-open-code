@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L2：Electron 启动到关闭保护链路地图</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="topline">L2 垂直切片 · 15 分钟短课</div>
+      <h1>Electron 启动到关闭保护链路地图</h1>
+      <p class="lead">
+        本课只训练一个判断：看到桌面端启动、窗口创建、关闭前同步或 finish-day 问题时，先把它放回正确的进程边界。Electron main process 创建窗口和 IPC；Angular renderer 完成业务初始化，并通过 preload 暴露的
+        <code>window.ea</code> 回报就绪或释放关闭等待项。
+      </p>
+
+      <div class="meta">
+        <span>主要来源：<a href="../reference/electron-startup-close-flow-reference.html">链路参考</a></span>
+        <span>后续短课：<a href="./0002-main-path.html">启动主路径</a> / <a href="./0003-close-protection-path.html">关闭保护</a></span>
+        <span>相关 L1：<a href="../../module-electron-host/">Electron 宿主</a></span>
+        <span>建议耗时：12-15 分钟</span>
+        <span>目标：能画出主路径并判断关闭是否应继续</span>
+      </div>
+
+      <h2>路径图：不是同步调用栈</h2>
+      <div class="flow-map">OS / 桌面入口
+  ↓
+electron/main.ts
+  ├─ 非 macOS：requestSingleInstanceLock()
+  └─ startApp()
+       ↓
+electron/start-app.ts
+  ├─ 注册协议、IPC、本地能力、app 事件
+  ├─ app ready → createMainWin()
+  └─ before-quit / window-all-closed 兜底退出
+       ↓
+electron/main-window.ts
+  ├─ new BrowserWindow({ preload, contextIsolation, nodeIntegration: false })
+  ├─ loadURL(dev server 或 dist index.html)
+  ├─ ready-to-show → show()
+  └─ close → 可能 hide、通知 renderer、或真正 quit
+       ↓
+Angular renderer
+  ├─ bootstrapApplication(...)
+  ├─ StartupService → APP_READY
+  └─ SyncEffects / FinishDayBeforeCloseEffects → BEFORE_CLOSE_DONE</div>
+
+      <p>
+        第一层入口很短：<span class="where">electron/main.ts</span> 在非 macOS 上先拿单实例锁，拿不到就退出，拿到才进入 <code>startApp()</code>。
+      </p>
+      <pre class="language-ts"><code>if (!IS_MAC) {
+  const isLockObtained = app.requestSingleInstanceLock();
+  if (!isLockObtained) {
+    process.exit(0);
+  } else {
+    startApp();
+  }
+} else {
+  startApp();
+}</code></pre>
+
+      <div class="callout">
+        关键边界：<code>startApp()</code> 不会直接调用 Angular 的 <code>bootstrapApplication()</code>。它创建
+        <code>BrowserWindow</code> 并加载 URL；Angular 是窗口里加载的 renderer 应用，完成初始化后再用 IPC 发回 <code>APP_READY</code>。
+      </div>
+
+      <h2>三个关键判断</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>问题</th>
+            <th>先看哪里</th>
+            <th>判断结果</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>窗口为什么还没出现？</td>
+            <td><span class="where">electron/start-app.ts</span></td>
+            <td><code>app ready</code> 之后才调用 <code>createMainWin()</code>；GPU、userData、托盘、IPC 都在这之前或同一阶段注册。</td>
+          </tr>
+          <tr>
+            <td>页面出现是否等于业务可用？</td>
+            <td><span class="where">electron/main-window.ts</span></td>
+            <td><code>ready-to-show</code> 只说明窗口可显示；<code>APP_READY</code> 才是 Angular 初始化后给 main 的业务就绪信号。</td>
+          </tr>
+          <tr>
+            <td>点击关闭会不会退出？</td>
+            <td><span class="where">electron/main-window.ts</span></td>
+            <td>如果 minimize-to-tray 生效，会先隐藏；如果有 before-close 等待项，会发 <code>NOTIFY_ON_CLOSE</code>；等待项清空后才继续关闭。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>关闭前保护的正确读法</h2>
+      <p>
+        main process 不知道“同步完成了吗”或“用户要不要 finish-day”的业务答案。它只维护一个等待项数组：renderer 注册 ID，关闭时 main 发通知，renderer 完成自己的业务后回报
+        <code>BEFORE_CLOSE_DONE</code>。这让同步保护和 finish-day 提醒可以并列存在。
+      </p>
+      <pre class="language-ts"><code>ipcMain.on(IPC.REGISTER_BEFORE_CLOSE, (ev, { id }) => {
+  ids.push(id);
+});
+
+ipcMain.on(IPC.BEFORE_CLOSE_DONE, (ev, { id }) => {
+  ids = ids.filter((idIn) => idIn !== id);
+  if (ids.length === 0) {
+    destroyTaskWidget();
+    mainWin.close();
+  }
+});
+
+mainWin.on('close', (event) => {
+  if (!getIsQuiting()) {
+    event.preventDefault();
+    ids.length > 0 ? mainWin.webContents.send(IPC.NOTIFY_ON_CLOSE, ids) : _quitApp();
+  }
+});</code></pre>
+
+      <p>
+        读这段时不要把“关闭事件”理解为“立刻销毁窗口”。第一次 <code>close</code> 常常只是一个拦截点；真正销毁窗口发生在等待项清空、<code>setIsQuiting(true)</code> 之后。
+      </p>
+
+      <h2>60 秒判断题</h2>
+      <div class="quiz">
+        <p>
+          场景：用户按 <code>Cmd+Q</code>，同步已启用，今天有已完成任务，finish-day 提醒也启用。renderer 收到关闭通知后，用户在弹窗里选择 <code>finish-day</code>。窗口应该立刻退出吗？
+        </p>
+        <p>先在脑中排顺序：<code>before-quit</code>、<code>closeWinAndQuit</code>、<code>NOTIFY_ON_CLOSE</code>、同步、finish-day 选择、<code>BEFORE_CLOSE_DONE</code>。</p>
+        <div class="answer">
+          <strong>参考答案：</strong>不应立刻退出。原生 quit 会先进入 main 的 <code>before-quit</code>，在尚未完成关闭保护时阻止默认退出并转到窗口 close 流程。同步等待项成功或失败后都会调用
+          <code>BEFORE_CLOSE_DONE</code>；但 finish-day 选择会导航到 <code>/active/daily-summary</code>，不调用 <code>setDone</code>，所以该等待项仍未释放，窗口保持打开。
+        </div>
+      </div>
+
+      <p class="footer">
+        复习时先打开参考页的“排障表”。相关模块可回看 <a href="../../module-angular-app-shell/">Angular 应用装配</a> 与
+        <a href="../../module-op-log-sync/">op-log 同步架构</a>。如果你要继续下钻，可以让 agent 带你读同步等待项、IPC handler wrapper 或 BrowserWindow 安全配置。
+      </p>
+    </main>
+  </body>
+</html>

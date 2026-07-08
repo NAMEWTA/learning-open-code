@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · 检索与注入优化：缓存前缀、Token预算与Prompt工程</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .step { background: #fff; border: 1px solid #ebebeb; border-radius: 10px; padding: 0.6rem 1.1rem; margin: 0.7rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.03); }
+  .step .num { display: inline-block; background: #2c3e50; color: #fff; width: 1.6rem; height: 1.6rem; line-height: 1.6rem; text-align: center; border-radius: 50%; font-size: 0.85rem; font-weight: bold; margin-right: 0.5rem; }
+  .step .where { font-size: 0.8rem; color: #888; font-family: "SF Mono", Consolas, monospace; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .danger { background: #fff4f4; border-left: 3px solid #e05555; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .opt { display: block; padding: 0.35rem 0; color: #333; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .cite a, .reminder a { color: #1d6fd6; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin: 1rem 0; }
+  th, td { border: 1px solid #e3e8ef; padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: #f7f9fc; font-weight: 600; }
+  .flow { background: #fafbfc; border: 1px solid #d6e4ff; border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.8; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>第 4 课 · 检索与注入优化：缓存前缀、Token预算与Prompt工程 <span class="tag">注入优化</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标：</b>学完你能画出 assemble 的四段拼接模板，解释 2000 token 预算在各层的分配逻辑和推理模型缓冲区机制，理解四个编译 Prompt 的共享过滤语义和缓存策略。
+</div>
+
+<p>前面三课聚焦于"如何生产记忆内容"。这一课我们关注"如何把记忆注入到每次 LLM 调用中"——从 assemble 拼接、到 token 预算控制、到 Prompt 缓存优化。</p>
+
+<h2>一、assemble：四段拼接终产物 memory.md</h2>
+
+<h3>1.1 功能定位</h3>
+
+<p><code>assemble</code> 是一个<b>纯同步函数</b>（不调 LLM），将四个中间文件按固定模板拼成 <code>memory.md</code>：</p>
+
+<div class="flow">
+facts.md      today.md      week.md       longterm.md
+   ↓             ↓             ↓               ↓
+   └─────────────┴─────────────┴───────────────┘
+                      ↓
+             buildCompiledMemoryMarkdown
+                      ↓
+                  memory.md
+  ┌──────────────────────────────────────────────┐
+  │ ## 重要事实 / Key facts                       │
+  │   (facts.md 内容 或 "(暂无)")                  │
+  │                                              │
+  │ ## 今天 / Today                               │
+  │   (today.md 内容 或 "(暂无)")                  │
+  │                                              │
+  │ ## 本周早些时候 / Earlier this week            │
+  │   (week.md 内容 或 "(暂无)")                   │
+  │                                              │
+  │ ## 长期情况 / Long-term context               │
+  │   (longterm.md 内容 或 "(暂无)")               │
+  └──────────────────────────────────────────────┘</div>
+
+<h3>1.2 关键约束</h3>
+
+<div class="step"><span class="num">1</span><b>空栏占位符</b>：四个标题始终保留。空内容栏写 "(暂无)" 或 "(none)"，避免格式漂移——即使某天没有任何记忆产物，模板结构不变。</div>
+
+<div class="step"><span class="num">2</span><b>标题固定双语</b>：中文环境用 "重要事实/今天/本周早些时候/长期情况"，英文环境对应英文标题。标题不随内容变化。</div>
+
+<div class="step"><span class="num">3</span><b>零 LLM</b>：终极核心理念——任何一个编译步骤（compileToday/compileDaily/compileLongterm/compileEditableFacts）都是独立对各段内容做蒸馏，assemble 只做拼接。分层编译 + 统一拼接 = 关注点分离。</div>
+
+<h2>二、Token 预算控制：2000 token 上限的分配</h2>
+
+<h3>2.1 硬约束</h3>
+
+<p>HanaAgent 记忆系统的硬约束是：<b>memory.md 总长度不超过 2000 token</b>（在 <code>buildSystemPrompt</code> 注入时截断）。这个约束驱动了每一层编译器的设计参数。</p>
+
+<h3>2.2 各层 maxTokens 分配表</h3>
+
+<table>
+<tr><th>编译器</th><th>输出<br>maxTokens</th><th>Prompt<br>字数上限</th><th>产物<br>文件</th><th>目的</th></tr>
+<tr>
+  <td><code>compileToday</code></td>
+  <td><b>450</b></td>
+  <td>300 字 / 180 词</td>
+  <td><code>today.md</code></td>
+  <td>今天的粗颗粒事件，3-5 条，每条 1-2 句</td>
+</tr>
+<tr>
+  <td><code>compileDaily</code></td>
+  <td><b>100</b></td>
+  <td>60 字 / 30 词</td>
+  <td><code>daily/{date}.md</code></td>
+  <td>每天 2-3 句日记，6 天拼起来约 360 字</td>
+</tr>
+<tr>
+  <td><code>compileLongterm</code></td>
+  <td><b>600</b></td>
+  <td>400 字 / 240 词</td>
+  <td><code>longterm.md</code></td>
+  <td>稳定用户画像核心，允许最长</td>
+</tr>
+<tr>
+  <td><code>compileEditableFacts</code></td>
+  <td><b>300</b></td>
+  <td>200 字 / 120 词</td>
+  <td><code>facts.md</code></td>
+  <td>可编辑的重要事实，宁概括勿堆叠</td>
+</tr>
+</table>
+
+<h3>2.3 层级分配的深层逻辑</h3>
+
+<div class="side">
+💡 <b>为什么 today 450、daily 100、longterm 600？</b>这不是简单的等比例分配，而是基于<b>信息时效性与稳定性的权衡</b>：
+<ul>
+  <li><b>today (450 tokens)</b>——今天的内容最直接影响用户当前对话体验，需要保持最高细节度。</li>
+  <li><b>daily (100 tokens)</b>——已结束的日子只需要"一眼扫过"级别的粒度。</li>
+  <li><b>longterm (600 tokens)</b>——虽然信息是"旧的"，但它沉淀的是用户最稳定的画像核心（人格、审美、长期关系、关注方向），需要较多文字来描述，因此给最高 budget。</li>
+  <li><b>facts (300 tokens)</b>——信息密度极高（原子事实），不需要很大的 token 预算。</li>
+</ul>
+</div>
+
+<h3>2.4 推理模型缓冲区</h3>
+
+<p><code>llm-budget.ts</code> 中的 <code>withMemoryReasoningBuffer</code> 函数处理推理模型（如 Claude Opus 4.5 + extended thinking）的特殊情况：</p>
+
+<pre><code>function withMemoryReasoningBuffer(visibleMaxTokens, resolvedModel):
+    visible = positiveInteger(visibleMaxTokens)
+    if not isReasoningModel(model):
+        return visible            // 非推理模型：不调整
+
+    buffer = 1024                  // 默认推理缓冲区
+    requested = visible + buffer
+
+    modelLimit = model.maxTokens   // 模型自身最大输出限制
+    if not modelLimit: return requested
+
+    return max(visible, min(modelLimit, requested))</code></pre>
+
+<p>如果模型开启了 reasoning，实际请求的 maxTokens 会在 visibleMaxTokens 基础上额外加 1024 作为推理缓冲区。最终不超过模型自身最大输出限制。</p>
+
+<h3>2.5 总 token 预算验证</h3>
+
+<div class="step"><span class="num">✓</span><b>峰值估算：</b>facts(200字) + today(300字) + week(6x60=360字) + longterm(400字) + 标题与分隔符(~50字) = <b>约 1310 字</b>。按中文约 1.5 token/字计算，约 <b>1965 token</b>，刚好在 2000 token 上限内。</div>
+
+<p>实战中大多数天的实际 token 远低于此峰值——空闲日 today.md 只有 2-3 条短事件、week 段通常不到 6 条（有些天没有活动）、longterm 做了取舍合并不会无限增长。</p>
+
+<h2>三、Prompt 工程设计</h2>
+
+<h3>3.1 Prompt 体系总览</h3>
+
+<p>记忆系统的 Prompt 主要分布在 <code>lib/memory/prompts/compile.ts</code>（164 行），导出四个函数：</p>
+
+<table>
+<tr><th>导出函数</th><th>用途</th><th>templateVersion</th></tr>
+<tr><td><code>buildCompileTodayPrompt</code></td><td>compileToday 的 System Prompt</td><td><code>compile-today.v2</code></td></tr>
+<tr><td><code>buildCompileDailyPrompt</code></td><td>compileDaily 的 System Prompt</td><td><code>compile-daily.v2</code></td></tr>
+<tr><td><code>buildCompileLongtermPrompt</code></td><td>compileLongterm 的 System Prompt</td><td><code>compile-longterm.v1</code></td></tr>
+<tr><td><code>buildCompileEditableFactsPrompt</code></td><td>compileEditableFacts 的 System Prompt</td><td><code>compile-editable-facts.v1</code></td></tr>
+</table>
+
+<h3>3.2 各层 Prompt 的核心差异</h3>
+
+<table>
+<tr><th>Prompt</th><th>输入</th><th>输出粒度</th><th>核心过滤逻辑</th><th>字数上限</th></tr>
+<tr>
+  <td><code>compileToday</code></td>
+  <td>上一版草稿 + delta 时间线条目</td>
+  <td>3-5 条粗颗粒事件，保留时间锚点</td>
+  <td>保留粗颗粒事件和用户画像，过滤工作细节</td>
+  <td>300 字</td>
+</tr>
+<tr>
+  <td><code>compileDaily</code></td>
+  <td>一天的时间线条目或最终版草稿</td>
+  <td>2-3 句日记</td>
+  <td>与 compileToday 一样，但更强调"一眼扫过"的概览性</td>
+  <td>60 字</td>
+</tr>
+<tr>
+  <td><code>compileLongterm</code></td>
+  <td>旧长期内容 + 新沉淀内容</td>
+  <td>用户画像核心</td>
+  <td><b>必须做取舍、抽象、合并</b>——不允许追加式复述</td>
+  <td>400 字</td>
+</tr>
+<tr>
+  <td><code>compileEditableFacts</code></td>
+  <td>当前可信 Facts + 新增候选 Facts</td>
+  <td>原子事实列表</td>
+  <td>新增与当前冲突时以新增为准；宁可概括合并</td>
+  <td>200 字</td>
+</tr>
+</table>
+
+<h3>3.3 共享的"不要记录"清单</h3>
+
+<p>四个编译 Prompt 共享几乎相同的过滤语义——每一层都在做同一件事：<b>把过程噪音过滤掉，只保留用户画像信息</b>。不同层级的过滤力度不同。</p>
+
+<div class="step"><span class="num">✗</span><b>所有 Prompt 都禁止的：</b>执行步骤、文件名、工具、命令；协作偏好、检查顺序、汇报格式；具体子问题、具体方案、具体改法；助手产出的具体内容；来回修改、重试、被打断这类过程波动。</div>
+
+<div class="step"><span class="num">✓</span><b>所有 Prompt 都允许的：</b>用户的身份、人格特质、审美、兴趣；用户喜欢或讨厌的事物；长期关系和稳定生活背景；用户最近关注的大主题（不是细节）；生活、创作或长期关注方向的变化。</div>
+
+<h3>3.4 Prompt 缓存策略</h3>
+
+<p>每个 Prompt 都声明了 <code>cacheGroup</code>（如 <code>memory.compile.today</code>），配合 <code>buildUtilityPromptLayout</code> 实现 prompt 缓存：</p>
+
+<pre><code>const layout = buildUtilityPromptLayout({
+    cacheGroup: "memory.compile.today",
+    templateVersion: "compile-today.v2",
+    systemPrompt: promptSpec.systemPrompt,
+    userContent: input,
+})</code></pre>
+
+<p>同一类型的编译调用（如所有 compileToday 调用）共享缓存的 System Prompt prefix，减少每次调用的 token 消耗和延迟。</p>
+
+<h2>四、检验一下（提取练习）</h2>
+
+<div class="quiz">
+<p>Q1. assemble 函数的核心理念是什么？</p>
+<span class="opt">A. 用 LLM 对四段内容做最终润色后拼接</span>
+<span class="opt">B. 分层编译 + 统一拼接——每个编译步骤独立蒸馏各自段落，assemble 只做零 LLM 的模板拼接</span>
+<span class="opt">C. 把四段内容压缩成一段</span>
+<span class="opt">D. 按重要性排序后注入 system prompt</span>
+<details><summary>看答案</summary><b>B</b>。compileToday/compileDaily/compileLongterm/compileEditableFacts 各自独立编译，assemble 不做任何 LLM 调用，只是按固定模板拼接四段内容。这是"关注点分离"的体现——编译和装配是两个正交的职责。</details>
+</div>
+
+<div class="quiz">
+<p>Q2. 2000 token 预算中，为什么 longterm 分配最多（600 tokens）？</p>
+<span class="opt">A. 因为 longterm.md 文件最大</span>
+<span class="opt">B. 因为长期记忆沉淀的是用户最稳定的画像核心（人格、审美、长期关系），需要较多文字描述，虽然信息是"旧的"但不随时间迅速衰减</span>
+<span class="opt">C. 因为 compileLongterm 的调用频率最高</span>
+<span class="opt">D. 因为 longterm 的内容最重要，应该无限制</span>
+<details><summary>看答案</summary><b>B</b>。today 的 450 服务于"当前细节"，而 longterm 的 600 服务于"稳定画像"。长期记忆需要容纳用户身份、人格、审美、长期兴趣等多维度信息，文字量自然需要更多。这是"时效性 vs 稳定性"的权衡。</details>
+</div>
+
+<div class="quiz">
+<p>Q3. 推理模型缓冲区的作用是什么？</p>
+<span class="opt">A. 让推理模型输出更长</span>
+<span class="opt">B. 在 visibleMaxTokens 基础上额外加 1024 作为推理过程的 token 预算，因为推理模型的 thinking 过程会消耗输出 token</span>
+<span class="opt">C. 减少推理模型的延迟</span>
+<span class="opt">D. 让推理模型更准确</span>
+<details><summary>看答案</summary><b>B</b>。推理模型（如 extended thinking）在输出最终答案前会进行内部推理，这个过程也消耗输出 token。如果不加缓冲区，visibleMaxTokens 中会被推理过程占用一部分，实际可见输出会减少。1024 缓冲区确保用户看到的记忆内容不受推理过程挤占。</details>
+</div>
+
+<div class="quiz">
+<p>Q4. 四个编译 Prompt 的共享"不要记录"清单体现了什么设计原则？</p>
+<span class="opt">A. 代码复用——四个 Prompt 共享同一段文本</span>
+<span class="opt">B. 过滤语义一致性——每一层都在做同一件事：把过程噪音过滤掉，只保留用户画像信息。不同层级的过滤力度不同，但过滤方向一致</span>
+<span class="opt">C. 为了减少 token 消耗，所有 Prompt 共享同一个</span>
+<span class="opt">D. 没有特殊原因，只是巧合</span>
+<details><summary>看答案</summary><b>B</b>。四个 Prompt 的"允许/禁止"清单高度一致，因为它们共同服务于同一个目标——把对话中的过程噪音（命令、文件名、具体方案）过滤掉，只保留对用户画像有价值的信息。区别在于各层的过滤力度：today 保留更多细节，longterm 只保留最稳定的核心。</details>
+</div>
+
+<div class="cite">📖 推荐一手资料：打开 <code>open-ai-desktop/openhanako/lib/memory/prompts/compile.ts</code>（164 行），阅读四个编译 Prompt 的完整文本；打开 <code>lib/memory/llm-budget.ts</code>（33 行），阅读 <code>withMemoryReasoningBuffer</code> 的实现。</div>
+
+<div class="reminder">💡 有疑问？直接问我——我是你的 AI 教师。可以问：「如果我想让 today 段在 memory.md 中占更多空间，应该改什么参数？」「Prompt 缓存策略在什么情况下会失效（cache miss）？」下一课是<b>最后一课：设计权衡与综合测验</b>——存储vs检索速度、精度vs成本、数据可见性窗口，以及六个已知局限和异常路径回顾。</div>
+
+<div class="nav"><a href="0003.html">← 上一课：折叠与装配机制</a> · 课程 0004 / 记忆传送带深度剖析 · <a href="0005.html">下一课：设计权衡与综合测验 →</a></div>
+
+</body>
+</html>

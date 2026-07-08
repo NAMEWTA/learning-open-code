@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>资源上传和访问参考图谱</title>
+  <link rel="stylesheet" href="../assets/resource-upload-access.css" />
+</head>
+<body>
+  <h1>资源上传和访问参考图谱</h1>
+  <p class="summary"><strong>一句话：</strong>Snail AI 的资源链路由 <code>ResourceController</code> 接收 Admin 上传请求，<code>ResourceAdminService</code> 补齐当前用户和业务字段，<code>ResourceService</code> 选择默认存储策略并写入 <code>sai_resource</code>，随后通过 <code>/files/{storageKey}</code> 由 <code>FileAccessController</code> 公开代理读取 <code>LOCAL</code> 或 <code>MINIO</code> 文件。</p>
+  <p class="warn"><strong>边界提醒：</strong><code>/resource/*</code> 有 <code>@LoginRequired</code>；<code>/files/**</code> 在拦截器中被排除，访问凭证实际是包含 UUID 的 <code>storageKey</code>。<code>EXTERNAL</code> 资源保存外部 <code>accessUrl</code>，当前文件访问控制器不会代理它。</p>
+
+  <h2>入口 API</h2>
+  <table>
+    <thead><tr><th>方法</th><th>路径</th><th>入口方法</th><th>行为</th><th>权限边界</th></tr></thead>
+    <tbody>
+      <tr><td>POST</td><td><code>/resource/upload</code></td><td><code>ResourceController.upload</code></td><td>接收 <code>MultipartFile</code> 和 <code>ResourceUploadRequestVO</code>，委托 <code>ResourceAdminService.upload</code>。</td><td><code>@LoginRequired</code> 默认 <code>ADMIN</code>。</td></tr>
+      <tr><td>DELETE</td><td><code>/resource/{id}</code></td><td><code>ResourceController.delete</code></td><td>先做资源授权检查，再调用 <code>ResourceService.delete</code> 删除文件和资源行。</td><td><code>@LoginRequired</code> 默认 <code>ADMIN</code>；服务层还保留非管理员所有者校验。</td></tr>
+      <tr><td>GET</td><td><code>/resource/page</code></td><td><code>ResourceController.page</code></td><td>按 <code>bizType</code>、<code>originalName</code>、<code>bizId</code>、时间范围分页查询。</td><td><code>@LoginRequired</code> 默认 <code>ADMIN</code>；服务层对非管理员追加 <code>creatorId</code> 过滤。</td></tr>
+      <tr><td>GET</td><td><code>/files/**</code></td><td><code>FileAccessController.access</code></td><td>从 URI 提取 <code>storageKey</code>，反查资源行并从 <code>LOCAL</code> 或 <code>MINIO</code> 读取流。</td><td>拦截器排除该路径；不看资源 ID 和登录 token。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>端到端流程</h2>
+  <pre class="diagram">Admin 上传
+  ↓
+ResourceController.upload(file, request)
+  ↓
+ResourceAdminService.upload
+  ├─ currentUserSession.id → creatorId
+  └─ request.bizType 为空 → GENERAL
+  ↓
+ResourceService.upload
+  ├─ ResourceStorageFactory.getDefault()
+  ├─ storage.store(bizType, originalName, inputStream)
+  ├─ MimeTypeUtils.detect(originalName)
+  ├─ insert sai_resource
+  └─ update accessUrl = storage.getAccessUrl(id, storageKey)
+  ↓
+ResourceResponseVO(id, storageKey, storageType, accessUrl, bizType, creatorId)
+  ↓
+GET /files/{storageKey}
+  ↓
+FileAccessController 校验 storageKey、查资源、限制 LOCAL/MINIO、返回文件流</pre>
+
+  <h2>L2 调用时序</h2>
+  <pre class="diagram">sequenceDiagram
+  participant Admin as Admin UI/API
+  participant Ctrl as ResourceController
+  participant AdminSvc as ResourceAdminService
+  participant ResSvc as ResourceService
+  participant Factory as ResourceStorageFactory
+  participant Store as Local/MinIO
+  participant DB as sai_resource
+  participant Files as FileAccessController
+
+  Admin->>Ctrl: POST /resource/upload multipart file
+  Ctrl->>AdminSvc: upload(file, request)
+  AdminSvc->>AdminSvc: 读取 current user 和 bizType
+  AdminSvc->>ResSvc: upload(inputStream, name, size, bizType, bizId, creatorId)
+  ResSvc->>Factory: getDefault()
+  Factory-->>ResSvc: LOCAL 或 MINIO 策略
+  ResSvc->>Store: store(bizType, originalName, inputStream)
+  Store-->>ResSvc: storageKey
+  ResSvc->>DB: insert ResourcePO
+  ResSvc->>Store: getAccessUrl(id, storageKey)
+  ResSvc->>DB: update accessUrl
+  ResSvc-->>AdminSvc: ResourcePO
+  AdminSvc-->>Admin: ResourceResponseVO
+  Admin->>Files: GET /files/{storageKey}
+  Files->>DB: select by storage_key
+  Files->>Factory: get(resource.storageType)
+  Files->>Store: load(storageKey)
+  Files-->>Admin: InputStreamResource</pre>
+
+  <h2>源码片段</h2>
+  <h3><code>ResourceController</code> 只定义入口</h3>
+  <pre class="snippet"><code>@PostMapping("/upload")
+@LoginRequired
+public Result&lt;ResourceResponseVO&gt; upload(@RequestParam("file") MultipartFile file,
+                                          ResourceUploadRequestVO request) {
+    return Result.ok(resourceAdminService.upload(file, request));
+}
+
+@DeleteMapping("/{id}")
+@LoginRequired
+public Result&lt;Void&gt; delete(@PathVariable("id") Long id) {
+    resourceAdminService.delete(id);
+    return Result.ok(null);
+}</code></pre>
+
+  <h3><code>ResourceService.upload</code> 串起存储和资源表</h3>
+  <pre class="snippet"><code>ResourceStorageService storage = storageFactory.getDefault();
+String storageKey = storage.store(bizType, originalName, inputStream);
+String mimeType = MimeTypeUtils.detect(originalName);
+
+ResourcePO resource = ResourcePO.builder()
+        .storageKey(storageKey)
+        .originalName(originalName)
+        .fileSize(fileSize)
+        .mimeType(mimeType)
+        .storageType(storage.getType())
+        .bizType(bizType)
+        .bizId(bizId)
+        .creatorId(creatorId)
+        .build();
+resourceMapper.insert(resource);
+
+String accessUrl = storage.getAccessUrl(resource.getId(), storageKey);
+resource.setAccessUrl(accessUrl);
+resourceMapper.updateById(resource);</code></pre>
+
+  <h3><code>FileAccessController</code> 的公开读取边界</h3>
+  <pre class="snippet"><code>String storageKey = extractStorageKey(request);
+ResourcePO resource = resourceService.getByStorageKey(storageKey);
+if (resource == null) {
+    throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Resource not found");
+}
+if (!isProxyStorage(resource.getStorageType())) {
+    throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Resource not found");
+}
+
+ResourceStorageService storage = storageFactory.get(resource.getStorageType());
+InputStream inputStream = storage.load(storageKey);</code></pre>
+
+  <h2>关键对象和字段</h2>
+  <table>
+    <thead><tr><th>字段或对象</th><th>来源</th><th>作用</th><th>排查意义</th></tr></thead>
+    <tbody>
+      <tr><td><code>storageKey</code></td><td><code>StorageKeyGenerator.generate</code></td><td>形如 <code>{bizType}/{yyyy}/{MM}/{dd}/{uuid}</code> 加可选扩展名，是存储后端对象 key，也是 <code>/files/**</code> 的访问凭证。</td><td>404 时先确认 URL 中的 key 和表里的 <code>storage_key</code> 完全一致。</td></tr>
+      <tr><td><code>accessUrl</code></td><td><code>ResourceStorageService.getAccessUrl</code></td><td><code>LOCAL</code> 和 <code>MINIO</code> 当前都返回 <code>/files/{storageKey}</code>；<code>EXTERNAL</code> 直接保存外部 URL。</td><td>判断是否应走文件控制器。</td></tr>
+      <tr><td><code>storageType</code></td><td>默认配置或直接建记录</td><td>上传走 <code>snail-ai.resource.storage-type</code>，支持策略是 <code>LOCAL</code> 和 <code>MINIO</code>；枚举还有 <code>EXTERNAL</code>。</td><td><code>/files/**</code> 只代理 <code>LOCAL</code> 和 <code>MINIO</code>。</td></tr>
+      <tr><td><code>bizType</code></td><td>上传请求或调用方</td><td>用于路径分区和业务归属，包含 <code>GENERAL</code>、<code>AVATAR</code>、<code>ATTACHMENT</code>、<code>DOCUMENT</code>、<code>DOCUMENT_PREVIEW</code>。</td><td>头像绑定、RAG 文档和临时预览资源都依赖它区分语义。</td></tr>
+      <tr><td><code>creatorId</code></td><td><code>UserSessionUtils.currentUserSession</code></td><td>记录上传者。</td><td>服务层分页和删除授权会用它做所有者边界。</td></tr>
+      <tr><td><code>mimeType</code></td><td><code>MimeTypeUtils.detect</code></td><td>按扩展名或 JDK 猜测生成响应 <code>Content-Type</code>。</td><td>影响浏览器预览、下载和 <code>Content-Disposition</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2><code>storageKey</code> 和 URL 规则</h2>
+  <table>
+    <thead><tr><th>阶段</th><th>源码事实</th><th>结果</th></tr></thead>
+    <tbody>
+      <tr><td>生成</td><td><code>StorageKeyGenerator</code> 会清理 <code>bizType</code> 为小写字母、数字、下划线或短横线，扩展名只保留小写字母数字。</td><td><code>DOCUMENT_PREVIEW</code> 会变成路径前缀 <code>document_preview</code>。</td></tr>
+      <tr><td>日期路径</td><td>使用当前日期 <code>yyyy/MM/dd</code>。</td><td>对象 key 天然按日期分区。</td></tr>
+      <tr><td>随机凭证</td><td>文件名主体是 UUID。</td><td>公开访问依赖 key 难猜，而不是登录态。</td></tr>
+      <tr><td>访问校验</td><td><code>FileAccessController.STORAGE_KEY_PATTERN</code> 要求 <code>bizType/yyyy/MM/dd/uuid</code> 加可选扩展名的形态。</td><td>不符合格式、URL 解码失败或前缀不是 <code>/files/</code> 都返回 404。</td></tr>
+      <tr><td>下载参数</td><td><code>download=true</code> 或 MIME 不在 inline 白名单时使用 attachment。</td><td>图片、PDF、TXT、CSV、Markdown 可 inline；其他默认下载。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>存储策略差异</h2>
+  <table>
+    <thead><tr><th>类型</th><th>写入位置</th><th>读取方式</th><th>URL</th><th>安全边界</th></tr></thead>
+    <tbody>
+      <tr><td><code>LOCAL</code></td><td><code>snail-ai.resource.upload-dir</code>，默认 <code>./upload/resource</code>。</td><td><code>Files.newInputStream(resolveAbsolute(storageKey))</code>。</td><td><code>/files/{storageKey}</code></td><td><code>resolveAbsolute</code> 归一化后要求仍在根目录内，防路径穿越。</td></tr>
+      <tr><td><code>MINIO</code></td><td><code>snail-ai.resource.minio.bucket</code>，默认 <code>snail-ai</code>。</td><td><code>MinioClient.getObject(bucket, storageKey)</code>。</td><td><code>/files/{storageKey}</code></td><td>首次使用时按 <code>endpoint/accessKey/secretKey</code> 建 client，并确保 bucket 存在。</td></tr>
+      <tr><td><code>EXTERNAL</code></td><td>不是上传策略；例如 <code>OpenApiUserService</code> 直接写外部头像 URL。</td><td>不由 <code>ResourceStorageFactory</code> 读取。</td><td>外部 <code>accessUrl</code></td><td><code>FileAccessController</code> 的 <code>isProxyStorage</code> 会拒绝，返回 404。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>权限和响应头</h2>
+  <table>
+    <thead><tr><th>位置</th><th>规则</th><th>意义</th></tr></thead>
+    <tbody>
+      <tr><td><code>ResourceController</code></td><td>三条接口都有 <code>@LoginRequired</code>；注解默认 <code>role=ADMIN</code>。</td><td>当前 Admin 资源管理入口按管理员权限保护。</td></tr>
+      <tr><td><code>ResourceAdminService.requireAuthorizedResource</code></td><td>资源不存在报错；非管理员且不是 <code>creatorId</code> 时拒绝。</td><td>即使入口权限以后放宽，服务层仍保留所有者边界。</td></tr>
+      <tr><td><code>SnailJobWebMvcConfigurerAdapter</code></td><td>认证拦截器排除 <code>/openapi/**</code> 和 <code>/files/**</code>。</td><td>公开文件访问不依赖登录态。</td></tr>
+      <tr><td><code>FileAccessController</code></td><td>添加 <code>Cache-Control: public, max-age=86400</code> 和 <code>X-Content-Type-Options: nosniff</code>。</td><td>允许公共缓存一天，并降低 MIME 嗅探风险。</td></tr>
+      <tr><td><code>OriginalControllerReturnValue</code></td><td>文件访问方法标注该注解。</td><td>绕过统一 <code>Result</code> 包装，直接返回 <code>ResponseEntity&lt;InputStreamResource&gt;</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>表结构速查</h2>
+  <table>
+    <thead><tr><th>表</th><th>字段</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>sai_resource</code></td><td><code>id</code></td><td>资源自增主键，Admin 删除和业务绑定使用。</td></tr>
+      <tr><td><code>sai_resource</code></td><td><code>storage_key</code></td><td>唯一索引 <code>uk_storage_key</code>，文件访问入口按它反查。</td></tr>
+      <tr><td><code>sai_resource</code></td><td><code>storage_type</code></td><td>默认 <code>LOCAL</code>，SQL 注释写 <code>LOCAL/MINIO</code>。</td></tr>
+      <tr><td><code>sai_resource</code></td><td><code>access_url</code></td><td>前端直接使用的访问链接。</td></tr>
+      <tr><td><code>sai_resource</code></td><td><code>biz_type</code>、<code>biz_id</code></td><td>业务归属索引 <code>idx_biz</code>。</td></tr>
+      <tr><td><code>sai_resource</code></td><td><code>creator_id</code></td><td>上传者索引 <code>idx_creator</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>调试 checklist</h2>
+  <table>
+    <thead><tr><th>问题</th><th>检查点</th><th>对应源码</th></tr></thead>
+    <tbody>
+      <tr><td>上传接口直接 401 或权限不足</td><td>确认请求头 <code>Snail-Ai-Auth</code> 有效，当前用户是否满足 <code>@LoginRequired</code> 默认管理员角色。</td><td><code>AuthenticationInterceptor.java</code>、<code>LoginRequired.java</code></td></tr>
+      <tr><td>上传成功但响应没有可用 URL</td><td>检查 <code>ResourceService.upload</code> 是否插入后成功回写 <code>accessUrl</code>，以及默认存储策略是否实现 <code>getAccessUrl</code>。</td><td><code>ResourceService.java</code>、<code>ResourceStorageService.java</code></td></tr>
+      <tr><td><code>/files/**</code> 返回 404</td><td>确认 URL 解码后以 <code>/files/</code> 开头、<code>storageKey</code> 符合正则、表中有同名 <code>storage_key</code>。</td><td><code>FileAccessController.extractStorageKey</code></td></tr>
+      <tr><td><code>EXTERNAL</code> 资源访问失败</td><td>不要走 <code>/files/**</code>；直接使用资源行的外部 <code>accessUrl</code>。</td><td><code>FileAccessController.isProxyStorage</code>、<code>OpenApiUserService.java</code></td></tr>
+      <tr><td>本地文件 404 或读取失败</td><td>检查 <code>snail-ai.resource.upload-dir</code>、磁盘文件是否存在、路径是否被归一化后越过根目录。</td><td><code>LocalResourceStorageService.java</code></td></tr>
+      <tr><td>MinIO 上传或读取失败</td><td>检查 <code>endpoint</code>、<code>accessKey</code>、<code>secretKey</code>、<code>bucket</code> 和对象 key；首次访问会创建 bucket。</td><td><code>MinioResourceStorageService.java</code>、<code>ResourceConfig.java</code></td></tr>
+      <tr><td>删除后文件仍残留</td><td>文件或对象删除失败只记录 warning；资源行最终仍会删除，需要查存储后端日志。</td><td><code>ResourceService.delete</code></td></tr>
+      <tr><td>分页看不到资源</td><td>核对 <code>bizType</code>、<code>originalName</code>、<code>bizId</code>、时间范围和当前用户角色；服务层可能追加 <code>creatorId</code> 条件。</td><td><code>ResourceAdminService.page</code>、<code>BaseQueryVO.java</code></td></tr>
+      <tr><td>头像绑定失败</td><td>用户资料更新只接受 <code>bizType=AVATAR</code> 的资源。</td><td><code>UserService.updateUserAvatar</code></td></tr>
+      <tr><td>RAG 文档下载 URL 不对</td><td>RAG 响应直接使用资源行 <code>accessUrl</code> 作为 <code>previewUrl</code>，下载 URL 只是追加 <code>download=true</code>。</td><td><code>RagDocumentService.toResponseVO</code></td></tr>
+    </tbody>
+  </table>
+</body>
+</html>

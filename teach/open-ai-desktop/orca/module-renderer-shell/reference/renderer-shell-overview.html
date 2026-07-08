@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Renderer Shell 模块总览参考</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <h1>Renderer Shell 模块总览参考</h1>
+        <p class="meta">定位：L1 模块速查。配合 <a href="../lessons/0001-renderer-shell-module-tour.html">导览短课</a> 使用。</p>
+
+        <h2>职责边界</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>核心文件</th>
+              <th>职责</th>
+              <th>边界不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>启动入口</td>
+              <td><code>src/renderer/src/main.tsx</code></td>
+              <td>导入全局 CSS，安装 crash diagnostics，应用主题，挂载 i18n、错误边界和 App。</td>
+              <td>没有 <code>#root</code> 直接失败；根级 recoverable error 不应让整个 Electron 窗口静默空白。</td>
+            </tr>
+            <tr>
+              <td>应用 shell</td>
+              <td><code>src/renderer/src/App.tsx</code></td>
+              <td>总装配页面、modal、window controls、启动水合、session writer、beforeunload flush 和 runtime graph sync。</td>
+              <td>水合成功前不打开可写 session 门；失败时保留磁盘上的旧 session。</td>
+            </tr>
+            <tr>
+              <td>状态总线</td>
+              <td><code>src/renderer/src/store/index.ts</code></td>
+              <td>用 Zustand 组合 repo、worktree、terminal、tabs、settings、browser、editor、SSH、runtime 等 slice。</td>
+              <td>store 是 renderer 的内存事实来源；跨进程能力仍只能经 preload 的 <code>window.api</code>。</td>
+            </tr>
+            <tr>
+              <td>统一 tab 模型</td>
+              <td><code>src/renderer/src/store/slices/tabs.ts</code></td>
+              <td>维护 <code>unifiedTabsByWorktree</code>、group、active group 和 split layout，修正 legacy terminal/browser/editor 状态。</td>
+              <td>tab、group、layout 必须原子更新，否则 split pane、active tab 和持久化 session 会分裂。</td>
+            </tr>
+            <tr>
+              <td>runtime graph 发布</td>
+              <td><code>src/renderer/src/runtime/sync-runtime-graph.ts</code></td>
+              <td>收集 mounted terminal panes、后台 automation PTY 和 mobile session tab snapshots，发给 main runtime。</td>
+              <td>不直接 import store；通过 getter 注入避免 store 构造循环。</td>
+            </tr>
+            <tr>
+              <td>IPC 事件消费</td>
+              <td><code>src/renderer/src/hooks/useIpcEvents.ts</code></td>
+              <td>把 main 进程事件映射为 store 更新、toast、导航或 UI 状态变化。</td>
+              <td>renderer 响应事件，但不越过 preload 直接访问 main 能力。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>启动链路</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>阶段</th>
+              <th>位置</th>
+              <th>行为</th>
+              <th>读源码时的判断点</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>React bootstrap</td>
+              <td><code>main.tsx</code></td>
+              <td>记录 bootstrap breadcrumb，安装 diagnostics，应用系统主题，挂载根组件。</td>
+              <td>根错误边界包住 <code>App</code>，不是包住单个页面。</td>
+            </tr>
+            <tr>
+              <td>基础数据读取</td>
+              <td><code>App.tsx</code></td>
+              <td>先串行读取 settings；提前发起 UI、keybindings、onboarding；repos 完成后让 project/folder scope 与 worktrees、lineage 扫描部分重叠。</td>
+              <td>并行化只发生在依赖满足后的子链路，避免远端 host 阻塞整个启动链。</td>
+            </tr>
+            <tr>
+              <td>session 水合</td>
+              <td><code>App.tsx</code></td>
+              <td>用 repos 推导 runtime hosts，读取各 host session partition，水合 workspace、tabs、editor、browser。</td>
+              <td>水合失败不写默认空 session；只让 UI 进入降级可见状态。</td>
+            </tr>
+            <tr>
+              <td>终端恢复</td>
+              <td><code>App.tsx</code></td>
+              <td>先恢复 SSH connection，再等待 first-window services，最后 reconnect persisted terminals。</td>
+              <td>终端恢复依赖 main runtime/daemon 服务，不是纯 renderer 内存操作。</td>
+            </tr>
+            <tr>
+              <td>持久化解锁</td>
+              <td><code>App.tsx</code></td>
+              <td>成功完成依赖步骤后设置 hydration succeeded，并通过 session write subscriber 写回 patch。</td>
+              <td>writer 与 JSX 解耦，避免 tab/file/browser 高频变动触发 App re-render。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键调用点</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>调用点</th>
+              <th>依赖</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>setRuntimeGraphStoreStateGetter(useAppStore.getState)</code></td>
+              <td><code>App.tsx</code>、<code>sync-runtime-graph.ts</code></td>
+              <td>App 把 store getter 注入 runtime graph helper，避免 helper 反向 import store。</td>
+            </tr>
+            <tr>
+              <td><code>setRuntimeGraphSyncEnabled(workspaceSessionReady)</code></td>
+              <td><code>App.tsx</code>、workspace session 状态</td>
+              <td>只有 session ready 后才允许发布窗口 graph，防止 runtime 看到半水合布局。</td>
+            </tr>
+            <tr>
+              <td><code>createSessionWriteSubscriber()</code></td>
+              <td><code>App.tsx</code>、workspace session helpers</td>
+              <td>订阅 store patch 并写到本地/远端 workspace session partition。</td>
+            </tr>
+            <tr>
+              <td><code>createTabsSlice()</code></td>
+              <td><code>store/index.ts</code>、<code>tabs.ts</code></td>
+              <td>为 shell 提供创建、激活、关闭、split、reconcile 和 hydrate tabs 的 action。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <pre><code class="language-typescript">const graph: RuntimeSyncWindowGraph = {
+  tabs: [],
+  leaves: [],
+  mobileSessionTabs: buildMobileSessionTabSnapshots(state, systemPrefersDark)
+}
+
+const result = await window.api.runtime.syncWindowGraph(graph)</code></pre>
+        <p>
+          runtime graph 同步不是把整个 Zustand store 发给 main，而是构造一个窗口运行时投影：terminal tab、pane leaf、
+          active leaf、layout 和移动端可消费的 session tab snapshots。main runtime 再用返回值更新 renderer 侧的 orchestration 状态。
+        </p>
+
+        <h2>测试佐证</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行为</th>
+              <th>测试文件</th>
+              <th>不变量</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>runtime graph 调度</td>
+              <td><code>src/renderer/src/runtime/sync-runtime-graph-scheduling.test.ts</code></td>
+              <td>16ms timer 合并同一帧内的更新；IPC in-flight 时只保留一个 trailing publish。</td>
+            </tr>
+            <tr>
+              <td>runtime graph 投影</td>
+              <td><code>src/renderer/src/runtime/sync-runtime-graph.test.ts</code></td>
+              <td>只发布可见/可恢复的 terminal、layout、browser、editor 和 mobile session 视图。</td>
+            </tr>
+            <tr>
+              <td>tab 状态机</td>
+              <td><code>src/renderer/src/store/slices/tabs.test.ts</code></td>
+              <td>创建、激活、关闭、split group、pin 和水合修正必须保持 tab/group/layout 同步。</td>
+            </tr>
+            <tr>
+              <td>session 级联</td>
+              <td><code>src/renderer/src/store/slices/store-session-cascades.test.ts</code></td>
+              <td>session 相关 slice 变化要按预期级联，避免持久化读写漏状态或过度写状态。</td>
+            </tr>
+            <tr>
+              <td>IPC 事件</td>
+              <td><code>src/renderer/src/hooks/useIpcEvents.test.ts</code></td>
+              <td>main 侧事件进入 renderer 后落到正确 store action 或 UI 反馈，不绕过事件边界。</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+    </main>
+  </body>
+</html>

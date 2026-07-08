@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Common adapter 与 API 映射短课</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Common adapter：同一份调用面，按能力改写成 IPC 或 REST/WS</h1>
+    <p class="subtitle">学习目标：15 分钟内看懂 AionU 怎样让 renderer 始终调用同一种 <code>ipcBridge.*</code> 形状，但底层可分别落到 Electron IPC、HTTP API 或 WebSocket 事件。</p>
+    <div class="meta">
+      <span class="pill">L1 模块总览</span>
+      <span class="pill">预计 15 分钟</span>
+      <span class="pill">主来源：ipcBridge.ts / httpBridge.ts / adapter/main.ts</span>
+    </div>
+  </section>
+  <p class="muted">L0 回链：先看 <a href="../../00-overview/lessons/0001-project-map.html">00-overview 项目地图</a>。交叉主题：边界入口看 <a href="../../module-preload-ipc/lessons/0001-preload-ipc-module-tour.html">module-preload-ipc</a>，调用方视角看 <a href="../../module-renderer-core/lessons/0001-renderer-core-module-tour.html">module-renderer-core</a>。</p>
+
+  <h2>1. 模块职责：给 renderer 一个稳定调用面，替它隐藏真实传输层</h2>
+  <p>在 renderer 里，调用窗口最小化、会话发送消息、主题同步、WebUI 状态查询时，代码都长得像 <code>ipcBridge.xxx.invoke()</code> 或 <code>ipcBridge.xxx.on()</code>。这不是说底层只有一种桥，而是 common adapter 故意把“能力接口”和“传输方式”拆开：renderer 只记能力名，adapter 决定它最终落到 <code>ipcRenderer.invoke</code>、HTTP <code>/api/*</code>，还是 WebSocket 事件流。</p>
+  <pre><code class="language-typescript">export const windowControls = {
+  minimize: bridge.buildProvider&lt;void, void&gt;('window-controls:minimize'),
+};
+
+export const conversation = {
+  sendMessage: httpPost&lt;ISendMessageResult, ISendMessageParams&gt;(
+    (p) =&gt; `/api/conversations/${p.conversation_id}/messages`
+  ),
+  responseStream: wsEmitter&lt;IResponseMessage&gt;('message.stream'),
+};</code></pre>
+  <p>所以 common adapter 的核心价值不是“又造一层封装”，而是让 renderer 保持稳定语义，同时允许实现从旧 IPC 迁往 backend API，而不用把迁移噪音扩散到每个页面组件。</p>
+
+  <h2>2. 架构位置：preload 只进门，adapter 才决定往哪条路走</h2>
+  <div class="filetree">packages/desktop/src/common/
+├── index.ts                        ← 对 renderer 暴露 ipcBridge
+├── adapter/
+│   ├── ipcBridge.ts                ← 能力目录：声明每个域的 invoke / on 形状
+│   ├── httpBridge.ts               ← HTTP / WS 工厂，伪装成 bridge provider/emitter
+│   ├── main.ts                     ← main 侧统一 adapter channel 与窗口广播
+│   ├── registry.ts                 ← WS broadcaster 与 emitter 引用注册表
+│   ├── apiModelMapper.ts           ← conversation/model 映射
+│   ├── teamMapper.ts               ← team 领域映射
+│   ├── fileSnapshotMapper.ts       ← 文件快照字段修正
+│   └── workspaceMapper.ts          ← 路径与目录树修正
+└── api/                            ← 旋转 API client 工具，供共享逻辑复用</div>
+  <p><a href="../../module-preload-ipc/reference/preload-ipc-overview.html">preload-ipc 参考页</a> 解释了 renderer 怎么拿到 <code>electronAPI</code>。而本模块继续往后走两步：如果能力仍依赖 Electron 本地对象，例如窗口控制、托盘、主题缓存或 WebUI 生命周期，<code>ipcBridge.ts</code> 就保留 <code>bridge.buildProvider()</code>；如果能力已经归 backend 所有，例如 conversation、assistants、providers、teams、extensions，大多会改写成 <code>httpGet/httpPost</code> 和 <code>wsEmitter</code>。</p>
+
+  <h2>3. 三条代表链路：IPC、REST + WS，以及混合域</h2>
+  <p>最适合入门的对照组是 <code>windowControls.minimize</code> 和 <code>conversation.sendMessage</code>。前者必须留在 IPC，因为真正副作用是 <code>BrowserWindow.getFocusedWindow().minimize()</code>，对象只存在 main 进程；后者则已经转给 backend，renderer 发 <code>POST /api/conversations/:id/messages</code>，随后用 WebSocket 监听 <code>message.stream</code> 和 <code>turn.completed</code>。</p>
+  <pre><code class="language-typescript">ipcBridge.windowControls.minimize.provider(() =&gt; {
+  BrowserWindow.getFocusedWindow()?.minimize();
+  return Promise.resolve();
+});
+
+ipcBridge.conversation.sendMessage.invoke({ conversation_id, input });
+ipcBridge.conversation.responseStream.on((msg) =&gt; { /* 增量消息 */ });</code></pre>
+  <p>这就是“adapter 映射”的判断标准：谁拥有真实状态，谁就拥有传输入口。OS 级状态还在 Electron main，就留 IPC；业务数据和长连接事件已经在 aioncore，就走 REST + WS。renderer-core 文档里看到的各种 hook 和页面逻辑，实际上都站在这层统一调用面之上。</p>
+  <p>第三条链路是 <code>webui</code> 混合域：<code>ipcBridge.webui.start.invoke()</code> 仍通过 <code>bridge.buildProvider('webui.start')</code> 进入 <code>process/bridge/webuiBridge.ts</code>，再调用 <code>startDesktopWebUI()</code>，因为启动 WebUI 需要 Electron app 路径和 Node 子进程能力；但 <code>changePassword</code>、<code>resetPassword</code>、<code>generateQRToken</code> 已经直接走 <code>/api/webui/*</code>。同一域内的传输方式不按名字决定，而按“真实副作用在哪里发生”决定。</p>
+
+  <h2>4. mapper 为什么关键：它负责把语义差异消掉</h2>
+  <p>传输切换后，最容易被忽视的不是 URL，而是字段和类型。比如 <code>fileSnapshotMapper.ts</code> 把后端的 <code>relative_path</code> 改成前端依赖的 <code>relativePath</code>；<code>apiModelMapper.ts</code> 负责把 conversation 里的 model 与 extra 字段改写成前端可直接消费的形状；<code>teamMapper.ts</code> 则把后端的 <code>lead</code>、<code>thinking</code> 之类值折叠成前端固定枚举。</p>
+  <div class="quiz">
+    <p><strong>暂停回忆：</strong>如果你要新增一个“列出会话工件”的调用，第一判断问题应该是什么？</p>
+    <details>
+      <summary>参考答案与反馈</summary>
+      <p>先问“真实状态归谁所有”。如果工件数据已经由 backend 保存并可通过 <code>/api/*</code> 返回，就应该优先在 <code>ipcBridge.ts</code> 里用 <code>httpGet/httpPost</code> 暴露，并视需要补 <code>wsEmitter</code>；只有当能力必须操作 Electron 本地对象时，才继续加 IPC provider。第二步再看是否需要 mapper 来修正字段、枚举或路径语义。</p>
+    </details>
+  </div>
+  <p class="muted">推荐主来源：先读 <code>packages/desktop/src/common/adapter/ipcBridge.ts</code>，再对照 <a href="../reference/common-adapter-overview.html">reference 总表</a> 看每个域的传输方式。然后继续追问 agent：请带我选一个具体接口，从 renderer 调用走到 main provider 或 backend 路由。</p>
+</main>
+</body>
+</html>

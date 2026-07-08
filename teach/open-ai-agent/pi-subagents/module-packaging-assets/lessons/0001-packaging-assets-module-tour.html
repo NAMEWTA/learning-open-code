@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 包装与资产交付模块导览</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f8fafc; --accent:#7c3aed; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #0f172a; color: #e5e7eb; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.86rem; line-height: 1.55; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>包装与资产交付模块导览</h1>
+  <p class="meta">学习目标：15 分钟内能说清 pi-subagents 如何把 extension、skills、prompts 和内置 agents 一起装到 Pi 里。</p>
+
+  <h2>1. 一句话职责</h2>
+  <p>仓库根部的包装层不负责 subagent 怎么跑，而负责<strong>把可运行能力打成可安装包</strong>。依据 <code>open-ai-agent/pi-subagents/package.json</code>，npm 包同时交付 TypeScript extension 入口、8 个内置 agent、父 orchestrator skill、7 个 prompt 工作流模板，以及 README/CHANGELOG。L0 的目录地图里这些目录各自独立；本课要回答的是：它们如何被 <code>pi</code> 块和 <code>files</code> 字段绑进同一个发布单元。</p>
+  <div class="filetree">pi-subagents（npm 包）
+├── package.json          ← pi.extensions / pi.skills / pi.prompts
+├── install.mjs           ← npx 安装器（bin 入口）
+├── src/extension/        ← extension 实现（随 files 发布）
+├── agents/               ← 8 个内置角色
+├── skills/pi-subagents/  ← 父 orchestrator skill
+└── prompts/              ← 7 个工作流 prompt 模板</div>
+
+  <h2>2. package.json 的三根支柱</h2>
+  <p>第一根是<strong>发布白名单</strong>：<code>files</code> 只包含 <code>src/**/*.ts</code>、<code>agents/</code>、<code>skills/**/*</code>、<code>prompts/**/*</code> 和文档，避免把测试夹具或开发配置打进 npm 包。第二根是<strong>Pi 发现声明</strong>：<code>pi.extensions</code> 指向 <code>./src/extension/index.ts</code>，<code>pi.skills</code> 指向 <code>./skills</code>，<code>pi.prompts</code> 指向 <code>./prompts</code>——Pi 安装 npm 包时按这三条路径加载能力。第三根是<strong>可选 CLI 安装器</strong>：<code>bin.pi-subagents</code> 映射到 <code>install.mjs</code>，供 <code>npx pi-subagents</code> 使用。</p>
+  <pre><code>"pi": {
+  "extensions": ["./src/extension/index.ts"],
+  "skills": ["./skills"],
+  "prompts": ["./prompts"]
+},
+"bin": { "pi-subagents": "install.mjs" },
+"files": [
+  "src/**/*.ts", "agents/", "skills/**/*", "prompts/**/*", "README.md"
+]</code></pre>
+  <p><code>peerDependencies</code> 声明对 <code>@earendil-works/pi-coding-agent</code> 等 Pi 运行时的依赖，但标记为 optional——extension 在 Pi 进程内运行，npm 包本身只打包自己的 TS 与资产。</p>
+
+  <h2>3. 两条安装路径与资产角色</h2>
+  <p><strong>路径 A（推荐）</strong>：README 写的 <code>pi install npm:pi-subagents</code>。Pi 读取已安装 npm 包里的 <code>pi</code> 块，注册 extension、skills 和 prompts。<strong>路径 B（备选）</strong>：<code>npx pi-subagents</code> 执行 <code>install.mjs</code>，把 GitHub 仓库克隆到 <code>~/.pi/agent/extensions/subagent</code>，已存在则 <code>git pull</code> 更新。两条路径最终都让 Pi 看到同一套 extension + 资产，但 B 绕过 npm、直接维护 git 工作副本。</p>
+  <p>资产分工上，<code>skills/pi-subagents/SKILL.md</code> 只给<strong>父 orchestrator</strong>：规定何时委派、async 默认、review-loop 等编排纪律，并明确子 agent 不应注入此 skill。<code>prompts/*.md</code> 则是可复用的<strong>工作流食谱</strong>（如 <code>parallel-review.md</code>、<code>review-loop.md</code>），frontmatter 只有 <code>description</code>，正文告诉父 agent 如何调用 <code>subagent(...)</code> 完成固定编排。slash 命令层可以引用这些 prompt，父 agent 也可直接按 skill 里的「Prompt Techniques」套用同样模式。</p>
+
+  <h2>4. 发布闸门与回忆练习</h2>
+  <p>CI 把「能发布」和「能合并」分开守门。<code>.github/workflows/test.yml</code> 在 push/PR 到 main 时，于 Ubuntu 与 Windows 双矩阵跑 <code>npm test</code>、<code>test:integration</code>、<code>test:e2e</code>。<code>.github/workflows/release.yml</code> 仅手动触发：先 <code>npm run test:all</code>，再 <code>npm publish --provenance</code> 发到 npm registry。也就是说，发布前测试覆盖面比日常 PR 更严（<code>test:all</code> 串行跑三层）。</p>
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>用户说「装了 pi-subagents 但看不到 parallel-review 工作流」，你会先查 extension 注册、skill 注入，还是 prompt 交付？</p>
+    <p><strong>参考答案：</strong>先查 prompt 交付链——<code>pi.prompts</code> 是否被 Pi 加载、<code>prompts/parallel-review.md</code> 是否在安装目录里。extension 未注册会导致整个包不可用；skill 只影响父 agent 编排建议，不决定 prompt 文件是否存在。完整资产清单与 CI 步骤见 <a href="../reference/packaging-assets-overview.html">packaging-assets-overview 参考页</a>。</p>
+  </div>
+  <p class="source">主要来源：<code>open-ai-agent/pi-subagents/package.json</code>、<code>open-ai-agent/pi-subagents/install.mjs</code>、<code>open-ai-agent/pi-subagents/README.md</code>；前置：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目整体架构与学习地图</a>。不清楚某条安装路径或 CI 步骤时，可以继续让 agent 对照源码解释。</p>
+</main>
+</body>
+</html>

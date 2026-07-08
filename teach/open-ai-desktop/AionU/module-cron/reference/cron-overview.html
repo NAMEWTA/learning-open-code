@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU Cron 定时任务模块参考总览</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Cron 定时任务模块参考总览</h1>
+    <p class="subtitle">L1 速查文档：模块职责、接口清单、分层结构、关键依赖、调用示例、测试证据与后续深挖入口。</p>
+    <div class="meta">
+      <span class="pill">主题：module-cron</span>
+      <span class="pill">核心入口：pages/cron + ipcBridge.cron</span>
+      <span class="pill">路由：/scheduled / /scheduled/:job_id</span>
+    </div>
+  </section>
+
+  <p class="muted">回链：整体架构看 <a href="../../00-overview/reference/00-overview.html">00-overview</a>；统一桥接看 <a href="../../module-common-adapter/reference/common-adapter-overview.html">module-common-adapter</a>；路由和 shell 看 <a href="../../module-renderer-core/reference/renderer-core-overview.html">module-renderer-core</a>；执行结果进入会话后看 <a href="../../module-conversation-runtime/reference/conversation-runtime-overview.html">module-conversation-runtime</a>。</p>
+
+  <nav class="toc" aria-label="目录">
+    <a href="#role">1. 模块职责与位置</a>
+    <a href="#entries">2. 对外入口与接口清单</a>
+    <a href="#layers">3. 内部分层结构</a>
+    <a href="#hooks">4. Hook 与工具函数</a>
+    <a href="#deps">5. 关键依赖</a>
+    <a href="#examples">6. 调用示例</a>
+    <a href="#evidence">7. 测试证据</a>
+  </nav>
+
+  <h2 id="role">1. 模块职责与位置</h2>
+  <table>
+    <thead>
+      <tr><th>职责</th><th>主文件</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>定时任务管理页</td><td><code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/index.tsx</code></td><td>展示任务卡片、空态、keep-awake 开关、创建入口、启停操作。</td></tr>
+      <tr><td>任务详情页</td><td><code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/TaskDetailPage.tsx</code></td><td>展示任务状态、执行说明、关联会话历史、立即执行、编辑、删除。</td></tr>
+      <tr><td>创建 / 编辑弹窗</td><td><code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/CreateTaskDialog.tsx</code></td><td>把频率、助手、模型、workspace、执行模式转换成 <code>ICreateCronJobParams</code> 或 <code>ICronJobUpdateParams</code>。</td></tr>
+      <tr><td>会话页入口提示</td><td><code>packages/desktop/src/renderer/pages/cron/components/CronJobManager.tsx</code></td><td>在会话标题栏显示已有任务状态，并跳转到详情页；无任务时不显示空态图标。</td></tr>
+      <tr><td>侧边栏状态索引</td><td><code>packages/desktop/src/renderer/pages/cron/useCronJobs.ts</code></td><td>按 conversation_id 建立任务 map，处理未读执行、状态图标和会话历史刷新。</td></tr>
+      <tr><td>API 调用面</td><td><code>packages/desktop/src/common/adapter/ipcBridge.ts</code></td><td>暴露 <code>ipcBridge.cron</code>，把 renderer 调用映射到 <code>/api/cron/*</code> 与 WS 事件。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="entries">2. 对外入口与接口清单</h2>
+  <h3>2.1 路由与 UI 入口</h3>
+  <table>
+    <thead>
+      <tr><th>入口</th><th>来源</th><th>落点</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>/scheduled</code></td><td><code>packages/desktop/src/renderer/components/layout/Router.tsx</code></td><td><code>ScheduledTasksPage</code></td><td>全部定时任务列表。</td></tr>
+      <tr><td><code>/scheduled/:job_id</code></td><td><code>packages/desktop/src/renderer/components/layout/Router.tsx</code></td><td><code>TaskDetailPage</code></td><td>单任务详情与关联会话历史。</td></tr>
+      <tr><td>侧边栏时钟入口</td><td><code>packages/desktop/src/renderer/components/layout/Sider/SiderNav/SiderScheduledEntry.tsx</code></td><td><code>/scheduled</code></td><td>全局进入定时任务列表。</td></tr>
+      <tr><td>会话头部时钟入口</td><td><code>packages/desktop/src/renderer/pages/cron/components/CronJobManager.tsx</code></td><td><code>/scheduled/:job_id</code></td><td>当前会话有关联任务时跳详情。</td></tr>
+      <tr><td>消息内任务触发卡片</td><td><code>packages/desktop/src/renderer/pages/conversation/Messages/components/MessageCronTrigger.tsx</code></td><td><code>/scheduled/:job_id</code></td><td>从 cron artifact 跳到任务详情。</td></tr>
+      <tr><td>“对话创建”入口</td><td><code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/index.tsx</code></td><td><code>/guid</code></td><td>携带 <code>prefillPrompt</code>，让首页 sendbox 预填 Cron 默认提示词。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 `pages/cron/index.ts` 导出</h3>
+  <table>
+    <thead>
+      <tr><th>导出</th><th>类型</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>CronJobIndicator</code></td><td>React 组件</td><td>会话历史中显示 active、paused、error、unread、unconfigured 等图标。</td></tr>
+      <tr><td><code>CronJobStatus</code></td><td>类型</td><td><code>'none' | 'active' | 'paused' | 'error' | 'unread' | 'unconfigured'</code>。</td></tr>
+      <tr><td><code>CronJobManager</code></td><td>React 组件</td><td>会话标题栏的任务入口。</td></tr>
+      <tr><td><code>useCronJobs</code></td><td>Hook</td><td>读取单个 conversation 关联的任务。</td></tr>
+      <tr><td><code>useCronJobsMap</code></td><td>Hook</td><td>为会话历史建立 conversation_id → jobs 映射。</td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.3 `ipcBridge.cron` API</h3>
+  <table>
+    <thead>
+      <tr><th>接口</th><th>传输</th><th>后端路径 / 事件</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>listJobs.invoke()</code></td><td>HTTP GET</td><td><code>/api/cron/jobs</code></td><td>读取全部任务。</td></tr>
+      <tr><td><code>listJobsByConversation.invoke({ conversation_id })</code></td><td>HTTP GET</td><td><code>/api/cron/jobs?conversation_id=...</code></td><td>读取某个会话的关联任务。</td></tr>
+      <tr><td><code>getJob.invoke({ job_id })</code></td><td>HTTP GET</td><td><code>/api/cron/jobs/:job_id</code></td><td>读取单任务详情。</td></tr>
+      <tr><td><code>addJob.invoke(params)</code></td><td>HTTP POST</td><td><code>/api/cron/jobs</code></td><td>创建任务。</td></tr>
+      <tr><td><code>updateJob.invoke({ job_id, updates })</code></td><td>HTTP PUT</td><td><code>/api/cron/jobs/:job_id</code></td><td>更新名称、启停、schedule、message、execution mode、agent_config、重试参数。</td></tr>
+      <tr><td><code>removeJob.invoke({ job_id })</code></td><td>HTTP DELETE</td><td><code>/api/cron/jobs/:job_id</code></td><td>删除任务，但 E2E 证明原会话仍可访问。</td></tr>
+      <tr><td><code>runNow.invoke({ job_id })</code></td><td>HTTP POST</td><td><code>/api/cron/jobs/:job_id/run</code></td><td>立即执行，返回 <code>{ conversation_id }</code> 后由详情页导航。</td></tr>
+      <tr><td><code>saveSkill.invoke({ job_id, content })</code></td><td>HTTP POST</td><td><code>/api/cron/jobs/:job_id/skill</code></td><td>保存由任务转成的 skill 内容。</td></tr>
+      <tr><td><code>hasSkill.invoke({ job_id })</code></td><td>HTTP GET</td><td><code>/api/cron/jobs/:job_id/skill</code></td><td>返回布尔值，判断任务是否已有 skill。</td></tr>
+      <tr><td><code>deleteSkill.invoke({ job_id })</code></td><td>HTTP DELETE</td><td><code>/api/cron/jobs/:job_id/skill</code></td><td>删除任务关联 skill。</td></tr>
+      <tr><td><code>onJobCreated.on(handler)</code></td><td>WebSocket</td><td><code>cron.job-created</code></td><td>任务创建事件。</td></tr>
+      <tr><td><code>onJobUpdated.on(handler)</code></td><td>WebSocket</td><td><code>cron.job-updated</code></td><td>任务更新或执行状态变化事件。</td></tr>
+      <tr><td><code>onJobRemoved.on(handler)</code></td><td>WebSocket</td><td><code>cron.job-removed</code></td><td>任务删除事件。</td></tr>
+      <tr><td><code>onJobExecuted.on(handler)</code></td><td>WebSocket</td><td><code>cron.job-executed</code></td><td>执行完成事件，状态为 ok、error、skipped 或 missed。</td></tr>
+    </tbody>
+  </table>
+  <p>关联会话接口位于 <code>ipcBridge.conversation.listByCronJob.invoke({ cron_job_id })</code>，实际路径是 <code>/api/cron/jobs/:cron_job_id/conversations</code>。</p>
+
+  <h2 id="layers">3. 内部分层结构</h2>
+  <div class="filetree">packages/desktop/src/renderer/pages/cron/
+├── index.ts                         ← barrel 导出：组件与核心 hooks
+├── useCronJobs.ts                   ← 单会话、全局列表、会话映射、任务会话历史 hooks
+├── cronUtils.ts                     ← schedule 格式化、时区、标题、状态与 ID 归一
+├── repairCronJobTimeZone.ts         ← 缺失 tz 的一次性修复器
+├── components/
+│   ├── CronJobManager.tsx           ← 会话头部任务入口
+│   └── CronJobIndicator.tsx         ← 会话历史图标
+└── ScheduledTasksPage/
+    ├── index.tsx                    ← 全部任务列表页
+    ├── TaskDetailPage.tsx           ← 任务详情、立即执行、历史会话
+    ├── CreateTaskDialog.tsx         ← 创建 / 编辑弹窗
+    ├── CronStatusTag.tsx            ← 列表与详情状态标签
+    ├── resolveCronAgentConfig.ts    ← assistant → agent_config
+    └── jobAgentMeta.ts              ← 任务卡片上的 agent 名称与头像</div>
+
+  <table>
+    <thead>
+      <tr><th>层</th><th>职责</th><th>典型依赖</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>路由层</td><td>把 <code>/scheduled</code> 与 <code>/scheduled/:job_id</code> 接到懒加载页面。</td><td><code>React Router</code>、<code>module-renderer-core</code></td></tr>
+      <tr><td>页面层</td><td>渲染列表、详情、弹窗和用户操作反馈。</td><td>Arco Design、i18n、assistant/model hooks</td></tr>
+      <tr><td>状态层</td><td>封装任务读取、事件订阅、未读标记、关联会话刷新。</td><td><code>ipcBridge.cron</code>、<code>emitter</code>、<code>localStorage</code></td></tr>
+      <tr><td>工具层</td><td>格式化 schedule、修复 timezone、归一 snake/camel ID、构造 agent_config。</td><td>Intl API、assistant catalog、provider list</td></tr>
+      <tr><td>桥接层</td><td>把 renderer 能力落到 HTTP 与 WebSocket。</td><td><code>module-common-adapter</code>、backend `/api/cron/*`</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="hooks">4. Hook 与工具函数</h2>
+  <table>
+    <thead>
+      <tr><th>函数 / 组件</th><th>返回或行为</th><th>边界说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>useCronJobs(conversation_id?)</code></td><td><code>jobs</code>、<code>loading</code>、<code>error</code>、<code>hasJobs</code>、<code>activeJobsCount</code>、<code>hasError</code>、<code>pauseJob</code>、<code>resumeJob</code>、<code>deleteJob</code>、<code>updateJob</code></td><td>无 conversation_id 时返回空列表；依赖 WS 事件刷新。</td></tr>
+      <tr><td><code>useAllCronJobs()</code></td><td>全部任务、加载态、activeCount、hasError、公共 actions</td><td>列表页使用；actions 会同步本地状态。</td></tr>
+      <tr><td><code>useCronJobsMap()</code></td><td>conversation_id → jobs map、状态查询、未读标记、refetch</td><td>侧边栏 / 会话历史使用；新执行会触发 <code>chat.history.refresh</code>。</td></tr>
+      <tr><td><code>useCronJobConversations(job_id?)</code></td><td>某任务关联的会话列表</td><td>详情页历史栏使用；监听任务事件和 <code>conversation.listChanged</code>。</td></tr>
+      <tr><td><code>createCronSchedule(expr, description)</code></td><td><code>{ kind: 'cron', expr, tz, description }</code></td><td>使用当前 IANA 时区；取不到时回退 UTC。</td></tr>
+      <tr><td><code>repairAllCronJobTimeZonesOnce()</code></td><td>启动后修复旧任务缺失的 <code>schedule.tz</code></td><td>在 <code>packages/desktop/src/renderer/main.tsx</code> 认证 ready 后调用，并去重并发请求。</td></tr>
+      <tr><td><code>resolveCronJobId(extra)</code></td><td>从 <code>cron_job_id</code> 或 <code>cronJobId</code> 读取任务 ID</td><td>兼容旧字段和新字段。</td></tr>
+      <tr><td><code>resolveCronAgentConfig(input)</code></td><td>构造写入后端的 <code>agent_config</code></td><td>aionrs 必须有 provider 与 model；普通 assistant 写入 model/config/workspace。</td></tr>
+      <tr><td><code>getJobAgentMeta(job, assistants, logos)</code></td><td>任务卡片/详情页的 agent 名称、头像、emoji 或 fallback</td><td>优先 assistant catalog，legacy job 回退到 agent_type。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="deps">5. 关键依赖</h2>
+  <table>
+    <thead>
+      <tr><th>依赖</th><th>用途</th><th>风险点 / 读码提示</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>module-common-adapter</code></td><td>Cron HTTP/WS 调用面。</td><td>不要被 <code>ipcBridge</code> 名字误导；Cron 域主要不是 Electron IPC。</td></tr>
+      <tr><td><code>module-renderer-core</code></td><td>路由、Layout、侧边栏入口。</td><td><code>/scheduled</code> 与 <code>/scheduled/:job_id</code> 都在 renderer 路由树挂载。</td></tr>
+      <tr><td><code>module-conversation-runtime</code></td><td>任务来源会话、执行后会话、消息内 artifact 跳转。</td><td>删除任务不应删除原会话；E2E 明确验证此行为。</td></tr>
+      <tr><td><code>configService</code> + <code>systemSettings</code></td><td>列表页 keep-awake 开关和系统设置。</td><td>先更新本地 UI，失败后回滚本地配置。</td></tr>
+      <tr><td>assistant/model hooks</td><td>创建弹窗中的助手、模型、workspace 配置。</td><td>aionrs 模式必须从 provider list 选择可用模型。</td></tr>
+      <tr><td>Arco Design</td><td>Form、Select、Switch、Modal、Tag、Tooltip、Message。</td><td>大量表单分支在 UI 层，业务负载最终集中到 submit。</td></tr>
+      <tr><td><code>emitter</code> 与 <code>localStorage</code></td><td>会话历史刷新与未读执行状态。</td><td>未读状态按 conversation_id 存储在 <code>aionui_cron_unread</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="examples">6. 调用示例</h2>
+  <div class="grid">
+    <section class="panel">
+      <h3>示例 A：手动创建任务</h3>
+      <pre><code class="language-typescript">const schedule = createCronSchedule('0 9 * * *', 'Daily at 09:00');
+await ipcBridge.cron.addJob.invoke({
+  name: 'Morning Greeting',
+  schedule,
+  prompt: 'Send a friendly greeting',
+  conversation_id: '',
+  created_by: 'user',
+  execution_mode: 'new_conversation',
+  agent_config,
+});</code></pre>
+      <p><code>agent_config</code> 由同一表单流程中的 <code>resolveCronAgentConfig()</code> 生成。对应文件：<code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/CreateTaskDialog.tsx</code>。</p>
+    </section>
+    <section class="panel">
+      <h3>示例 B：立即执行并进入会话</h3>
+      <pre><code class="language-typescript">const result = await ipcBridge.cron.runNow.invoke({ job_id: job.id });
+if (result?.conversation_id) {
+  navigate(`/conversation/${result.conversation_id}`);
+}</code></pre>
+      <p>对应文件：<code>packages/desktop/src/renderer/pages/cron/ScheduledTasksPage/TaskDetailPage.tsx</code>。</p>
+    </section>
+    <section class="panel">
+      <h3>示例 C：列表页启停任务</h3>
+      <pre><code class="language-typescript">if (job.enabled) {
+  await pauseJob(job.id);
+} else {
+  await resumeJob(job.id);
+}</code></pre>
+      <p><code>pauseJob</code> 与 <code>resumeJob</code> 内部都调用 <code>ipcBridge.cron.updateJob.invoke</code>。</p>
+    </section>
+  </div>
+
+  <h2 id="evidence">7. 测试证据</h2>
+  <table>
+    <thead>
+      <tr><th>测试文件</th><th>覆盖行为</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>open-ai-desktop/AionU/tests/e2e/specs/cron-crud.e2e.ts</code></td><td>AI 对话创建任务、修改任务、任务出现在列表和详情页、删除任务后原会话仍可访问、侧边栏保留普通会话历史。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/cron/useCronJobs.dom.test.ts</code></td><td>单会话读取、全局读取、事件订阅、启停删除更新、未读执行、执行后会话重命名、关联会话从后端刷新。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/cron/repairCronJobTimeZone.test.ts</code></td><td>启动修复缺失 timezone，并对并发修复请求去重。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/cron/cronUtils.test.ts</code></td><td>创建 schedule 时写入当前时区、时区失败回退 UTC、执行会话标题格式。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/tests/unit/cron/CronStatusTag.dom.test.tsx</code></td><td>active、paused、error、missed 状态展示优先级。</td></tr>
+      <tr><td><code>open-ai-desktop/AionU/docs/prds/cron/cron-entry-optimization.md</code></td><td>对话头部入口空态收敛、列表页创建入口双路径化、首页预填行为的验收依据。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

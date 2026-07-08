@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 tools/MCP 如何进入 agent 可调用集合</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#5f6e7a; --line:#d9e1e8; --soft:#f7f9fb; --accent:#1f6feb; --green:#207a4c; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 58px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.18rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+    pre { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.6; background:#fafbfc; border:1px solid #e5e9ef; border-radius:8px; padding:1rem 1.1rem; overflow-x:auto; }
+    .lede { color:var(--muted); font-size:1.02rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .note { background:#f7fbff; border-left:4px solid var(--accent); padding:12px 14px; border-radius:6px; }
+    .exercise { background:#f7fbf8; border:1px solid #cfe8d6; border-radius:8px; padding:14px 16px; }
+    .answer { margin-top:10px; color:var(--green); }
+    .where { color:#6f42c1; font-weight:600; }
+    .route { font-family:"SF Mono",Consolas,monospace; color:#263746; background:#eef3f7; padding:.1rem .32rem; border-radius:5px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 tools/MCP 如何进入 agent 可调用集合</h1>
+  <p class="lede">学习目标：读完后，你能说明一个普通配置工具和一个 MCP 工具分别从哪里加载，经过哪些过滤与延迟处理，最后怎样进入 LangChain agent 的 <code>tools</code> 参数。</p>
+
+  <h2>1. 工具不是单一来源</h2>
+  <p>Tools/MCP 模块位于 lead agent 装配点之前；对照 <a href="../../00-overview/reference/00-overview.html">L0 架构图</a>，它处在“工具扩展入口”这一层。它不负责决定“模型下一步是否调用工具”，而是先回答更底层的问题：这次 agent run 到底有哪些工具可以绑定？核心入口是 <span class="where"><code>backend/packages/harness/deerflow/tools/tools.py</code></span> 的 <code>get_available_tools()</code>。</p>
+  <p>这个入口把多类来源合并：运行时主配置中的 <code>tools[*].use</code> 通过反射加载；<code>present_files</code>、<code>ask_clarification</code> 等内置工具直接加入；subagent 只在运行参数启用时加入 <code>task</code>；vision 模型才加入 <code>view_image</code>；MCP 工具从缓存读取；ACP agent 存在时才构造 <code>invoke_acp_agent</code>。最后按名字去重，优先级是配置工具、内置工具、MCP、ACP。</p>
+
+  <h2>2. agent 装配会再次收窄集合</h2>
+  <p>lead agent 不会原样使用全量工具。<span class="where"><code>backend/packages/harness/deerflow/agents/lead_agent/agent.py</code></span> 先按 custom agent 的 <code>tool_groups</code> 传给 <code>get_available_tools()</code>，再用 skill allowed-tools policy 过滤，最后才处理 deferred tools。</p>
+  <pre><code class="language-python">raw_tools = get_available_tools(
+    model_name=model_name,
+    groups=agent_config.tool_groups if agent_config else None,
+    subagent_enabled=subagent_enabled,
+    app_config=resolved_app_config,
+)
+filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+final_tools, setup = assemble_deferred_tools(
+    filtered,
+    enabled=resolved_app_config.tool_search.enabled,
+)</code></pre>
+  <p>这段顺序很重要：先按 agent 和 skill 收窄，再构建 deferred catalog。这样 <code>tool_search</code> 只能搜索当前 agent 已被允许的 MCP 工具，而不会绕过 skill policy。</p>
+
+  <h2>3. MCP 的特殊处理是“缓存、打标、延迟”</h2>
+  <div class="diagram">extensions runtime config / Gateway MCP API
+  ↓
+deerflow.mcp.cache → get_mcp_tools()
+  ↓
+MultiServerMCPClient loads tools
+  ↓
+get_available_tools() tag_mcp_tool(...)
+  ↓
+lead agent policy filtering
+  ↓
+assemble_deferred_tools(...)
+  ├── tool_search disabled: MCP schema 直接绑定给模型
+  └── tool_search enabled: 只把名称写入 prompt，schema 等 promote 后再暴露</div>
+  <p>MCP 配置不从运行时主配置的 <code>tools[*]</code> 读取，而是从 extensions 运行时配置读取，Gateway 的 <span class="route">/api/mcp/config</span> 负责管理它；仓库中可对照 <code>extensions_config.example.json</code> 理解字段形状。<span class="where"><code>backend/packages/harness/deerflow/mcp/tools.py</code></span> 用 <code>MultiServerMCPClient</code> 拉取各 server 工具；stdio server 会被 session pool 包装，保持同一用户线程内的状态，并把本地输出路径改写为 DeerFlow 可访问的虚拟路径。</p>
+  <p><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code></span> 则只关心“哪些 MCP 工具要延迟”。开启 <code>tool_search.enabled</code> 时，它追加一个 <code>tool_search</code> 工具，并让 middleware 在 promote 前隐藏 MCP schema。模型先看到名称列表，调用 <code>tool_search("select:...")</code> 后，promoted state 带着 catalog hash 写入图状态，后续模型调用才看见对应 schema。</p>
+
+  <h2>4. 暂停回忆</h2>
+  <div class="exercise">
+    <strong>检索练习：</strong>不看上文，按顺序说出一个 MCP 工具进入 agent 可调用集合的 6 个阶段。
+    <div class="answer">参考答案：读取 extensions 运行时配置里的启用 server；<code>get_mcp_tools()</code> 通过 MCP client 拉取工具；cache 暂存工具；<code>get_available_tools()</code> 取缓存并用 <code>tag_mcp_tool()</code> 打标；lead agent 经过 tool groups 与 skill policy 过滤；<code>assemble_deferred_tools()</code> 根据 <code>tool_search.enabled</code> 决定直接绑定 schema，或追加 <code>tool_search</code> 并由 middleware 延迟暴露。</div>
+  </div>
+  <p class="note">主要参考来源：<code>backend/packages/harness/deerflow/tools/tools.py</code>、<code>backend/packages/harness/deerflow/mcp/tools.py</code>、<code>backend/packages/harness/deerflow/tools/builtins/tool_search.py</code>。模块地图见 <a href="../reference/tools-mcp-overview.html">tools-mcp-overview.html</a>；函数签名、参数约束与测试锚点见 L3 <a href="../reference/tools-mcp-api.html">tools-mcp-api.html</a>。如果某段边界不清楚，可以继续追问 agent：“从这个阶段继续展开源码”。</p>
+</main>
+</body>
+</html>

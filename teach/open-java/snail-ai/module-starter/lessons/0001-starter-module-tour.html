@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Snail AI Starter 模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    pre{background:#0f172a;color:#e5e7eb;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:.86rem;line-height:1.55}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+    .note{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px;margin:16px 0}
+  </style>
+</head>
+<body>
+  <h1>Snail AI Starter 模块导览</h1>
+  <p class="lead">这一课只做一件事：学会把 <code>snail-ai-starter</code> 当作 Snail AI 的启动壳和配置边界来读。学完后，你应该能判断一个启动、端口、静态页面或部署问题该留在 starter 排查，还是继续下钻到 Server、Agent 或 Persistence。</p>
+  <div class="meta">
+    <span class="pill">学习目标：识别 starter 边界</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<span class="where">snail-ai-starter/pom.xml</span></span>
+    <span class="pill"><span class="where">snail-ai-starter/src/main/java/com/aizuda/snail/ai/starter/SnailAiSpringbootApplication.java</span></span>
+    <span class="pill"><span class="where">snail-ai-starter/src/main/resources/application.yml</span></span>
+  </div>
+
+  <h2>1. 模块职责</h2>
+  <p><a href="../../00-overview/lessons/0001-project-map.html">L0 总览/架构图</a> 已经把 Snail AI 分成 Server、Agent Client、Models、Persistence 和 Starter。这里的关键判断是：starter 不实现核心业务链路，它把可运行应用装起来。它的 <code>pom.xml</code> 依赖 <code>snail-ai-server-admin</code>、<code>snail-ai-server-openapi</code> 和三种关系库存储实现，同时引入 Actuator 与 Spring AI MCP Server WebMVC。也就是说，starter 是“把接口、存储适配、配置和静态后台装进一个 Spring Boot 进程”的模块。</p>
+  <pre><code>&lt;artifactId&gt;snail-ai-starter&lt;/artifactId&gt;
+&lt;finalName&gt;snail-ai-server&lt;/finalName&gt;
+&lt;classifier&gt;exec&lt;/classifier&gt;
+&lt;mainClass&gt;com.aizuda.snail.ai.starter.SnailAiSpringbootApplication&lt;/mainClass&gt;</code></pre>
+  <p><code>finalName</code> 是 <code>snail-ai-server</code>，Spring Boot repackage 的 classifier 是 <code>exec</code>，所以可执行包是 <code>snail-ai-server-exec.jar</code>，主类固定为 <code>SnailAiSpringbootApplication</code>。如果你要找某个 REST Controller、RAG Pipeline 或模型适配器，入口不在 starter；如果你要找“为什么服务从 8900 起、为什么静态后台能访问、为什么默认连 MySQL”，starter 才是第一站。</p>
+
+  <h2>2. 启动入口</h2>
+  <p>主类只有少量代码，但信息密度很高。<code>@SpringBootApplication(scanBasePackages = "com.aizuda.snail.ai")</code> 把扫描范围放到整个 Snail AI 包名前缀，starter 的依赖一旦进入 classpath，Server、Persistence、Model 等模块中的 Bean 就会被纳入容器。<code>@EnableAsync</code> 和 <code>@EnableScheduling</code> 说明运行时允许异步任务和定时任务；<code>main</code> 方法先把 JVM 默认时区设为 <code>Asia/Shanghai</code>，再调用 Spring Boot。</p>
+  <pre><code>public static void main(String[] args) {
+    TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+    SpringApplication.run(SnailAiSpringbootApplication.class, args);
+}</code></pre>
+  <p>启动监听和关闭监听位于 <code>listener/</code> 包：Spring 上下文刷新后打印 Logo，并遍历所有自定义 <code>Lifecycle.start()</code>；上下文关闭时遍历 <code>Lifecycle.close()</code>。这使 PgVector、Milvus、Elasticsearch 等存储注册或清理逻辑不需要写进主类。完整清单见 <a href="../reference/starter-overview.html">starter 参考页</a>。</p>
+
+  <h2>3. 配置边界</h2>
+  <p><code>application.yml</code> 是 starter 最重要的运行时契约。HTTP 默认监听 <code>8900</code>，上下文路径是 <code>/snail-ai</code>；Server gRPC 监听 <code>18888</code>，供 Agent Client 注册、心跳和任务分发；默认数据库是 MySQL，配置了 Hikari 连接池。资源文件默认走本地目录，Skill 上传目录是 <code>./upload/skills</code>，短期记忆默认用内存存储，重启后不会保留。</p>
+  <pre><code>server:
+  port: 8900
+  servlet:
+    context-path: /snail-ai
+
+spring:
+  web:
+    resources:
+      static-locations: classpath:admin/
+
+snail-ai:
+  server:
+    grpc-port: 18888</code></pre>
+  <p>这里还划清了前端边界：<code>classpath:admin/</code> 指向已构建的管理后台静态资源，<code>admin/index.html</code> 引用带 hash 的 JS/CSS 产物。这些文件决定页面如何被 Spring Boot 暴露，但不承载后端业务逻辑，后续源码学习不逐个解析 <code>admin/assets/**</code>。</p>
+
+  <h2>4. 启动一次</h2>
+  <p>本地开发时，依赖组件可按部署文档用 Docker Compose 启动；Snail AI Server 本体可以直接从根目录运行：</p>
+  <pre><code>mvn spring-boot:run -pl snail-ai-starter</code></pre>
+  <p>启动成功后，浏览器入口是 <code>http://localhost:8900/snail-ai</code>；OpenAPI 和 Admin API 共享这个 HTTP 端口；Agent Client 连接的是 <code>18888</code>。日志由 <code>logback-boot.xml</code> 控制：控制台输出所有 info 级别以上日志，同时把 INFO、WARN、ERROR 分别写入 <code>./data/log/snail-ai/</code> 下的滚动文件。</p>
+  <div class="filetree">snail-ai-starter/
+├── pom.xml                         ← 聚合依赖、可执行 JAR 和主类声明
+└── src/
+    └── main/
+        ├── java/                   ← Spring Boot 主类和生命周期监听器
+        └── resources/              ← 应用配置、日志配置和静态后台资源</div>
+  <div class="practice"><strong>检索练习：</strong>不看正文回答：如果页面能打开但 Agent Client 连不上，应先看 HTTP 端口还是 gRPC 端口？如果你想改后台静态资源的服务位置，应看主类还是 <code>application.yml</code>？<br><strong>参考答案：</strong>Agent Client 连接 Server gRPC，先看 <code>snail-ai.server.grpc-port</code> 与网络连通性；静态资源位置由 <code>spring.web.resources.static-locations</code> 定义，先看 <code>application.yml</code>。如果问题进入具体 Controller、RAG 或模型调用，再跳出 starter 到对应业务模块。</div>
+  <p>主要推荐来源：先读 <code>snail-ai-starter/src/main/resources/application.yml</code>，再读 <code>docs/deploy/configuration.md</code> 对照每个配置项。遇到不清楚的启动日志或端口问题，可以继续向 agent 追问“这个配置最终被哪个 Bean 使用”。</p>
+</body>
+</html>

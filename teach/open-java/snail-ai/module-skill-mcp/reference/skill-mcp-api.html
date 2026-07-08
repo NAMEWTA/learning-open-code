@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skill/MCP 模块构建 API</title>
+  <link rel="stylesheet" href="../assets/skill-mcp.css">
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-skill-mcp-module-tour.html">返回短课</a>
+    <a href="skill-mcp-overview.html">模块地图 L1</a>
+    <a href="../../slice-mcp-skill-tools/reference/mcp-skill-tools-flow-map.html">工具注入切片 L2</a>
+    <a href="../../module-agent-chain/reference/agent-chain-api.html">责任链 API L3</a>
+    <a href="../../module-persistence/reference/persistence-api.html#skill">Skill/MCP PO L3</a>
+  </nav>
+
+  <h1>Skill/MCP 模块构建 API</h1>
+  <p class="lead">本页是 L3 微观构建字典，聚焦 <code>snail-ai-feature-skill</code> 的 Maven 坐标、直接依赖，以及它与 <a href="../../slice-mcp-skill-tools/reference/mcp-skill-tools-flow-map.html">slice-mcp-skill-tools</a> 运行时各阶段的边界。<a href="skill-mcp-overview.html">skill-mcp-overview.html</a> 负责全链路地图；本文只回答「这个 jar 包里有什么、被谁依赖、在工具注入链路里承担哪一段」。</p>
+
+  <div class="meta">
+    <span class="pill">层级：L3 微观 API</span>
+    <span class="pill">源码 commit：2ae56c0</span>
+    <span class="pill">覆盖：1 个 pom + 2 个 Java 类</span>
+  </div>
+
+  <h2>1. Maven 坐标与模块位置</h2>
+  <table>
+    <thead><tr><th>属性</th><th>值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>groupId</code></td><td><code>com.aizuda</code></td><td>继承根 POM <code>open-java/snail-ai/pom.xml</code></td></tr>
+      <tr><td><code>artifactId</code></td><td><code>snail-ai-feature-skill</code></td><td>Server features 层中的 Skill 基础设施 jar</td></tr>
+      <tr><td><code>version</code></td><td><code>${revision}</code> → <code>1.0.0</code></td><td>由根 POM <code>flatten-maven-plugin</code> 展平</td></tr>
+      <tr><td><code>packaging</code></td><td><code>jar</code></td><td>无独立启动器，作为库被 admin / feature-agent 引用</td></tr>
+      <tr><td>父 POM</td><td><code>snail-ai-server-features</code></td><td>与 <code>feature-agent</code>、<code>feature-model</code> 等并列</td></tr>
+      <tr><td>物理路径</td><td><code>snail-ai-server/snail-ai-server-features/snail-ai-feature-skill/</code></td><td>当前仅含 <code>pom.xml</code> 与 2 个 <code>@Component</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="filetree">snail-ai-server-features/          ← packaging=pom
+├── snail-ai-feature-agent           ← 依赖 feature-skill；装配 Skill/MCP Handler
+├── snail-ai-feature-model           ← MCP 连接测试与工具发现（McpToolService）
+├── snail-ai-feature-skill           ← 本模块：Skill 读取 + Skill 内容回调
+└── …</div>
+
+  <h2>2. 直接依赖与职责</h2>
+  <p class="where">源文件：<code>snail-ai-feature-skill/pom.xml</code></p>
+  <table>
+    <thead><tr><th>依赖坐标</th><th>版本来源</th><th>在本模块中的实际用途</th><th>运行时落点</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>com.aizuda:snail-ai-commons-core</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>SkillContentRequest</code>、<code>JsonUtil</code>、MCP 枚举等公共 DTO/工具</td>
+        <td><code>SkillContentCallbackHandler</code> 解析回调 body</td>
+      </tr>
+      <tr>
+        <td><code>com.aizuda:snail-ai-commons-grpc</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>GrpcRequestHandler</code>、<code>UriConstants</code>、<code>GrpcSnailAiResult</code></td>
+        <td><code>SkillContentCallbackHandler</code> 注册 <code>/callback/skill/content</code></td>
+      </tr>
+      <tr>
+        <td><code>com.aizuda:snail-ai-biz-template</code></td>
+        <td><code>${revision}</code></td>
+        <td><code>SkillMapper</code>、<code>SkillFileMapper</code>、<code>AgentSkillMapper</code> 及 PO</td>
+        <td><code>SkillHandler</code> 按 Agent 绑定读 <code>SkillPO</code>；回调 Handler 读正文与支撑文件</td>
+      </tr>
+      <tr>
+        <td><code>org.springframework.ai:spring-ai-mcp</code></td>
+        <td><code>${spring-ai.version}</code> → 2.0.0</td>
+        <td><strong>当前源码未直接使用</strong>；MCP Client 在 <code>feature-model</code> 与 Agent Client resolver 中引用</td>
+        <td>见下文「MCP 运行时不在本 jar」</td>
+      </tr>
+      <tr>
+        <td><code>org.springframework.ai:spring-ai-client-chat</code></td>
+        <td><code>${spring-ai.version}</code> → 2.0.0</td>
+        <td><strong>当前源码未直接使用</strong>；工具注入在 Agent Client <code>ToolRuntime</code> 完成</td>
+        <td>见 L2 切片 Client 段</td>
+      </tr>
+      <tr>
+        <td><code>org.projectlombok:lombok</code></td>
+        <td><code>${lombok.version}</code></td>
+        <td>编译期注解；<code>provided</code> 作用域</td>
+        <td>—</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="note"><strong>依赖声明 vs 实际代码：</strong><code>pom.xml</code> 声明了 Spring AI MCP 栈，但 <code>snail-ai-feature-skill</code> 目录下没有任何 <code>import org.springframework.ai</code> 或 <code>io.modelcontextprotocol</code>。MCP 连接、<code>SyncMcpToolCallbackProvider</code> 和 <code>read_skill</code> 工具注册分别落在 <code>snail-ai-feature-model</code>（Admin 测试）、<code>snail-ai-feature-agent</code>（描述符生成）和 <code>snail-ai-agent-executor-core</code>（Client resolver）。不要把本 jar 误当成 MCP 运行时模块。</p>
+
+  <h2>3. 谁依赖本模块</h2>
+  <table>
+    <thead><tr><th>消费方</th><th>依赖方式</th><th>使用的公共 API</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>snail-ai-feature-agent</code></td>
+        <td>直接 Maven 依赖</td>
+        <td>注入 <code>SkillHandler</code>，在 <code>SkillAgentChatHandler</code> @Order(70) 中读取 Agent 绑定 Skill 并生成 <code>SkillDescriptor</code></td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-server-admin</code></td>
+        <td>直接 Maven 依赖</td>
+        <td>随 Spring Boot 组件扫描加载 <code>SkillContentCallbackHandler</code>；Admin CRUD 本身在 <code>SkillService</code>（admin 包），不在本 jar</td>
+      </tr>
+      <tr>
+        <td><code>snail-ai-starter</code>（可执行 Server）</td>
+        <td>传递依赖自 admin</td>
+        <td>启动时注册 gRPC 回调路由</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. 本模块公开 API</h2>
+
+  <h3>4.1 SkillHandler — Server 侧 Skill 读取</h3>
+  <p class="where">snail-ai-feature-skill/src/main/java/com/aizuda/snail/ai/features/skill/handle/SkillHandler.java</p>
+  <table>
+    <thead><tr><th>方法</th><th>签名</th><th>入参</th><th>返回 / 副作用</th><th>调用方</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>getSkillsWithContentForAgent</code></td>
+        <td><code>List&lt;SkillPO&gt; getSkillsWithContentForAgent(Long agentId)</code></td>
+        <td>Agent 主键</td>
+        <td>按 <code>AgentSkillPO</code> 关联查 <code>SkillPO</code> 全量列表（含 <code>skillContent</code>）；无绑定时返回空列表</td>
+        <td><code>SkillAgentChatHandler</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="note">本类注释写「供 features 层工具类和 admin 层 handler 调用」，但当前源码唯一调用方是 <code>SkillAgentChatHandler</code>。Skill 上传、在线编辑、版本管理仍在 <code>snail-ai-server-admin</code> 的 <code>SkillService</code>。</p>
+
+  <h3>4.2 SkillContentCallbackHandler — Client 回调读正文</h3>
+  <p class="where">snail-ai-feature-skill/src/main/java/com/aizuda/snail/ai/features/skill/handle/SkillContentCallbackHandler.java</p>
+  <table>
+    <thead><tr><th>契约项</th><th>值</th></tr></thead>
+    <tbody>
+      <tr><td>接口</td><td><code>GrpcRequestHandler</code></td></tr>
+      <tr><td>URI</td><td><code>UriConstants.CALLBACK_SKILL_CONTENT</code> → <code>/callback/skill/content</code></td></tr>
+      <tr><td>请求 DTO</td><td><code>SkillContentRequest</code>：<code>skillId</code>（必填）、<code>agentId</code>（可选，当前 Handler 未使用）</td></tr>
+      <tr><td>成功响应 JSON</td><td><code>skillContent</code>、<code>version</code>、<code>files[]</code>（每项含 <code>filePath</code>、<code>content</code>、<code>encoding</code>）</td></tr>
+      <tr><td>失败</td><td><code>GrpcSnailAiResult.status=0</code>；缺 <code>skillId</code> 或 Skill 不存在时返回错误消息</td></tr>
+      <tr><td>Client 触发</td><td><code>ReadSkillTool</code> → <code>RpcClient.fetchSkillContent</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 与 slice-mcp-skill-tools 运行时的关系</h2>
+  <p>L2 切片 <a href="../../slice-mcp-skill-tools/reference/mcp-skill-tools-flow-map.html">mcp-skill-tools-flow-map.html</a> 描述一次对话中 MCP 与 Skill 工具从绑定到 cleanup 的完整链路。下表把各阶段映射到具体 Maven 模块，并标出 <code>snail-ai-feature-skill</code> 的参与点。</p>
+
+  <table>
+    <thead><tr><th>运行时阶段</th><th>责任模块</th><th>关键类</th><th>feature-skill 是否参与</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Admin 保存 Skill / MCP 配置</td>
+        <td><code>snail-ai-server-admin</code></td>
+        <td><code>SkillService</code>、<code>McpServerService</code></td>
+        <td>否（仅被 admin 依赖以注册回调 Bean）</td>
+      </tr>
+      <tr>
+        <td>Agent 绑定写入关联表</td>
+        <td><code>snail-ai-server-admin</code></td>
+        <td><code>AgentService.updateAgentSkills</code> / <code>updateAgentMcpServers</code></td>
+        <td>否</td>
+      </tr>
+      <tr>
+        <td>对话时 MCP 描述符生成</td>
+        <td><code>snail-ai-feature-agent</code> + <code>snail-ai-feature-model</code></td>
+        <td><code>McpHandler</code>、<code>McpToolService</code></td>
+        <td>否；MCP 读取走 <code>McpToolService.getMcpServersForAgent</code></td>
+      </tr>
+      <tr>
+        <td>对话时 Skill 描述符生成</td>
+        <td><code>snail-ai-feature-agent</code> + <strong>本模块</strong></td>
+        <td><code>SkillAgentChatHandler</code> → <code>SkillHandler</code></td>
+        <td><strong>是</strong>：提供绑定 Skill 的 <code>SkillPO</code> 列表</td>
+      </tr>
+      <tr>
+        <td>组装 <code>ChatDispatchRequest</code></td>
+        <td><code>snail-ai-feature-agent</code></td>
+        <td><code>LlmCallHandler</code></td>
+        <td>间接：消费上一步写入的 <code>skillDescriptors</code></td>
+      </tr>
+      <tr>
+        <td>Client MCP 工具连接</td>
+        <td><code>snail-ai-agent-executor-core</code></td>
+        <td><code>ClientMcpToolResolver</code></td>
+        <td>否；使用 <code>spring-ai-mcp</code> 在 Client 侧</td>
+      </tr>
+      <tr>
+        <td>Client Skill 工具注册</td>
+        <td><code>snail-ai-agent-executor-core</code></td>
+        <td><code>ClientSkillToolResolver</code>、<code>ReadSkillTool</code></td>
+        <td>否；仅消费描述符，不依赖本 jar</td>
+      </tr>
+      <tr>
+        <td><code>read_skill</code> 回调拉正文</td>
+        <td><strong>本模块</strong> + commons-grpc</td>
+        <td><code>SkillContentCallbackHandler</code></td>
+        <td><strong>是</strong>：Server 侧唯一 Skill 运行时回调</td>
+      </tr>
+      <tr>
+        <td>工具汇总与 MCP cleanup</td>
+        <td><code>snail-ai-agent-executor-core</code></td>
+        <td><code>ToolRuntime</code>、<code>ChatSessionRuntime</code></td>
+        <td>否</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="diagram">slice-mcp-skill-tools 主链路（模块视角）
+
+Admin (skill/mcp CRUD)
+  └─ feature-skill：不参与
+      ↓
+Agent 绑定
+  └─ feature-skill：不参与
+      ↓
+Server Chain
+  ├─ McpHandler ← feature-model (McpToolService)
+  └─ SkillAgentChatHandler ← feature-skill (SkillHandler)  ★
+      ↓
+LlmCallHandler → ChatDispatchRequest
+      ↓
+Client ToolRuntime
+  ├─ ClientMcpToolResolver (spring-ai-mcp)
+  └─ ClientSkillToolResolver + ReadSkillTool
+      ↓ RPC
+SkillContentCallbackHandler ← feature-skill  ★</div>
+
+  <h2>6. 构建与排查速查</h2>
+  <table>
+    <thead><tr><th>问题</th><th>先查哪里</th><th>判断依据</th></tr></thead>
+    <tbody>
+      <tr><td>Skill 描述符为空</td><td><code>SkillHandler.getSkillsWithContentForAgent</code> 上游：<code>skillEnabled</code>、<code>AgentSkillPO</code></td><td>本模块只读 DB，不负责绑定写入</td></tr>
+      <tr><td><code>read_skill</code> 回调 404 / 无 Handler</td><td>Server 是否引入 <code>snail-ai-feature-skill</code> 且扫描到 <code>SkillContentCallbackHandler</code></td><td>缺依赖则 gRPC 路由无 <code>/callback/skill/content</code> 处理器</td></tr>
+      <tr><td>MCP 工具缺失</td><td><code>McpHandler</code>、<code>ClientMcpToolResolver</code></td><td>与 feature-skill 无关；勿在本模块找 MCP 代码</td></tr>
+      <tr><td>想给 feature-skill 加 MCP 逻辑</td><td>对照 <code>feature-model/McpToolService</code> 与 <code>feature-agent/McpHandler</code></td><td>现有分层把 MCP 放在 model + agent，Skill 基础设施保持薄层</td></tr>
+      <tr><td><code>spring-ai-mcp</code> 为何在 pom 里</td><td>git history / 后续扩展</td><td>当前 2 个 Java 类均未引用；可能是预留或历史遗留，改动前用 <code>mvn dependency:analyze</code> 验证</td></tr>
+    </tbody>
+  </table>
+
+  <p class="note">官方 <code>architecture.md</code> 把 <code>feature-skill</code> 描述为「技能管理（SkillService、McpServerService）」——与当前源码不一致：CRUD 在 admin，MCP 服务在 feature-model，本 jar 仅提供 Server 运行时读取与回调。以本页与源码为准。</p>
+</main>
+</body>
+</html>

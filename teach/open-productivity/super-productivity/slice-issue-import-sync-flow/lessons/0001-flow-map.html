@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L2 外部 Issue 导入与双向同步路径图</title>
+    <link rel="stylesheet" href="../assets/course.css" />
+  </head>
+  <body>
+    <main>
+      <article class="doc">
+        <p class="kicker">15 分钟短课 · 一个判断目标</p>
+        <h1>从 provider 候选 issue 到任务与写回</h1>
+        <p class="lead">
+          学完这一课，你要能回答一个问题：某段代码是在拉取 provider 状态、创建/更新本地任务，还是把本地任务变化写回 provider？
+          完整入口清单见
+          <a href="../reference/issue-import-sync-flow-reference.html">参考文档</a>。
+          相关 L1：<a href="../../module-issue-integrations/lessons/0001-issue-integrations-module-tour.html">Issue Provider 与日历集成</a>、
+          <a href="../../module-task-domain/lessons/0001-task-domain-module-tour.html">任务领域</a>、
+          <a href="../../module-op-log-sync/lessons/0001-op-log-sync-module-tour.html">op-log 同步</a>。
+        </p>
+
+        <h2>Mermaid 时序图</h2>
+        <pre class="mermaid">sequenceDiagram
+  participant Trigger as Poll / Task Action
+  participant IssueFx as issue effects
+  participant IssueSvc as IssueService
+  participant Provider as Issue Provider
+  participant TaskSvc as TaskService
+  participant Store as TaskSharedActions / reducer
+  participant Adapter as IssueSyncAdapter
+
+  alt import or remote refresh
+    Trigger->>IssueFx: backlog poll or refresh trigger
+    IssueFx->>IssueSvc: import / refresh request
+    IssueSvc->>Provider: get candidates or fresh issue data
+    Provider-->>IssueSvc: IssueTask / fresh values
+    IssueSvc->>TaskSvc: add/update task when local task must change
+    TaskSvc->>Store: persistent task action
+  else local task writeback
+    Store-->>IssueFx: local task action observed
+    IssueFx->>Adapter: fetch fresh provider value
+    Adapter-->>IssueFx: provider baseline input
+    IssueFx->>Adapter: optional push / create / delete
+    Adapter-->>IssueFx: provider result
+    IssueFx->>Store: update issueLastSyncedValues when needed
+  end</pre>
+
+        <h2>路径图</h2>
+        <ol class="flow">
+          <li>
+            <strong>触发导入轮询。</strong>
+            初始同步完成后，切到项目会筛出启用、绑定当前项目、允许自动加入 backlog、非 agenda view、且有轮询间隔的 provider；`always` 模式走常驻轮询。
+            <span class="where"><code>src/app/features/issue/store/poll-to-backlog.effects.ts</code></span>
+          </li>
+          <li>
+            <strong>只委托，不写任务。</strong>
+            effect 自身 `dispatch: false`，它只调用 `IssueService.checkAndImportNewIssuesToBacklogForProject`。失败时记录 log、弹 snack，并返回 `EMPTY` 保持轮询流继续。
+          </li>
+          <li>
+            <strong>去重后向 provider 要候选 issue。</strong>
+            `IssueService` 先收集同一 provider 在当前任务和归档任务里的 issue id，再调用 provider 的 `getNewIssuesToAddToBacklog`，最后再次过滤已存在 id。
+            <span class="where"><code>src/app/features/issue/issue.service.ts</code></span>
+          </li>
+          <li>
+            <strong>候选 issue 映射成任务字段。</strong>
+            provider 的 `getAddTaskData` 返回 `IssueTask`：例如 title、issuePoints、dueDay、issueLastUpdated、issueLastSyncedValues。这里还不是 NgRx action。
+          </li>
+          <li>
+            <strong>创建或更新本地任务。</strong>
+            `addTaskFromIssue` 合并 provider 字段、默认项目/标签/备注、backlog 标记，然后调用 `TaskService.add`、`addAndSchedule` 或 `addSubTaskTo`。这一步才落到任务 action 和 op-log 边界。
+          </li>
+          <li>
+            <strong>本地变化另走写回链路。</strong>
+            后续用户改标题、完成状态、日期或标签时，双向同步 effect 监听任务 action，计算 push 决策，再经 adapter 写回 provider。
+            <span class="where"><code>src/app/features/issue/two-way-sync/issue-two-way-sync.effects.ts</code></span>
+          </li>
+        </ol>
+
+        <h2>三个判断点</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>看到的动作</th>
+              <th>任务是否变化</th>
+              <th>边界判断</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>provider `getNewIssuesToAddToBacklog`</td>
+              <td>否</td>
+              <td>只是从远端取候选 issue；不创建任务，不写任务 op-log。</td>
+            </tr>
+            <tr>
+              <td>`IssueService.addTaskFromIssue`</td>
+              <td>是，可能创建主任务、定时任务或子任务</td>
+              <td>它把 provider 字段和本地默认值合并后交给 `TaskService`。</td>
+            </tr>
+            <tr>
+              <td>`IssueTwoWaySyncEffects._pushChanges$`</td>
+              <td>可能只更新 sync baseline</td>
+              <td>先看 baseline 与方向配置；provider 已变化或无 baseline 时不会 push。</td>
+            </tr>
+            <tr>
+              <td>`IssueProviderActions.upsertIssueProvider`</td>
+              <td>否</td>
+              <td>这是 provider 配置状态，不是任务创建；导入/同步用途不带持久化 meta。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>不要混成一步：</strong>
+          backlog 轮询负责“发现并导入缺失 issue”；已有 issue task 的远端更新由 `poll-issue-updates` 调 `refreshIssueTasks`；本地任务变化写回 provider 由 `issue-two-way-sync` 监听任务 action。
+        </div>
+
+        <h2>60 秒判断题</h2>
+        <p>
+          场景：Jira provider 的 backlog poll 返回 `ABC-7`，但当前任务或归档任务中已经有同一 `issueProviderId + issueType + issueId`。
+          代码应该怎么做？
+        </p>
+        <ol>
+          <li>创建一个新的 backlog 任务，避免漏掉远端 issue。</li>
+          <li>不创建新任务；根据位置提示已存在、恢复归档或移动到当前上下文。</li>
+          <li>直接把 Jira issue 写回远端，更新远端状态。</li>
+        </ol>
+        <details class="answer">
+          <summary>参考答案与反馈</summary>
+          <p>
+            选 2。`addTaskFromIssue` 会先调用重复检测；归档任务会恢复，当前项目 backlog 中的任务只提示已存在，其他列表中的任务可能被移动到当前上下文。provider 拉取不会自动写回远端。
+          </p>
+        </details>
+
+        <h3>下一步阅读</h3>
+        <p>
+          打开参考文档的“边界清单”，按“入口 effect → service → provider adapter → task action → sync adapter”的顺序复盘。后续待拆 L3/L4：
+          <code>IssueService.addTaskFromIssue</code>、<code>TaskSharedActions</code> 持久化边界、plugin field mapping、<code>computePushDecisions</code>。若某个判断不确定，向 agent 追问对应源码片段和状态字段。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 应用启动与数据初始化路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15-20 分钟 · 目标：能从冷启动症状选对第一排查入口</p>
+    <h1>应用启动与数据初始化路径图</h1>
+    <p class="lead">这节课只建立一张启动地图：Angular 先把 provider 和 root shell 装起来，数据加载在 <code>src/app/core/data-init/data-init.service.ts</code> 里异步落到 NgRx，随后同步信号和插件初始化才接力。详细入口清单见 <a href="../reference/app-startup-flow-reference.html">参考文档</a>。</p>
+
+    <h2>1. 从 bootstrap 看第一批接线</h2>
+    <p><span class="where">src/main.ts</span> 调用 <code>bootstrapApplication(AppComponent, ...)</code>，集中注册 <code>src/app/root-store/feature-stores.module.ts</code>、NgRx 根 store、<code>src/app/app.routes.ts</code>、Translate、HTTP、service worker 和平台生命周期。最容易误判的是：<code>src/app/plugins/plugin-initializer.ts</code> 的 provider 只是注册 <code>'PLUGIN_INITIALIZER'</code> token；当前实际插件运行时不靠它执行。</p>
+    <pre class="diagram">src/main.ts
+  ├─ bootstrapApplication(AppComponent)
+  ├─ importProvidersFrom(FeatureStoresModule, StoreModule.forRoot(...))
+  ├─ provideRouter(APP_ROUTES, withHashLocation(), withPreloading(...))
+  ├─ APP_INITIALIZER: OperationCaptureService
+  ├─ APP_INITIALIZER: instantiate DataInitService
+  └─ APP_INITIALIZER: encryption / OAuth handler side effects</pre>
+
+    <h2>2. 数据加载不是等 bootstrap 完成才开始</h2>
+    <p><code>src/main.ts</code> 的 DataInit initializer 只返回空函数，但它会强制实例化 <code>src/app/core/data-init/data-init.service.ts</code>。该 service 的字段初始化立即执行 <code>reInit()</code>：可选初始化 user profile，再进入 <code>src/app/op-log/persistence/operation-log-hydrator.service.ts</code>。hydrator 优先读 state cache；没有快照时检查旧 <code>pf</code> 数据迁移；必要时迁移 schema 或 replay operations；最后 dispatch <code>loadAllData</code>，再由 <code>src/app/core/data-init/data-init-state.service.ts</code> 广播首次数据完成。</p>
+
+    <h2>3. 根组件触发启动后任务</h2>
+    <p><span class="where">src/app/app.component.ts</span> 构造函数马上调用 <code>src/app/core/startup/startup.service.ts</code> 的初始化。这里做单实例检查、本地备份、持久化请求、主题预加载和 Electron ready；1 秒后进入延迟任务：tracking reminder、更新检查、离线 banner、legacy custom theme migration、评分提示，最后才初始化插件。</p>
+    <pre class="diagram">AppComponent constructor
+  → src/app/core/startup/startup.service.ts
+  → single-instance / backup / persistence / theme
+  → delayed startup tasks
+  → wait data loaded + current sync done
+  → src/app/plugins/plugin.service.ts</pre>
+
+    <h2>4. 同步与插件的等待边界</h2>
+    <p><code>src/app/imex/sync/sync.effects.ts</code> 在数据完成后订阅自动同步；<code>src/app/imex/sync/sync-trigger.service.ts</code> 管理“初始同步完成 + 数据加载完成”的 UI 信号，最多等待 8 秒兜底。插件更保守：<code>src/app/core/startup/startup.service.ts</code> 的插件入口等待 <code>DataInitStateService.isAllDataLoadedInitially$</code> 和 <code>SyncWrapperService.afterCurrentSyncDoneOrSyncDisabled$</code>，再调用 <code>src/app/plugins/plugin.service.ts</code> 发现内置/上传插件、自动启用迁移插件并加载 enabled 插件。</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>症状</th><th>第一判断</th><th>入口</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>首屏一直像未加载数据</td><td>数据是否发出首次完成信号</td><td><code>src/app/core/data-init/data-init.service.ts</code></td></tr>
+          <tr><td>旧版本数据迁移弹窗或失败</td><td>是否没有 state cache 且旧 <code>pf</code> 数据可读</td><td><code>src/app/op-log/persistence/operation-log-migration.service.ts</code></td></tr>
+          <tr><td>同步后 banner 没出现</td><td>初始同步完成信号是否被置位或 8 秒兜底</td><td><code>src/app/imex/sync/sync-trigger.service.ts</code></td></tr>
+          <tr><td>插件设置可见但没运行</td><td>插件是否仍在等数据/同步或 activation 失败</td><td><code>src/app/core/startup/startup.service.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>暂停 60 秒判断</h3>
+    <p>只凭这张路径图判断：用户报告“冷启动后侧栏和 header 已出现，但插件页为空；同时控制台没有路由错误”。你先看 <code>src/app/app.routes.ts</code>、<code>src/app/core/data-init/data-init.service.ts</code>、<code>src/app/core/startup/startup.service.ts</code>，还是 <code>src/app/plugins/plugin.service.ts</code>？再说出第二跳。</p>
+    <div class="answer">参考答案：先看 <code>src/app/core/startup/startup.service.ts</code>，因为 shell 已出现且没有路由错误，问题更像启动后插件等待链。第二跳看 <code>src/app/plugins/plugin.service.ts</code>：确认 <code>initializePlugins()</code> 是否发现 manifest、是否加载 enabled 插件、是否把状态置为 error。主要来源：<code>src/app/core/startup/startup.service.ts</code>。不确定某个等待信号时，直接向 agent 追问下一跳源码。</div>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subagent 系统参考</title>
+  <link rel="stylesheet" href="../assets/topic.css">
+</head>
+<body>
+<main class="wide">
+  <h1>Subagent 系统参考</h1>
+  <p class="lead">本页承载 L1 Subagent 模块的速查材料：职责边界、入口类、内部分层、依赖、调用示例、状态契约、事件映射、executor 责任表和测试线索。L3 API 签名见 <a href="subagents-api.html">subagents-api.html</a>；短课入口：<a href="../lessons/0001-subagents-module-tour.html">0001-subagents-module-tour.html</a>；L0 锚点见 <a href="../../00-overview/reference/00-overview.html">00-overview.html</a>。</p>
+
+  <h2 id="boundary">模块职责与架构位置</h2>
+  <table>
+    <tr><th>维度</th><th>结论</th><th>源码依据</th></tr>
+    <tr><td>职责</td><td>把 lead agent 的 <code>task</code> tool call 转换为后台 subagent 执行，继承运行上下文，直播 step，返回结构化 ToolMessage，并把 step 持久化为 run event。</td><td><code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code></td></tr>
+    <tr><td>架构位置</td><td>位于 lead agent tool 层、runtime stream bridge、run event persistence、前端 workspace subtask card 之间，是长任务 delegation 的执行桥。</td><td><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code>、<code>frontend/src/components/workspace/messages/subtask-card.tsx</code></td></tr>
+    <tr><td>非职责</td><td>不做用户意图判定，不允许递归 subagent，不替代 RunManager，不直接渲染 UI。</td><td><code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code>、<code>frontend/src/core/tasks/steps.ts</code></td></tr>
+    <tr><td>用户可见结果</td><td>subtask card 展示 description、运行状态、AI/tool step 时间线、终态结果或错误；刷新后可按 task id 回填历史 step。</td><td><code>frontend/src/components/workspace/messages/subtask-card.tsx</code></td></tr>
+  </table>
+
+  <h2 id="internal-map">内部分层结构</h2>
+  <div class="filetree">backend/packages/harness/deerflow/
+├── tools/
+│   └── builtins/
+│       └── task_tool.py              ← lead agent 的 task tool 入口
+├── subagents/                        ← subagent 执行与契约层
+│   ├── config.py                     ← SubagentConfig 与模型继承解析
+│   ├── registry.py                   ← built-in/custom 配置解析与覆盖
+│   ├── executor.py                   ← 后台执行、状态、取消、超时、step 捕获
+│   ├── step_events.py                ← task_* chunk 到 subagent.* run event
+│   ├── status_contract.py            ← ToolMessage additional_kwargs 状态契约
+│   └── builtins/                     ← 内置 subagent 定义
+└── agents/
+    └── middlewares/
+        ├── subagent_limit_middleware.py  ← 单次响应 task 调用并发上限
+        └── delegation_ledger.py          ← 已委托工作 durable context</div>
+
+  <h3>内置 subagent</h3>
+  <table>
+    <tr><th>类型</th><th>用途</th><th>工具策略</th><th>默认上限</th></tr>
+    <tr><td><code>general-purpose</code></td><td>复杂、多步、需要探索与行动的任务。</td><td>默认继承父 agent 工具，但禁止 <code>task</code>、<code>ask_clarification</code>、<code>present_files</code>。</td><td><code>max_turns=150</code>，timeout 使用全局内置默认或覆盖。</td></tr>
+    <tr><td><code>bash</code></td><td>一组相关命令执行、构建、测试、诊断。</td><td>仅允许 sandbox 工具 <code>bash</code>、<code>ls</code>、<code>read_file</code>、<code>write_file</code>、<code>str_replace</code>，且 host bash 开关必须允许。</td><td><code>max_turns=60</code>，timeout 使用全局内置默认或覆盖。</td></tr>
+  </table>
+
+  <h2 id="entrypoints">对外入口与主要类</h2>
+  <table>
+    <tr><th>入口/类</th><th>角色</th><th>阅读重点</th></tr>
+    <tr><td><code>task_tool()</code></td><td>LangChain tool，lead agent 直接调用。</td><td>配置查找、runtime context 继承、禁用递归 task、启动 executor、轮询并发 stream event。</td></tr>
+    <tr><td><code>SubagentConfig</code></td><td>单个 subagent 的声明式配置。</td><td><code>tools</code> allowlist、<code>disallowed_tools</code> denylist、<code>skills</code> 白名单、<code>model</code> 继承、<code>max_turns</code>、<code>timeout_seconds</code>。</td></tr>
+    <tr><td><code>get_subagent_config()</code></td><td>registry 解析器。</td><td>built-in 与 custom agents 合并，再应用 per-agent timeout、model、skills、max_turns 覆盖。</td></tr>
+    <tr><td><code>SubagentExecutor</code></td><td>执行引擎。</td><td>创建 agent、加载 skills、过滤工具、构造 state、stream 执行、捕获 step、处理终态。</td></tr>
+    <tr><td><code>SubagentResult</code></td><td>后台任务状态容器。</td><td>保存 <code>task_id</code>、<code>trace_id</code>、status、结果、错误、AI/tool step、token usage、cancel event。</td></tr>
+    <tr><td><code>SubagentLimitMiddleware</code></td><td>lead agent 输出后的硬限制。</td><td>单次 AIMessage 只保留前 N 个 <code>task</code> tool call，默认 3，配置范围 2 到 4。</td></tr>
+    <tr><td><code>delegation_ledger</code></td><td>durable context 构造器。</td><td>只信 ToolMessage 的结构化 status/result 元数据，给 lead agent 渲染“已委托工作”。</td></tr>
+  </table>
+
+  <h2 id="call-flow">调用示例：一次委托的主链路</h2>
+  <pre><code class="language-python"># 模型输出的 tool_call_id 会成为 task_id
+await task_tool(
+    runtime=runtime,
+    description="调查 run events",
+    prompt="检查 subagent step 如何持久化",
+    subagent_type="general-purpose",
+    tool_call_id="call_123",
+)
+
+# task_tool 内部关键动作
+config = get_subagent_config("general-purpose")
+tools = get_available_tools(subagent_enabled=False)
+executor = SubagentExecutor(config=config, tools=tools, thread_id=thread_id)
+task_id = executor.execute_async(prompt, task_id="call_123")
+writer({"type": "task_started", "task_id": task_id, "description": description})</code></pre>
+
+  <div class="diagram">AI tool call
+  │
+  ├── task_tool.py
+  │   ├── 解析 subagent config
+  │   ├── 继承 runtime context
+  │   ├── 加载可用工具并关闭 subagent_enabled
+  │   ├── SubagentExecutor.execute_async()
+  │   └── 轮询 SubagentResult，写 task_* stream chunk
+  │
+  ├── executor.py
+  │   ├── 后台登记 SubagentResult
+  │   ├── 构造 LangGraph agent state
+  │   ├── 流式执行 agent.astream()
+  │   └── 捕获 AIMessage / ToolMessage 为 step 原料
+  │
+  ├── step_events.py
+  │   ├── task_started   → subagent.start
+  │   ├── task_running   → subagent.step
+  │   └── task_completed → subagent.end
+  │
+  └── frontend subtask card
+      ├── live：消费 task_running
+      └── reload：按 task_id 拉取 subagent.step</div>
+
+  <h2 id="dependencies">关键依赖</h2>
+  <table>
+    <tr><th>依赖</th><th>如何影响 subagent</th></tr>
+    <tr><td><code>runtime.state["sandbox"]</code>、<code>thread_data</code></td><td>让 subagent 复用父 agent 的 sandbox 和 workspace 上下文。</td></tr>
+    <tr><td><code>runtime.context</code></td><td>传递 <code>thread_id</code>、<code>run_id</code>、用户身份、OAuth、channel user、trace id，保证 guardrail 与审计归属一致。</td></tr>
+    <tr><td><code>runtime.config["metadata"]</code></td><td>提供父模型名、tool groups、available skills、trace metadata。</td></tr>
+    <tr><td><code>deerflow.tools.get_available_tools()</code></td><td>按模型和 tool groups 取工具，并用 <code>subagent_enabled=False</code> 禁止嵌套 task。</td></tr>
+    <tr><td><code>deerflow.skills.storage</code></td><td>executor 每次 subagent session 加载 enabled skills，再按配置与父 allowlist 过滤。</td></tr>
+    <tr><td><code>RunEventStore</code></td><td>runtime worker 把 <code>subagent.step</code> 持久化，前端历史回填依赖它。</td></tr>
+    <tr><td><code>contracts/subagent_status_contract.json</code></td><td>固定后端与 TypeScript 共享的终态枚举。</td></tr>
+  </table>
+
+  <h2 id="status-contract">状态契约</h2>
+  <p>终态不是从 <code>ToolMessage.content</code> 文本中解析，而是从 <code>ToolMessage.additional_kwargs</code> 读取。文本给模型看，结构化字段给 runtime、ledger 和前端消费。</p>
+  <table>
+    <tr><th>状态</th><th>含义</th><th>元数据字段</th><th>ledger 行为</th></tr>
+    <tr><td><code>completed</code></td><td>正常完成。</td><td><code>subagent_status</code>，可带 <code>subagent_result_brief</code> 与 <code>subagent_result_sha256</code>。</td><td>结果可复用，提示 lead 不要重复委托。</td></tr>
+    <tr><td><code>failed</code></td><td>执行失败。</td><td><code>subagent_status</code>，可带 <code>subagent_error</code>。</td><td>记录失败尝试，可用变化后的计划重试。</td></tr>
+    <tr><td><code>cancelled</code></td><td>父 run 或用户取消。</td><td><code>subagent_status</code>，可带 <code>subagent_error</code>。</td><td>记录取消尝试，可用变化后的计划重试。</td></tr>
+    <tr><td><code>timed_out</code></td><td>executor 执行超时。</td><td><code>subagent_status</code>，可带 <code>subagent_error</code>。</td><td>记录超时尝试，建议缩小范围或调整 timeout。</td></tr>
+    <tr><td><code>polling_timed_out</code></td><td><code>task_tool</code> 轮询安全网超时。</td><td><code>subagent_status</code>，可带 <code>subagent_error</code>。</td><td>表示后台可能卡住，不能当成功结果复用。</td></tr>
+    <tr><td><code>max_turns_reached</code></td><td>LangGraph recursion limit 到达，但可能已有部分结果。</td><td>同时带 result brief/hash 与 error。它是唯一既 result-bearing 又 error-bearing 的状态。</td><td>优先复用 partial result，必要时缩小任务或提高 max_turns。</td></tr>
+  </table>
+
+  <h2 id="events">事件与持久化映射</h2>
+  <table>
+    <tr><th>stream chunk</th><th>run event</th><th>content</th><th>消费者</th></tr>
+    <tr><td><code>task_started</code></td><td><code>subagent.start</code></td><td><code>task_id</code>、<code>description</code></td><td>live SSE 创建卡片；run event store 保留起点。</td></tr>
+    <tr><td><code>task_running</code></td><td><code>subagent.step</code></td><td><code>task_id</code>、<code>message_index</code>、<code>kind</code>、<code>text</code>、<code>tool_calls</code> 或 <code>tool_name</code></td><td>live timeline 和刷新后 step 回填。</td></tr>
+    <tr><td><code>task_completed</code></td><td><code>subagent.end</code></td><td><code>status=completed</code>，可带 bounded result。</td><td>卡片终态、ledger 结果复用。</td></tr>
+    <tr><td><code>task_failed</code></td><td><code>subagent.end</code></td><td><code>status=failed</code>，可带 bounded error。</td><td>卡片失败、ledger 失败尝试。</td></tr>
+    <tr><td><code>task_cancelled</code></td><td><code>subagent.end</code></td><td><code>status=cancelled</code>。</td><td>卡片取消、ledger 取消尝试。</td></tr>
+    <tr><td><code>task_timed_out</code></td><td><code>subagent.end</code></td><td><code>status=timed_out</code>。</td><td>卡片超时、ledger 超时尝试。</td></tr>
+  </table>
+  <p class="note">精确终态原因以 <code>ToolMessage.additional_kwargs.subagent_status</code> 为准；例如 <code>max_turns_reached</code> 会通过 <code>task_failed</code> 进入 run event，<code>polling_timed_out</code> 会通过 <code>task_timed_out</code> 进入 run event。</p>
+  <p><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code> 的 `_SubagentEventBuffer` 用 <code>put_batch</code> 批量写入，达到 25 条或终态事件时 flush，finally 中也会 flush 剩余事件。</p>
+
+  <h2 id="executor-table">executor 责任表</h2>
+  <table>
+    <tr><th>阶段</th><th>关键函数/字段</th><th>说明</th></tr>
+    <tr><td>登记任务</td><td><code>execute_async()</code>、<code>_background_tasks</code></td><td>创建 <code>SubagentResult(PENDING)</code>，用 <code>task_id</code> 存入全局后台任务表。</td></tr>
+    <tr><td>调度执行</td><td><code>_scheduler_pool</code>、<code>_submit_to_isolated_loop_in_context()</code></td><td>后台线程把 coroutine 提交到持久隔离事件循环，保留 ContextVar。</td></tr>
+    <tr><td>创建 agent</td><td><code>_build_initial_state()</code>、<code>_create_agent()</code></td><td>加载 skills、过滤工具、追加 deferred tool section，创建 LangGraph agent。</td></tr>
+    <tr><td>捕获 step</td><td><code>capture_new_step_messages()</code></td><td>按 values-mode 新增尾部捕获 AIMessage 与 ToolMessage，避免多工具输出只保留最后一条。</td></tr>
+    <tr><td>正常完成</td><td><code>_extract_final_result()</code></td><td>从最后一个 AIMessage 提取文本作为 result。</td></tr>
+    <tr><td>取消/超时</td><td><code>cancel_event</code>、<code>request_cancel_background_task()</code></td><td>协作式取消；长工具调用只能在下一个 stream iteration 边界观察到。</td></tr>
+    <tr><td>max turns</td><td><code>GraphRecursionError</code></td><td>恢复 partial result，并写入 <code>MAX_TURNS_REACHED</code>。</td></tr>
+    <tr><td>清理</td><td><code>cleanup_background_task()</code></td><td>只删除 terminal 或已完成任务，避免后台线程仍在写状态时被移除。</td></tr>
+  </table>
+
+  <h2 id="frontend">前端 subtask card 消费路径</h2>
+  <table>
+    <tr><th>文件</th><th>作用</th></tr>
+    <tr><td><code>frontend/src/core/threads/hooks.ts</code></td><td>处理 live stream 中的 <code>task_started/task_running/task_completed</code> 等事件，更新 subtask state。</td></tr>
+    <tr><td><code>frontend/src/core/tasks/steps.ts</code></td><td>把 live message 或 persisted run event 标准化为 <code>SubtaskStep</code>，按 <code>message_index</code> 排序并去重合并。</td></tr>
+    <tr><td><code>frontend/src/core/tasks/api.ts</code></td><td>展开旧卡片时分页请求 <code>/events?event_types=subagent.step&amp;task_id=...</code>。</td></tr>
+    <tr><td><code>frontend/src/components/workspace/messages/subtask-card.tsx</code></td><td>显示卡片标题、运行/完成/失败状态、AI/tool step 时间线和最终 result。</td></tr>
+  </table>
+
+  <h2 id="source-index">源码索引</h2>
+  <table>
+    <tr><th>路径</th><th>阅读目的</th><th>关键度</th></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/</code></span></td><td>subagent 执行、配置、状态契约、事件映射与内置定义的模块根。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/executor.py</code></span></td><td>后台执行、LangGraph agent 创建、step 捕获、取消、超时、max turns。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/step_events.py</code></span></td><td>AI/tool message 到 compact step，以及 task chunk 到 run event 的映射。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/status_contract.py</code></span></td><td>ToolMessage additional_kwargs 的状态、result brief、sha256 与 error 规则。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/config.py</code></span></td><td>SubagentConfig 字段与 model inherit 解析。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/registry.py</code></span></td><td>built-in/custom agent 配置解析、全局与 per-agent 覆盖。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/builtins/general_purpose.py</code></span></td><td>general-purpose 内置 subagent 的 system prompt、工具策略和 max turns。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/subagents/builtins/bash_agent.py</code></span></td><td>bash 内置 subagent 的工具 allowlist 与命令执行定位。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/tools/builtins/task_tool.py</code></span></td><td>task tool 入口、runtime context 继承、轮询、SSE 事件和 ToolMessage 终态。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/config/subagents_config.py</code></span></td><td>config.yaml 中 subagents 全局、per-agent 和 custom_agents schema。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py</code></span></td><td>单次模型响应中 task tool call 的并发硬限制。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/agents/middlewares/delegation_ledger.py</code></span></td><td>从 AIMessage/ToolMessage 提取 delegation ledger，防止重复委托。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/packages/harness/deerflow/runtime/runs/worker.py</code></span></td><td>_SubagentEventBuffer 批量持久化 subagent run events。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>contracts/subagent_status_contract.json</code></span></td><td>跨语言状态枚举契约。</td><td>核心</td></tr>
+    <tr><td><span class="where"><code>frontend/src/components/workspace/messages/subtask-card.tsx</code></span></td><td>用户可见 subtask card。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/core/tasks/steps.ts</code></span></td><td>前端 step 标准化、过滤、排序与合并。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/core/tasks/api.ts</code></span></td><td>按 task_id 分页回填 persisted subagent.step。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/src/core/threads/hooks.ts</code></span></td><td>live stream 事件进入前端 subtask state。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_task_tool_core_logic.py</code></span></td><td>task tool 编排契约测试。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_subagent_step_events.py</code></span></td><td>step payload 与 run event 映射测试。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_subagent_status_contract.py</code></span></td><td>状态契约测试。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_delegation_ledger.py</code></span></td><td>delegation ledger 测试。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>backend/tests/test_subagent_limit_middleware.py</code></span></td><td>并发 task call 限制测试。</td><td>辅助</td></tr>
+    <tr><td><span class="where"><code>frontend/tests/e2e/subtask-card.spec.ts</code></span></td><td>subtask card reload 行为测试。</td><td>辅助</td></tr>
+  </table>
+
+  <h2 id="tests">测试线索矩阵</h2>
+  <table>
+    <tr><th>测试文件</th><th>覆盖点</th></tr>
+    <tr><td><code>backend/tests/test_task_tool_core_logic.py</code></td><td>未知 subagent、bash gate、runtime app_config 传递、事件顺序、tool groups、模型覆盖、skills allowlist、状态 ToolMessage。</td></tr>
+    <tr><td><code>backend/tests/test_subagent_executor.py</code></td><td>executor 创建、执行、超时、状态转换和结果提取。</td></tr>
+    <tr><td><code>backend/tests/test_subagent_step_events.py</code></td><td>AI/tool message 到 step payload，文本截断，tool args 截断，task chunk 到 run event。</td></tr>
+    <tr><td><code>backend/tests/test_worker_subagent_persistence.py</code></td><td>runtime worker 批量持久化 subagent step，终态 flush，event store 查询。</td></tr>
+    <tr><td><code>backend/tests/test_subagent_status_contract.py</code></td><td>状态枚举与 JSON fixture 对齐，result/error metadata 读写，max turns partial result。</td></tr>
+    <tr><td><code>backend/tests/test_delegation_ledger.py</code></td><td>task 调用提取、终态不降级、结构化元数据优先、上下文预算裁剪。</td></tr>
+    <tr><td><code>backend/tests/test_subagent_limit_middleware.py</code></td><td>并发 task call 上限、raw provider tool_calls 同步截断。</td></tr>
+    <tr><td><code>frontend/tests/unit/core/tasks/steps.test.ts</code></td><td>persisted <code>subagent.step</code> 到前端 step、排序、过滤和合并。</td></tr>
+    <tr><td><code>frontend/tests/unit/core/tasks/api.test.ts</code></td><td>step 回填 API 按 event type、task id 和 after_seq 分页。</td></tr>
+    <tr><td><code>frontend/tests/e2e/subtask-card.spec.ts</code></td><td>停止后的 subtask reload 不应继续显示 running。</td></tr>
+  </table>
+
+  <p class="callout">阅读顺序建议：先读短课，再读 <code>task_tool.py</code> 中的轮询循环；第二轮读 <code>executor.py</code> 的 <code>_aexecute()</code> 与 <code>execute_async()</code>；最后用本页测试矩阵挑一个异常状态做 L2 垂直切片。</p>
+</main>
+</body>
+</html>

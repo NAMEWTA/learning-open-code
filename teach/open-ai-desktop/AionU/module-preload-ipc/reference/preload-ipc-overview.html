@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AionU Preload / IPC 参考总览</title>
+  <link rel="stylesheet" href="../../00-overview/assets/aionu-course.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Preload 与 IPC 参考总览</h1>
+    <p class="subtitle">供 L1 lesson 配套速查：模块职责、入口清单、分层关系、关键依赖与主要 channel 地图。</p>
+    <div class="meta">
+      <span class="pill">Reference</span>
+      <span class="pill">Preload / Main Bridge</span>
+    </div>
+  </section>
+  <p class="muted">L0 回链：需要先看项目全景时，跳到 <a href="../../00-overview/reference/00-overview.html">00-overview / 00-overview</a>，再回到本页检查 preload 的精确暴露面。</p>
+
+  <div class="toc">
+    <a href="#role">模块职责与架构位置</a>
+    <a href="#entries">对外接口 / 入口清单</a>
+    <a href="#channels">主要 IPC channel 清单</a>
+    <a href="#example">调用 / 阅读示例</a>
+  </div>
+
+  <h2 id="role">模块职责与架构位置</h2>
+  <p>本模块负责把 Electron renderer 放进受控沙箱。preload 负责暴露最小可用 API；<code>common/adapter/main.ts</code> 负责把统一桥接事件接到 main；<code>process/bridge/*</code> 负责按能力域注册 provider；pet 多窗口 preload 负责各自极窄的专用通道。它处在 renderer 与 main 之间，是桌面端安全边界的一部分，而不是业务逻辑承载层。</p>
+
+  <div class="filetree">packages/desktop/src/
+├── preload/                               ← 4 个 renderer 注入入口
+│   ├── main.ts                            ← 主窗口白名单 API
+│   ├── petPreload.ts                      ← pet 展示窗订阅状态/眼球/尺寸
+│   ├── petHitPreload.ts                   ← pet 命中层发拖拽/点击/右键
+│   └── petConfirmPreload.ts               ← pet 确认窗收确认、发响应
+├── common/
+│   └── adapter/
+│       ├── constant.ts                    ← `office-ai-bridge-adapter`
+│       ├── ipcBridge.ts                   ← 契约定义，分 application/webui/theme 等域
+│       └── main.ts                        ← ipcMain.handle + BrowserWindow 广播
+├── process/
+│   └── bridge/                            ← provider 注册集合
+│       ├── index.ts                       ← initAllBridges 聚合入口
+│       ├── applicationBridge.ts           ← devtools/zoom/CDP/GPU/start-on-boot
+│       ├── dialogBridge.ts                ← 原生文件选择
+│       ├── themeBridge.ts                 ← theme 缓存与广播
+│       ├── webuiBridge.ts                 ← WebUI 生命周期
+│       └── windowControlsBridge.ts        ← 最小化/最大化/关闭
+└── tests/unit/feedback/feedbackBridge.test.ts ← feedback IPC 行为证据</div>
+
+  <h2 id="entries">对外接口 / 入口清单</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>入口</th>
+        <th>暴露对象 / 职责</th>
+        <th>去向</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>preload/main.ts</code></td>
+        <td><code>window.electronAPI</code><br><code>emit(name, data)</code><br><code>on(callback)</code><br><code>getPathForFile(file)</code><br><code>collectFeedbackLogs()</code><br><code>captureFeedbackScreenshot()</code><br><code>logFeedbackEvent(payload)</code><br><code>recoverCorruptedDatabase()</code><br><code>window.__backendPort</code><br><code>window.__initialLanguage</code><br><code>window.__aionuiE2ETest</code><br><code>window.__backendStartupFailed</code><br><code>window.__backendStartupFailure</code><br>托盘 DOM 事件：<code>tray:navigate-to-guid</code>、<code>tray:navigate-to-conversation</code>、<code>tray:open-about</code>、<code>tray:pause-all-tasks</code>、<code>tray:check-update</code></td>
+        <td>统一 adapter + 少数原生独立 channel + 首屏只读启动快照</td>
+      </tr>
+      <tr>
+        <td><code>preload/petPreload.ts</code></td>
+        <td><code>window.petAPI</code><br><code>onStateChange(cb)</code><br><code>onEyeMove(cb)</code><br><code>onResize(cb)</code></td>
+        <td><code>petManager.ts</code> 发来的状态、眼球、尺寸事件</td>
+      </tr>
+      <tr>
+        <td><code>preload/petHitPreload.ts</code></td>
+        <td><code>window.petHitAPI</code><br><code>dragStart()</code><br><code>dragEnd()</code><br><code>click(data)</code><br><code>contextMenu()</code><br><code>setIgnoreMouseEvents(ignore, options?)</code><br><code>onHitReset(cb)</code></td>
+        <td><code>petManager.ts</code> 的拖拽、点击、鼠标穿透控制</td>
+      </tr>
+      <tr>
+        <td><code>preload/petConfirmPreload.ts</code></td>
+        <td><code>window.petConfirmAPI</code><br><code>onConfirmationAdd(callback)</code><br><code>onConfirmationUpdate(callback)</code><br><code>onConfirmationRemove(callback)</code><br><code>onThemeChange(callback)</code><br><code>respond(data)</code><br><code>dragStart()</code><br><code>dragEnd()</code></td>
+        <td><code>petConfirmManager.ts</code> 的确认事件、主题同步、响应回传</td>
+      </tr>
+      <tr>
+        <td><code>common/adapter/main.ts</code></td>
+        <td>统一 <code>ipcMain.handle</code>、窗口广播、WS 广播</td>
+        <td>bridge emitter / 所有 BrowserWindow / WebSocket 客户端</td>
+      </tr>
+      <tr>
+        <td><code>process/bridge/index.ts</code></td>
+        <td><code>initAllBridges()</code></td>
+        <td>注册 dialog、application、windowControls、webui、theme 等 provider</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="channels">主要 IPC channel 清单</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Channel / 事件</th>
+        <th>方向</th>
+        <th>来源文件</th>
+        <th>用途</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>office-ai-bridge-adapter</code></td>
+        <td>renderer ↔ main</td>
+        <td><code>preload/main.ts</code> / <code>common/adapter/main.ts</code></td>
+        <td>统一业务桥接；renderer 用 <code>emit</code> 发请求，main 广播事件回所有窗口。</td>
+      </tr>
+      <tr>
+        <td><code>get-backend-port</code></td>
+        <td>renderer ← main（sync）</td>
+        <td><code>index.ts</code></td>
+        <td>把 backend 端口同步注入到 <code>window.__backendPort</code>。</td>
+      </tr>
+      <tr>
+        <td><code>get-initial-language</code></td>
+        <td>renderer ← main（sync）</td>
+        <td><code>index.ts</code></td>
+        <td>提供首屏语言，避免 renderer 首次加载时丢失初始值。</td>
+      </tr>
+      <tr>
+        <td><code>get-backend-startup-failed</code> / <code>get-backend-startup-failure</code></td>
+        <td>renderer ← main（sync）</td>
+        <td><code>index.ts</code></td>
+        <td>让安装完整性对话框等首屏逻辑可直接知道 backend 启动失败详情。</td>
+      </tr>
+      <tr>
+        <td><code>feedback:collect-logs</code></td>
+        <td>renderer → main</td>
+        <td><code>feedbackBridge.ts</code></td>
+        <td>收集近三天日志并转成可序列化字节数组。</td>
+      </tr>
+      <tr>
+        <td><code>feedback:capture-screenshot</code></td>
+        <td>renderer → main</td>
+        <td><code>feedbackBridge.ts</code></td>
+        <td>抓当前窗口截图；无窗口或失败时返回 <code>null</code>。</td>
+      </tr>
+      <tr>
+        <td><code>feedback:renderer-log</code></td>
+        <td>renderer → main</td>
+        <td><code>feedbackBridge.ts</code></td>
+        <td>把反馈上报阶段的诊断日志打到 main 控制台。</td>
+      </tr>
+      <tr>
+        <td><code>backend:recover-corrupted-database</code></td>
+        <td>renderer → main</td>
+        <td><code>index.ts</code></td>
+        <td>用户确认后走恢复流程并尝试重启 backend。</td>
+      </tr>
+      <tr>
+        <td><code>tray:navigate-to-guid</code> 等 5 个托盘事件</td>
+        <td>main → renderer</td>
+        <td><code>preload/main.ts</code></td>
+        <td>转成 <code>window.dispatchEvent(new CustomEvent(...))</code>，让 renderer 用 DOM 事件消费。</td>
+      </tr>
+      <tr>
+        <td><code>pet:state-changed</code> / <code>pet:eye-move</code> / <code>pet:resize</code></td>
+        <td>main → pet renderer</td>
+        <td><code>petPreload.ts</code></td>
+        <td>桌宠展示窗口的状态与外观同步。</td>
+      </tr>
+      <tr>
+        <td><code>pet:drag-start</code> / <code>pet:drag-end</code> / <code>pet:click</code> / <code>pet:context-menu</code></td>
+        <td>pet renderer → main</td>
+        <td><code>petHitPreload.ts</code></td>
+        <td>桌宠命中层交互事件。</td>
+      </tr>
+      <tr>
+        <td><code>pet:set-ignore-mouse-events</code> / <code>pet:hit-reset</code></td>
+        <td>双向</td>
+        <td><code>petHitPreload.ts</code></td>
+        <td>命中层鼠标穿透切换与重置。</td>
+      </tr>
+      <tr>
+        <td><code>pet:confirm-add</code> / <code>update</code> / <code>remove</code> / <code>theme</code></td>
+        <td>main → pet confirm renderer</td>
+        <td><code>petConfirmPreload.ts</code></td>
+        <td>确认浮窗的数据流与主题同步。</td>
+      </tr>
+      <tr>
+        <td><code>pet:confirm-respond</code> / <code>pet:confirm-drag-start</code> / <code>pet:confirm-drag-end</code></td>
+        <td>pet confirm renderer → main</td>
+        <td><code>petConfirmPreload.ts</code></td>
+        <td>确认响应和拖拽操作回传。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>统一桥里的具体能力名则定义在 <code>ipcBridge.ts</code>。本主题相关、最值得先记的几个域如下：</p>
+  <table>
+    <thead>
+      <tr>
+        <th>域</th>
+        <th>典型 provider / emit</th>
+        <th>实现文件</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>windowControls</code></td>
+        <td><code>minimize</code>、<code>maximize</code>、<code>unmaximize</code>、<code>close</code>、<code>isMaximized</code>、<code>maximizedChanged.emit</code></td>
+        <td><code>windowControlsBridge.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>dialog</code></td>
+        <td><code>showOpen</code></td>
+        <td><code>dialogBridge.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>theme</code></td>
+        <td><code>setActive</code>、<code>requestCurrent</code>、<code>changed.emit</code></td>
+        <td><code>themeBridge.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>webui</code></td>
+        <td><code>getStatus</code>、<code>start</code>、<code>stop</code>、<code>statusChanged.emit</code></td>
+        <td><code>webuiBridge.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>application</code></td>
+        <td><code>restart</code>、<code>openDevTools</code>、<code>setZoomFactor</code>、<code>getStartOnBootStatus</code>、<code>setGpuOverride</code></td>
+        <td><code>applicationBridge.ts</code></td>
+      </tr>
+      <tr>
+        <td><code>systemSettings</code></td>
+        <td><code>changeLanguage</code>、<code>setCloseToTray</code>、<code>setPetEnabled</code> 等</td>
+        <td><code>systemSettingsBridge.ts</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="example">调用 / 阅读示例</h2>
+  <p>推荐沿“窗口最小化”读一次完整链路：</p>
+  <ol>
+    <li>renderer 调用封装后的 <code>ipcBridge.windowControls.minimize.invoke()</code>。</li>
+    <li>主窗口 preload 通过 <code>electronAPI.emit</code> 把事件送进 <code>office-ai-bridge-adapter</code>。</li>
+    <li><code>common/adapter/main.ts</code> 中的 <code>ipcMain.handle</code> 解析 <code>{ name, data }</code>，交给 bridge emitter。</li>
+    <li><code>windowControlsBridge.ts</code> 的 provider 找到聚焦窗口并执行 <code>window.minimize()</code>。</li>
+    <li>若窗口最大化状态变化，main 再用 <code>maximizedChanged.emit</code> 广播回 renderer。</li>
+  </ol>
+  <p>这个例子说明：renderer 能表达意图，但真正有 OS 级副作用的对象始终留在 main。新增 IPC 能力时，最该审查的就是 preload 是否暴露过宽、provider 是否验证上下文，以及失败语义是否可预测。</p>
+</main>
+</body>
+</html>

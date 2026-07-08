@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 项目完成到上下文收尾路径图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <article>
+    <p class="meta">L2 垂直切片 · 预计 15 分钟内 · 目标：能判断项目完成会触发哪些 dialog、service、task/archive、worklog 与 op-log 边界</p>
+    <h1>项目完成不是一个 reducer action</h1>
+    <p class="lead">这条链路的核心判断是：<strong>完成项目只是在最终阶段翻转 project flag，真正的收尾发生在它之前和之后。</strong>之前要处理未完成任务；之后要从 active context 离开、展示庆祝页，并让 history/worklog 继续能读到 live 与 archived 数据。</p>
+
+    <h2>1. 路径图</h2>
+    <pre class="diagram">项目菜单 Complete
+  src/app/core-ui/work-context-menu/work-context-menu.component.html
+    ↓ click
+WorkContextMenuComponent.completeProject()
+  src/app/core-ui/work-context-menu/work-context-menu.component.ts
+    ├─ 读取 project 与 ProjectService.getCompletionInfo()
+    ├─ 若有 unfinishedTasks → DialogCompleteResolveTasks
+    ├─ 用户确认 complete
+    ├─ applyResolution()
+    │   ├─ inbox    → ProjectService.moveTasksToInbox()
+    │   └─ markDone → ProjectService.markTasksDone()
+    ├─ 重新读取 completion info 计算 stats
+    ├─ ProjectService.complete(id, doneOn)
+    ├─ 若完成的是 active project → router.navigateByUrl("/")
+    └─ DialogProjectComplete 显示庆祝与统计
+
+后台边界
+  project.reducer          → isDone + doneOn + isArchived
+  task.service/actions     → moveToOtherProject / updateTask / moveToArchive
+  archive.service          → Daily Summary 归档 done tasks，不是完成项目本身
+  worklog.service          → 合并 live task、archive task、timeTracking 输出 history
+  op-log capture           → 只捕获 meta.isPersistent 的本地 action</pre>
+    <p>源码锚点：<code>src/app/core-ui/work-context-menu/work-context-menu.component.ts</code>、<code>src/app/features/project/project.service.ts</code>、<code>src/app/features/project/store/project.reducer.ts</code>、<code>src/app/features/archive/archive.service.ts</code>、<code>src/app/features/worklog/worklog.service.ts</code>。</p>
+
+    <h2>2. 五个判断点</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>问题</th>
+            <th>判断</th>
+            <th>看哪里</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>项目里还有未完成任务吗？</td>
+            <td>有则先弹 resolve dialog；取消就停止整条完成流程。</td>
+            <td class="path">src/app/core-ui/work-context-menu/work-context-menu.component.ts</td>
+          </tr>
+          <tr>
+            <td>用户选 Inbox 还是 Mark Done？</td>
+            <td>Inbox 移动 top-level task tree，并把已完成 parent 重新打开；Mark Done 标记每个 unfinished task。</td>
+            <td class="path">src/app/features/project/project.service.ts</td>
+          </tr>
+          <tr>
+            <td>是否已经确认完成？</td>
+            <td>resolution 选择后还要再确认；确认取消时，不移动也不标记任务。</td>
+            <td class="path">src/app/core-ui/work-context-menu/work-context-menu.component.spec.ts</td>
+          </tr>
+          <tr>
+            <td>完成项目会不会把任务写入 archive store？</td>
+            <td>不会。它只设置 project 的 done/archived flag；任务归档由 Daily Summary 调用 `moveToArchive`。</td>
+            <td class="path">src/app/pages/daily-summary/daily-summary.component.ts</td>
+          </tr>
+          <tr>
+            <td>哪些东西会进 op-log？</td>
+            <td>project complete、task move/update、moveToArchive、flushYoungToOld 会；弹窗关闭和路由上下文切换不会。</td>
+            <td class="path">src/app/op-log/core/persistent-action.interface.ts</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>3. 收尾边界</h2>
+    <p><code>completeProject</code> 被派发后，<code>src/app/features/project/store/project.reducer.ts</code> 只改 <code>isDone</code>、<code>doneOn</code>、<code>isArchived</code>。任务还可能留在 live task store，但 <code>src/app/features/tasks/store/task.selectors.ts</code> 会用 archived project ids 把它们挡在活跃任务视图之外。真正把 done tasks 写进 archiveYoung 的路径，是 Daily Summary 的 <code>TaskService.moveToArchive()</code> 加 <code>ArchiveService.moveTasksToArchiveAndFlushArchiveIfDue()</code>。</p>
+    <p>完成的是当前 active project 时，菜单组件先导航到 <code>/</code>，再打开 fullscreen celebration；这样 MatDialog 不会被项目路由离开时自动关闭。Work context 的 active id 由路由事件和 <code>setActiveWorkContext</code> 更新，本身不是同步事实。History/worklog 则从 <code>TaskArchiveService.load()</code>、live task state 和 timeTracking start/end 组合输出；这部分可以回读 <a href="../../slice-time-tracking-flow/">时间追踪 L2</a>。</p>
+
+    <h2>4. 60 秒自测</h2>
+    <p>场景：当前项目 P 有任务 A 未完成、任务 B 已完成；用户点击 Complete Project，选择“Move to Inbox”，然后确认完成。暂停 60 秒，判断下面三件事：</p>
+    <ol>
+      <li>A 和 B 会被 project reducer 一次性处理吗？</li>
+      <li>P 的完成动作和 A/B 的移动动作在 op-log 里是同一条 operation 吗？</li>
+      <li>完成后 history 页面为什么仍可能看到这个项目相关的历史记录？</li>
+    </ol>
+    <div class="answer">
+      <strong>参考答案：</strong>1. 不会。未完成任务先由 `ProjectService.moveTasksToInbox()` 走 task service 的普通 move/update 路径，之后 project reducer 才处理 `completeProject`。2. 不是同一条。task move/update 和 project complete 都是各自带 persistent meta 的 action。3. worklog 会合并 live task、archive task 和 timeTracking；完成项目不是删除历史数据。
+    </div>
+    <p>主要来源：<a href="../reference/project-completion-flow-reference.html">项目完成全链路参考</a>。父级地图：<a href="../../module-task-domain/">任务领域模块</a>、<a href="../../module-planning-time/">计划与时间模块</a>。相邻切片：<a href="../../slice-time-tracking-flow/">时间追踪链路</a>、<a href="../../slice-op-log-sync-flow/">op-log 同步链路</a>。如果某一步不清楚，可以向 agent 追问：“请从这个 action 反查 reducer、effect 和 op-log 捕获路径”。</p>
+  </article>
+</main>
+</body>
+</html>

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟理解 sandbox 如何隔离执行、映射路径并支撑 artifact</title>
+  <style>
+    :root { color-scheme: light; --ink:#18212f; --muted:#5d6b7a; --line:#d9e2ea; --soft:#f7fafc; --accent:#2563eb; --ok:#0f766e; --warn:#9a3412; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:#fff; line-height:1.7; }
+    main { max-width:920px; margin:0 auto; padding:40px 22px 68px; }
+    h1 { font-size:1.95rem; line-height:1.2; margin:0 0 10px; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:30px 0 10px; border-top:1px solid var(--line); padding-top:20px; }
+    p { margin:10px 0; }
+    a { color:var(--accent); text-decoration:none; }
+    code { font-family:"SF Mono",Consolas,monospace; background:#eef3f8; padding:.1rem .32rem; border-radius:5px; }
+    .mono { font-family:"SF Mono",Consolas,monospace; background:#eef3f8; padding:.1rem .32rem; border-radius:5px; }
+    pre { margin:12px 0; padding:14px 16px; overflow:auto; background:#0f172a; color:#e5eefb; border-radius:8px; font-size:.84rem; line-height:1.6; }
+    pre code { background:transparent; color:inherit; padding:0; }
+    .lead { color:var(--muted); font-size:1.03rem; }
+    .diagram, .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    .diagram { border-left:4px solid var(--accent); }
+    .callout { border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:8px; padding:12px 14px; background:var(--soft); }
+    .exercise { border:1px solid #cfe8d6; border-left:4px solid var(--ok); border-radius:8px; padding:14px 16px; background:#f7fbf8; }
+    .answer { margin-top:10px; color:var(--warn); }
+    .where { color:#6f42c1; font-weight:600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>15 分钟理解 sandbox 如何隔离执行、映射路径并支撑 artifact</h1>
+  <p class="lead">学习目标：读完后，你能用一条主线解释 agent 为什么只能看到 `/mnt/user-data/...`，工具如何拿到线程 sandbox，以及写到 outputs 的文件为什么能被 Gateway 当作 artifact 取回。</p>
+
+  <h2>1. 先记住三个目录</h2>
+  <p>L0 已经把 sandbox 放在执行安全与文件产物边界上。DeerFlow 给每个线程准备一组 host 目录，再把它们暴露成稳定的虚拟路径。关键入口是 <span class="where">backend/packages/harness/deerflow/agents/middlewares/thread_data_middleware.py</span> 和 <span class="where">backend/packages/harness/deerflow/config/paths.py</span>。</p>
+  <div class="diagram">host: {DEER_FLOW_HOME}/users/{user_id}/threads/{thread_id}/user-data/
+  │
+  ├── workspace  →  sandbox: /mnt/user-data/workspace  ← agent 工作区
+  ├── uploads    →  sandbox: /mnt/user-data/uploads    ← 用户上传文件
+  └── outputs    →  sandbox: /mnt/user-data/outputs    ← agent 生成产物</div>
+  <p>这里的重点不是“目录名”，而是边界：agent prompt 和工具参数都应该使用虚拟路径；host 绝对路径只在 Gateway 和 provider 内部出现，并在工具输出中被遮回虚拟路径。</p>
+
+  <h2>2. sandbox id 是延迟拿到并写回 state 的</h2>
+  <p><span class="where">backend/packages/harness/deerflow/sandbox/middleware.py</span> 默认 lazy init。也就是说，run 开始时先有 <code>thread_data</code>，第一次调用 <code>bash</code>、<code>ls</code> 或 <code>read_file</code> 这类工具时，<code>ensure_sandbox_initialized()</code> 才会调用 provider 的 <code>acquire(thread_id, user_id)</code>。</p>
+  <div class="diagram">ThreadDataMiddleware.before_agent
+  ↓
+ThreadState.thread_data = workspace/uploads/outputs host paths
+  ↓
+file or bash tool call
+  ↓
+ensure_sandbox_initialized(runtime)
+  ↓
+SandboxProvider.acquire(thread_id, user_id)
+  ↓
+ThreadState.sandbox = {"sandbox_id": "..."}
+  ↓
+SandboxMiddleware.wrap_tool_call emits Command(update=...)</div>
+  <p>最后一步很容易漏：工具内部直接改 <code>runtime.state</code> 不等于 LangGraph 已持久化 state，所以 middleware 会把新 sandbox id 合并进 <code>Command(update=...)</code>。Lead agent 参考页提到的 <code>ThreadState.sandbox</code> 就在这里落地。</p>
+
+  <h2>3. Local、AIO、E2B 共享同一套 Sandbox API</h2>
+  <p>公共契约在 <span class="where">backend/packages/harness/deerflow/sandbox/sandbox.py</span>：<code>execute_command</code>、<code>read_file</code>、<code>download_file</code>、<code>list_dir</code>、<code>write_file</code>、<code>glob</code>、<code>grep</code>、<code>update_file</code>。provider 可以不同，但工具层只面向这个抽象。</p>
+  <pre><code class="language-python">sandbox = ensure_sandbox_initialized(runtime)
+thread_data = get_thread_data(runtime)
+
+if is_local_sandbox(runtime):
+    validate_local_tool_path(path, thread_data)
+    path = resolve_and_validate_user_data_path(path, thread_data)
+
+sandbox.write_file(path, content)</code></pre>
+  <p>Local provider 不是强隔离 shell，默认 <code>allow_host_bash: false</code>；AIO 用容器或 provisioner；E2B 用云端 micro-VM。它们都必须遵守 `/mnt/user-data` 契约。这个契约由 <span class="where">backend/tests/test_local_sandbox_virtual_path_contract.py</span> 固定：直接调用 <code>LocalSandbox.write_file("/mnt/user-data/workspace/a.txt", ...)</code> 也要成功，而不是只靠工具层临时翻译。</p>
+
+  <h2>4. artifact 是 outputs 目录的反向读取</h2>
+  <p>当 agent 写入 <span class="mono">/mnt/user-data/outputs/report.html</span>，文件实际落在当前线程的 host outputs 目录。Gateway 的 <span class="where">backend/app/gateway/routers/artifacts.py</span> 会通过 <code>resolve_thread_virtual_path(thread_id, path)</code> 把 URL 中的 <span class="mono">mnt/user-data/outputs/report.html</span> 转回 host path，再按 MIME 类型返回；HTML、SVG 这类主动内容会强制下载，避免在应用同源下执行。</p>
+  <div class="exercise">
+    <strong>检索练习：</strong>判断下面说法是否正确：用户上传的 `data.csv` 和 agent 生成的 `chart.svg` 都通过同一个虚拟根 `/mnt/user-data` 暴露给 agent，但它们默认落在不同子目录。
+    <div class="answer">参考答案：正确。上传文件在 `/mnt/user-data/uploads`，生成产物应写到 `/mnt/user-data/outputs`。前者由 uploads router 管入口，后者由 artifacts router 管读取；二者共享线程级 user-data 根，但语义不同。</div>
+  </div>
+  <p class="callout">主要来源：<code>backend/packages/harness/deerflow/sandbox/tools.py</code>。模块速查见 <a href="../reference/sandbox-overview.html">L1 模块参考</a>；函数签名、参数边界与测试锚点见 <a href="../reference/sandbox-api.html">L3 微观 API 参考</a>；整体架构锚点见 <a href="../../00-overview/reference/00-overview.html">L0 总览</a>。如果某段还不清楚，可以继续追问：“从 sandbox lazy init 展开到 provider acquire”。</p>
+</main>
+</body>
+</html>

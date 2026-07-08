@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型配置到运行时调用速查</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.68;max-width:1180px;margin:34px auto;padding:0 24px;color:#1f2937;background:#fff}
+    nav{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:22px}
+    nav a{color:#2563eb;text-decoration:none;border-bottom:1px solid #bfdbfe}
+    h1{font-size:32px;margin:0 0 8px}
+    h2{font-size:22px;margin-top:32px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+    h3{font-size:17px;margin-top:22px}
+    table{border-collapse:collapse;width:100%;margin:12px 0 20px}
+    th,td{border:1px solid #e5e7eb;padding:8px 10px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}
+    .warn{border-left:4px solid #d97706;background:#fffbeb;padding:10px 14px}
+    .flow,.tree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.58;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .tag{display:inline-block;border:1px solid #d1d5db;border-radius:999px;padding:2px 8px;margin:2px;font-size:12px;background:#fafafa}
+  </style>
+</head>
+<body>
+<main>
+  <nav>
+    <a href="../lessons/0001-flow-map.html">返回短课</a>
+    <a href="../../module-models/reference/models-overview.html">模型适配层参考</a>
+    <a href="../../module-agent-client/reference/agent-client-overview.html">Agent Client 参考</a>
+    <a href="../../module-rag/reference/rag-overview.html">RAG 参考</a>
+  </nav>
+
+  <h1>模型配置到运行时调用速查</h1>
+  <p class="lead">这份 reference 用于排查 Snail AI 的模型调用：配置字段、API Key 解密、provider 目录、runtime 接口、Chat/Embedding/Rerank 差异、异常传播和降级策略都放在这里。</p>
+  <p class="warn">当前源码事实：用户给出的 <code>DispatchModelConfigAssembler</code> 优先路径在 <code>snail-ai-feature-agent</code> 下不存在；真实类位于 <code>snail-ai-server-features/snail-ai-feature-model/src/main/java/com/aizuda/snail/ai/model/adapter/server/DispatchModelConfigAssembler.java</code>，并由 <code>ModelResolveHandler</code> import 使用。</p>
+
+  <h2>1. 总流程图</h2>
+  <h3>Mermaid 时序图：Agent Chat 与 Server Runtime</h3>
+  <pre class="flow"><code>sequenceDiagram
+  autonumber
+  participant Agent as AgentChatContext
+  participant Resolver as ModelResolveHandler
+  participant Config as ModelConfigHandler
+  participant Assembler as DispatchModelConfigAssembler
+  participant Llm as LlmCallHandler
+  participant Client as Client Runtime
+  participant Observer as ChatStreamObserver
+  participant Rag as RagQAService
+  participant Runtime as ModelRuntimeHandler
+  participant Builder as Server builders
+  participant Facade as ServerModelFacade
+  participant Adapter as Provider adapter
+
+  Note over Agent,Observer: Agent Chat：Server 解析 CHAT 配置，Client 运行 Chat runtime
+  Agent->>Resolver: resolve(ctx)
+  Resolver->>Config: agent.chatModelId 或 getDefaultModelByType(CHAT)
+  Resolver->>Assembler: assembleChatModelConfig(modelId)
+  Assembler->>Config: getConfigInfo + decryptApiKey
+  Assembler-->>Resolver: ChatDispatchRequest.ModelConfig
+  Resolver->>Llm: buildDispatchRequest(ctx)
+  Llm->>Client: gRPC CHAT_DISPATCH(modelConfig)
+  Client->>Client: DefaultChatClientFactory -> ChatModelRuntime
+  Client-->>Observer: ChatStreamResponse(text/thinking/completion/error)
+
+  Note over Rag,Adapter: Server Runtime：Server 解析配置，Server 本地运行 Chat/Embedding/Rerank runtime
+  Rag->>Rag: qaStream() -> doQaStream()
+  Rag->>Runtime: modelRuntimeHandler.chatStream(modelId, prompt)
+  Runtime->>Config: requireConfig + decryptApiKey
+  Runtime->>Builder: ChatClientBuilder / EmbeddingClientBuilder / RerankClientBuilder
+  Builder->>Facade: buildChatModel / buildEmbeddingModel / buildRerankClient
+  Facade->>Adapter: ServerModelSpecFactory -> *ModelRuntime -> adapter.create
+  Adapter-->>Runtime: call / stream / embed / rerank</code></pre>
+
+  <h3>Agent Chat：Server 解析，Client 运行</h3>
+  <pre class="flow"><code>AgentChatContext
+  -> ModelResolveHandler
+      -> agent.chatModelId 或 ModelConfigHandler.getDefaultModelByType(CHAT)
+      -> DispatchModelConfigAssembler.assembleChatModelConfig(modelId)
+          -> ModelConfigHandler.getConfigInfo(modelId)
+          -> ModelConfigHandler.decryptApiKey(encryptedApiKey)
+          -> ServerModelSpecFactory.chatSpec(configInfo, decryptedApiKey)
+          -> ChatDispatchRequest.ModelConfig
+  -> LlmCallHandler.buildDispatchRequest(ctx)
+      -> gRPC UriConstants.CHAT_DISPATCH
+  -> ChatDispatchStreamingHandler
+      -> ChatSessionRuntime
+      -> DefaultChatClientFactory.build(request)
+          -> DefaultChatModelFactory.build(modelConfig)
+          -> ClientChatModelSpecFactory.create(input)
+          -> ChatModelRuntime.build(spec)
+          -> OpenAiCompatibleChatModelAdapter.create(spec)
+      -> ClientChatExecutor.streamResponses(...)
+      -> ChatStreamResponse text / thinking / completion / error
+  -> ChatStreamObserver
+      -> text/thinking 转发
+      -> completion 持久化 fullText、thinking、tokens
+      -> error 写入 [ERROR]</code></pre>
+
+  <h3>Server Runtime：Server 解析，Server 运行</h3>
+  <pre class="flow"><code>业务调用点
+  RagQAService.qaStream -> doQaStream -> ModelRuntimeHandler.chatStream
+  VectorStoreFactory.buildVectorStore
+  EmbeddingModelDimensionService.probeDimensionViaApi
+  DefaultRerankService.rerank
+        |
+        v
+ModelRuntimeHandler
+  -> requireConfig(modelConfigId)
+  -> decryptApiKey(config)
+  -> ChatClientBuilder / EmbeddingClientBuilder / RerankClientBuilder
+  -> ServerModelFacade
+  -> ServerModelSpecFactory.chatSpec / embeddingSpec / rerankSpec
+  -> ChatModelRuntime / EmbeddingModelRuntime / RerankModelRuntime
+  -> OpenAiCompatibleChatModelAdapter / OpenAiCompatibleEmbeddingModelAdapter / QwenRerankModelAdapter
+  -> call / stream / embed / rerank</code></pre>
+
+  <h2>2. 配置字段速查</h2>
+  <table>
+    <thead><tr><th>对象</th><th>字段</th><th>进入 runtime 的方式</th><th>来源</th></tr></thead>
+    <tbody>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>id</code></td><td>缓存 key、日志和 <code>modelConfigId</code> 追踪。</td><td><code>ModelConfigHandler.buildConfigInfoDTO</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>providerKey</code></td><td>必须非空，进入 spec；当前内置 adapter 选择不靠它。</td><td><code>ServerModelSpecFactory.requireConfig</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>adapterKey</code></td><td>空值由 <code>ModelAdapterDefaults.resolve</code> 补默认值，是 runtime 选择 adapter 的主键。</td><td><code>ServerModelSpecFactory.resolveAdapterKey</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>modelType</code></td><td>必须匹配 <code>CHAT</code>、<code>EMBEDDING</code> 或 <code>RERANKER</code>。</td><td><code>ServerModelSpecFactory.requireConfig</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>apiEndpoint</code></td><td>进入 spec 的 <code>baseUrl</code>；缺失会报非法参数或无效配置。</td><td><code>ServerModelSpecFactory</code>、<code>*ModelRuntime.validate</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>modelKey</code></td><td>进入 provider 的 model 字段；Chat/Embedding 传给 OpenAI-compatible options，Rerank 传给 HTTP body。</td><td><code>OpenAiCompatible*Adapter</code>、<code>QwenRerankModelAdapter</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>encryptedApiKey</code></td><td>Server 侧通过 <code>ModelConfigHandler.decryptApiKey</code> 解密；Client 侧不再解密。</td><td><code>ModelRuntimeHandler.decryptApiKey</code>、<code>DispatchModelConfigAssembler</code></td></tr>
+      <tr><td><code>ModelConfigInfoDTO</code></td><td><code>configJson</code></td><td>进入 spec；provider 读取 timeout、采样参数、embedding 维度、rerank path。</td><td><code>ConfigExtAttrsDTO</code></td></tr>
+      <tr><td><code>ChatDispatchRequest.ModelConfig</code></td><td><code>apiEndpoint</code>、<code>apiKey</code>、<code>modelKey</code></td><td>Client validator 要求非空，随后转为 <code>ChatModelSpec</code>。</td><td><code>ClientModelConfigValidator</code></td></tr>
+      <tr><td><code>ChatDispatchRequest.ModelConfig</code></td><td><code>adapterKey</code></td><td>Client 侧空值按 Chat 默认补为 <code>openai-compatible</code>。</td><td><code>ClientChatModelSpecFactory</code></td></tr>
+    </tbody>
+  </table>
+
+  <table>
+    <thead><tr><th><code>ConfigExtAttrsDTO</code> 字段</th><th>Chat</th><th>Embedding</th><th>Rerank</th></tr></thead>
+    <tbody>
+      <tr><td><code>timeoutMs</code></td><td>默认 <code>300000</code> ms。</td><td>默认 <code>60000</code> ms。</td><td>默认 <code>60000</code> ms，连接超时最多 <code>10000</code> ms。</td></tr>
+      <tr><td><code>maxRetries</code></td><td>当前内置 Chat adapter 未映射。</td><td>映射到 <code>OpenAiEmbeddingOptions.maxRetries</code>，默认 <code>2</code>。</td><td>当前内置 Rerank adapter 未映射。</td></tr>
+      <tr><td><code>responseFormat</code>、<code>stream</code></td><td>字段存在于 <code>ConfigExtAttrsDTO</code>，并随 <code>configJson</code> 抵达 <code>ChatModelSpec</code>；但当前内置 <code>OpenAiCompatibleChatModelAdapter</code> 未读取它们，未映射成实际 runtime 参数。</td><td>不使用。</td><td>不使用。</td></tr>
+      <tr><td><code>temperature</code>、<code>topP</code>、<code>topK</code>、<code>maxTokens</code></td><td>映射到 <code>OpenAiChatOptions</code>。</td><td>不使用。</td><td>不使用。</td></tr>
+      <tr><td><code>frequencyPenalty</code>、<code>presencePenalty</code>、<code>stopSequences</code>、<code>seed</code>、<code>extraBody</code></td><td>映射到 <code>OpenAiChatOptions</code>。</td><td>不使用。</td><td>不使用。</td></tr>
+      <tr><td><code>embeddingDimension</code>、<code>encodingFormat</code></td><td>不使用。</td><td>映射到 <code>OpenAiEmbeddingOptions</code>；调用时的 <code>dimensions</code> 还会进入 <code>EmbeddingRequest</code>。</td><td>不使用。</td></tr>
+      <tr><td><code>rerankPath</code></td><td>不使用。</td><td>不使用。</td><td>拼接到 <code>baseUrl</code>，默认 <code>/rerank</code>。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3. Provider 目录与默认 adapter</h2>
+  <pre class="tree"><code>snail-ai-models/
+├── snail-ai-model-common/
+│   └── ModelAdapterDefaults.java
+├── snail-ai-model-chat/
+│   ├── snail-ai-model-chat-core/
+│   │   ├── ChatModelSpec.java
+│   │   ├── ChatModelAdapter.java
+│   │   └── ChatModelRuntime.java
+│   ├── snail-ai-model-chat-provider-openai-compatible/
+│   │   └── OpenAiCompatibleChatModelAdapter.java
+│   └── snail-ai-model-chat-starter/
+│       └── SnailAiChatModelAutoConfiguration.java
+├── snail-ai-model-embedding/
+│   ├── snail-ai-model-embedding-core/
+│   ├── snail-ai-model-embedding-provider-openai-compatible/
+│   └── snail-ai-model-embedding-starter/
+└── snail-ai-model-rerank/
+    ├── snail-ai-model-rerank-core/
+    ├── snail-ai-model-rerank-provider-qwen/
+    └── snail-ai-model-rerank-starter/</code></pre>
+  <table>
+    <thead><tr><th>模型类型</th><th>默认 <code>adapterKey</code></th><th>内置 adapter</th><th>返回对象</th></tr></thead>
+    <tbody>
+      <tr><td><code>CHAT</code></td><td><code>openai-compatible</code></td><td><code>OpenAiCompatibleChatModelAdapter</code></td><td><code>ChatModel</code></td></tr>
+      <tr><td><code>EMBEDDING</code></td><td><code>openai-compatible</code></td><td><code>OpenAiCompatibleEmbeddingModelAdapter</code></td><td><code>EmbeddingModel</code></td></tr>
+      <tr><td><code>RERANKER</code></td><td><code>qwen-rerank</code></td><td><code>QwenRerankModelAdapter</code></td><td><code>RerankApiClient</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. 运行时接口</h2>
+  <table>
+    <thead><tr><th>层</th><th>接口或类</th><th>职责</th><th>典型错误</th></tr></thead>
+    <tbody>
+      <tr><td>Server 配置</td><td><code>ModelConfigHandler</code></td><td>读取模型配置、解密 API Key、获取默认模型。</td><td>配置不存在、密钥解密失败。</td></tr>
+      <tr><td>Server spec</td><td><code>ServerModelSpecFactory</code></td><td>按类型生成 <code>ChatModelSpec</code>、<code>EmbeddingModelSpec</code>、<code>RerankModelSpec</code>。</td><td><code>INVALID_PARAMETER</code>。</td></tr>
+      <tr><td>Server 门面</td><td><code>ServerModelFacade</code></td><td>把三类 spec 交给对应 runtime。</td><td>透传 runtime 或 adapter 异常。</td></tr>
+      <tr><td>Runtime</td><td><code>ChatModelRuntime</code>、<code>EmbeddingModelRuntime</code>、<code>RerankModelRuntime</code></td><td>校验 spec，按 <code>adapterKey</code> 选择 adapter。</td><td><code>INVALID_MODEL_CONFIG</code>、<code>ADAPTER_NOT_FOUND</code>、<code>MODEL_BUILD_FAILED</code>。</td></tr>
+      <tr><td>Provider SPI</td><td><code>ChatModelAdapter</code>、<code>EmbeddingModelAdapter</code>、<code>RerankModelAdapter</code></td><td>把 spec 翻译成 SDK 模型或 HTTP client。</td><td>provider 构建异常。</td></tr>
+      <tr><td>Client spec</td><td><code>ClientChatModelSpecFactory</code></td><td>把下发的 <code>ChatDispatchRequest.ModelConfig</code> 转成 <code>ChatModelSpec</code>。</td><td><code>IllegalArgumentException</code>。</td></tr>
+      <tr><td>Client factory</td><td><code>DefaultChatClientFactory</code></td><td>构建 <code>ChatClient</code>，注入 tools、advisor 和 tool context。</td><td>进入 Client error 回调。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 三类模型差异</h2>
+  <table>
+    <thead><tr><th>维度</th><th>Chat</th><th>Embedding</th><th>Rerank</th></tr></thead>
+    <tbody>
+      <tr><td>Server 本地入口</td><td><code>ModelRuntimeHandler.chat</code>、<code>chatStream</code>、<code>SmartChunkStrategy</code> 的 <code>ChatClientBuilder</code>。</td><td><code>ModelRuntimeHandler.embed</code>、<code>embedBatch</code>、<code>buildEmbeddingModel</code>。</td><td><code>ModelRuntimeHandler.rerank</code>。</td></tr>
+      <tr><td>Agent Client 入口</td><td><code>DefaultChatClientFactory</code>。</td><td>当前 Agent Client 切片未下发 Embedding runtime。</td><td>当前 Agent Client 切片未下发 Rerank runtime。</td></tr>
+      <tr><td>真实调用</td><td><code>ChatClient.prompt(...).call()</code> 或 <code>stream().chatResponse()</code>。</td><td><code>EmbeddingModel.call(new EmbeddingRequest(...))</code>。</td><td><code>RerankApiClient.rerank(query, documents, topN)</code>。</td></tr>
+      <tr><td>返回结构</td><td>文本内容、流式 chunk、completion token 统计。</td><td><code>SnailEmbeddingResponse</code>，包含 <code>vectors</code>、<code>dimensions</code>、<code>costTimeMs</code>。</td><td><code>List&lt;RerankResultItem&gt;</code>，包含 <code>index</code> 和 <code>score</code>。</td></tr>
+      <tr><td>usage 边界</td><td>Client 流式路径由 <code>TokenUsageCollectorAdvisor</code> 提取并通过 <code>ChatStreamResponse.completion</code> 回传；Server 本地 <code>chat</code> 当前只返回文本。</td><td>响应类有 <code>usage</code> 字段，但当前 <code>convertEmbeddingResponse</code> 主要填 vectors、dimensions、costTimeMs。</td><td>无 token usage，只有排序分数。</td></tr>
+      <tr><td>缓存与复用</td><td><code>ChatClientBuilder</code> 按配置 ID 缓存 5 分钟，并用 API Key hash 判断是否失效。</td><td>当前 builder 每次构建。</td><td>当前 builder 每次构建。</td></tr>
+      <tr><td>典型降级</td><td><code>SmartChunkStrategy</code> 调用失败后保留原文切片；Agent Client 错误变成 error chunk。</td><td><code>EmbeddingModelDimensionService</code> 探测失败后使用并持久化默认维度 <code>1024</code>。</td><td><code>DefaultRerankService</code> 空结果或异常后按原 score 排序。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. 异常与降级矩阵</h2>
+  <table>
+    <thead><tr><th>位置</th><th>触发条件</th><th>当前行为</th><th>排查入口</th></tr></thead>
+    <tbody>
+      <tr><td><code>ModelResolveHandler</code></td><td>Agent 未配置模型且无默认 <code>CHAT</code> 模型。</td><td>向 stream 写 <code>Error: 未配置对话模型</code>，complete，并设置 terminated。</td><td>模型配置表、默认模型标记、provider 启用状态。</td></tr>
+      <tr><td><code>DispatchModelConfigAssembler</code></td><td>配置缺失、密钥解密失败、字段校验失败。</td><td>异常被 <code>ModelResolveHandler</code> 捕获，输出 <code>Error: 模型配置加载失败</code>。</td><td><code>ModelConfigHandler</code>、<code>ServerModelSpecFactory</code>。</td></tr>
+      <tr><td><code>ClientModelConfigValidator</code></td><td>下发配置缺少 <code>apiEndpoint</code>、<code>apiKey</code> 或 <code>modelKey</code>。</td><td>抛 <code>IllegalArgumentException</code>，Client 通过 <code>ChatStreamResponse.error</code> 回 Server。</td><td><code>ChatDispatchRequest.ModelConfig</code>。</td></tr>
+      <tr><td><code>*ModelRuntime.validate</code></td><td>spec 缺少 <code>adapterKey</code>、<code>baseUrl</code>、<code>apiKey</code> 或 <code>modelKey</code>。</td><td>抛 <code>ModelAdapterException</code>，错误码为 <code>INVALID_MODEL_CONFIG</code>。</td><td><code>ChatModelRuntime</code>、<code>EmbeddingModelRuntime</code>、<code>RerankModelRuntime</code>。</td></tr>
+      <tr><td><code>*ModelRuntime.build</code></td><td>没有 adapter 的 <code>adapterKey()</code> 与 spec 匹配。</td><td>抛 <code>ModelAdapterException</code>，错误码为 <code>ADAPTER_NOT_FOUND</code>。</td><td>starter 自动装配、provider 依赖、adapterKey 大小写。</td></tr>
+      <tr><td><code>Server path caller-visible wrapper</code></td><td><code>*ModelRuntime</code> 在 validate/build/create 期间抛出 <code>ModelAdapterException</code>。</td><td>Server builder 会捕获并包装成调用方可见的 <code>ModelCallException</code>：Chat 侧 <code>ChatClientBuilder</code> 使用 <code>CHAT_CLIENT_BUILD_FAILED</code>；Embedding/Rerank builder 当前都使用 <code>CHAT_MODEL_BUILD_FAILED</code>。</td><td><code>ChatClientBuilder</code>、<code>EmbeddingClientBuilder</code>、<code>RerankClientBuilder</code>。</td></tr>
+      <tr><td><code>ModelRuntimeHandler.decryptApiKey</code></td><td>解密返回空或抛异常。</td><td>抛 <code>ModelCallException.API_KEY_DECRYPT_FAILED</code>。</td><td>密文、密钥配置、<code>CryptoHelper</code>。</td></tr>
+      <tr><td><code>ModelRuntimeHandler.chatStream</code></td><td>流式订阅过程中模型报错。</td><td>记录日志并调用请求中的 <code>onError</code> consumer。</td><td><code>RagQAService</code> 或调用方传入的 error handler。</td></tr>
+      <tr><td><code>QwenRerankModelAdapter</code></td><td>响应 body 为 null、含 <code>error</code>、无 results 或结果为空。</td><td>返回空列表；上层 RAG 降级。</td><td>provider 响应体、<code>rerankPath</code>、模型名。</td></tr>
+      <tr><td><code>DefaultRerankService</code></td><td><code>rerankModelId</code> 为空、结果为空、<code>ModelCallException</code> 或其他异常。</td><td>按候选原 score 降序截断。</td><td><code>RerankHandler</code>、知识库 <code>rerankModelId</code>、搜索参数。</td></tr>
+      <tr><td><code>EmbeddingModelDimensionService</code></td><td>无法通过 API 探测 embedding 维度。</td><td>使用默认维度 <code>1024</code> 并尝试写回配置。</td><td><code>configJson.embeddingDimension</code>、embedding API 日志。</td></tr>
+      <tr><td><code>ChatStreamObserver</code></td><td>Client 返回 <code>ChatStreamResponse.error</code>。</td><td>记录错误并向 Server writer 写纯文本 <code>[ERROR] ...</code>。</td><td>Client 日志、error chunk、gRPC status。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. 调试 checklist</h2>
+  <table>
+    <thead><tr><th>症状</th><th>检查顺序</th></tr></thead>
+    <tbody>
+      <tr><td>Agent 对话直接提示未配置模型</td><td>查 Agent 的 <code>chatModelId</code>；若为空，查是否有启用 provider 下的默认 <code>CHAT</code> 模型。</td></tr>
+      <tr><td>Agent 对话提示模型配置加载失败</td><td>查 <code>ModelConfigInfoDTO.modelType</code> 是否为 <code>CHAT</code>，<code>providerKey</code>、<code>apiEndpoint</code>、<code>modelKey</code> 是否为空，API Key 是否能解密。</td></tr>
+      <tr><td>Client 报模型字段缺失</td><td>打印 <code>ChatDispatchRequest.ModelConfig</code>，确认 <code>apiEndpoint</code>、<code>apiKey</code>、<code>modelKey</code> 已由 Server 组装。</td></tr>
+      <tr><td>找不到 adapter</td><td>确认 <code>adapterKey</code> 是否为 <code>openai-compatible</code> 或 <code>qwen-rerank</code>；确认对应 starter 和 provider 模块在依赖中。</td></tr>
+      <tr><td>Chat usage 一直为 0</td><td>查模型流最终 chunk 是否有 <code>Usage</code>；查 <code>TokenUsageCollectorAdvisor</code> 是否在 advisor 链中；非 OpenAI-compatible 的 cache token 可能为 0。</td></tr>
+      <tr><td>Embedding 向量库维度不对</td><td>先看 <code>configJson.embeddingDimension</code>；为空时看探测 API 是否成功；失败会回退并写入 <code>1024</code>。</td></tr>
+      <tr><td>Rerank 没有效果但搜索没报错</td><td>看 <code>rerankEnabled</code>、<code>rerankModelId</code>、<code>enterRerankCount</code>、<code>resultCount</code>；再看 provider 是否返回空结果，空结果会静默降级排序。</td></tr>
+      <tr><td>RAG 智能切片输出原文</td><td>查 <code>chunkModelId</code> 是否为 <code>CHAT</code>，API Key 是否可用；<code>SmartChunkStrategy</code> 调用失败会保留原文。</td></tr>
+    </tbody>
+  </table>
+
+  <p><span class="tag">最短定位法</span> 先问：这是 Agent Client 路径还是 Server 本地路径？再问：当前 <code>modelConfigId</code> 经过的是 <code>ChatModelRuntime</code>、<code>EmbeddingModelRuntime</code> 还是 <code>RerankModelRuntime</code>？最后用 <code>adapterKey</code> 和 provider starter 验证落点。</p>
+</main>
+</body>
+</html>

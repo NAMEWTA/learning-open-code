@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Server API 入口模块导览</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:38px auto;padding:0 24px;color:#1f2937;background:#fff}
+    h1{font-size:30px;line-height:1.25;margin-bottom:10px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:5px}
+    a{color:#2563eb;text-decoration:none}
+    code{background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .endpoint{font-family:"SF Mono",Consolas,monospace;background:#f6f8fa;padding:2px 5px;border-radius:5px}
+    .lead{border-left:4px solid #2563eb;background:#eff6ff;padding:10px 14px;margin:16px 0}
+    .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 20px}
+    .pill{border:1px solid #d1d5db;border-radius:999px;padding:3px 10px;font-size:13px;background:#fafafa}
+    .filetree{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.75;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:1rem 1.2rem;white-space:pre;overflow-x:auto}
+    .diagram{font-family:"SF Mono",Consolas,monospace;font-size:.82rem;line-height:1.55;background:#fbfbfb;border:1px solid #e5e7eb;border-radius:8px;padding:1rem;white-space:pre;overflow-x:auto}
+    .practice{border-left:4px solid #16a34a;background:#f0fdf4;padding:11px 14px;margin-top:18px}
+  </style>
+</head>
+<body>
+  <h1>Server API 入口模块导览</h1>
+  <p class="lead">这一课只做一件事：建立 Server API 入口层的边界感。学完后，你应能判断请求是 Admin API 还是 OpenAPI、该带哪组认证头、返回 JSON 还是 SSE，并知道下一步该从哪个 Controller 继续追踪。</p>
+  <div class="meta">
+    <span class="pill">学习目标：识别入口边界</span>
+    <span class="pill">预计 12 分钟</span>
+    <span class="pill">主来源：<span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-admin/src/main/java/com/aizuda/snail/ai/admin/interceptor/AuthenticationInterceptor.java</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/interceptor/OpenApiAuthInterceptor.java</span></span>
+    <span class="pill"><span class="where">open-java/snail-ai/snail-ai-server/snail-ai-server-openapi/src/main/java/com/aizuda/snail/ai/openapi/controller/OpenApiChatController.java</span></span>
+  </div>
+
+  <h2>1. 入口层负责什么</h2>
+  <p>在 L0 总览里，请求从 Admin 或 OpenAPI 进入 Server，然后才进入 Agent 责任链、RAG 或其他业务服务。本课只看入口层：Controller 负责接收 HTTP 参数、选择同步或流式响应；Interceptor 负责认证和把当前身份放进 ThreadLocal；Service 才开始做业务编排。源码上，Server 聚合模块下有两个入口子模块：<code>snail-ai-server-admin</code> 面向管理后台和内部配置操作，<code>snail-ai-server-openapi</code> 面向第三方系统调用。外部 URL 还会叠加 <code>application.yml</code> 中的 <span class="endpoint">/snail-ai</span> context path，所以 Java 常量里的 <span class="endpoint">/openapi/v1</span> 对外通常表现为 <span class="endpoint">/snail-ai/openapi/v1</span>。</p>
+  <div class="filetree">snail-ai-server/
+├── snail-ai-server-admin/        ← 管理后台 REST/SSE 入口
+│   ├── controller/               ← Agent、RAG、模型、用户、应用等 Controller
+│   └── interceptor/              ← Admin 登录态认证
+└── snail-ai-server-openapi/      ← 第三方系统 OpenAPI 入口
+    ├── controller/               ← 用户、智能体、会话、对话、嵌入 Token
+    ├── interceptor/              ← App ID + Token 鉴权
+    ├── stream/                   ← 同步对话收集器
+    └── config/                   ← OpenAPI MVC 拦截器注册</div>
+
+  <h2>2. 两套认证不要混用</h2>
+  <p>Admin API 使用 <code>Snail-Ai-Auth</code>。它由 <code>AuthenticationInterceptor</code> 读取，先看目标方法是否带 <code>@LoginRequired</code>，再解析 JWT、查询用户、校验角色，并把用户写入 <code>UserSessionUtils</code>；请求结束后清理 ThreadLocal。注意：Admin 拦截器挂在 <span class="endpoint">/**</span>，但排除 <span class="endpoint">/openapi/**</span> 和 <span class="endpoint">/files/**</span>，且真正强制登录依赖方法注解。</p>
+  <p>OpenAPI 使用 <code>Snail-Ai-App-Id</code> 与 <code>Snail-Ai-Token</code>。<code>OpenApiAuthInterceptor</code> 会查应用、要求状态为启用、用常量时间比较 Token，再写入 <code>OpenApiSessionUtils</code>。它由 MVC 配置注册到 <span class="endpoint">/openapi/**</span>，因此第三方系统不要把 Admin 的 <code>Snail-Ai-Auth</code> 拿来调用 OpenAPI。</p>
+
+  <h2>3. 一个请求入口示例</h2>
+  <p>以 OpenAPI 流式对话为例，入口是 <span class="endpoint">POST /snail-ai/openapi/v1/agent/chat</span>。请求先过 App 鉴权，再到 <code>OpenApiChatController#chat</code>，Controller 返回 <code>Flux&lt;ServerSentEvent&lt;String&gt;&gt;</code>，把服务层产生的事件类型映射成 SSE event。服务层会解析外部用户、构造 Agent 对话命令，并通过流式 writer 把下游 chunk 送回 HTTP；责任链内部怎么补上下文，本课先不展开。</p>
+  <pre class="diagram">curl -N -X POST http://localhost:8900/snail-ai/openapi/v1/agent/chat
+  -H "Content-Type: application/json"
+  -H "Snail-Ai-App-Id: your-app-id"
+  -H "Snail-Ai-Token: your-app-token"
+  -d '{"agentId":1,"openId":"external-user-001","conversationId":"conv-001","content":"你好"}'</pre>
+  <p>同步对话走 <span class="endpoint">/agent/chat/sync</span>，边界不同：它用 <code>CollectingChatStreamWriter</code> 等待流完成并拼接完整文本，再一次性返回 <code>Result&lt;OpenApiChatSyncResponse&gt;</code>。因此调试响应问题时，先判断接口是“边推边返回”还是“收集后返回”。完整接口清单见 <a href="../reference/server-entry-overview.html">Server API 入口参考</a>，上游定位可回看 <a href="../../00-overview/lessons/0001-project-map.html">项目总览课</a>。</p>
+
+  <h2>4. 检索练习</h2>
+  <div class="practice"><strong>暂停回忆：</strong>不看上文，回答三问：第三方系统调用 OpenAPI 要带哪两个 Header？Admin 登录态 Header 是什么？如果一个 Admin 方法没有 <code>@LoginRequired</code>，拦截器会强制登录吗？<br><strong>参考答案：</strong>OpenAPI 带 <code>Snail-Ai-App-Id</code> 和 <code>Snail-Ai-Token</code>；Admin 带 <code>Snail-Ai-Auth</code>；不会，当前 Admin 拦截器会先检查方法注解，缺少 <code>@LoginRequired</code> 时直接放行。主要推荐来源：先读本课 meta 中的两个拦截器，再读 reference 的接口表。遇到路径或 Header 混淆，可以继续向 agent 追问“这个 URL 应该走哪套认证”。</div>
+</body>
+</html>
