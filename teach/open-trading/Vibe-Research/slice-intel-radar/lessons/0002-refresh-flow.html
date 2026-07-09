@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0002 强制刷新链路：108 RSS 并发抓取 → 合规过滤 → 原子缓存</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>强制刷新链路：108 RSS 并发抓取 → 合规过滤 → 原子缓存</h1>
+  <p class="meta">学习目标：15 分钟内能解释 fetch_radar() 的并发模型、单源抓取逻辑、合规过滤机制和原子缓存写入策略。</p>
+
+  <h2>1. 触发路径：前端 → POST 端点 → fetch_radar()</h2>
+  <p>用户在 <a href="0001-flow-map.html">上一节课</a> 的页面中点击"刷新"按钮，触发与主链路不同的 POST 路径：</p>
+  <div class="diagram">Intel.tsx: refresh() → api.radarRefresh() → POST /api/radar/refresh → newsradar.fetch_radar()
+                                                                        │
+                                                                        ▼ 耗时 20-40s
+                                                              app.py:242-248 返回 RadarData</div>
+  <p>与 <code>GET /api/radar</code> 的关键区别：<code>get_radar(force=False)</code> 只读缓存，而 <code>fetch_radar()</code> 每次都重新抓取全部 108 个 RSS 源，完成后覆盖缓存并返回新鲜数据。</p>
+
+  <h2>2. fetch_radar() 四阶段流水线</h2>
+  <p><code>fetch_radar()</code>（<code>newsradar.py:101-143</code>）按以下四阶段执行：</p>
+  <div class="diagram">阶段 1: 加载配置
+  news_sources.json → {industries, sources, redline_keywords, fetch:{recent_days,per_source}}
+
+  阶段 2: 构建任务列表
+  sources[] ──按 hint 分组──▶ byhint: {"ai":[16 个源], "semi":[9 个源], …}
+  遍历 industries[] → 匹配 byhint → 生成 (industry_index, source_dict) 任务对
+
+  阶段 3: 40 线程并发抓取
+  ThreadPoolExecutor(max_workers=40).map(lambda t: (t[0], _fetch_source(t[1], …)), tasks)
+  → 每个源超时 14s → XML 解析 → 日期过滤 → 合规过滤 → 返回 items[]
+
+  阶段 4: 聚合排序 + 原子落盘
+  按 industry_index 归并 items → 各赛道按 ts 倒序 → JSON 写 tmp → os.replace(tmp, file)</div>
+
+  <h2>3. 单源抓取：_fetch_source() 内部逻辑</h2>
+  <p>每个 RSS 源的抓取由 <code>_fetch_source()</code>（<code>newsradar.py:56-98</code>）完成。这是链路中最底层的原子操作：</p>
+  <table>
+    <tr><th>步骤</th><th>代码位置</th><th>说明</th></tr>
+    <tr><td>HTTP GET</td><td>L59-63</td><td><code>urllib.request.urlopen(req, timeout=14)</code>，设 Accept 头声明 RSS/Atom</td></tr>
+    <tr><td>XML 解析</td><td>L64</td><td><code>ET.fromstring(raw)</code>，标准库 xml.etree.ElementTree</td></tr>
+    <tr><td>节点遍历</td><td>L67-97</td><td>查找所有 item/entry 节点，提取 title/link/pubDate/description</td></tr>
+    <tr><td>合规过滤</td><td>L84-86</td><td>标题+摘要拼接后小写，匹配 redline_keywords（赌/预测市场/加密/色情）</td></tr>
+    <tr><td>日期过滤</td><td>L87-92</td><td>只保留 cutoff（7天前）之后的资讯，转北京时间格式化</td></tr>
+    <tr><td>截断</td><td>L68-69</td><td>每个源最多取 <code>per_source=6</code> 条</td></tr>
+    <tr><td>异常降级</td><td>L97-98</td><td>任何异常（超时/XML格式错/网络不可达）→ 返回 <code>None</code></td></tr>
+  </table>
+  <p><strong>关键设计：</strong><code>_fetch_source()</code> 的异常处理是"静默吞掉"。单个 RSS 源失败不影响其他源，最终 <code>fetch_radar()</code> 在 <code>stats.failed_sources</code> 中记录失败数。这是一种"尽力而为"（best-effort）的聚合模式——宁可少几条资讯，也不能因为一个源挂了就让整个页面报错。</p>
+
+  <h2>4. 并发模型与原子写入</h2>
+  <p><code>ThreadPoolExecutor(max_workers=40)</code> 是这段代码最有意思的设计决策。108 个 RSS 源分散在全球各地，单线程串行抓取需要 108 x 2s ~ 216 秒。40 个线程并发下，理论耗时约 ceil(108/40) x 2s ~ 6 秒（不含网络抖动）。实际约 20-40 秒，因为部分 RSS 源响应慢（超时 14 秒），且 XML 解析消耗 CPU。40 是经验值——太少则并发度不够，太多可能触发 rate limiting。</p>
+  <p>缓存写入使用了经典的"写临时文件 + 原子重命名"模式：</p>
+  <div class="diagram">1. json.dump(data, ".cache/radar.json.tmp")   ← 先写临时文件
+2. os.replace(tmp, ".cache/radar.json")    ← 原子 rename（Unix 上保证原子性）</div>
+  <p>如果两个请求同时触发刷新，可能出现两次并发写。临时文件 + 原子 rename 保证了：读缓存的一方要么读到完整的旧缓存，要么读到完整的新缓存——永远不会读到写了一半的损坏 JSON。</p>
+
+  <div class="callout">
+    <p><strong>判断练习：</strong>以下哪些情况会导致 <code>fetch_radar()</code> 返回的某个赛道 items 为空？
+    <br>A. 该赛道所有 RSS 源服务器都不可达
+    <br>B. 该赛道所有资讯都包含"bitcoin"关键词
+    <br>C. 该赛道所有资讯都是 8 天前发布的（recent_days=7）
+    <br>D. 该赛道在 news_sources.json 中定义了 0 个源</p>
+    <p><strong>参考答案：</strong>A、B、C 都可能。A → 所有 _fetch_source 返回 None，items 为空。B → 合规过滤（redline_keywords 含 "bitcoin"）全部拦截。C → 日期过滤（cutoff=7天前）全部排除。D → industries 定义了该赛道但 byhint 中没有匹配的源，total=0，items 自然为空。四种情况都不会报错，体现了尽力而为的聚合哲学。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/newsradar.py</code>（fetch_radar/_fetch_source 完整实现）、<code>backend/news_sources.json</code>（108 源定义 + redline_keywords）。上一节课 <a href="0001-flow-map.html">0001 主链路</a> 讲解了页面加载时的缓存读取路径。对 AI 提炼的 chatStream 流式调用链感兴趣？那是 <a href="../../slice-ai-chat/lessons/0001-flow-map.html">L2 AI 对话切片</a> 的内容。不清楚某个细节？让 agent 带你逐行走读 newsradar.py。</p>
+</main>
+</body>
+</html>

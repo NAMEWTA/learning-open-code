@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考 — Graph 模块公共 API 完整参考</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .toc {
+    background: #f9fafc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .toc ol { margin: 4px 0; padding-left: 20px; }
+  .signature {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.88rem;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin: 10px 0;
+    overflow-x: auto;
+  }
+  .edge-case {
+    border-left: 4px solid #e6a800;
+    background: #fffdf2;
+    padding: 10px 14px;
+    margin: 12px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 0.93rem;
+  }
+  .edge-case strong {
+    color: #8a6d00;
+  }
+  .chain-step {
+    background: #f0f5fc;
+    border: 1px solid #d0dcec;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 10px 0;
+  }
+  .chain-step .step-num {
+    display: inline-block;
+    background: #0f6b8f;
+    color: #fff;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.82rem;
+    font-weight: bold;
+    margin-right: 8px;
+  }
+  .return-type {
+    color: #1d7a3a;
+    font-weight: 600;
+  }
+  .param-name {
+    color: #7a3d00;
+    font-weight: 600;
+  }
+  .deprecated {
+    text-decoration: line-through;
+    color: #999;
+  }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">参考文档 &middot; L3 API 参考 &middot; 速查用</p>
+
+<h1>Graph 模块公共 API 参考</h1>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#sec-tradingagentsgraph">TradingAgentsGraph — 主编排器</a></li>
+    <li><a href="#sec-graphsetup">GraphSetup — 图节点拓扑定义</a></li>
+    <li><a href="#sec-propagator">Propagator — 状态初始化与传播</a></li>
+    <li><a href="#sec-conditional">ConditionalLogic — 条件路由</a></li>
+    <li><a href="#sec-signal">SignalProcessor — 信号评级提取</a></li>
+    <li><a href="#sec-reflector">Reflector — 反思机制</a></li>
+    <li><a href="#sec-checkpointer">Checkpointer — SQLite 断点续跑</a></li>
+  </ol>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 1. TradingAgentsGraph -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-tradingagentsgraph">1. TradingAgentsGraph — 主编排器</h2>
+
+<p>文件：<code>tradingagents/graph/trading_graph.py</code><br>
+职责：组装所有组件（双 LLM、ToolNode 字典、5 个子组件），对外暴露 <code>propagate()</code> 单入口。</p>
+
+<h3>1.1 构造函数</h3>
+
+<div class="signature">
+TradingAgentsGraph(<br>
+&nbsp;&nbsp;<span class="param-name">selected_analysts</span>: list[str] = ["market","social","news","fundamentals","policy","hot_money","lockup"],<br>
+&nbsp;&nbsp;<span class="param-name">debug</span>: bool = False,<br>
+&nbsp;&nbsp;<span class="param-name">config</span>: dict[str, Any] | None = None,<br>
+&nbsp;&nbsp;<span class="param-name">callbacks</span>: list | None = None<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr>
+    <td><code>selected_analysts</code></td>
+    <td><code>list[str]</code></td>
+    <td>7 个全选</td>
+    <td>启用的分析师类型。可选值：<code>market</code>、<code>social</code>、<code>news</code>、<code>fundamentals</code>、<code>policy</code>、<code>hot_money</code>、<code>lockup</code>。顺序决定图中节点的执行顺序。</td>
+  </tr>
+  <tr>
+    <td><code>debug</code></td>
+    <td><code>bool</code></td>
+    <td><code>False</code></td>
+    <td>为 <code>True</code> 时逐 chunk 打印每条消息，适合排查 LLM 输出异常。</td>
+  </tr>
+  <tr>
+    <td><code>config</code></td>
+    <td><code>dict | None</code></td>
+    <td><code>DEFAULT_CONFIG</code></td>
+    <td>配置字典。不传则使用 <code>tradingagents.default_config.DEFAULT_CONFIG</code>。关键字段见下表。</td>
+  </tr>
+  <tr>
+    <td><code>callbacks</code></td>
+    <td><code>list | None</code></td>
+    <td><code>[]</code></td>
+    <td>LangChain callback handler 列表。传入后将同时传递给 LLM 构造函数和 <code>get_graph_args()</code>，用于追踪 token 消耗和工具调用。</td>
+  </tr>
+</table>
+
+<p><strong>config 关键字段：</strong></p>
+<table>
+  <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>llm_provider</code></td><td><code>str</code></td><td>LLM 厂商：<code>"google"</code> / <code>"openai"</code> / <code>"anthropic"</code>。影响 <code>_get_provider_kwargs()</code> 的参数映射。</td></tr>
+  <tr><td><code>deep_think_llm</code></td><td><code>str</code></td><td>深度推理模型 ID。用于 Research Manager 和 Portfolio Manager。</td></tr>
+  <tr><td><code>quick_think_llm</code></td><td><code>str</code></td><td>快速推理模型 ID。用于 7 Analyst + 其余 Agent。</td></tr>
+  <tr><td><code>backend_url</code></td><td><code>str</code></td><td>LLM API 端点。默认从环境变量读取。</td></tr>
+  <tr><td><code>max_debate_rounds</code></td><td><code>int</code></td><td>Bull/Bear 辩论最大轮数。实际执行 2x 轮（双方各发言）。</td></tr>
+  <tr><td><code>max_risk_discuss_rounds</code></td><td><code>int</code></td><td>三方风控辩论最大轮数。实际执行 3x 轮。</td></tr>
+  <tr><td><code>checkpoint_enabled</code></td><td><code>bool</code></td><td>是否启用 SQLite 断点续跑。</td></tr>
+  <tr><td><code>data_cache_dir</code></td><td><code>str</code></td><td>数据缓存目录（checkpoint DB 也存于此）。</td></tr>
+  <tr><td><code>results_dir</code></td><td><code>str</code></td><td>分析结果 JSON 输出目录。</td></tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>selected_analysts</code> 传入空列表，<code>GraphSetup.setup_graph()</code> 将在编译阶段抛出 <code>ValueError("Trading Agents Graph Setup Error: no analysts selected!")</code>。构造函数本身不做校验。</div>
+
+<p><strong>构造函数初始化流程：</strong></p>
+<ol>
+  <li><code>set_config()</code> — 将配置写入全局单例</li>
+  <li>创建 <code>data_cache_dir</code> 和 <code>results_dir</code> 目录</li>
+  <li><code>_get_provider_kwargs()</code> — 按厂商生成 thinking 控制参数</li>
+  <li><code>create_llm_client()</code> ×2 — 构造 deep / quick 两个 LLM 客户端</li>
+  <li><code>TradingMemoryLog</code> — 初始化记忆日志（复盘数据库）</li>
+  <li><code>_create_tool_nodes()</code> — 创建 7 个类别共 17 个工具函数的 ToolNode</li>
+  <li>初始化 5 个子组件：<code>ConditionalLogic</code> → <code>GraphSetup</code> → <code>Propagator</code> → <code>Reflector</code> → <code>SignalProcessor</code></li>
+  <li><code>workflow.compile()</code> — 首次编译（默认不带 checkpointer）</li>
+</ol>
+
+<h3>1.2 propagate() — 主入口</h3>
+
+<div class="signature">
+<span class="return-type">tuple[dict, str]</span> <strong>propagate</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">company_name</span>: str,<br>
+&nbsp;&nbsp;<span class="param-name">trade_date</span>: str<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr>
+    <td><code>company_name</code></td>
+    <td><code>str</code></td>
+    <td>股票代码（6 位）或中文名称。如 <code>"600519"</code> 或 <code>"贵州茅台"</code>。会经由 <code>safe_ticker_component</code> 做路径安全校验。</td>
+  </tr>
+  <tr>
+    <td><code>trade_date</code></td>
+    <td><code>str</code></td>
+    <td>分析日期，格式 <code>"YYYY-MM-DD"</code>。作为 thread_id 和日志文件名的一部分。</td>
+  </tr>
+</table>
+
+<p><strong>返回值：</strong></p>
+<table>
+  <tr><th>类型</th><th>说明</th></tr>
+  <tr><td><code>tuple[dict, str]</code></td>
+    <td><code>(final_state, signal)</code> — <code>final_state</code> 为包含全部 report 字段和决策的 <code>AgentState</code> 字典；<code>signal</code> 为 5 档评级字符串（Buy / Overweight / Hold / Underweight / Sell）。</td>
+  </tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong>
+  <ul>
+    <li><strong>checkpoint 已存在：</strong>若 <code>checkpoint_enabled=True</code> 且相同 ticker+date 的 checkpoint 尚未清除，将从中断处恢复执行，不会重跑已完成节点。</li>
+    <li><strong>yfinance 无数据：</strong>若分析日期距今过近（股票价格未出），<code>_fetch_returns()</code> 返回 <code>(None,None,None)</code>，pending 条目不会被标记为已解决，下次运行再试。</li>
+    <li><strong>ticker 路径注入：</strong><code>_log_state()</code> 写文件前经过 <code>safe_ticker_component()</code> 校验，防止 <code>../../etc/passwd</code> 类路径遍历攻击。</li>
+  </ul>
+</div>
+
+<h3>1.3 propagate() 状态传播全链路</h3>
+
+<p>以下是 <code>propagate()</code> 从入参到返回值的完整调用链路：</p>
+
+<div class="chain-step">
+  <span class="step-num">1</span> <strong>propagate(company_name, trade_date)</strong> → <code>_run_graph()</code>
+</div>
+
+<div class="chain-step">
+  <span class="step-num">2</span> <strong>prepare_graph_run()</strong>
+  <ul>
+    <li>赋值 <code>self.ticker = company_name</code></li>
+    <li>调用 <code>_resolve_pending_entries(company_name)</code> — 处理上次运行的 deferred reflection</li>
+    <li>若 <code>checkpoint_enabled</code>：用 <code>get_checkpointer()</code> 打开 SQLite DB，<code>workflow.compile(checkpointer=saver)</code> 重新编译；检查是否存在可恢复的 checkpoint</li>
+    <li>调用 <code>propagator.get_graph_args(callbacks)</code> 构建运行参数</li>
+    <li>若 checkpoint 存在则返回 <code>(None, args, resume_step)</code> 让 LangGraph 恢复；否则调用 <code>propagator.create_initial_state()</code> 构建全新状态</li>
+    <li>返回 <code>(init_agent_state, args, checkpoint_step)</code></li>
+  </ul>
+</div>
+
+<div class="chain-step">
+  <span class="step-num">3</span> <strong>graph.invoke(init_state, **args)</strong> 或 <strong>graph.stream(init_state, **args)</strong>
+  <ul>
+    <li>LangGraph 按照 <code>GraphSetup.setup_graph()</code> 定义的拓扑执行 30 个节点</li>
+    <li>每个 Analyst 节点：LLM 调用 → tool_calls? → tools → 回到 Analyst → 无 tool_calls → Msg Clear → 下一个 Analyst</li>
+    <li>Bull/Bear 辩论：<code>should_continue_debate</code> 控制轮数，达到上限后进入 Research Manager</li>
+    <li>三方风控辩论：<code>should_continue_risk_analysis</code> 控制轮数，达到上限后进入 Portfolio Manager</li>
+    <li>debug 模式：逐 chunk 输出 <code>pretty_print()</code></li>
+    <li>返回 <code>final_state</code>（包含所有 report 字段 + 最终决策）</li>
+  </ul>
+</div>
+
+<div class="chain-step">
+  <span class="step-num">4</span> <strong>finalize_graph_run(company_name, trade_date, final_state)</strong>
+  <ul>
+    <li>赋值 <code>self.curr_state = final_state</code></li>
+    <li><code>_log_state(trade_date, final_state)</code> — 提取 8 个字段序列化为 JSON，写入 <code>results_dir/{ticker}/TradingAgentsStrategy_logs/full_states_log_{date}.json</code></li>
+    <li><code>memory_log.store_decision()</code> — 将 <code>final_trade_decision</code> 作为 pending 条目存入 SQLite，供下次运行时复盘</li>
+    <li>若 <code>checkpoint_enabled</code>：调用 <code>clear_checkpoint()</code> 清理本次 checkpoint，避免脏状态</li>
+    <li>调用 <code>process_signal(final_trade_decision)</code> 提取 5 档评级</li>
+    <li>返回 <code>(final_state, signal)</code></li>
+  </ul>
+</div>
+
+<div class="chain-step">
+  <span class="step-num">5</span> <strong>close_graph_run()</strong>（在 <code>_run_graph()</code> 的 finally 块中执行）
+  <ul>
+    <li><code>_checkpointer_ctx.__exit__()</code> — 关闭 SQLite 连接</li>
+    <li><code>workflow.compile()</code> — 将 graph 恢复为不带 checkpointer 的版本，避免连接泄漏</li>
+  </ul>
+</div>
+
+<div class="edge-case"><strong>异常安全：</strong><code>_run_graph()</code> 使用 try/finally 确保无论 graph 执行是否成功，<code>close_graph_run()</code> 都会执行。若 graph 执行中抛出异常，checkpointer 不会被清除（保留中断现场），下次相同 ticker+date 的 <code>propagate()</code> 将从中断处恢复。</div>
+
+<h3>1.4 内部方法速查</h3>
+
+<table>
+  <tr><th>方法</th><th>签名</th><th>说明</th></tr>
+  <tr>
+    <td><code>_get_provider_kwargs</code></td>
+    <td><code>() -> dict</code></td>
+    <td>按 <code>llm_provider</code> 返回厂商特定参数。Google → <code>thinking_level</code>；OpenAI → <code>reasoning_effort</code>；Anthropic → <code>effort</code>。其他厂商返回空字典。</td>
+  </tr>
+  <tr>
+    <td><code>_create_tool_nodes</code></td>
+    <td><code>() -> dict[str, ToolNode]</code></td>
+    <td>创建 7 个 analyst 类型对应的 ToolNode 字典。共绑定 17 个工具函数。</td>
+  </tr>
+  <tr>
+    <td><code>_fetch_returns</code></td>
+    <td><code>(ticker, trade_date, holding_days=5) -> tuple[float|None, float|None, int|None]</code></td>
+    <td>用 yfinance 拉取 ticker 和沪深300 基准在 holding_days 内的收益。返回 <code>(raw_return, alpha_return, actual_days)</code>。数据不足（< 2 行）或网络异常时全返回 <code>None</code>。</td>
+  </tr>
+  <tr>
+    <td><code>_resolve_pending_entries</code></td>
+    <td><code>(ticker: str) -> None</code></td>
+    <td>读取同一 ticker 的 pending 日志条目，计算实际收益，生成反思文本，批量写回。只有价格数据就绪的条目才会被更新。</td>
+  </tr>
+  <tr>
+    <td><code>_log_state</code></td>
+    <td><code>(trade_date, final_state) -> None</code></td>
+    <td>提取 final_state 中的 8 个关键字段，写入 <code>full_states_log_{date}.json</code>。路径经 <code>safe_ticker_component</code> 安全校验。</td>
+  </tr>
+  <tr>
+    <td><code>process_signal</code></td>
+    <td><code>(full_signal: str) -> str</code></td>
+    <td>公开方法。从 Portfolio Manager 的完整决策文本中提取 5 档评级，委托给 <code>signal_processor.process_signal()</code>。</td>
+  </tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 2. GraphSetup -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-graphsetup">2. GraphSetup — 图节点拓扑定义</h2>
+
+<p>文件：<code>tradingagents/graph/setup.py</code><br>
+职责：根据 <code>selected_analysts</code> 动态创建 Agent 节点并构建 LangGraph <code>StateGraph</code> 拓扑。</p>
+
+<h3>2.1 构造函数</h3>
+
+<div class="signature">
+GraphSetup(<br>
+&nbsp;&nbsp;<span class="param-name">quick_thinking_llm</span>: Any,<br>
+&nbsp;&nbsp;<span class="param-name">deep_thinking_llm</span>: Any,<br>
+&nbsp;&nbsp;<span class="param-name">tool_nodes</span>: dict[str, ToolNode],<br>
+&nbsp;&nbsp;<span class="param-name">conditional_logic</span>: ConditionalLogic<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>quick_thinking_llm</code></td><td><code>Any</code></td><td>快速推理 LLM 实例，注入 7 Analyst、Quality Gate、Bull/Bear、Trader、3 Risk Debater。</td></tr>
+  <tr><td><code>deep_thinking_llm</code></td><td><code>Any</code></td><td>深度推理 LLM 实例，仅注入 Research Manager 和 Portfolio Manager。</td></tr>
+  <tr><td><code>tool_nodes</code></td><td><code>dict[str, ToolNode]</code></td><td>7 个 analyst 类型对应的工具节点字典，由 <code>TradingAgentsGraph._create_tool_nodes()</code> 生成。</td></tr>
+  <tr><td><code>conditional_logic</code></td><td><code>ConditionalLogic</code></td><td>包含 9 个路由函数的条件逻辑实例。</td></tr>
+</table>
+
+<h3>2.2 setup_graph()</h3>
+
+<div class="signature">
+<span class="return-type">StateGraph</span> <strong>setup_graph</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">selected_analysts</span>: list[str] = ["market","social","news","fundamentals","policy","hot_money","lockup"]<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>selected_analysts</code></td><td><code>list[str]</code></td><td>7 个全选</td><td>启用的分析师列表。顺序决定图中节点执行顺序。可选值：<code>market</code>、<code>social</code>、<code>news</code>、<code>fundamentals</code>、<code>policy</code>、<code>hot_money</code>、<code>lockup</code>。</td></tr>
+</table>
+
+<p><strong>返回值：</strong>未 compile 的 <code>langgraph.graph.StateGraph</code> 实例。调用方需要自行 <code>.compile()</code> 并可注入 checkpointer。</p>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>selected_analysts</code> 为空列表，立即抛出 <code>ValueError("Trading Agents Graph Setup Error: no analysts selected!")</code>。这是唯一的输入校验点。</div>
+
+<p><strong>图拓扑构建流程：</strong></p>
+<ol>
+  <li>依 <code>selected_analysts</code> 顺序创建 3 类节点（Analyst + tools_X + Msg Clear X）</li>
+  <li>创建 Quality Gate、Bull/Bear、Research Manager、Trader</li>
+  <li>创建 3 Risk Debater + Portfolio Manager</li>
+  <li>添加节点到 <code>StateGraph(AgentState)</code></li>
+  <li>边定义：
+    <ul>
+      <li><code>START → first_analyst</code>（固定边）</li>
+      <li>每个 Analyst → 条件路由 <code>should_continue_{type}</code> → tools_X（回环）或 Msg Clear</li>
+      <li>Msg Clear → 下一个 Analyst（固定边）或 Quality Gate（最后一个 Analyst 时）</li>
+      <li>Quality Gate → Bull（固定边）</li>
+      <li>Bull ↔ Bear（条件路由 <code>should_continue_debate</code>），终止条件 → Research Manager</li>
+      <li>Research Manager → Trader（固定边）</li>
+      <li>Trader → Aggressive（固定边）</li>
+      <li>Aggressive → Conservative → Neutral → Aggressive…（条件路由 <code>should_continue_risk_analysis</code>），终止条件 → Portfolio Manager</li>
+      <li>Portfolio Manager → END（固定边）</li>
+    </ul>
+  </li>
+</ol>
+
+<p><strong>各 Analyst 创建的 Agent 函数：</strong></p>
+<table>
+  <tr><th>analyst_type</th><th>创建函数</th><th>所属模块</th></tr>
+  <tr><td><code>market</code></td><td><code>create_market_analyst(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>social</code></td><td><code>create_social_media_analyst(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>news</code></td><td><code>create_news_analyst(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>fundamentals</code></td><td><code>create_fundamentals_analyst(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>policy</code></td><td><code>create_policy_analyst(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>hot_money</code></td><td><code>create_hot_money_tracker(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+  <tr><td><code>lockup</code></td><td><code>create_lockup_watcher(llm)</code></td><td><code>tradingagents.agents</code></td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 3. Propagator -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-propagator">3. Propagator — 状态初始化与传播</h2>
+
+<p>文件：<code>tradingagents/graph/propagation.py</code><br>
+职责：构建 AgentState 初始状态字典，生成 LangGraph <code>invoke/stream</code> 的运行参数。</p>
+
+<h3>3.1 构造函数</h3>
+
+<div class="signature">
+Propagator(<span class="param-name">max_recur_limit</span>: int = 100)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>max_recur_limit</code></td><td><code>int</code></td><td><code>100</code></td><td>LangGraph <code>recursion_limit</code>。图中每经过一个节点计数 +1，超过此值抛出 <code>RecursionError</code>。全选 7 Analyst + 默认辩论轮数时，总步数约 60-80，100 为安全上限。</td></tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong>若设置过小（如 <code>max_recur_limit=10</code>），在选中多个 Analyst 的场景下图遍历 10 个节点后即被 LangGraph 终止并抛异常。建议不低于 50。</div>
+
+<h3>3.2 create_initial_state()</h3>
+
+<div class="signature">
+<span class="return-type">dict[str, Any]</span> <strong>create_initial_state</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">company_name</span>: str,<br>
+&nbsp;&nbsp;<span class="param-name">trade_date</span>: str,<br>
+&nbsp;&nbsp;<span class="param-name">past_context</span>: str = ""<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>company_name</code></td><td><code>str</code></td><td>—（必填）</td><td>股票代码或中文名。存入 <code>company_of_interest</code> 字段和 <code>messages</code> 的第一条。</td></tr>
+  <tr><td><code>trade_date</code></td><td><code>str</code></td><td>—（必填）</td><td>分析日期，强制转为 <code>str</code> 类型。</td></tr>
+  <tr><td><code>past_context</code></td><td><code>str</code></td><td><code>""</code></td><td>来自 <code>TradingMemoryLog.get_past_context(ticker)</code> 的历史反思文本。注入到 <code>past_context</code> 字段供后续 Agent prompt 使用。</td></tr>
+</table>
+
+<p><strong>返回值：</strong>一个包含 14 个键的字典：</p>
+<table>
+  <tr><th>键</th><th>初始值</th><th>类型</th></tr>
+  <tr><td><code>messages</code></td><td><code>[("human", company_name)]</code></td><td><code>list</code></td></tr>
+  <tr><td><code>company_of_interest</code></td><td><code>company_name</code></td><td><code>str</code></td></tr>
+  <tr><td><code>trade_date</code></td><td><code>str(trade_date)</code></td><td><code>str</code></td></tr>
+  <tr><td><code>past_context</code></td><td><code>""</code> 或上次反思文本</td><td><code>str</code></td></tr>
+  <tr><td><code>investment_debate_state</code></td><td><code>InvestDebateState(6 fields, count=0)</code></td><td><code>TypedDict</code></td></tr>
+  <tr><td><code>risk_debate_state</code></td><td><code>RiskDebateState(9 fields, count=0)</code></td><td><code>TypedDict</code></td></tr>
+  <tr><td><code>market_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>fundamentals_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>sentiment_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>news_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>policy_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>hot_money_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+  <tr><td><code>lockup_report</code></td><td><code>""</code></td><td><code>str</code></td></tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong><code>past_context</code> 可能为 <code>None</code>（首次分析时 <code>get_past_context()</code> 返回空字符串）。<code>InvestDebateState</code> 和 <code>RiskDebateState</code> 由 <code>agent_states.py</code> 中的 TypedDict 定义，字段名和类型有约束。</div>
+
+<h3>3.3 get_graph_args()</h3>
+
+<div class="signature">
+<span class="return-type">dict[str, Any]</span> <strong>get_graph_args</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">callbacks</span>: list | None = None<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>callbacks</code></td><td><code>list | None</code></td><td><code>None</code></td><td>callback handler 列表。注意：LLM callback 在构造函数中已传给 LLM；这里的 callback 用于工具执行跟踪。</td></tr>
+</table>
+
+<p><strong>返回值结构：</strong></p>
+<pre><code>{
+    "stream_mode": "values",       # 固定为 "values"，返回完整状态快照
+    "config": {
+        "recursion_limit": 100,    # 取自 max_recur_limit
+        // "callbacks": [...]      # 仅当 callbacks 非空
+    }
+}</code></pre>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 4. ConditionalLogic -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-conditional">4. ConditionalLogic — 条件路由</h2>
+
+<p>文件：<code>tradingagents/graph/conditional_logic.py</code><br>
+职责：为 LangGraph 的 <code>add_conditional_edges</code> 提供 9 个路由函数，控制图中 token 的流转方向。</p>
+
+<h3>4.1 构造函数</h3>
+
+<div class="signature">
+ConditionalLogic(<br>
+&nbsp;&nbsp;<span class="param-name">max_debate_rounds</span>: int = 1,<br>
+&nbsp;&nbsp;<span class="param-name">max_risk_discuss_rounds</span>: int = 1<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>max_debate_rounds</code></td><td><code>int</code></td><td><code>1</code></td><td>Bull/Bear 辩论最大轮数。实际执行 <strong>2x</strong> 此值（因为 <code>count &gt;= 2 * max_debate_rounds</code> 才终止，每次双方各发表一次 count+1）。</td></tr>
+  <tr><td><code>max_risk_discuss_rounds</code></td><td><code>int</code></td><td><code>1</code></td><td>三方风控辩论最大轮数。实际执行 <strong>3x</strong> 此值（<code>count &gt;= 3 * max_risk_discuss_rounds</code> 终止）。</td></tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>max_debate_rounds=0</code>，由于 <code>count</code> 初始为 0 且条件为 <code>&gt;= 0</code>，第一条消息即直接进入 Research Manager，跳过多空辩论。同理 <code>max_risk_discuss_rounds=0</code> 会直接进入 Portfolio Manager。</div>
+
+<h3>4.2 Analyst 路由函数（7 个）</h3>
+
+<p>这 7 个函数签名和逻辑完全相同，仅目标节点名称不同。以一个为例说明：</p>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>should_continue_{analyst_type}</strong>(<span class="param-name">state</span>: AgentState)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>state</code></td><td><code>AgentState</code></td><td>LangGraph 当前状态。从中读取 <code>messages[-1]</code>。</td></tr>
+</table>
+
+<p><strong>逻辑：</strong>检查 <code>state["messages"][-1].tool_calls</code>。若存在 tool_calls → 返回 <code>"tools_{type}"</code>，工具执行完回到同一分析师。否则 → 返回 <code>"Msg Clear {Type}"</code>，清消息历史后进入下一节点。</p>
+
+<table>
+  <tr><th>方法名</th><th>返回节点 1（有 tool_calls）</th><th>返回节点 2（无 tool_calls）</th></tr>
+  <tr><td><code>should_continue_market</code></td><td><code>"tools_market"</code></td><td><code>"Msg Clear Market"</code></td></tr>
+  <tr><td><code>should_continue_social</code></td><td><code>"tools_social"</code></td><td><code>"Msg Clear Social"</code></td></tr>
+  <tr><td><code>should_continue_news</code></td><td><code>"tools_news"</code></td><td><code>"Msg Clear News"</code></td></tr>
+  <tr><td><code>should_continue_fundamentals</code></td><td><code>"tools_fundamentals"</code></td><td><code>"Msg Clear Fundamentals"</code></td></tr>
+  <tr><td><code>should_continue_policy</code></td><td><code>"tools_policy"</code></td><td><code>"Msg Clear Policy"</code></td></tr>
+  <tr><td><code>should_continue_hot_money</code></td><td><code>"tools_hot_money"</code></td><td><code>"Msg Clear Hot_money"</code></td></tr>
+  <tr><td><code>should_continue_lockup</code></td><td><code>"tools_lockup"</code></td><td><code>"Msg Clear Lockup"</code></td></tr>
+</table>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>messages</code> 列表为空（不可能在执行中发生，因为第一个节点已注入 human message），<code>messages[-1]</code> 会引发 <code>IndexError</code>。若 <code>last_message</code> 没有 <code>tool_calls</code> 属性（非 AIMessage），Python 抛出 <code>AttributeError</code>。</div>
+
+<h3>4.3 should_continue_debate()</h3>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>should_continue_debate</strong>(<span class="param-name">state</span>: AgentState)
+</div>
+
+<p><strong>决策逻辑：</strong></p>
+<ol>
+  <li>若 <code>investment_debate_state["count"] >= 2 * max_debate_rounds</code> → 返回 <code>"Research Manager"</code>（辩论结束）</li>
+  <li>若 <code>current_response</code> 以 <code>"Bull"</code> 开头 → 返回 <code>"Bear Researcher"</code>（轮到 Bear 发言）</li>
+  <li>否则 → 返回 <code>"Bull Researcher"</code></li>
+</ol>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>current_response</code> 既不以 "Bull" 开头也不以 "Bear" 开头（例如 LLM 输出了非预期前缀），默认进入 Bull Researcher。这种 fallback 行为可以防止辩论死锁。</div>
+
+<h3>4.4 should_continue_risk_analysis()</h3>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>should_continue_risk_analysis</strong>(<span class="param-name">state</span>: AgentState)
+</div>
+
+<p><strong>决策逻辑：</strong></p>
+<ol>
+  <li>若 <code>risk_debate_state["count"] >= 3 * max_risk_discuss_rounds</code> → 返回 <code>"Portfolio Manager"</code>（风控辩论结束）</li>
+  <li>若 <code>latest_speaker</code> 以 <code>"Aggressive"</code> 开头 → 返回 <code>"Conservative Analyst"</code></li>
+  <li>若 <code>latest_speaker</code> 以 <code>"Conservative"</code> 开头 → 返回 <code>"Neutral Analyst"</code></li>
+  <li>否则 → 返回 <code>"Aggressive Analyst"</code>（默认开启新一轮轮转）</li>
+</ol>
+
+<div class="edge-case"><strong>边界条件：</strong>裁决的次序固定（进攻 → 保守 → 中立 → 进攻…），若 <code>latest_speaker</code> 不匹配任何已知前缀，自动路由到 Aggressive，不会阻塞图执行。</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 5. SignalProcessor -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-signal">5. SignalProcessor — 信号评级提取</h2>
+
+<p>文件：<code>tradingagents/graph/signal_processing.py</code><br>
+职责：从 Portfolio Manager 的完整决策文本中提取 5 档评级字符串。</p>
+
+<h3>5.1 构造函数</h3>
+
+<div class="signature">
+SignalProcessor(<span class="param-name">quick_thinking_llm</span>: Any = None)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr>
+    <td><code>quick_thinking_llm</code></td>
+    <td><code>Any</code></td>
+    <td><code>None</code></td>
+    <td><span class="deprecated">已废弃</span>。保留此参数仅为向后兼容，调用方仍可传入 LLM 实例但不会被使用。评级提取现已改为确定性解析。</td>
+  </tr>
+</table>
+
+<h3>5.2 process_signal()</h3>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>process_signal</strong>(<span class="param-name">full_signal</span>: str)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>full_signal</code></td><td><code>str</code></td><td>Portfolio Manager 的完整 markdown 决策文本。格式由 <code>render_pm_decision()</code> 渲染，通常以 <code>**Rating**: X</code> 开头。</td></tr>
+</table>
+
+<p><strong>返回值：</strong>5 档评级之一：<code>"Buy"</code> | <code>"Overweight"</code> | <code>"Hold"</code> | <code>"Underweight"</code> | <code>"Sell"</code></p>
+
+<p><strong>实现：</strong>委托给 <code>tradingagents.agents.utils.rating.parse_rating()</code>，该函数通过确定性启发式从 markdown 文本中匹配 <code>**Rating**: X</code> 模式，不再发起 LLM 调用。</p>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>full_signal</code> 为 <code>None</code> 或不包含 <code>**Rating**</code> 模式，<code>parse_rating()</code> 返回 <code>"Hold"</code> 作为保守默认值，而非抛异常。</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 6. Reflector -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-reflector">6. Reflector — 反思机制</h2>
+
+<p>文件：<code>tradingagents/graph/reflection.py</code><br>
+职责：在下次运行时对上次决策做复盘反思（Phase B deferred reflection），生成 2-4 句简洁英文反思文本，注入后续分析的 <code>past_context</code>。</p>
+
+<h3>6.1 构造函数</h3>
+
+<div class="signature">
+Reflector(<span class="param-name">quick_thinking_llm</span>: Any)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>quick_thinking_llm</code></td><td><code>Any</code></td><td>快速推理 LLM 实例。用于生成反思文本——反思只需 2-4 句精简总结，不需要深度推理。</td></tr>
+</table>
+
+<p>构造函数内部通过 <code>_get_log_reflection_prompt()</code> 生成系统 prompt，要求输出覆盖三个部分：方向判断正确性、投资论据实效性、具体改进建议。</p>
+
+<h3>6.2 reflect_on_final_decision()</h3>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>reflect_on_final_decision</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">final_decision</span>: str,<br>
+&nbsp;&nbsp;<span class="param-name">raw_return</span>: float,<br>
+&nbsp;&nbsp;<span class="param-name">alpha_return</span>: float<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>final_decision</code></td><td><code>str</code></td><td>上次 Portfolio Manager 输出的完整决策文本。</td></tr>
+  <tr><td><code>raw_return</code></td><td><code>float</code></td><td>上次分析后 holding_days 内的绝对收益率。格式化为 <code>+.1%</code>。</td></tr>
+  <tr><td><code>alpha_return</code></td><td><code>float</code></td><td>相对沪深300 的超额收益（alpha）。格式化为 <code>+.1%</code>。</td></tr>
+</table>
+
+<p><strong>返回值：</strong>2-4 句英文反思文本，纯 prose，无 markdown、无列表、无标题。</p>
+
+<p><strong>LLM 调用方式：</strong></p>
+<pre><code>messages = [
+    ("system", log_reflection_prompt),
+    ("human", f"Raw return: {raw_return:+.1%}\nAlpha vs CSI 300: {alpha_return:+.1%}\n\nFinal Decision:\n{final_decision}")
+]
+return self.quick_thinking_llm.invoke(messages).content</code></pre>
+
+<div class="edge-case"><strong>边界条件：</strong>
+  <ul>
+    <li><code>raw_return</code> 或 <code>alpha_return</code> 取值为 <code>float('nan')</code> 或 <code>float('inf')</code> 时，格式化字符串 <code>:+.1%</code> 会输出 <code>nan%</code> 或 <code>inf%</code>，LLM 可能生成扭曲的反思。</li>
+    <li>prompt 明确要求 2-4 句英文纯 prose，但 LLM 不保证一定遵守——反思文本仍可能包含 markdown 或超过长度。</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- 7. Checkpointer -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<h2 id="sec-checkpointer">7. Checkpointer — SQLite 断点续跑</h2>
+
+<p>文件：<code>tradingagents/graph/checkpointer.py</code><br>
+职责：为 LangGraph 提供 per-ticker 的 SQLite checkpoint 存储，支持中断恢复。每个 ticker 一个独立 <code>.db</code> 文件，避免并发争用。</p>
+
+<h3>7.1 thread_id()</h3>
+
+<div class="signature">
+<span class="return-type">str</span> <strong>thread_id</strong>(<span class="param-name">ticker</span>: str, <span class="param-name">date</span>: str)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>ticker</code></td><td><code>str</code></td><td>股票代码。内部转为大写。</td></tr>
+  <tr><td><code>date</code></td><td><code>str</code></td><td>分析日期。</td></tr>
+</table>
+
+<p><strong>返回值：</strong><code>{ticker}:{date}</code> 的 SHA256 哈希前 16 个十六进制字符。</p>
+
+<p><strong>实现：</strong><code>hashlib.sha256(f"{ticker.upper()}:{date}".encode()).hexdigest()[:16]</code></p>
+
+<div class="edge-case"><strong>边界条件：</strong>同一 ticker+date 组合始终产生相同 thread_id（确定性），不同 ticker+date 碰撞概率极低（16 hex chars = 64 bits）。此确定性设计确保手动重启后能从上次断点恢复。</div>
+
+<h3>7.2 get_checkpointer()</h3>
+
+<div class="signature">
+<span class="return-type">Generator[SqliteSaver, None, None]</span> <strong>get_checkpointer</strong>(<br>
+&nbsp;&nbsp;<span class="param-name">data_dir</span>: str | Path,<br>
+&nbsp;&nbsp;<span class="param-name">ticker</span>: str<br>
+)
+</div>
+
+<table>
+  <tr><th>参数</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>data_dir</code></td><td><code>str | Path</code></td><td>数据根目录。DB 文件创建于 <code>{data_dir}/checkpoints/{TICKER}.db</code>。</td></tr>
+  <tr><td><code>ticker</code></td><td><code>str</code></td><td>股票代码。经 <code>safe_ticker_component</code> 校验后转为大写。</td></tr>
+</table>
+
+<p><strong>返回值：</strong><code>@contextmanager</code> 装饰的生成器，yield <code>SqliteSaver</code> 实例。调用方必须使用 <code>with get_checkpointer(...) as saver:</code> 或在 <code>__enter__/__exit__</code> 中手动管理。</p>
+
+<p><strong>内部流程：</strong></p>
+<ol>
+  <li><code>sqlite3.connect(db, check_same_thread=False)</code> — 允许多线程访问</li>
+  <li><code>SqliteSaver(conn)</code> — 创建 LangGraph checkpoint saver</li>
+  <li><code>saver.setup()</code> — 创建 <code>writes</code> 和 <code>checkpoints</code> 表</li>
+  <li>yield saver</li>
+  <li>finally 块中 <code>conn.close()</code></li>
+</ol>
+
+<div class="edge-case"><strong>边界条件：</strong>若 <code>ticker</code> 包含 <code>/</code> 或 <code>..</code> 等路径遍历字符，<code>safe_ticker_component()</code> 将拒绝并抛异常，防止写入 <code>../../etc/some.db</code>。</div>
+
+<h3>7.3 has_checkpoint()</h3>
+
+<div class="signature">
+<span class="return-type">bool</span> <strong>has_checkpoint</strong>(<span class="param-name">data_dir</span>, <span class="param-name">ticker</span>, <span class="param-name">date</span>)
+</div>
+
+<p>等价于 <code>checkpoint_step(data_dir, ticker, date) is not None</code>。用于存在性快速判断。</p>
+
+<h3>7.4 checkpoint_step()</h3>
+
+<div class="signature">
+<span class="return-type">int | None</span> <strong>checkpoint_step</strong>(<span class="param-name">data_dir</span>, <span class="param-name">ticker</span>, <span class="param-name">date</span>)
+</div>
+
+<p>查询指定 ticker+date 的最新 checkpoint 步骤号。</p>
+
+<p><strong>内部流程：</strong></p>
+<ol>
+  <li>计算 DB 路径，若 .db 文件不存在 → 返回 <code>None</code></li>
+  <li>用 <code>thread_id(ticker, date)</code> 生成 thread_id</li>
+  <li>打开 <code>get_checkpointer()</code> 上下文，调用 <code>saver.get_tuple(config)</code></li>
+  <li>若 cp 为 <code>None</code> → 返回 <code>None</code>（无 checkpoint）</li>
+  <li>否则返回 <code>cp.metadata.get("step")</code> — LangGraph 在每次 checkpoint 时写入的步骤号</li>
+</ol>
+
+<div class="edge-case"><strong>边界条件：</strong>
+  <ul>
+    <li>DB 文件存在但表中无该 thread_id 的行 → <code>get_tuple()</code> 返回 <code>None</code></li>
+    <li>DB 文件损坏 → <code>sqlite3.connect</code> 可能抛 <code>sqlite3.DatabaseError</code>，调用方需自行捕获</li>
+    <li>同一 ticker 的不同 date 互不干扰（不同 thread_id）</li>
+  </ul>
+</div>
+
+<h3>7.5 clear_checkpoint()</h3>
+
+<div class="signature">
+<span class="return-type">None</span> <strong>clear_checkpoint</strong>(<span class="param-name">data_dir</span>, <span class="param-name">ticker</span>, <span class="param-name">date</span>)
+</div>
+
+<p>删除指定 ticker+date 在 <code>writes</code> 和 <code>checkpoints</code> 两表中的所有行。</p>
+
+<div class="edge-case"><strong>边界条件：</strong>
+  <ul>
+    <li>DB 文件不存在 → 静默返回（不抛异常）</li>
+    <li>表不存在（<code>sqlite3.OperationalError</code>）→ 被 <code>except</code> 捕获，静默跳过</li>
+  </ul>
+</div>
+
+<h3>7.6 clear_all_checkpoints()</h3>
+
+<div class="signature">
+<span class="return-type">int</span> <strong>clear_all_checkpoints</strong>(<span class="param-name">data_dir</span>: str | Path)
+</div>
+
+<p>删除 <code>{data_dir}/checkpoints/</code> 下所有 <code>.db</code> 文件。返回删除的文件数。若目录不存在则返回 <code>0</code>。</p>
+
+<div class="edge-case"><strong>注意：</strong>此函数删除的是整个文件而非单行，一旦执行所有 ticker 的断点全部清空。建议仅在批量重置场景使用，日常使用 <code>clear_checkpoint()</code> 精确清除单次运行的断点。</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- Footer -->
+<!-- ═══════════════════════════════════════════════════════ -->
+
+<p style="margin-top:32px; border-top: 1px solid #eee; padding-top: 18px;">
+  <strong>关联参考：</strong><a href="graph-overview.html">Graph 模块总览参考</a> &mdash; 类速查、节点映射、边路由、状态定义、生命周期<br>
+  <strong>关联课程：</strong><a href="../lessons/0001-graph-module-tour.html">0001 — LangGraph 工作流引擎模块总览</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的 API 签名、参数语义或边界行为。
+</p>
+
+</div>
+</main>
+</body>
+</html>

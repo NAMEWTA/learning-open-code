@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0003 个股数据 — 资金面+信号路径</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>0003 个股数据 — 资金面+信号路径</h1>
+  <p class="meta">学习目标：15 分钟内能说出 10 个 fire-and-forget 端点的分类逻辑（资金/筹码/情绪/归属）、它们的缓存策略（15/30分钟阶梯）和"失败静默降级"的前端体验含义。</p>
+
+  <h2>1. 为什么是 fire-and-forget？</h2>
+  <p>在 <a href="./0001-flow-map.html">0001 全链路地图</a> 中我们看到，10 个资金面/信号端点采用 <code>.then().catch(() => {})</code> 模式发射后立即返回——从不 await。为什么？因为这 10 个端点的数据<strong>不是用户第一眼必须看到的</strong>。用户打开个股页首先关注的是行情、估值、财报。资金面/龙虎榜属于"深入了解"层——先展示核心卡片，再渐进回填外围卡片，体验远好于等所有端点返回后才渲染。</p>
+
+  <div class="diagram">// 伪代码：10 个 fire-and-forget 发射
+const ok = (set) => (v) => { if (rid === runIdRef.current) set(v); };
+
+api.margin(c).then(ok(setMargin)).catch(() => {});       // 融资融券
+api.blockTrade(c).then(ok(setBlockT)).catch(() => {});   // 大宗交易
+api.holders(c).then(ok(setHolders)).catch(() => {});     // 股东户数
+api.dividend(c).then(ok(setDividend)).catch(() => {});   // 分红历史
+api.fundFlow(c).then(ok(setFundFlow)).catch(() => {});   // 主力资金流
+api.dragonTiger(c).then(ok(setDt)).catch(() => {});      // 龙虎榜
+api.lockup(c).then(ok(setLockup)).catch(() => {});       // 限售解禁
+api.blocks(c).then(ok(setBlocks)).catch(() => {});       // 板块归属
+api.hotConcepts(c).then(ok(setHotCon)).catch(() => {});  // 热门概念
+api.investorQa(c).then(ok(setQa)).catch(() => {});       // 互动易</div>
+
+  <p>注意 <code>ok()</code> 函数的竞态检查：即使请求返回了，如果用户已经切换到另一只股票（rid 已变），数据也会被丢弃。这保证了<strong>快速切换代码时不会出现闪烁</strong>。</p>
+
+  <h2>2. 10 端点分类与缓存策略</h2>
+  <p>这 10 个端点共享一个通用缓存池 <code>_DC_CACHE</code>，键为 <code>(endpoint, code)</code> 复合键。缓存 TTL 遵循"数据变化频率决定缓存时长"原则：</p>
+
+  <table>
+    <tr><th>分类</th><th>端点</th><th>数据频率</th><th>缓存 TTL</th></tr>
+    <tr><td rowspan="2"><strong>资金面</strong></td><td><code>/api/margin</code></td><td>日级</td><td>30 分钟</td></tr>
+    <tr><td><code>/api/fund-flow</code></td><td>日级（120日序列）</td><td>15 分钟</td></tr>
+    <tr><td rowspan="3"><strong>筹码持仓</strong></td><td><code>/api/holders</code></td><td>季度级</td><td>30 分钟</td></tr>
+    <tr><td><code>/api/block-trade</code></td><td>日级</td><td>30 分钟</td></tr>
+    <tr><td><code>/api/dividend</code></td><td>年度/不定期</td><td>30 分钟</td></tr>
+    <tr><td rowspan="2"><strong>情绪信号</strong></td><td><code>/api/dragon-tiger</code></td><td>日级（上榜日）</td><td>30 分钟</td></tr>
+    <tr><td><code>/api/lockup</code></td><td>不定期</td><td>30 分钟</td></tr>
+    <tr><td rowspan="3"><strong>概念归属</strong></td><td><code>/api/blocks</code></td><td>半静态</td><td>30 分钟</td></tr>
+    <tr><td><code>/api/hot-concepts</code></td><td>盘中变化</td><td>15 分钟</td></tr>
+    <tr><td><code>/api/investor-qa</code></td><td>不定期</td><td>15 分钟</td></tr>
+  </table>
+
+  <p><strong>缓存阶梯设计：</strong>fund-flow 和 hot-concepts 给 15 分钟是因为它们可能在盘中变化（资金流是实时累计的，热门概念可能在盘中切换）。其余端点基本都是 30 分钟——日级数据在盘中不会变化，季级数据更不用说了。这个 15/30 分钟的阶梯配合主数据块的 30 分钟分位缓存，形成了完整的缓存梯度。</p>
+
+  <h2>3. 数据源的东财依赖与限流风险</h2>
+  <p>这 10 个端点全部走东财数据中心（app.py:470-473 注释说明），通过 astock.py 中的对应函数获取。东财对同一 IP 有<strong>约 1 秒 1 次的限流策略</strong>。前端一次查询可能触发 10 个并行请求，这在技术上会触发限流。后端的应对策略是：</p>
+  <div class="diagram">抗限流三层设计：
+
+1. 通用缓存 _DC_CACHE[(endpoint, code)]：30 分钟内同一代码
+   同一端点只请求一次东财——绝大多数重复查询走缓存。
+
+2. 前端 fire-and-forget 异步发射：10 个请求近乎同时发出，
+   但经过 Vite 代理和 HTTP 协议栈的序列化后，到达后端时
+   会有微小的到达时间差。东财限流是基于 "1 秒内请求数"，
+   这个到达差通常足以分散压力。
+
+3. astock.py 内的随机抖动：部分函数在构造请求时会加入
+   random 级别的微小延迟，进一步降低被风控的概率。</div>
+
+  <p><strong>关键认知：</strong>缓存是这里的第一道防线，不是性能优化，是<strong>生存必需</strong>。如果去掉缓存，一个用户在个股页面快速切换 5 只股票，就会触发 50+ 个后端请求（10 端点 x 5 次），大概率触发东财临时封 IP。这就是为什么资金面端点的缓存注释是"进一步降低被封风险"而非"提升响应速度"。</p>
+
+  <h2>4. 前端条件渲染：有数据才展示</h2>
+  <p>每个 fire-and-forget 端点的数据到达后，前端通过条件渲染决定是否展示对应的卡片：</p>
+  <div class="diagram">资金面 + 筹码卡片（StockData.tsx:422-449）：
+  渲染条件：margin.length>0 || holders.length>0
+           || fundFlow.length>0 || dividend.length>0
+  → 四个数据源至少有一个非空才渲染整张卡片
+  → 融资余额/股东户数/20日主力净流入/最近派息 四个指标
+
+龙虎榜卡片（StockData.tsx:452-481）：
+  渲染条件：dt && dt.records.length > 0
+  → 近 30 日上榜记录 + 买卖席位 TOP
+
+限售解禁卡片（StockData.tsx:484-506）：
+  渲染条件：lockup && (lockup.upcoming.length>0
+           || lockup.history.length>0)
+  → 未来 90 天待解禁 + 历史解禁
+
+板块 + 概念卡片（StockData.tsx:509-530）：
+  渲染条件：(blocks && blocks.concept_tags.length>0)
+           || hotCon.length > 0
+  → 概念标签云 + 热门概念命中
+
+互动易卡片（StockData.tsx:533-546）：
+  渲染条件：qa.filter(q => q.answer).length > 0
+  → 只展示有回复的问答（过滤掉未回复的提问）</div>
+
+  <p>这种设计意味着：<strong>没有任何一张卡片是"一定出现"的</strong>。取决于股票是否上榜龙虎榜、是否有解禁、是否有分析师提问，页面会自适应地呈现不同的信息密度。这实现了"数据驱动 UI"——页面的复杂度由数据本身的丰富度决定，而非前端硬编码。</p>
+
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>如果 fund-flow 端点因为东财 push2his 风控返回了空数组（非异常），前端会展示什么？用户看到空卡片时会困惑吗？设计上如何避免？</p>
+    <p><strong>参考答案：</strong>空数组不触发 catch，setFundFlow([]) 成功执行。在条件渲染中 <code>fundFlow.length > 0</code> 为假，该指标被跳过，卡片只展示有数据的融资余额和股东户数。空端点的数据自然地融入"不渲染"分支，无需额外空状态。但 push2his 可能因风控返回空——此时前端无法区分"确实无数据"和"被风控"，这是体验改进点。</p>
+  </div>
+
+  <p class="source">主要来源：<code>frontend/src/pages/StockData.tsx:126-137</code>（fire-and-forget 发射）、<code>backend/app.py:470-601</code>（_DC_CACHE 通用缓存 + 10 端点注册）、<code>backend/astock.py</code>（margin_trading/block_trade/holder_num_change 等函数）。完整端点速查表见 <a href="../reference/stock-data-flow-map.html">stock-data-flow-map</a>。回到链路上游：<a href="./0002-valuation-finance.html">0002 估值+财务路径</a> 和 <a href="./0001-flow-map.html">0001 全链路地图</a>。</p>
+</main>
+</body>
+</html>

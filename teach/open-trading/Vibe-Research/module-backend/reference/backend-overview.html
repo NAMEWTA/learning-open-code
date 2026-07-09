@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vibe-Research L1 后端参考</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #5f6b7a;
+      --line: #d9e2ec;
+      --soft: #f7f9fb;
+      --accent: #f35d2b;
+      --accent-soft: #fef5f2;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background: #fff;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 36px 24px 64px; }
+
+    h1 { font-size: 2rem; margin: 0 0 0.25rem; font-weight: 700; letter-spacing: 0; color: #111; }
+    h1 small { font-size: 0.85rem; color: var(--muted); font-weight: 400; margin-left: 0.5rem; }
+
+    h2 { font-size: 1.22rem; margin: 2.4rem 0 0.8rem; padding-top: 1.1rem; border-top: 1px solid var(--line); letter-spacing: 0; font-weight: 600; }
+    h3 { font-size: 1.02rem; margin: 1.3rem 0 0.5rem; font-weight: 600; }
+
+    p, li { font-size: 0.96rem; color: var(--ink); }
+    p { margin-bottom: 0.65rem; }
+    ul, ol { padding-left: 1.5rem; margin-bottom: 0.8rem; }
+    li { margin-bottom: 0.25rem; }
+
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.3rem; font-size: 0.92rem; }
+    th, td { border: 1px solid var(--line); padding: 0.55rem 0.65rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; white-space: nowrap; }
+    td code, th code { font-family: "SF Mono", "Cascadia Code", Consolas, monospace; font-size: 0.88em; background: #f0f1f3; padding: 0.1rem 0.3rem; border-radius: 3px; }
+
+    .note { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 0.75rem 1rem; margin-bottom: 1.2rem; font-size: 0.94rem; border-radius: 0 4px 4px 0; }
+
+    .diagram, .filetree {
+      font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.68;
+      background: #fafbfc;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+      margin: 0.6rem 0 1.2rem;
+    }
+
+    .compact td { font-size: 0.88rem; padding: 0.4rem 0.55rem; }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    @media print {
+      body { background: #fff; }
+      main { max-width: none; padding: 16mm; }
+      a { color: inherit; text-decoration: none; }
+      h2 { break-after: avoid; }
+      table { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+
+  <h1>Vibe-Research L1 后端参考<small>速查表</small></h1>
+  <p class="note">
+    本参考页是「后端模块总览」课程的补充速查资料，按模块详解、API 端点分组、缓存策略、中间件链和依赖清单组织。
+    建议与 <a href="../lessons/0001-backend-module-tour.html">0001-backend-module-tour.html</a> 配合使用。
+  </p>
+
+  <!-- ====== 1. 十模块详解 ====== -->
+  <h2>1. 十模块详解</h2>
+
+  <h3>1.1 app.py — 应用入口与路由注册（602行）</h3>
+  <p>
+    FastAPI 应用定义，监听 <code>:8900</code>。职责：创建 <code>FastAPI()</code> 实例、注册 CORS 中间件和可选 API Key 鉴权中间件、
+    定义 30+ 路由函数、管理全站共享缓存字典。每个路由函数的通用模式：接收参数 → 校验 6 位代码 → 调用数据模块 → 包装为
+    <code>{"data": ...}</code> → 捕获异常转换为 HTTP 4xx/5xx。启动时调用 <code>pf.start_scheduler(1800)</code> 注册持仓后台刷新。
+  </p>
+
+  <h3>1.2 astock.py — A股全栈数据层</h3>
+  <p>
+    五层数据源封装，30+ 数据获取函数。核心设计：<strong>分级依赖</strong>——腾讯行情仅需标准库（永远可用）、
+    东财研报/公告仅需 requests（轻量必装）、akshare 和 mootdx 惰性导入（缺失时抛 <code>DependencyMissing</code>）。
+    关键函数：<code>tencent_quote()</code>（批量行情）、<code>full_valuation()</code>（完整估值）、
+    <code>eastmoney_reports()</code>（研报列表）、<code>kline()</code>（K线需 mootdx）、
+    <code>stock_news()</code>（新闻需 akshare）、<code>margin_trading()</code>（融资融券）、
+    <code>dragon_tiger_board()</code>（龙虎榜）、<code>industry_comparison()</code>（行业排名）。
+    所有东财请求通过 <code>em_get()</code> 统一发，内置 1s 限流间隔。
+  </p>
+
+  <h3>1.3 gstock.py — 美股/港股数据层</h3>
+  <p>
+    移植自 global-stock-data 的东财域内合规子集。核心设计：<strong>push2 优先、push2delay 降级</strong>——
+    首次请求走 push2.eastmoney.com，掉连后 latch 到 push2delay.eastmoney.com（延时行情，投研够用）。
+    提供：全球指数快照（道指/标普/纳指/恒生/恒生科技）、美港股个股行情 + 关键财务指标、股票代码搜索。
+    市场代码映射：105=NASDAQ、106=NYSE、116=HK、177=韩国。所有请求复用 <code>astock.em_get()</code> 的直连策略。
+  </p>
+
+  <h3>1.4 market.py — 市场情绪与板块资金流</h3>
+  <p>
+    全站共享缓存（5分钟 TTL），数据源故障空结果不缓存（下次请求直接重试）。提供四大接口：
+    <code>get_overview()</code>（市场总览：涨跌家数、大盘宽度、涨停跌停、题材投机）、
+    <code>get_short_term_emotion()</code>（短线情绪：连板梯队/最高连板/炸板率/封板率/晋级率）、
+    <code>get_turnover_top()</code>（全市场成交额榜 Top20，push2/push2delay 同款降级）、
+    <code>get_global_indices()</code>（全球指数快照，用于判断隔夜外围走势）。
+    市场情绪数据通过 akshare 惰性导入，缺失时降级返回空字典。
+  </p>
+
+  <h3>1.5 newsradar.py — 资讯雷达</h3>
+  <p>
+    移植自 investment-news，纯标准库 + 线程池，零 key、零个股字段。12 赛道 108 公开 RSS 源配置文件
+    <code>news_sources.json</code>。工作流：<code>get_radar(force=False)</code> 读本地 JSON 缓存（无缓存返回赛道骨架）、
+    <code>fetch_radar()</code> 线程池并发抓全部源（约 20-40s）→ 合规过滤（赌/预测市场/加密/色情关键词黑名单）
+    → 按赛道分组、时间倒序 → 写缓存。AI 今日要点不在此模块——复用前端 /api/chat 由用户自己的模型提炼。
+  </p>
+
+  <h3>1.6 portfolio.py — 持仓管理</h3>
+  <p>
+    本地 JSON 持久化（<code>.cache/portfolio.json</code>，gitignore、不上传）。核心设计：
+    同代码多次录入按加权平均成本合并、原子写入（先写 .tmp 再 os.replace 防并发读到半截 JSON）、
+    threading.Lock 串行化。支持持仓增删、已清仓记录、手动刷新和后台 30 分钟定时刷新（<code>start_scheduler()</code>）。
+    实时盈亏通过行情叠加计算（红涨绿跌，A股口径）。
+  </p>
+
+  <h3>1.7 chat.py — AI 对话层</h3>
+  <p>
+    OpenAI 兼容 function-calling 循环，兼容豆包/DeepSeek/任意兼容端点。核心机制：
+    定义 7 个工具（<code>TOOLS</code> 列表：query_quote/query_valuation/query_reports/query_news/query_global_stock/
+    query_market_overview/query_short_term_emotion），每个工具对应 astock/gstock/market 的具体函数。
+    投研五维分析框架（估值/资金面/财报质量/行业景气/事件催化）焊进 SYSTEM_PROMPT。
+    最大 6 轮工具调用防死循环，单次工具结果注入上限 6000 字符（控 token）。
+    SSRF 防护：禁止私有 IP、禁止非 80/443 端口。
+  </p>
+
+  <h3>1.8 cli_runtime.py — 订阅 CLI 运行时</h3>
+  <p>
+    检测并 spawn 本机已安装的 AI CLI（Claude Code/Qwen/DeepSeek/Codex），用用户自己的订阅额度作答。
+    四种 CLI 三种提示词投递方式：Claude 走 system-file（系统提示词写临时文件）、Qwen/Codex 走 stdin、
+    DeepSeek 走 arg（位置参数）。子进程在临时目录执行、300s 超时兜底、纯文本输出。
+    不参与 function-calling——订阅接入只适合"数据已在 context 里"的场景。
+  </p>
+
+  <h3>1.9 mcp_server.py — MCP 服务</h3>
+  <p>
+    纯标准库 JSON-RPC over stdio，复用 <code>chat.TOOLS</code> 定义自动生成 MCP 工具列表。
+    支持 <code>initialize</code>、<code>tools/list</code>、<code>tools/call</code> 三个方法。
+    挂进 Claude Code：<code>claude mcp add vibe-research -- python backend/mcp_server.py</code>。
+    工具返回纯客观数据，判断由调用方 agent 给出。
+  </p>
+
+  <h3>1.10 myreports.py — 研报管理</h3>
+  <p>
+    用户上传研报，Base64 JSON 传输（不引入 python-multipart 依赖）、存本地 <code>.cache/myreports/</code>。
+    元数据存 <code>index.json</code>，threading.Lock 防并发覆盖。白名单扩展名校验（pdf/doc/txt/csv/xlsx 等）、
+    单文件 25MB 上限。文件名关键词自动打行业标签（9 大类：人形机器人/光互联/HBM/AI算力/半导体/新能源/创新药/商业航天/电力电网），
+    未命中记"未分类"。
+  </p>
+
+  <!-- ====== 2. API 端点分组 ====== -->
+  <h2>2. API 端点分组速查</h2>
+
+  <h3>系统</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/health</code></td><td>GET</td><td>app.py</td><td>健康检查（不鉴权）</td></tr>
+  </table>
+
+  <h3>AI 对话</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/chat</code></td><td>POST</td><td>chat.py</td><td>流式 NDJSON，支持 API 接入和订阅 CLI 接入</td></tr>
+  </table>
+
+  <h3>市场总览（缓存 5 分钟）</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/market/overview</code></td><td>GET</td><td>market.py</td><td>市场情绪 + 板块资金流</td></tr>
+    <tr><td><code>/api/market/emotion</code></td><td>GET</td><td>market.py</td><td>短线情绪（连板梯队/炸板率/封板率）</td></tr>
+    <tr><td><code>/api/market/turnover-top</code></td><td>GET</td><td>market.py</td><td>全市场成交额榜 Top20</td></tr>
+    <tr><td><code>/api/global/indices</code></td><td>GET</td><td>market.py</td><td>全球指数快照（道指/标普/纳指/恒生）</td></tr>
+    <tr><td><code>/api/industry</code></td><td>GET</td><td>astock.py</td><td>全行业涨跌幅排名</td></tr>
+  </table>
+
+  <h3>A股数据 — 核心行情（仅标准库）</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/indices</code></td><td>GET</td><td>astock.py</td><td>A股大盘指数（上证/深证/创业板/沪深300）</td></tr>
+    <tr><td><code>/api/quote</code></td><td>GET</td><td>astock.py</td><td>批量实时行情（腾讯源，不封IP）</td></tr>
+  </table>
+
+  <h3>A股数据 — 估值与财务</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>缓存</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/valuation</code></td><td>GET</td><td>—</td><td>astock.py</td><td>完整估值：行情+一致预期+前向PE/PEG</td></tr>
+    <tr><td><code>/api/valuation/percentile</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>PE-TTM/PB 历史分位（近5年）</td></tr>
+    <tr><td><code>/api/financials</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>财务关键指标（同花顺源）</td></tr>
+    <tr><td><code>/api/finance</code></td><td>GET</td><td>—</td><td>astock.py</td><td>季报财务快照（需 mootdx）</td></tr>
+  </table>
+
+  <h3>A股数据 — 研报与公告</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>缓存</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/reports</code></td><td>GET</td><td>—</td><td>astock.py</td><td>个股研报列表（东财+PDF链接）</td></tr>
+    <tr><td><code>/api/announcements</code></td><td>GET</td><td>15分钟</td><td>astock.py</td><td>个股近期公告（东财源）</td></tr>
+    <tr><td><code>/api/news</code></td><td>GET</td><td>—</td><td>astock.py</td><td>个股新闻（需 akshare，501降级）</td></tr>
+    <tr><td><code>/api/disclosure</code></td><td>GET</td><td>—</td><td>astock.py</td><td>巨潮公告列表（需 akshare）</td></tr>
+  </table>
+
+  <h3>A股数据 — 资金面与筹码</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>缓存</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/kline</code></td><td>GET</td><td>—</td><td>astock.py</td><td>K线（需 mootdx）</td></tr>
+    <tr><td><code>/api/margin</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>融资融券明细（东财）</td></tr>
+    <tr><td><code>/api/block-trade</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>大宗交易记录</td></tr>
+    <tr><td><code>/api/holders</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>股东户数变化</td></tr>
+    <tr><td><code>/api/dividend</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>分红送转历史</td></tr>
+    <tr><td><code>/api/fund-flow</code></td><td>GET</td><td>15分钟</td><td>astock.py</td><td>120日主力资金流（push2his）</td></tr>
+    <tr><td><code>/api/dragon-tiger</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>龙虎榜上榜记录</td></tr>
+    <tr><td><code>/api/lockup</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>限售解禁日历</td></tr>
+  </table>
+
+  <h3>A股数据 — 板块与互动</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>缓存</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/blocks</code></td><td>GET</td><td>30分钟</td><td>astock.py</td><td>个股板块/概念归属</td></tr>
+    <tr><td><code>/api/hot-concepts</code></td><td>GET</td><td>15分钟</td><td>astock.py</td><td>热门概念命中</td></tr>
+    <tr><td><code>/api/investor-qa</code></td><td>GET</td><td>15分钟</td><td>astock.py</td><td>互动易问答</td></tr>
+    <tr><td><code>/api/info</code></td><td>GET</td><td>—</td><td>astock.py</td><td>个股基本面（需 akshare）</td></tr>
+  </table>
+
+  <h3>美股/港股</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/global/stock</code></td><td>GET</td><td>gstock.py</td><td>美股/港股个股行情+关键财务（symbol参数）</td></tr>
+  </table>
+
+  <h3>资讯雷达</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/radar</code></td><td>GET</td><td>newsradar.py</td><td>读缓存，无缓存返回赛道骨架</td></tr>
+    <tr><td><code>/api/radar/refresh</code></td><td>POST</td><td>newsradar.py</td><td>强制重抓全部 RSS 源（约20-40s）</td></tr>
+  </table>
+
+  <h3>持仓管理</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/portfolio</code></td><td>GET</td><td>portfolio.py</td><td>持仓+实时盈亏</td></tr>
+    <tr><td><code>/api/portfolio/holding</code></td><td>POST</td><td>portfolio.py</td><td>添加持仓（加权平均成本合并）</td></tr>
+    <tr><td><code>/api/portfolio/holding</code></td><td>DELETE</td><td>portfolio.py</td><td>删除持仓</td></tr>
+    <tr><td><code>/api/portfolio/close</code></td><td>POST</td><td>portfolio.py</td><td>记录已清仓</td></tr>
+    <tr><td><code>/api/portfolio/close</code></td><td>DELETE</td><td>portfolio.py</td><td>删除已清仓记录</td></tr>
+    <tr><td><code>/api/portfolio/refresh</code></td><td>POST</td><td>portfolio.py</td><td>手动刷新持仓盈亏</td></tr>
+  </table>
+
+  <h3>我的研报</h3>
+  <table class="compact">
+    <tr><th>端点</th><th>方法</th><th>模块</th><th>说明</th></tr>
+    <tr><td><code>/api/myreports</code></td><td>GET</td><td>myreports.py</td><td>研报列表</td></tr>
+    <tr><td><code>/api/myreports</code></td><td>POST</td><td>myreports.py</td><td>上传研报（Base64）</td></tr>
+    <tr><td><code>/api/myreports/file/{rid}</code></td><td>GET</td><td>myreports.py</td><td>下载/预览研报原文件</td></tr>
+    <tr><td><code>/api/myreports/{rid}</code></td><td>DELETE</td><td>myreports.py</td><td>删除研报</td></tr>
+  </table>
+
+  <!-- ====== 3. 缓存策略总览 ====== -->
+  <h2>3. 缓存策略总览</h2>
+  <table>
+    <tr><th>缓存层级</th><th>TTL</th><th>适用范围</th><th>实现方式</th><th>设计依据</th></tr>
+    <tr>
+      <td>行情级</td>
+      <td>5 分钟</td>
+      <td>市场情绪、板块资金流、全球指数、行业排名、成交额榜</td>
+      <td><code>market.py</code> 全站共享 <code>_CACHE</code> 字典</td>
+      <td>盘中变化快但 5 分钟内的抖动对投研无意义</td>
+    </tr>
+    <tr>
+      <td>公告级</td>
+      <td>15 分钟</td>
+      <td>个股公告、资金流、热门概念、互动易</td>
+      <td><code>app.py</code> 端点级 <code>_ANN_CACHE</code> / <code>_DC_CACHE</code></td>
+      <td>日级数据，但盘中可能有新公告</td>
+    </tr>
+    <tr>
+      <td>静态级</td>
+      <td>30 分钟</td>
+      <td>估值分位、财务摘要、融资融券、大宗交易、股东户数、分红、龙虎榜、解禁、板块归属</td>
+      <td><code>app.py</code> 端点级 <code>_PCT_CACHE</code> / <code>_FIN_CACHE</code> / <code>_DC_CACHE</code></td>
+      <td>季级静态数据，几乎不变，减少对东财限流请求</td>
+    </tr>
+  </table>
+  <p>
+    <strong>缓存键设计</strong>：行情级按功能 key（如 <code>"overview"</code>）缓存；个股级按 <code>(endpoint, code)</code> 二元组缓存，
+    确保不同代码的缓存互不干扰。<code>market.py</code> 还有一条特殊规则——数据源故障的空结果不缓存（<code>valid()</code> 判否），
+    下次请求直接重试，避免把故障结果锁定 5 分钟。
+  </p>
+
+  <!-- ====== 4. 中间件链 ====== -->
+  <h2>4. 中间件链</h2>
+  <p>每个 <code>/api/*</code> 请求经过两条中间件：</p>
+  <table>
+    <tr><th>顺序</th><th>中间件</th><th>类型</th><th>行为</th></tr>
+    <tr>
+      <td>1</td>
+      <td>CORS</td>
+      <td>Starlette 内置 <code>CORSMiddleware</code></td>
+      <td>默认全放行（<code>allow_origins=["*"]</code>）；公网部署时通过 <code>VR_ALLOW_ORIGINS</code> 收紧为白名单</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>可选鉴权</td>
+      <td>自定义 <code>@app.middleware("http")</code></td>
+      <td>设了 <code>VR_API_KEY</code> 环境变量后，所有 <code>/api/*</code> 请求（除 OPTIONS 和 health）必须带 <code>Authorization: Bearer &lt;key&gt;</code>；未设则开放</td>
+    </tr>
+  </table>
+
+  <!-- ====== 5. 依赖清单 ====== -->
+  <h2>5. 依赖清单</h2>
+  <table>
+    <tr><th>依赖</th><th>版本</th><th>用途</th><th>层级</th><th>缺失行为</th></tr>
+    <tr><td><code>fastapi</code></td><td>&ge; 0.110</td><td>Web 框架，路由注册、参数校验（Pydantic）、中间件</td><td>核心</td><td>服务无法启动</td></tr>
+    <tr><td><code>uvicorn</code></td><td>&ge; 0.29</td><td>ASGI 服务器，驱动 FastAPI 应用</td><td>核心</td><td>服务无法启动</td></tr>
+    <tr><td><code>requests</code></td><td>—</td><td>HTTP 客户端，直连东财/同花顺/巨潮 HTTP API</td><td>核心</td><td>服务无法启动</td></tr>
+    <tr><td><code>akshare</code></td><td>&ge; 1.10</td><td>金融数据接口（新闻/公告/基本面/市场情绪）</td><td>全栈</td><td>对应端点返回 501 + pip install 提示</td></tr>
+    <tr><td><code>mootdx</code></td><td>&ge; 0.10</td><td>通达信数据接口（K线/盘口/财务/F10）</td><td>全栈</td><td>对应端点返回 501 + pip install 提示</td></tr>
+    <tr><td><code>pandas</code></td><td>—</td><td>数据处理，同花顺一致预期 DataFrame 解析</td><td>全栈</td><td>对应端点返回 501 + pip install 提示</td></tr>
+  </table>
+
+  <!-- ====== 6. MCP 工具列表 ====== -->
+  <h2>6. MCP 暴露的工具</h2>
+  <p>MCP Server 将 chat.py 的 TOOLS 转为 MCP 格式，暴露以下 7 个数据查询工具给 Claude Code agent：</p>
+  <table class="compact">
+    <tr><th>工具名</th><th>对应模块</th><th>说明</th></tr>
+    <tr><td><code>query_quote</code></td><td>astock.py</td><td>批量 A 股实时行情</td></tr>
+    <tr><td><code>query_valuation</code></td><td>astock.py</td><td>完整估值（行情+一致预期+前向PE/PEG）</td></tr>
+    <tr><td><code>query_reports</code></td><td>astock.py</td><td>个股研报列表（含PDF链接）</td></tr>
+    <tr><td><code>query_news</code></td><td>astock.py</td><td>个股新闻（需 akshare）</td></tr>
+    <tr><td><code>query_global_stock</code></td><td>gstock.py</td><td>美股/港股个股行情+关键财务</td></tr>
+    <tr><td><code>query_market_overview</code></td><td>market.py</td><td>市场情绪+板块资金流</td></tr>
+    <tr><td><code>query_short_term_emotion</code></td><td>market.py</td><td>短线情绪（连板梯队/炸板率）</td></tr>
+  </table>
+
+</main>
+</body>
+</html>

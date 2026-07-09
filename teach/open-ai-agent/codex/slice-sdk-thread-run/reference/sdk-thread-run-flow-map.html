@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SDK Thread/Run 调用链速查表</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <section class="reference">
+        <h1>SDK Thread/Run 调用链速查表</h1>
+        <p class="meta">用途：快速定位 TypeScript SDK 和 Python SDK 中 thread/run 链路的每一层入口、关键函数、输入输出和异常处理。基于当前本地源码快照。</p>
+
+        <h2>层级概览 — TypeScript SDK</h2>
+        <table>
+          <thead>
+            <tr><th>层</th><th>入口文件</th><th>关键函数/方法</th><th>输入</th><th>输出</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1. Codex 构造</td>
+              <td><code>sdk/typescript/src/codex.ts</code></td>
+              <td><code>new Codex(options)</code></td>
+              <td><code>CodexOptions</code></td>
+              <td><code>Codex</code> 实例（含 <code>CodexExec</code>）</td>
+            </tr>
+            <tr>
+              <td>2. 创建 Thread</td>
+              <td><code>sdk/typescript/src/codex.ts</code>、<code>thread.ts</code></td>
+              <td><code>codex.startThread(options)</code></td>
+              <td><code>ThreadOptions</code></td>
+              <td><code>Thread</code> 实例（id=null）</td>
+            </tr>
+            <tr>
+              <td>3. 发起 run</td>
+              <td><code>sdk/typescript/src/thread.ts</code></td>
+              <td><code>thread.run(input)</code> → <code>runStreamedInternal()</code></td>
+              <td><code>Input</code> + <code>TurnOptions</code></td>
+              <td><code>AsyncGenerator&lt;ThreadEvent&gt;</code></td>
+            </tr>
+            <tr>
+              <td>4. 子进程通信</td>
+              <td><code>sdk/typescript/src/exec.ts</code></td>
+              <td><code>CodexExec.run(args)</code></td>
+              <td><code>CodexExecArgs</code></td>
+              <td><code>AsyncGenerator&lt;string&gt;</code> (JSONL 行)</td>
+            </tr>
+            <tr>
+              <td>5. 事件解析</td>
+              <td><code>sdk/typescript/src/thread.ts</code></td>
+              <td><code>JSON.parse(line) as ThreadEvent</code></td>
+              <td>JSONL 字符串</td>
+              <td><code>ThreadEvent</code> 联合类型</td>
+            </tr>
+            <tr>
+              <td>6. 结果聚合</td>
+              <td><code>sdk/typescript/src/thread.ts</code></td>
+              <td><code>thread.run()</code> 内 <code>for await</code> 循环</td>
+              <td>事件流</td>
+              <td><code>Turn {items, finalResponse, usage}</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>层级概览 — Python SDK</h2>
+        <table>
+          <thead>
+            <tr><th>层</th><th>入口文件</th><th>关键函数/方法</th><th>输入</th><th>输出</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1. Codex 构造</td>
+              <td><code>sdk/python/src/openai_codex/api.py</code></td>
+              <td><code>Codex.__init__()</code> → <code>CodexClient.start()</code></td>
+              <td><code>CodexConfig</code></td>
+              <td>已初始化的长连接客户端</td>
+            </tr>
+            <tr>
+              <td>2. 创建 Thread</td>
+              <td><code>sdk/python/src/openai_codex/api.py</code></td>
+              <td><code>codex.thread_start()</code> → <code>client.thread_start()</code></td>
+              <td>sandbox, model, cwd 等参数</td>
+              <td><code>Thread</code> 实例（含 id）</td>
+            </tr>
+            <tr>
+              <td>3. 发起 run</td>
+              <td><code>sdk/python/src/openai_codex/api.py</code></td>
+              <td><code>thread.run(input)</code> → <code>thread.turn(input)</code></td>
+              <td><code>RunInput</code></td>
+              <td><code>TurnHandle</code></td>
+            </tr>
+            <tr>
+              <td>4. turn/start RPC</td>
+              <td><code>sdk/python/src/openai_codex/client.py</code></td>
+              <td><code>client.turn_start(thread_id, input)</code></td>
+              <td>thread_id + wire_input</td>
+              <td><code>TurnStartResponse</code></td>
+            </tr>
+            <tr>
+              <td>5. 事件路由</td>
+              <td><code>sdk/python/src/openai_codex/client.py</code></td>
+              <td><code>_reader_loop()</code> → <code>_router.route_notification()</code></td>
+              <td>stdout JSON 行</td>
+              <td>按 turn_id 路由到专用队列</td>
+            </tr>
+            <tr>
+              <td>6. 结果收集</td>
+              <td><code>sdk/python/src/openai_codex/_run.py</code></td>
+              <td><code>_collect_turn_result(stream, turn_id)</code></td>
+              <td>通知流</td>
+              <td><code>TurnResult</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>ThreadEvent 类型速查 (TypeScript SDK)</h2>
+        <table>
+          <thead>
+            <tr><th>type 字段值</th><th>接口名</th><th>携带数据</th><th>消费方</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>thread.started</code></td><td><code>ThreadStartedEvent</code></td><td><code>thread_id: string</code></td><td>Thread 记录 _id</td></tr>
+            <tr><td><code>turn.started</code></td><td><code>TurnStartedEvent</code></td><td>无额外字段</td><td>UI 状态更新</td></tr>
+            <tr><td><code>item.started</code></td><td><code>ItemStartedEvent</code></td><td><code>item: ThreadItem</code></td><td>增量 UI 渲染</td></tr>
+            <tr><td><code>item.updated</code></td><td><code>ItemUpdatedEvent</code></td><td><code>item: ThreadItem</code></td><td>实时更新流式输出</td></tr>
+            <tr><td><code>item.completed</code></td><td><code>ItemCompletedEvent</code></td><td><code>item: ThreadItem</code></td><td>收集最终 item、捕获 finalResponse</td></tr>
+            <tr><td><code>turn.completed</code></td><td><code>TurnCompletedEvent</code></td><td><code>usage: Usage</code></td><td>记录 token 用量、结束流</td></tr>
+            <tr><td><code>turn.failed</code></td><td><code>TurnFailedEvent</code></td><td><code>error: ThreadError</code></td><td>抛出异常终止 run()</td></tr>
+            <tr><td><code>error</code></td><td><code>ThreadErrorEvent</code></td><td><code>message: string</code></td><td>流级致命错误</td></tr>
+          </tbody>
+        </table>
+
+        <h2>CodexExec CLI 参数映射 (TypeScript SDK)</h2>
+        <table>
+          <thead>
+            <tr><th>CodexExecArgs 字段</th><th>CLI 参数形式</th><th>示例</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>model</code></td><td><code>--model &lt;name&gt;</code></td><td><code>--model gpt-5</code></td></tr>
+            <tr><td><code>sandboxMode</code></td><td><code>--sandbox &lt;mode&gt;</code></td><td><code>--sandbox workspace-write</code></td></tr>
+            <tr><td><code>workingDirectory</code></td><td><code>--cd &lt;path&gt;</code></td><td><code>--cd /home/user/project</code></td></tr>
+            <tr><td><code>threadId</code></td><td><code>resume &lt;id&gt;</code></td><td>追加在参数末尾</td></tr>
+            <tr><td><code>outputSchemaFile</code></td><td><code>--output-schema &lt;path&gt;</code></td><td>结构化输出 schema 文件路径</td></tr>
+            <tr><td><code>signal</code></td><td>spawn 的 <code>signal</code> 选项</td><td>AbortController.signal</td></tr>
+          </tbody>
+        </table>
+
+        <h2>异常路径一览</h2>
+        <table>
+          <thead>
+            <tr><th>异常</th><th>触发层</th><th>错误信息示例</th><th>排查方向</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>二进制缺失</td>
+              <td><code>findCodexPath()</code> (exec.ts)</td>
+              <td><code>Unable to locate Codex CLI binaries</code></td>
+              <td>检查 <code>@openai/codex</code> 及其 optional dependencies 是否完整安装</td>
+            </tr>
+            <tr>
+              <td>平台不支持</td>
+              <td><code>findCodexPath()</code> (exec.ts)</td>
+              <td><code>Unsupported platform: freebsd (x64)</code></td>
+              <td>确认 platform/arch 是否在 PLATFORM_PACKAGE_BY_TARGET 映射中</td>
+            </tr>
+            <tr>
+              <td>spawn 失败</td>
+              <td><code>spawn()</code> error 事件 (exec.ts)</td>
+              <td>ENOENT / EACCES 等系统错误</td>
+              <td>检查 binaryPath 是否存在且可执行</td>
+            </tr>
+            <tr>
+              <td>JSON 解析失败</td>
+              <td><code>runStreamedInternal()</code> (thread.ts)</td>
+              <td><code>Failed to parse item: ...</code></td>
+              <td>检查 Rust 侧输出的 JSONL 是否合法</td>
+            </tr>
+            <tr>
+              <td>子进程异常退出</td>
+              <td><code>CodexExec.run()</code> (exec.ts)</td>
+              <td><code>Codex Exec exited with code 1: ...</code></td>
+              <td>检查 stderr 输出；验证参数合法性</td>
+            </tr>
+            <tr>
+              <td>turn 执行失败</td>
+              <td><code>Thread.run()</code> (thread.ts)</td>
+              <td><code>Error(event.error.message)</code></td>
+              <td>检查 turn.failed 事件中携带的错误信息</td>
+            </tr>
+            <tr>
+              <td>进程 stdin 不可用</td>
+              <td><code>CodexExec.run()</code> (exec.ts)</td>
+              <td><code>Child process has no stdin</code></td>
+              <td>检查 spawn 配置是否有误</td>
+            </tr>
+            <tr>
+              <td>进程 stdout 不可用</td>
+              <td><code>CodexExec.run()</code> (exec.ts)</td>
+              <td><code>Child process has no stdout</code></td>
+              <td>检查 spawn 配置是否有误</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键环境变量</h2>
+        <table>
+          <thead>
+            <tr><th>变量</th><th>设置方</th><th>用途</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>CODEX_INTERNAL_ORIGINATOR_OVERRIDE</code></td><td>CodexExec (exec.ts)</td><td>固定为 <code>codex_sdk_ts</code>，标记调用来源为 TypeScript SDK</td></tr>
+            <tr><td><code>CODEX_API_KEY</code></td><td>用户通过 CodexOptions 传入</td><td>API 密钥认证</td></tr>
+          </tbody>
+        </table>
+
+        <h2>ThreadItem 类型速查 (TypeScript SDK)</h2>
+        <table>
+          <thead>
+            <tr><th>type 字段</th><th>接口名</th><th>含义</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>agent_message</code></td><td><code>AgentMessageItem</code></td><td>Agent 文本回复（自然语言或 JSON）</td></tr>
+            <tr><td><code>reasoning</code></td><td><code>ReasoningItem</code></td><td>Agent 推理摘要</td></tr>
+            <tr><td><code>command_execution</code></td><td><code>CommandExecutionItem</code></td><td>Shell 命令执行记录</td></tr>
+            <tr><td><code>file_change</code></td><td><code>FileChangeItem</code></td><td>文件变更补丁</td></tr>
+            <tr><td><code>mcp_tool_call</code></td><td><code>McpToolCallItem</code></td><td>MCP 工具调用</td></tr>
+            <tr><td><code>web_search</code></td><td><code>WebSearchItem</code></td><td>网络搜索请求</td></tr>
+            <tr><td><code>todo_list</code></td><td><code>TodoListItem</code></td><td>Agent 待办事项列表</td></tr>
+            <tr><td><code>error</code></td><td><code>ErrorItem</code></td><td>非致命错误 item</td></tr>
+          </tbody>
+        </table>
+
+        <p>
+          回到课程：<a href="../lessons/0001-flow-map.html">0001 链路地图</a>、<a href="../lessons/0002-main-path.html">0002 主路径</a>。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

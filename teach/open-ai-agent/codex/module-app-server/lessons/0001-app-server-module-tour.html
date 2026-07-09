@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App-server JSON-RPC 服务导览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">L1 · module-app-server · 15 分钟短课</div>
+  <h1>App-server 是富客户端和 core 之间的 JSON-RPC 边界</h1>
+  <p class="lead">本课只训练一个判断：当 IDE、桌面端或 SDK 发来一个方法名时，你能把它放到 app-server 的正确层次中，并知道下一步该读哪个源码文件。</p>
+  <div class="meta">
+    <span class="pill">学习目标：识别请求穿过的 4 层</span>
+    <span class="pill">主要来源：codex-rs/app-server/README.md</span>
+    <span class="pill">配套参考：<a href="../reference/app-server-overview.html">app-server overview</a></span>
+  </div>
+
+  <section>
+    <h2>1. 它负责什么</h2>
+    <p><code>codex app-server</code> 不是另一个 TUI，也不是模型执行核心。它是给富客户端使用的进程内服务：客户端通过 JSON-RPC 发送 <code>initialize</code>、<code>thread/start</code>、<code>turn/start</code>、<code>fs/readFile</code>、<code>mcpServer/tool/call</code> 等方法；服务端把这些请求转换为 Rust 内部调用，再把 <code>thread/started</code>、<code>turn/started</code>、<code>item/agentMessage/delta</code>、<code>turn/completed</code> 等通知流回客户端。</p>
+    <p>README 把交互抽象为三个核心原语：Thread 是一段对话，Turn 是一次用户输入到模型完成的回合，Item 是回合里的可持久化输入、输出、工具调用、文件变更和推理片段。这个抽象让富客户端可以做会话列表、继续对话、流式渲染、审批和工具状态，而不用直接嵌入 core 的内部结构。</p>
+  </section>
+
+  <section>
+    <h2>2. 它在整体架构的位置</h2>
+    <div class="diagram">富客户端
+  ↓ JSON-RPC over stdio / websocket / unix socket
+codex-app-server
+  ↓ typed request processors
+codex-core / config / thread-store / mcp / plugin / exec-server
+  ↓
+模型、文件系统、命令执行、插件与外部环境</div>
+    <p>从依赖看，<code>codex-app-server</code> 同时依赖 <code>codex-app-server-protocol</code>、<code>codex-app-server-transport</code> 和 <code>codex-core</code>。协议 crate 定义 wire 上能出现的对象；transport crate 管连接和帧；app-server 自己做配置加载、初始化门禁、请求分发、通知过滤和业务处理；真正的 agent 执行仍落到 core、thread store、MCP、插件和执行环境等 crate。</p>
+    <p>放回 L0 总图看，app-server 就是 <a href="../../00-overview/lessons/0001-project-map.html">项目地图</a> / <a href="../../00-overview/reference/00-overview.html">00-overview 参考</a> 中“富客户端 / SDK”与 Rust core 之间的边界层：客户端只依赖 JSON-RPC 方法、通知和能力声明，不直接持有 core 的内部对象。</p>
+  </section>
+
+  <section>
+    <h2>3. 请求穿过的四层</h2>
+    <p>读源码时先抓四层，不要从 API 清单开始背。</p>
+    <div class="filetree">codex-rs/app-server/src/
+├── main.rs                   ← CLI 参数：--listen、--session-source、strict config
+├── lib.rs                    ← runtime：transport acceptor、outbound router、processor loop
+├── message_processor.rs      ← JSON-RPC 反序列化、initialize gate、请求分发
+└── request_processors/       ← 各领域处理器
+    ├── thread_processor.rs   ← Thread 生命周期、列表、归档、恢复
+    ├── turn_processor.rs     ← turn/start、steer、interrupt、review
+    ├── fs_processor.rs       ← fs/readFile、writeFile、watch
+    ├── config_processor.rs   ← config/read、写配置、feature enablement
+    └── mcp_processor.rs      ← MCP 状态、资源读取、工具调用</div>
+    <p>入口在 <a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/main.rs"><code>main.rs</code></a>：解析 transport URL，默认 <code>stdio://</code>，然后调用 runtime。<a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/lib.rs"><code>lib.rs</code></a> 启动 transport acceptor、outbound router 和 processor loop；它把收到的 <code>JSONRPCMessage</code> 区分为 Request、Response、Notification、Error。<a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/message_processor.rs"><code>message_processor.rs</code></a> 负责把 JSON-RPC request 反序列化为 <code>ClientRequest</code>，先处理 <code>initialize</code>，再把已初始化请求路由到对应 processor。</p>
+  </section>
+
+  <section>
+    <h2>4. 一个最小调用序列</h2>
+    <p>客户端连接后必须先握手。下面是概念序列，字段已删减：</p>
+<pre><code class="language-json">{"id":0,"method":"initialize","params":{"clientInfo":{"name":"my_client","version":"0.1.0"}}}
+{"method":"initialized"}
+{"id":1,"method":"thread/start","params":{"cwd":"/repo"}}
+{"id":2,"method":"turn/start","params":{"threadId":"...","input":[{"type":"text","text":"hello"}]}}</code></pre>
+    <p><code>initialize</code> request 才决定服务端的 initialized 状态：它写入连接能力、客户端元数据和通知 opt-out，并触发初始化后的服务端动作。<code>initialized</code> notification 只是客户端生命周期确认；当前 notification 处理路径主要记录日志，不作为 <code>dispatch_initialized_client_request</code> 的门禁条件。</p>
+    <p>随后客户端继续读取服务端通知：先得到 thread 和 turn 的状态，再收到 item 级别的增量和完成事件。判断方法归属时，用前缀即可快速定位：<code>thread/*</code> 找 <code>ThreadRequestProcessor</code>，<code>turn/*</code> 找 <code>TurnRequestProcessor</code>，<code>fs/*</code> 找 <code>FsRequestProcessor</code>，<code>mcpServer/*</code> 找 <code>McpRequestProcessor</code>。如果方法在初始化前发送，processor 会返回 “Not initialized”；如果是实验方法但连接没有声明 experimental capability，也会被拒绝。</p>
+  </section>
+
+  <section class="panel">
+    <h3>检索练习</h3>
+    <p>不要回看上文，回答：如果客户端调用 <code>turn/start</code>，它依次经过哪四个层次？</p>
+    <p class="answer"><strong>参考答案：</strong>transport 收到 JSON-RPC 消息 → <code>lib.rs</code> 的 processor loop 将 Request 交给 <code>MessageProcessor</code> → <code>message_processor.rs</code> 检查初始化和实验能力后匹配 <code>ClientRequest::TurnStart</code> → <code>TurnRequestProcessor</code> 调用 core/thread 相关能力并通过 outgoing sender 流式发回通知。</p>
+    <p>如果你对某个阶段不确定，下一次可以直接追问 agent：“请带我读 <code>turn/start</code> 从 request 到 <code>turn/completed</code> 的源码链路”。</p>
+  </section>
+</main>
+</body>
+</html>

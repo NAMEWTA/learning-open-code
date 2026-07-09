@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 — MiniMax → OpenAI 兼容主路径追踪</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .route-block { text-align: center; margin: 20px 0; }
+  .route-block pre { display: inline-block; text-align: left; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 2 节 &middot; 预计 13 分钟</p>
+
+<h1>0002 — MiniMax → OpenAI 兼容主路径追踪</h1>
+
+<p class="objective"><strong>学习目标：</strong>能追踪 <code>provider="minimax"</code> 从配置字符串到最终 API 调用的完整 6 步链路，解释 <code>_PROVIDER_CONFIG</code> 的 base_url/API Key 解析机制和 <code>NormalizedChatOpenAI</code> 的响应归一化逻辑。</p>
+
+<h2>1. MiniMax 的 provider 身份：进入 8 合 1 通道</h2>
+
+<p>MiniMax 是国产大模型供应商，API 端点 <code>https://api.minimax.chat/v1</code> 兼容 OpenAI Chat Completions 协议。在 TradingAgents 的 provider 分类中，它属于 8 种 OpenAI 兼容供应商之一。整条链路从用户配置或 CLI 选择开始：</p>
+
+<div class="route-block">
+<pre>
+用户 CLI: 选择 MiniMax → M2.7-highspeed (quick)
+  │
+  ├─① llm_provider = "minimax"
+  │    quick_think_llm = "MiniMax-M2.7-highspeed"
+  │
+  └─② create_llm_client("minimax", "MiniMax-M2.7-highspeed")
+       │
+       └─③ "minimax" in _OPENAI_COMPATIBLE? → YES
+            from .openai_client import OpenAIClient
+            return OpenAIClient(model, base_url, provider="minimax", **kwargs)
+</pre>
+</div>
+
+<p>关键点：MiniMax 没有自己的 Client 类——它通过 <code>_OPENAI_COMPATIBLE</code> 元组匹配进入 <code>OpenAIClient</code> 通道，与 OpenAI、DeepSeek、xAI 等共享同一套代码。区分它们的唯一标记是构造时传入的 <code>provider="minimax"</code> 字符串。</p>
+
+<p>此时 <code>base_url</code> 参数通常为 <code>None</code>（除非用户配置了自定义代理），由 <code>get_llm()</code> 内部从 <code>_PROVIDER_CONFIG</code> 查表获取默认端点。</p>
+
+<h2>2. OpenAIClient.get_llm()：三阶段配置解析</h2>
+
+<p><code>get_llm()</code> 是 OpenAIClient 最核心的方法，将 provider 字符串转换为可用的 LangChain ChatModel 实例。它分三个阶段：</p>
+
+<p><strong>阶段一 —— Provider 元数据查表：</strong></p>
+
+<pre><code>_PROVIDER_CONFIG = {
+    "minimax": ("https://api.minimax.chat/v1", "MINIMAX_API_KEY"),
+    "xai":     ("https://api.x.ai/v1",         "XAI_API_KEY"),
+    "deepseek":("https://api.deepseek.com",     "DEEPSEEK_API_KEY"),
+    # ... 共 7 个非 OpenAI 的 provider
+}
+
+# get_llm() 内部:
+default_base, api_key_env = _PROVIDER_CONFIG["minimax"]
+llm_kwargs["base_url"] = self.base_url or default_base
+# → "https://api.minimax.chat/v1"</code></pre>
+
+<p>如果用户传了自定义 <code>base_url</code>（如企业代理网关），则优先生效；否则使用 provider 默认值。这允许在不改源码的情况下路由到自建代理。</p>
+
+<p><strong>阶段二 —— API Key 环境变量检索：</strong></p>
+
+<pre><code>api_key = os.environ.get("MINIMAX_API_KEY")
+if api_key:
+    llm_kwargs["api_key"] = api_key
+elif "api_key" not in self.kwargs:
+    raise RuntimeError(
+        "未找到 minimax 的 API Key。请在 .env 文件或环境变量中设置 "
+        "`MINIMAX_API_KEY`（例如 `MINIMAX_API_KEY=你的key`），设置后重启程序。"
+        "注意：minimax 用的是 MINIMAX_API_KEY，不是 OPENAI_API_KEY。"
+    )</code></pre>
+
+<p>这个错误提示是专门设计的——初学者常误以为所有 provider 都用 <code>OPENAI_API_KEY</code>，实际上每家有自己的环境变量名。Ollama 是例外（本地服务无需 Key，<code>api_key_env=None</code>）。</p>
+
+<p><strong>阶段三 —— ChatModel 类选择与实例化：</strong></p>
+
+<pre><code># 原生 OpenAI 有特殊处理，其他 provider 走标准路径
+if self.provider == "openai":
+    llm_kwargs["use_responses_api"] = True   # Responses API
+
+chat_cls = DeepSeekChatOpenAI if self.provider == "deepseek" \
+           else NormalizedChatOpenAI
+return chat_cls(**llm_kwargs)</code></pre>
+
+<p>MiniMax 不匹配任何特殊分支，进入默认的 <code>NormalizedChatOpenAI</code>，使用标准 Chat Completions 协议。<code>DeepSeekChatOpenAI</code> 是为 DeepSeek 独有思考模式定制的子类——这体现了"共性走基类，个性走子类"的设计原则。</p>
+
+<h2>3. NormalizedChatOpenAI：响应归一化层</h2>
+
+<p><code>NormalizedChatOpenAI</code> 继承自 LangChain 的 <code>ChatOpenAI</code>，覆写了两个方法：</p>
+
+<pre><code>class NormalizedChatOpenAI(ChatOpenAI):
+    def invoke(self, input, config=None, **kwargs):
+        return normalize_content(
+            super().invoke(input, config, **kwargs)
+        )
+
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        if method is None:
+            method = "function_calling"  # 强制不用 Responses API 解析路径
+        return super().with_structured_output(schema, method=method, **kwargs)</code></pre>
+
+<p><code>invoke()</code> 覆写是防御性的——虽然 MiniMax 当前返回纯字符串，但一旦它升级为返回 <code>[{"type":"text","text":"..."}]</code> 格式，<code>normalize_content()</code> 会自动提取拼接，无需改任何上游代码。</p>
+
+<p><code>with_structured_output()</code> 覆写将 <code>method</code> 默认值强制设为 <code>"function_calling"</code>（而非 langchain-openai 默认的 <code>"json_mode"</code>），避免走 Responses API 的解析路径——该路径在 langchain-openai 中存在 Pydantic 序列化警告。这是一个工程实践级别的防御措施。</p>
+
+<h2>4. 端到端追踪：从字符串到 API 响应的 6 步</h2>
+
+<p>将前三节串起来，一次完整的 MiniMax LLM 调用经过 6 个步骤：</p>
+
+<div class="route-block">
+<pre>
+① 配置读取
+   llm_provider="minimax" + model="MiniMax-M2.7-highspeed"
+   ↓
+② 工厂路由
+   create_llm_client("minimax", "MiniMax-M2.7-highspeed")
+   → OpenAIClient(model, base_url=None, provider="minimax")
+   ↓
+③ 客户端配置
+   client.get_llm()
+   → _PROVIDER_CONFIG["minimax"] → base_url + MINIMAX_API_KEY
+   → NormalizedChatOpenAI(model=..., base_url=..., api_key=...)
+   ↓
+④ 模型校验
+   client.validate_model() → validators.validate_model("minimax", ...)
+   → MODEL_CATALOG["minimax"] 白名单查表 → True/False
+   ↓
+⑤ LLM 调用
+   llm.invoke(messages)
+   → POST https://api.minimax.chat/v1/chat/completions
+   → MiniMax 云端推理
+   ↓
+⑥ 响应归一化
+   normalize_content(response)
+   → 提取 text 块 → 返回纯字符串给上游 Agent
+</pre>
+</div>
+
+<p>这 6 步覆盖了从配置字符串到可用 response 的全路径。如果要替换为其他 provider（如 qwen），只需改步骤①的 provider 字符串——步骤②-⑥自动适配，因为 <code>_PROVIDER_CONFIG</code> 中已有 qwen 的 base_url 和 DASHSCOPE_API_KEY 映射。这正是工厂 + 注册表模式的威力。</p>
+
+<!-- ──────────────────────────────────────────── -->
+<div class="quiz">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong>MiniMax 在 <code>_PROVIDER_CONFIG</code> 中对应的 base_url 和 API Key 环境变量名分别是什么？</p>
+<p><strong>问题 2：</strong>如果用户想通过自己的代理网关 <code>https://proxy.example.com/v1</code> 访问 MiniMax，应该传什么参数？这个参数在 <code>get_llm()</code> 中如何与默认值交互？</p>
+<p><strong>问题 3：</strong><code>NormalizedChatOpenAI</code> 和 <code>DeepSeekChatOpenAI</code> 的分叉点在哪里？为什么 MiniMax 走 Normalized 分支而 DeepSeek 走专属子类？</p>
+
+<div class="answer" style="margin-top:16px;">
+<strong>参考答案</strong><br>
+<strong>1：</strong>base_url = <code>https://api.minimax.chat/v1</code>，API Key 环境变量 = <code>MINIMAX_API_KEY</code>。<br>
+<strong>2：</strong>传 <code>base_url="https://proxy.example.com/v1"</code> 给 <code>create_llm_client()</code>。在 <code>get_llm()</code> 中，<code>self.base_url or default_base</code> 的 or 短路逻辑使显式传入的值优先于 provider 默认值。<br>
+<strong>3：</strong>分叉点在 <code>get_llm()</code> 的最后一行：<code>chat_cls = DeepSeekChatOpenAI if self.provider == "deepseek" else NormalizedChatOpenAI</code>。DeepSeek 需要专属子类处理 thinking-mode 的 reasoning_content 往返传播和 deepseek-reasoner 禁用 function calling；MiniMax 没有这些特殊需求，走通用路径即可。
+</div>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>关联课程：</strong><a href="0001-flow-map.html">0001 — Provider 路由全貌地图</a> · <a href="../../module-llm-clients/lessons/0001-llm-clients-module-tour.html">L1 — LLM 客户端模块总览</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问 MiniMax API 细节、其他 provider 的差异，或如何新增一个 provider。
+</p>
+
+</div>
+</main>
+</body>
+</html>

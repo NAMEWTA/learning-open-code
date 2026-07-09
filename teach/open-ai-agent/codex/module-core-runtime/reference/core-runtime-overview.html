@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Core Runtime L1 参考地图</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <section class="reference">
+        <h1>Core Runtime L1 参考地图</h1>
+        <p class="meta">用途：快速定位 `codex-core` 的职责、公开接口、内部分层、关键依赖与后续 L2/L3 候选。事实来源来自当前本地源码快照。</p>
+
+        <h2>模块职责</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>职责</th>
+              <th>说明</th>
+              <th>主要源码</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>线程生命周期</td>
+              <td>创建、恢复、fork、subagent、线程列表、元数据更新、线程关闭。</td>
+              <td><span class="where">codex-rs/core/src/thread_manager.rs</span>、<span class="where">codex-rs/core/src/codex_thread.rs</span></td>
+            </tr>
+            <tr>
+              <td>请求与事件通道</td>
+              <td>接收 `Op`，产出 `Event` / `EventMsg`，维持 submission 与 event 的相关 id。</td>
+              <td><span class="where">codex-rs/protocol/src/protocol.rs</span></td>
+            </tr>
+            <tr>
+              <td>Session/Turn 编排</td>
+              <td>维护 session 状态、active turn、输入队列、turn context、context window、MCP runtime 与 rollout。</td>
+              <td><span class="where">codex-rs/core/src/session/</span></td>
+            </tr>
+            <tr>
+              <td>任务类型</td>
+              <td>统一普通 turn、review、compact、用户 shell 命令的异步任务生命周期。</td>
+              <td><span class="where">codex-rs/core/src/tasks/</span></td>
+            </tr>
+            <tr>
+              <td>模型上下文与后端</td>
+              <td>构造 model-visible fragments，管理 provider/auth/streaming，会把模型响应映射成 turn item。</td>
+              <td><span class="where">codex-rs/core/src/context/</span>、<span class="where">codex-rs/core/src/client.rs</span>、<span class="where">codex-rs/core/src/event_mapping.rs</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>整体位置</h2>
+        <div class="diagram">
+          <pre>入口层：TUI / exec / app-server / SDK
+        ↓
+公共 API：core-api re-export ThreadManager、CodexThread、Op、EventMsg 等
+        ↓
+运行时：codex-core 管理 thread、session、turn、context、task、client
+        ↓
+边界 crate：protocol、tools、mcp、skills、config、sandboxing、model-provider、rollout、state</pre>
+        </div>
+        <p>
+          读源码时优先确认“这是公共合同、运行时编排，还是边界能力”。公共合同属于 `codex-rs/protocol/src/`；面向外部调用者的窄门面属于 `codex-rs/core-api/src/lib.rs`；运行时状态和调度属于 `codex-rs/core/src/`；工具、沙箱、模型目录、MCP、skills、配置等不要强行归入 core。需要回到全局视角时，先看 <a href="../../00-overview/reference/00-overview.html">L0 总览参考</a>。
+        </p>
+
+        <h2>对外接口与公共类型清单</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>类型或函数</th>
+              <th>来自</th>
+              <th>阅读用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ThreadManager</code>、<code>StartThreadOptions</code>、<code>NewThread</code>、<code>ForkSnapshot</code></td>
+              <td><code>codex-rs/core/src/thread_manager.rs</code></td>
+              <td>线程创建、恢复、fork、subagent 和共享服务装配。</td>
+            </tr>
+            <tr>
+              <td><code>CodexThread</code>、<code>ThreadConfigSnapshot</code>、<code>CodexThreadSettingsOverrides</code></td>
+              <td><code>codex-rs/core/src/codex_thread.rs</code></td>
+              <td>提交请求、读取事件、注入当前 turn、读取配置快照、操作后台终端。</td>
+            </tr>
+            <tr>
+              <td><code>Op</code>、<code>Event</code>、<code>EventMsg</code>、<code>SessionConfiguredEvent</code></td>
+              <td><code>codex-rs/protocol/src/protocol.rs</code></td>
+              <td>跨 TUI、app-server、SDK 和 core 的稳定消息合同。</td>
+            </tr>
+            <tr>
+              <td><code>UserInput</code>、<code>ResponseItem</code>、<code>PermissionProfile</code>、<code>AskForApproval</code></td>
+              <td><code>codex-rs/protocol/src/</code></td>
+              <td>用户输入、模型项、权限和审批策略的共享结构。</td>
+            </tr>
+            <tr>
+              <td><code>ModelClient</code>、<code>ModelClientSession</code></td>
+              <td><code>codex-rs/core/src/client.rs</code></td>
+              <td>session-scoped provider/auth 状态和 turn-scoped streaming 请求。</td>
+            </tr>
+            <tr>
+              <td><code>TurnContext</code></td>
+              <td><code>codex-rs/core/src/session/turn_context.rs</code></td>
+              <td>单个 turn 的模型、环境、权限、MCP、skills、动态工具、telemetry 快照。</td>
+            </tr>
+            <tr>
+              <td><code>parse_turn_item</code></td>
+              <td><code>codex-rs/core/src/event_mapping.rs</code></td>
+              <td>把 Responses API item 转为 UI/app-server 可展示的 turn item。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>内部分层结构</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>目录或文件</th>
+              <th>职责边界</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>导出面</td>
+              <td><span class="where">codex-rs/core/src/lib.rs</span></td>
+              <td>显式 re-export core 对外类型，并把多数实现模块保持私有。</td>
+            </tr>
+            <tr>
+              <td>线程管理</td>
+              <td><span class="where">codex-rs/core/src/thread_manager.rs</span>、<span class="where">codex-rs/core/src/codex_thread.rs</span></td>
+              <td>外部入口持有 `Arc&lt;CodexThread&gt;`，内部绑定到 `Session` 和 event channel。</td>
+            </tr>
+            <tr>
+              <td>Session 状态</td>
+              <td><span class="where">codex-rs/core/src/session/session.rs</span>、<span class="where">codex-rs/core/src/session/mod.rs</span></td>
+              <td>保存配置、权限、环境、服务、输入队列、active turn 和 lifecycle hooks。</td>
+            </tr>
+            <tr>
+              <td>Turn 构造</td>
+              <td><span class="where">codex-rs/core/src/session/turn.rs</span>、<span class="where">codex-rs/core/src/session/turn_context.rs</span></td>
+              <td>构造模型请求上下文，执行普通 turn，追踪 token/context window。</td>
+            </tr>
+            <tr>
+              <td>任务抽象</td>
+              <td><span class="where">codex-rs/core/src/tasks/mod.rs</span></td>
+              <td>`SessionTask` 统一 run/abort 生命周期，具体任务分布在 regular/review/compact/user_shell。</td>
+            </tr>
+            <tr>
+              <td>上下文片段</td>
+              <td><span class="where">codex-rs/core/src/context/</span></td>
+              <td>所有 model-visible fragment 的定义区。AGENTS.md 要求这些片段必须 bounded 且有 hard cap。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键依赖边界</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>依赖组</th>
+              <th>代表 crate</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>协议与配置</td>
+              <td><code>codex-protocol</code>、<code>codex-config</code>、<code>codex-features</code></td>
+              <td>跨模块类型、配置分层、feature flag，不应私藏在 core。</td>
+            </tr>
+            <tr>
+              <td>模型与认证</td>
+              <td><code>codex-api</code>、<code>codex-model-provider</code>、<code>codex-login</code></td>
+              <td>provider 解析、认证、Responses API transport 与 fallback。</td>
+            </tr>
+            <tr>
+              <td>工具与安全</td>
+              <td><code>codex-tools</code>、<code>codex-sandboxing</code>、<code>codex-execpolicy</code></td>
+              <td>工具 schema、命令执行、审批和平台 sandbox 边界。</td>
+            </tr>
+            <tr>
+              <td>扩展与上下文</td>
+              <td><code>codex-mcp</code>、<code>codex-core-skills</code>、<code>codex-core-plugins</code>、<code>codex-context-fragments</code></td>
+              <td>MCP、skills、plugins 和上下文片段抽象。</td>
+            </tr>
+            <tr>
+              <td>持久化与状态</td>
+              <td><code>codex-rollout</code>、<code>codex-thread-store</code>、<code>codex-state</code></td>
+              <td>会话 JSONL/SQLite、线程元数据和状态数据库。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>简单调用示例</h2>
+        <div class="codeblock">
+          <pre><code class="language-rust">let new_thread = thread_manager.start_thread(config).await?;
+let thread = new_thread.thread;
+
+let submission_id = thread.submit(Op::from(vec![UserInput::Text {
+    text: "Summarize this repository".to_string(),
+    text_elements: Vec::new(),
+}])).await?;
+
+loop {
+    let event = thread.next_event().await?;
+    if matches!(event.msg, EventMsg::TurnComplete(_)) {
+        break;
+    }
+}</code></pre>
+        </div>
+        <p>
+          这段示例只表达调用形状。真实 app-server 和 TUI 还会处理 trace、client message id、settings overrides、审批响应、工具事件、token usage、thread store 与关闭流程。
+        </p>
+
+        <h2>后续 L2/L3 候选</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层级</th>
+              <th>候选主题</th>
+              <th>建议入口</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>L2</td>
+              <td>interactive-turn：TUI 提交一次用户输入到 core，再流式渲染事件。</td>
+              <td><code>CodexThread::submit</code>、<code>Session::spawn_task</code>、<code>RegularTask</code></td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>app-server-turn：JSON-RPC thread/turn API 如何驱动同一套 core。</td>
+              <td><code>core-api</code>、<code>app-server</code>、<code>protocol::EventMsg</code></td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>tool-call-execution：模型工具调用如何进入 tools、sandboxing 和审批。</td>
+              <td><code>codex-rs/core/src/tools/</code>、<code>codex-rs/tools</code>、<code>exec_policy</code></td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>skill-activation：skills 如何被发现、预算化并注入 model context。</td>
+              <td><code>codex-rs/core/src/skills.rs</code>、<code>codex-rs/core/src/context/available_skills_instructions.rs</code></td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>session-resume-fork：rollout、thread store 与 fork snapshot 的恢复链路。</td>
+              <td><code>codex-rs/core/src/thread_manager.rs</code>、<code>codex-rs/core/src/session/rollout_reconstruction.rs</code></td>
+            </tr>
+            <tr>
+              <td>L3</td>
+              <td>Core API 参考：逐项整理 `core-api/src/lib.rs` re-export 的公共类型。</td>
+              <td><code>codex-rs/core-api/src/lib.rs</code></td>
+            </tr>
+            <tr>
+              <td>L3</td>
+              <td>Protocol 类型速查：`Op`、`EventMsg`、权限、用户输入、turn item。</td>
+              <td><code>codex-rs/protocol/src/protocol.rs</code>、<code>codex-rs/protocol/src/items.rs</code>、<code>codex-rs/protocol/src/models.rs</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>关联课程：<a href="../lessons/0001-core-runtime-module-tour.html">0001 Core Runtime 模块导览</a>。</p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — CLI 命令执行链路全景地图</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .stage { border: 1px solid #dfe5ec; border-radius: 8px; padding: 14px 18px; margin: 16px 0; }
+  .stage h3 { margin: 0 0 8px; font-size: 1.02rem; }
+  .stage .file { color: #607086; font-size: 0.88rem; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 1 节 &middot; 预计 12 分钟</p>
+
+<h1>0001 — CLI 命令执行链路全景地图</h1>
+
+<p class="objective"><strong>学习目标：</strong>能画出 CLI 命令执行的 6 阶段链路图，说出每阶段的关键函数和所属源文件，理解跨文件调用关系。</p>
+
+<h2>1. 链路 6 阶段总览</h2>
+
+<p>用户在终端输入 <code>tradingagents analyze</code> 后，CLI 模块按固定顺序执行 6 个阶段。下图标注了每阶段的关键函数和所在文件：</p>
+
+<div class="filetree">
+┌─ 阶段 1: 入口派发 ─────────────────────────────────────┐
+│  cli/main.py:app()                    Typer 解析命令      │
+│  cli/main.py:analyze()                处理 --checkpoint   │
+│       │                                                  │
+│       ▼                                                  │
+│  cli/main.py:run_analysis()  ← 所有后续阶段的调度中心     │
+└─────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌─ 阶段 2: 交互式输入 ────────────────────────────────────┐
+│  cli/main.py:get_user_selections()    8 步引导编排        │
+│  cli/utils.py:get_ticker()           ticker 输入+安全校验 │
+│  cli/utils.py:select_analysts()      分析师多选           │
+│  cli/utils.py:select_llm_provider()  10 种 provider 选择  │
+│  cli/utils.py:select_*_thinking_agent()  深浅 LLM 引擎    │
+│  cli/utils.py:ask_output_language()  12 种语言选择        │
+│  cli/announcements.py                公告拉取与展示        │
+└─────────────────────────────────────────────────────────┘
+       │ 返回 selections dict
+       ▼
+┌─ 阶段 3: 配置组装 ─────────────────────────────────────┐
+│  cli/main.py:run_analysis()          合并 DEFAULT_CONFIG  │
+│  tradingagents/default_config.py     DEFAULT_CONFIG 基座  │
+│  cli/config.py                       CLI_CONFIG 常量      │
+│  cli/models.py                       AnalystType 枚举     │
+└─────────────────────────────────────────────────────────┘
+       │ 得到 config dict
+       ▼
+┌─ 阶段 4: 图与界面初始化 ───────────────────────────────┐
+│  cli/stats_handler.py:StatsCallbackHandler  LLM/Tool 统计 │
+│  tradingagents.graph:TradingAgentsGraph()  图实例化       │
+│  cli/main.py:MessageBuffer.init_for_analysis()  状态初始化│
+│  cli/main.py:create_layout()            Rich 四区布局     │
+└─────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌─ 阶段 5: 流式执行 ─────────────────────────────────────┐
+│  graph.propagator.create_initial_state()   初始状态       │
+│  graph.graph.stream()                     LangGraph 流式  │
+│  cli/main.py:classify_message_type()      消息分类        │
+│  cli/main.py:update_analyst_statuses()    Agent 状态推进  │
+│  cli/main.py:update_display()             Rich Live 渲染  │
+│  MessageBuffer: 消息缓冲 + 报告累积 + 去重               │
+└─────────────────────────────────────────────────────────┘
+       │ 得到 final_state
+       ▼
+┌─ 阶段 6: 结果保存与展示 ───────────────────────────────┐
+│  cli/main.py:save_report_to_disk()   5 级目录 + MD 写入   │
+│  cli/main.py:display_complete_report() Rich Panel 渲染    │
+│  graph.process_signal()               最终信号处理         │
+│  StatsCallbackHandler.get_stats()     统计摘要输出         │
+└─────────────────────────────────────────────────────────┘
+</div>
+
+<h2>2. 跨文件调用关系</h2>
+
+<p>CLI 模块的文件职责按调用层次分为三层。理解这个分层有助于快速定位代码：</p>
+
+<table>
+  <tr><th>层次</th><th>文件</th><th>职责</th><th>被谁调用</th></tr>
+  <tr>
+    <td>调度层</td>
+    <td><code>cli/main.py</code></td>
+    <td>Typer 入口 + 8 步编排 + 流式循环 + 结果保存</td>
+    <td>用户终端 / 根目录 <code>main.py</code></td>
+  </tr>
+  <tr>
+    <td>交互层</td>
+    <td><code>cli/utils.py</code></td>
+    <td>questionary 交互式提示函数（ticker/日期/分析师/LLM 等）</td>
+    <td><code>cli/main.py:get_user_selections()</code></td>
+  </tr>
+  <tr>
+    <td>辅助层</td>
+    <td><code>cli/config.py</code><br><code>cli/models.py</code><br><code>cli/announcements.py</code><br><code>cli/stats_handler.py</code></td>
+    <td>配置常量、类型枚举、公告拉取、LLM/Tool 统计回调</td>
+    <td><code>cli/main.py:run_analysis()</code></td>
+  </tr>
+</table>
+
+<p>唯一跨模块边界是阶段 5：<code>cli/main.py</code> 调用 <code>tradingagents.graph.TradingAgentsGraph</code> 的 <code>propagate</code> 相关方法。这是 CLI 层与 Graph 层的唯一接触点——所有业务逻辑封装在 Graph 内部，CLI 只负责参数传入和结果渲染。</p>
+
+<h2>3. 两条入口路径</h2>
+
+<p>项目提供两种启动方式，最终都汇聚到同一个 Graph 实例：</p>
+
+<div class="decision-box">
+  <strong>路径 A：脚本模式（根目录 main.py）</strong>
+  <code>main.py</code> 直接创建 <code>TradingAgentsGraph(debug=True, config=config)</code>，调用 <code>ta.propagate("NVDA", "2024-05-10")</code>。跳过所有交互步骤，适合 IDE 调试和脚本化批量分析。
+</div>
+
+<div class="decision-box">
+  <strong>路径 B：CLI 模式（cli/main.py）</strong>
+  <code>tradingagents analyze</code> 命令通过 Typer 解析，进入 <code>run_analysis()</code>，先收集用户输入再初始化 Graph。包含完整的 8 步交互引导、流式展示和报告保存。
+</div>
+
+<p>本节后续课程聚焦路径 B（CLI 模式），这是生产环境的主入口。</p>
+
+<h2>4. 消息状态机</h2>
+
+<p><code>MessageBuffer</code> 是流式执行阶段的中央状态管理器，维护四类数据：<strong>agent_status</strong>（Agent 完成进度）、<strong>report_sections</strong>（报告段落累积）、<strong>messages</strong>（消息日志 queue）、<strong>tool_calls</strong>（工具调用记录）。</p>
+
+<p>Agent 状态转换由 <code>update_analyst_statuses()</code> 驱动：检测 chunk 中 report 字段 → 标记对应 Analyst 为 completed → 激活下一个为 in_progress → 全部完成则激活 Bull Researcher。整个转换链为：Analysts → Research → Trader → Risk → Portfolio，无需外部状态机——仅靠 chunk 内容和当前 status 即可推进。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>CLI 命令执行的 6 个阶段中，哪个阶段是 CLI 层与 Graph 层的唯一接触点？</li>
+    <li><code>cli/utils.py</code> 在调用层次中属于哪一层？它主要被哪个函数调用？</li>
+    <li>脚本模式（main.py）和 CLI 模式（cli/main.py）的根本区别是什么？</li>
+    <li>MessageBuffer 维护了哪四类数据？Agent 状态转换由哪个函数驱动？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> 阶段 5（流式执行）。CLI 通过 <code>graph.graph.stream()</code> 调用 LangGraph，所有业务逻辑封装在 Graph 内部。</p>
+      <p><strong>2.</strong> 交互层，主要被 <code>cli/main.py</code> 的 <code>get_user_selections()</code> 调用，该函数编排 8 步交互流程。</p>
+      <p><strong>3.</strong> 脚本模式跳过交互步骤，直接硬编码参数调用 <code>propagate()</code>，适合 IDE 调试；CLI 模式通过 Typer + questionary 收集用户输入后再初始化 Graph，适合终端使用。</p>
+      <p><strong>4.</strong> agent_status、report_sections、messages、tool_calls。状态转换由 <code>update_analyst_statuses()</code> 驱动。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>下一节：</strong><a href="0002-main-path.html">0002 — 输入→分析→保存主成功路径</a> —— 从 selections dict 到 complete_report.md 的数据流转全追踪。<br>
+  <strong>前置课程：</strong><a href="../../module-cli/lessons/0001-cli-module-tour.html">L1 CLI 模块总览</a> —— 8 步交互流程图和 5 级报告目录结构。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的调用关系。
+</p>
+
+</div>
+</main>
+</body>
+</html>

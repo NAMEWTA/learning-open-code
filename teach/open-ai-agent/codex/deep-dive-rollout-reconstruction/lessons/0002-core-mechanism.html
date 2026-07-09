@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>核心机制：enumerate().rev() 反向扫描算法逐行拆解</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .alg-step {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>反向扫描算法的逐步拆解</h1>
+    <p class="meta">学习目标：逐行理解 <code>reconstruct_history_from_rollout()</code> 的枚举反向扫描、三条件提前终止、分段累积和正向 replay 四阶段流程。</p>
+    <p class="meta">前置：<a href="0001-problem-frame.html">问题框架——JSONL 与 SQLite 双轨制</a></p>
+    <p class="meta">参考：<a href="../reference/rollout-reconstruction-notes.html">反向重建快速参考</a></p>
+  </header>
+
+  <section>
+    <h2>1. 算法总览：为什么是反向扫描？</h2>
+    <p>Resume 只关心<em>最新的</em>状态。正向扫描意味着读完整个文件才能找到最后一个 TurnContext，而反向扫描一旦发现"足够新"的信息就可以提前终止。核心循环只有一行：</p>
+    <pre><code>for (index, item) in rollout_items.iter().enumerate().rev() {</code></pre>
+    <p><code>enumerate()</code> 提供行号索引，用于后续切分 <code>rollout_suffix</code>（Compaction 之后的那一段）。<code>rev()</code> 反转迭代方向，从最新行往最旧行扫描。整个算法可以拆为四个阶段：</p>
+    <div class="diagram">阶段1（反向扫描）: 从 JSONL 末尾向头部迭代每个 RolloutItem
+    │
+    ├─ 遇到 Compaction? → 记录 replacement_history + window 信息
+    ├─ 遇到 TurnStarted? → 触发 finalize_active_segment（分段累积完成）
+    ├─ 遇到 TurnContext? → 记录 previous_turn_settings + reference_context_item
+    ├─ 遇到 ThreadRolledBack? → 增加 pending_rollback_turns 计数
+    └─ 遇到 ResponseItem / InterAgentCommunication? → 标记 user_turn 边界
+    │
+    阶段2（提前终止）: 三条件同时满足 → break
+    │
+    阶段3（正向 replay rollout_suffix）: 用 ContextManager 重建完整 history
+    │
+    阶段4（正向 replay world_state）: 按时间顺序应用 snapshot + patches</div>
+
+    <p>反向扫描的核心洞察是：<strong>越新的 Compaction 携带越完整的 replacement_history</strong>——一旦在反向扫描中找到某个 Compaction 的 <code>replacement_history</code>，它之前（更旧的）所有 ResponseItem 都可以安全丢弃。</p>
+  </section>
+
+  <section>
+    <h2>2. 阶段 1：反向扫描与分段累积</h2>
+    <p>反向扫描并非每行独立处理——它维护一个 <code>ActiveReplaySegment</code>，将相邻的 rollout items 按 turn 边界分组。一个 segment 从 <code>TurnStarted</code> 到下一个 <code>TurnStarted</code>（反向即从 <code>TurnComplete</code>/<code>TurnAborted</code> 遇到 <code>TurnStarted</code> 为止）。</p>
+
+    <p>每个 <code>ActiveReplaySegment</code> 累积以下信息：</p>
+    <pre><code>struct ActiveReplaySegment {
+    turn_id: Option&lt;String&gt;,           // 当前 turn 的 ID
+    counts_as_user_turn: bool,        // 是否包含用户消息
+    previous_turn_settings: Option&lt;..&gt;, // TurnContext 中的模型配置
+    reference_context_item: TRefCtx,  // TurnContextItem 或 Cleared
+    world_state_replay: Vec&lt;&amp;RolloutItem&gt;, // 世界状态快照与补丁
+    base_replacement_history: Option&lt;&amp;[ResponseItem]&gt;, // Compaction 携带的历史
+    window: Option&lt;ReconstructedWindow&gt;, // 上下文窗口信息
+}</code></pre>
+
+    <p>当反向扫描遇到 <code>TurnStarted</code> 且 turn_id 匹配时，调用 <code>finalize_active_segment()</code> 将当前 segment 的信息写入全局状态变量，然后清空 segment 准备处理下一个（更旧的）turn。</p>
+
+    <h3>关键分支：RolloutItem 匹配逻辑</h3>
+    <table>
+      <tr><th>RolloutItem 变体</th><th>反向扫描行为</th></tr>
+      <tr>
+        <td><code>Compacted</code></td>
+        <td>设置 window 信息；若有 <code>replacement_history</code>，记录为 base 并切分 <code>rollout_suffix</code>；将 <code>reference_context_item</code> 标记为 Cleared</td>
+      </tr>
+      <tr>
+        <td><code>TurnStarted</code></td>
+        <td>turn_id 匹配时调用 <code>finalize_active_segment()</code>，结束当前 segment</td>
+      </tr>
+      <tr>
+        <td><code>TurnContext</code></td>
+        <td>记录 <code>previous_turn_settings</code> 和 <code>reference_context_item</code></td>
+      </tr>
+      <tr>
+        <td><code>EventMsg::ThreadRolledBack</code></td>
+        <td>增加 <code>pending_rollback_turns</code>，后续 finalized segment 若 counts_as_user_turn 则跳过</td>
+      </tr>
+      <tr>
+        <td><code>ResponseItem</code></td>
+        <td>若 <code>is_user_turn_boundary()</code> 则标记 <code>counts_as_user_turn = true</code></td>
+      </tr>
+    </table>
+  </section>
+
+  <h3>子阶段 2：三条件提前终止</h3>
+    <p>这是反向扫描的性能关键。每处理一个 item 后检查三个条件：</p>
+
+    <pre><code>if base_replacement_history.is_some()
+    && previous_turn_settings.is_some()
+    && !matches!(reference_context_item, TurnReferenceContextItem::NeverSet)
+{
+    break;
+}</code></pre>
+
+    <p>三个条件的语义：</p>
+    <ol>
+      <li><strong><code>base_replacement_history.is_some()</code></strong>——已找到最新的 Compaction 携带的完整历史基线。更旧的 items 不会再影响 history。</li>
+      <li><strong><code>previous_turn_settings.is_some()</code></strong>——已找到最近一次 TurnContext 中的模型配置（model、comp_hash、realtime_active）。</li>
+      <li><strong><code>reference_context_item != NeverSet</code></strong>——已确定 reference context baseline（可能是 TurnContextItem 也可能是 Cleared）。<code>NeverSet</code> 表示反向扫描至今尚未遇到任何 TurnContext 或 Compaction。</li>
+    </ol>
+
+    <div class="callout">
+      <p><strong>性能意义</strong>：在典型场景（最近几个 turn 内有 Compaction 且有 TurnContext），扫描在几十行内即终止。最坏情况（从头到尾没有 Compaction 也没有 TurnContext），扫描整个文件——O(n) 线性扫描。</p>
+    </div>
+
+  <section>
+    <h2>3. 阶段 3-4：正向 replay 重建 history 与 world_state</h2>
+    <p>反向扫描完成后，得到了两个关键中间结果：</p>
+    <ul>
+      <li><strong><code>rollout_suffix</code></strong>——从最新 Compaction 的 replacement_history 之后（不含）到文件末尾的 rollout items 切片</li>
+      <li><strong><code>world_state_replay</code></strong>——按反向顺序收集的 Compaction 和 WorldState items（将被反转后正向应用）</li>
+    </ul>
+
+    <p><strong>阶段 3（history 重建）</strong>：以 <code>base_replacement_history</code> 为起点，正向遍历 <code>rollout_suffix</code>，用 <code>ContextManager</code> 逐条 <code>record_items()</code>。遇到新的 Compaction 时调用 <code>history.replace()</code> 替换整个历史。这确保重建的 history 与写入时完全一致。</p>
+
+    <h3>legacy compaction 的额外路径</h3>
+    <p>如果 Compaction 的 <code>replacement_history</code> 为 <code>None</code>（legacy 格式），进入备选路径：从当前 history 中收集 user messages，用 <code>build_compacted_history()</code> 重新拼接紧凑版本。同时清除 <code>reference_context_item</code>——因为 legacy 格式无法保证 TurnContext 插入位置正确。</p>
+
+    <p><strong>阶段 4（world_state 重建）</strong>：将 <code>world_state_replay</code> 反转（变为正向时间顺序），然后按序处理：遇到 <code>full=true</code> 的 WorldState 时覆盖基线；遇到 <code>full=false</code> 的 WorldState 时应用 merge patch；遇到 Compaction 时清空基线（因为 compact 意味着历史压缩，旧的世界状态已不可恢复）。</p>
+
+    <p>最终，<code>RolloutReconstruction</code> 将所有结果打包返回给调用方：</p>
+    <pre><code>RolloutReconstruction {
+    history,                    // 完整对话历史
+    previous_turn_settings,     // 最近一次 Turn 的配置
+    reference_context_item,     // TurnContext 基线
+    world_state_baseline,       // 世界状态快照
+    window_number,              // 上下文窗口编号
+    first_window_id,            // 首个窗口 UUID
+    previous_window_id,         // 前一窗口 UUID
+    window_id,                  // 当前窗口 UUID
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，完成以下任务：</p>
+      <ol>
+        <li>画出反向扫描遇到 Compaction（有 replacement_history）→ TurnContext → TurnStarted 这三条 rollout line 时，三个全局状态变量各如何变化？</li>
+        <li>如果 JSONL 文件没有 Compaction 行也没有 TurnContext 行，三条件提前终止会怎样？</li>
+        <li>legacy compaction（<code>replacement_history = None</code>）与新版 compaction 在重建路径上有何不同？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. Compaction 设置 <code>base_replacement_history</code> + 切分 <code>rollout_suffix</code> + 标记 reference_context 为 Cleared；TurnContext 设置 <code>previous_turn_settings</code>（model/comp_hash/realtime） + 若 reference_context 尚未设置则写入 TurnContextItem；TurnStarted 触发 <code>finalize_active_segment</code> 将 segment 中的所有信息写入全局变量。2. 三条件永远不会同时满足，扫描将走到文件开头（index 0），等同于全量正向扫描。3. 新版直接从 <code>replacement_history</code> 替换整个 history；legacy 需要从当前 history 中重新收集 user_messages 然后调用 <code>build_compacted_history()</code> 重新拼接，同时清除 <code>reference_context_item</code>。</p>
+    </div>
+    <p>补充阅读：<a href="../reference/rollout-reconstruction-notes.html">参考文档——反向重建类型关系图与 API 速查</a>。有疑问随时追问 agent。</p>
+  </section>
+</main>
+</body>
+</html>

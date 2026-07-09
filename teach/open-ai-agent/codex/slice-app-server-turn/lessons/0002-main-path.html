@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>主路径详解：thread/start 和 turn/start 的内部逻辑</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.78rem;
+      line-height: 1.6;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">L2 垂直切片 · slice-app-server-turn · 15 分钟短课</div>
+  <h1>主路径详解：thread/start 怎样创建线程，turn/start 怎样启动回合</h1>
+  <p class="lead">本课聚焦一个判断：thread/start 是异步的还是同步的？turn/start 在校验通过后如何提交到 core？学完后你能逐行解释两个 RPC 方法的内部处理逻辑。</p>
+  <div class="meta">
+    <span class="pill">学习目标：解释 thread_start_inner 和 turn_start_inner 的 5 个阶段</span>
+    <span class="pill">前置：<a href="0001-flow-map.html">链路地图 0001</a></span>
+    <span class="pill">前置：<a href="../../module-app-server/lessons/0001-app-server-module-tour.html">L1 app-server 导览</a></span>
+    <span class="pill">配套参考：<a href="../reference/app-server-turn-flow-map.html">链路速查表</a></span>
+  </div>
+
+  <section>
+    <h2>1. thread/start 的五阶段</h2>
+    <p><code>thread_start()</code>（<code>thread_processor.rs:422</code>）是入口，但它只是薄层代理，直接调用 <code>thread_start_inner()</code> 并返回 <code>Ok(None)</code>——注意这里的 <code>None</code> 意味着<strong>没有同步响应体</strong>。真正的 thread 创建是异步任务。</p>
+    <div class="diagram">thread_start_inner() 的 5 个阶段：
+
+① 参数解构与校验（:911-942）
+   解构 ThreadStartParams（model、cwd、sandbox、permissions 等）
+   校验 sandbox 和 permissions 不能同时指定
+
+② 配置覆盖构建（:946-960）
+   build_thread_config_overrides() 将请求参数转为 ConfigOverrides
+   设置 ephemeral 标志
+
+③ 组装 ListenerTaskContext（:961-971）
+   聚集 thread_manager、thread_state_manager、outgoing、
+   pending_thread_unloads、skills_watcher 等共享状态
+
+④ 异步任务 spawn（:977-1005）
+   将 thread_start_task 通过 background_tasks.spawn() 提交
+   thread_start_task 内部：加载配置 → new_thread() → ensure_conversation_listener()
+   成功后通过 outgoing 发送 thread/started 通知
+
+⑤ 立即返回（:1006）
+   thread_start_inner 返回 Ok(())，message_processor 收到 Ok(None)
+   不发送同步响应 —— 客户端必须等待 thread/started 通知</div>
+    <p>关键设计决策：thread/start 是<strong>fire-and-notify</strong>模式。方法返回只表示"请求已受理"，真正的 thread 创建和通知是异步的。这与 turn/start 不同——后者同步返回一个 Turn 对象。这种差异的原因是 thread 创建涉及配置加载、thread store 写入和监听器注册，这些 I/O 操作不宜阻塞 JSON-RPC 连接。</p>
+  </section>
+
+  <section>
+    <h2>2. turn/start 的六阶段</h2>
+    <p><code>turn_start()</code>（<code>turn_processor.rs:155</code>）先调用 <code>validate_user_input_image_urls()</code> 校验图片 URL，然后进入 <code>turn_start_inner()</code>。</p>
+    <div class="diagram">turn_start_inner() 的 6 个阶段：
+
+① 加载 thread（:450-455）
+   load_thread(&params.thread_id) → thread_manager.get_thread()
+   失败 → "thread not found: {thread_id}"（JSON-RPC error -32600）
+
+② 输入校验（:456-465）
+   ensure_direct_input_allowed() — 多 agent v2 子代理不允许直接输入
+   validate_v2_input_limit() — 输入文本超过 MAX_USER_INPUT_TEXT_CHARS 则拒绝
+
+③ 设置客户端信息（:466-482）
+   set_app_server_client_info() — 记录 client name/version
+   set_openai_form_elicitation_support() — 标记是否支持 OpenAI 表单诱导
+
+④ 构建 thread settings 覆盖（:484-519）
+   resolve_turn_environment_selections() — 解析环境选择
+   build_thread_settings_overrides() — 组装 approval、sandbox、
+     model、collaboration_mode、personality 等覆盖参数
+
+⑤ 提交用户输入（:522-540）
+   构造 Op::UserInput { items, thread_settings, ... }
+   调用 thread.submit_user_input_with_client_user_message_id()
+   → codex_thread.rs:261 → codex.session.submit_user_input()
+   返回 turn_id
+
+⑥ 构造同步响应（:557-568）
+   构造 Turn { id: turn_id, status: InProgress, items: [], ... }
+   返回 TurnStartResponse { turn } → 通过 JSON-RPC Response 发回客户端</div>
+    <p>与 thread/start 的 fire-and-notify 不同，turn/start 的⑥返回了<strong>同步响应</strong>：客户端立即得到 turn_id 和 InProgress 状态，后续的 item 增量事件和 turn/completed 通知通过 notification 通道异步到达。这使得客户端可以立即渲染 "thinking..." 状态，而不需要等待通知。</p>
+  </section>
+
+  <section>
+    <h2>3. thread/start 和 turn/start 的对比</h2>
+    <table>
+      <tr><th>维度</th><th>thread/start</th><th>turn/start</th></tr>
+      <tr><td>响应模式</td><td>fire-and-notify（异步）</td><td>同步返回 Turn 对象</td></tr>
+      <tr><td>成功通知</td><td>thread/started notification</td><td>turn/started notification</td></tr>
+      <tr><td>核心校验</td><td>sandbox ⊥ permissions 互斥</td><td>thread 存在性 + 输入长度 + 图片 URL</td></tr>
+      <tr><td>配置覆盖</td><td>创建时一次性设置</td><td>每次 turn 均可覆盖 model/sandbox 等</td></tr>
+      <tr><td>监听器</td><td>创建后自动注册</td><td>继承 thread 已有的监听器</td></tr>
+      <tr><td>Processor 文件</td><td><code>thread_processor.rs</code></td><td><code>turn_processor.rs</code></td></tr>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h3>暂停回忆</h3>
+    <p>闭上眼睛，在脑中过一遍以下流程：</p>
+    <ol>
+      <li>thread/start 的 5 个阶段依次是什么？</li>
+      <li>turn/start 在第几步提交到 core？提交的数据结构是什么？</li>
+      <li>为什么 thread/start 不返回同步响应？</li>
+    </ol>
+    <p class="answer"><strong>自查要点：</strong>
+      ① 参数解构 → 配置覆盖构建 → ListenerTaskContext 组装 → background task spawn → 立即返回；
+      ② 第⑤步，数据结构是 <code>Op::UserInput { items, thread_settings, ... }</code>；
+      ③ thread 创建涉及配置加载、thread store 写入和监听器注册等 I/O 操作，fire-and-notify 避免阻塞 JSON-RPC 连接。如果你记不清某一步，回到上文对照源码行号重新跟踪。
+    </p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox 权限决策链路地图与 Mermaid 时序图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .mermaid {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.7;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Sandbox 权限决策链路地图</h1>
+    <p class="meta">学习目标：画出从工具调用触发到沙箱就绪的完整 6 阶段时序图，说出每层的职责边界。</p>
+    <p class="meta">前置：<a href="../../module-sandbox-config/lessons/0001-sandbox-config-module-tour.html">L1 Sandbox 配置模块导览</a></p>
+  </header>
+
+  <section>
+    <h2>1. 链路全景：6 阶段决策管道</h2>
+    <p>当 Codex Agent 决定执行一个 shell 命令或文件操作时，会经过一条 6 阶段的安全决策管道。每个阶段由不同模块负责，输入输出明确，边界清晰：</p>
+
+    <div class="diagram">工具调用触发 (ToolOrchestrator)
+  │
+  ▼
+[1] execpolicy 策略查询
+    输入: 命令令牌数组 (["git", "status"])
+    输出: Decision::Allow / Prompt / Forbidden
+    所属: codex-rs/execpolicy/src/policy.rs → Policy::check()
+  │
+  ▼
+[2] permissions 权限编译
+    输入: profile_name + SandboxWorkspaceWrite 配置
+    输出: (FileSystemSandboxPolicy, NetworkSandboxPolicy)
+    所属: codex-rs/core/src/config/permissions.rs → compile_permission_profile_selection()
+  │
+  ▼
+[3] 权限策略合并 (effective profile)
+    输入: base PermissionProfile + optional AdditionalPermissionProfile
+    输出: 合并后的 PermissionProfile
+    所属: codex-rs/sandboxing/src/policy_transforms.rs → effective_permission_profile()
+  │
+  ▼
+[4] sandboxing::select_initial() 沙箱类型选择
+    输入: &FileSystemSandboxPolicy + NetworkSandboxPolicy + SandboxablePreference + WindowsSandboxLevel + has_managed_network_requirements: bool
+    输出: SandboxType (None / MacosSeatbelt / LinuxSeccomp / WindowsRestrictedToken)
+    所属: codex-rs/sandboxing/src/manager.rs → SandboxManager::select_initial()
+  │
+  ▼
+[5] 平台沙箱创建 (transform)
+    输入: SandboxTransformRequest (命令 + 权限 + 沙箱类型)
+    输出: SandboxExecRequest (包装后的命令 + env + 平台沙箱参数)
+    所属: codex-rs/sandboxing/src/manager.rs → SandboxManager::transform()
+  │
+  ▼
+[6] 执行环境就绪
+    SandboxExecRequest 交给 exec-server 启动子进程
+    沙箱策略已内嵌在命令包装器中</div>
+  </section>
+
+  <section>
+    <h2>2. Mermaid 时序图</h2>
+    <p>以下时序图展示一次完整决策链路中各组件的交互顺序：</p>
+
+    <div class="mermaid">sequenceDiagram
+    participant Tool as ToolOrchestrator
+    participant EP as ExecPolicy
+    participant Perm as PermissionCompiler
+    participant PT as PolicyTransforms
+    participant SM as SandboxManager
+    participant Platform as PlatformSandbox
+
+    Tool->>EP: check(["git", "status"])
+    EP->>EP: match_exact_rules() → match_host_executable_rules()
+    EP-->>Tool: Decision::Allow
+
+    Tool->>Perm: compile_permission_profile_selection(profile_name)
+    Perm->>Perm: builtin_permission_profile() 或 resolve_permission_profile()
+    Perm->>Perm: compile_filesystem_permission() + compile_network_sandbox_policy()
+    Perm-->>Tool: (FileSystemSandboxPolicy, NetworkSandboxPolicy)
+
+    Tool->>PT: effective_permission_profile(base, additional)
+    PT->>PT: effective_file_system_sandbox_policy() + effective_network_sandbox_policy()
+    PT-->>Tool: 合并后的 PermissionProfile
+
+    Tool->>SM: select_initial(file_system, network, pref, win_level, has_managed_net)
+    SM->>SM: should_sandbox() → should_require_platform_sandbox()
+    SM->>SM: get_platform_sandbox(windows_sandbox_enabled)
+    SM-->>Tool: SandboxType::LinuxSeccomp
+
+    Tool->>SM: transform(SandboxTransformRequest)
+    SM->>Platform: create_linux_sandbox_command_args_for_permission_profile()
+    Platform-->>SM: 包装后的 argv + arg0 override
+    SM-->>Tool: SandboxExecRequest { command, env, sandbox_type, policies }
+
+    Tool->>Tool: 发送 SandboxExecRequest 到 exec-server</div>
+  </section>
+
+  <section>
+    <h2>3. 关键决策点速查</h2>
+    <table>
+      <thead>
+        <tr><th>阶段</th><th>核心函数</th><th>决策输出</th><th>源码位置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>execpolicy</td><td><code>Policy::check()</code></td><td>Allow / Prompt / Forbidden</td><td>execpolicy/src/policy.rs</td></tr>
+        <tr><td>权限编译</td><td><code>compile_permission_profile_selection()</code></td><td>(FileSystemSandboxPolicy, NetworkSandboxPolicy)</td><td>core/src/config/permissions.rs</td></tr>
+        <tr><td>策略合并</td><td><code>effective_permission_profile()</code></td><td>合并后的 PermissionProfile</td><td>sandboxing/src/policy_transforms.rs</td></tr>
+        <tr><td>沙箱选择</td><td><code>SandboxManager::select_initial()</code></td><td>SandboxType 枚举</td><td>sandboxing/src/manager.rs</td></tr>
+        <tr><td>平台创建</td><td><code>SandboxManager::transform()</code></td><td>SandboxExecRequest</td><td>sandboxing/src/manager.rs</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>4. 异常路径概览</h2>
+    <p>决策链路中任一阶段都可能产生非正常结果。以下为两条关键异常路径（第 2 节课详解）：</p>
+    <ul>
+      <li><strong>权限拒绝路径：</strong>execpolicy 返回 <code>Forbidden</code> 时，链路在阶段 [1] 终止，工具调用被直接拒绝，不进入后续沙箱创建。</li>
+      <li><strong>沙箱降级路径：</strong><code>select_initial()</code> 判断不需要沙箱（SandboxablePreference::Auto + 全盘写权限），返回 <code>SandboxType::None</code>，跳过平台沙箱包装。</li>
+    </ul>
+  </section>
+
+  <div class="exercise">
+    <h3>检索练习</h3>
+    <p>不翻看上文，用 1-2 句话回答：<code>should_require_platform_sandbox()</code> 在什么条件下返回 <code>false</code>?（提示：涉及 FileSystemSandboxKind 的三个变体）</p>
+  </div>
+  <div class="answer">
+    <h3>参考答案</h3>
+    <p><code>should_require_platform_sandbox()</code> 在以下条件同时满足时返回 <code>false</code>（前提：<code>has_managed_network_requirements</code> 为 <code>false</code>）：</p>
+    <ol>
+      <li>文件系统策略为 <code>ExternalSandbox</code>（无论网络是否启用）；</li>
+      <li>网络<strong>启用</strong>且文件系统策略为 <code>Unrestricted</code>；</li>
+      <li>网络<strong>启用</strong>且文件系统策略为 <code>Restricted</code> 且 <code>has_full_disk_write_access()</code> 为 <code>true</code>。</li>
+    </ol>
+    <p>注意：当网络<strong>未启用</strong>时，<code>Restricted</code> 和 <code>Unrestricted</code> 均返回 <code>true</code>（源码 <code>policy_transforms.rs:518-522</code>：<code>!network_policy.is_enabled()</code> 分支中仅 <code>ExternalSandbox</code> 被排除）。</p>
+  </div>
+
+  <p style="margin-top: 28px; color: var(--muted);">
+    继续学习：<a href="0002-main-path.html">第 2 节 — 主路径详解：从策略查询到平台沙箱创建</a><br>
+    速查参考：<a href="../reference/sandbox-permission-decision-flow-map.html">Sandbox 权限决策流程速查图</a><br>
+    有疑问？追问本 Agent 获取更深入的解释。
+  </p>
+</main>
+</body>
+</html>

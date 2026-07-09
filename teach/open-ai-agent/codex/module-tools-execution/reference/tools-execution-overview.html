@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工具定义与执行抽象参考</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>工具定义与执行抽象参考</h1>
+    <p class="meta">用途：作为 L1 源码阅读地图。短课见 <a href="../lessons/0001-tools-execution-module-tour.html">0001 工具执行模块导览</a>；上层架构见 L0 <a href="../../00-overview/reference/00-overview.html">项目总览参考</a>。</p>
+  </header>
+
+  <section>
+    <h2>模块定位</h2>
+    <p>工具执行层位于模型会话与宿主环境之间。上游是模型返回的 Responses API item，下游是本地进程、文件系统、MCP server、插件扩展、子 agent、code mode runtime 或托管工具。它的核心任务是把“模型请求”变成“受策略约束的副作用”，再把结果转回模型可消费的 response item。</p>
+  </section>
+
+  <section>
+    <h2>内部分层</h2>
+    <table>
+      <thead>
+        <tr><th>层级</th><th>关键文件</th><th>职责</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>共享协议层</td><td><code>codex-rs/tools/src/tool_spec.rs</code><br><code>codex-rs/tools/src/tool_executor.rs</code><br><code>codex-rs/tools/src/tool_definition.rs</code></td><td>定义 <code>ToolSpec</code>、<code>ToolDefinition</code>、<code>ToolExecutor</code>、<code>ToolExposure</code>、输出协议和 schema。</td></tr>
+        <tr><td>规划层</td><td><code>codex-rs/core/src/tools/spec_plan.rs</code></td><td>按 feature、模型能力、环境状态、MCP/扩展/动态工具，生成 model-visible specs 与 registry。</td></tr>
+        <tr><td>路由层</td><td><code>codex-rs/core/src/tools/router.rs</code></td><td>把 <code>ResponseItem</code> 转为 <code>ToolCall</code>，补齐 session、turn、cancellation、tracker，形成 <code>ToolInvocation</code>。</td></tr>
+        <tr><td>注册执行层</td><td><code>codex-rs/core/src/tools/registry.rs</code></td><td>按 <code>ToolName</code> 找 runtime，执行 hook、telemetry、生命周期事件、post hook、输出转换。</td></tr>
+        <tr><td>handler 层</td><td><code>codex-rs/core/src/tools/handlers/</code></td><td>解析参数、选择环境、构造 request，把工具业务交给 runtime 或外部 executor。</td></tr>
+        <tr><td>runtime 层</td><td><code>codex-rs/core/src/tools/runtimes/</code></td><td>把已验证 request 放入审批、沙箱、网络策略和实际执行后端。</td></tr>
+        <tr><td>执行基础设施</td><td><code>codex-rs/core/src/exec.rs</code><br><code>codex-rs/exec-server/</code></td><td>本地/远端进程、文件系统 RPC、超时取消、输出聚合、PTY 和流式输出。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>对外暴露工具来源清单</h2>
+    <table>
+      <thead>
+        <tr><th>来源</th><th>注册入口</th><th>典型工具</th><th>条件</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Shell / exec</td><td><code>add_shell_tools</code></td><td><code>exec_command</code>、<code>write_stdin</code>、<code>shell_command</code></td><td>存在 turn environment；取决于模型 shell tool 类型和 feature。</td></tr>
+        <tr><td>MCP resource</td><td><code>add_mcp_resource_tools</code></td><td><code>list_mcp_resources</code>、<code>list_mcp_resource_templates</code>、<code>read_mcp_resource</code></td><td>会话中存在 MCP tools。</td></tr>
+        <tr><td>核心工具</td><td><code>add_core_utility_tools</code></td><td><code>update_plan</code>、<code>request_user_input</code>、<code>request_permissions</code>、<code>new_context</code>、<code>get_context_remaining</code>、<code>clock.curr_time</code>、<code>clock.sleep</code>、<code>apply_patch</code>、<code>view_image</code></td><td>由 feature、模型能力、环境数量控制；这里列的是真实 wire/tool name。</td></tr>
+        <tr><td>协作工具</td><td><code>add_collaboration_tools</code></td><td><code>spawn_agent</code>、<code>send_input</code>、<code>wait_agent</code>、<code>close_agent</code>、V2 agent 工具、CSV agent jobs</td><td>multi-agent 配置、深度限制和 worker 身份控制。</td></tr>
+        <tr><td>MCP runtime</td><td><code>add_mcp_runtime_tools</code></td><td>MCP server 暴露的 function tools</td><td>direct MCP 直接暴露，deferred MCP 通过 tool search 延迟发现。</td></tr>
+        <tr><td>动态工具</td><td><code>add_dynamic_tools</code></td><td>运行时注入的 function 或 namespace function</td><td>来自 <code>DynamicToolSpec</code>。</td></tr>
+        <tr><td>扩展工具</td><td><code>add_extension_tools</code></td><td>插件/扩展贡献的 tools，如 standalone web/image 工具</td><td>名称不冲突且满足 feature 与模型能力。</td></tr>
+        <tr><td>Tool search</td><td><code>append_tool_search_executor</code></td><td><code>tool_search</code></td><td>存在 deferred tools，且模型/namespace tools 支持搜索。</td></tr>
+        <tr><td>Code mode</td><td><code>prepend_code_mode_executors</code></td><td><code>execute</code>、<code>wait</code> 及嵌套工具列表</td><td>ToolMode 为 CodeMode 或 CodeModeOnly。</td></tr>
+        <tr><td>Hosted model tools</td><td><code>hosted_model_tool_specs</code></td><td>hosted web search、image generation</td><td>provider/model 支持，且 standalone 工具不可用或未启用。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>关键接口速查</h2>
+    <table>
+      <thead>
+        <tr><th>接口/类型</th><th>位置</th><th>阅读要点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>ToolSpec</code></td><td><code>codex-rs/tools/src/tool_spec.rs</code></td><td>Responses API 序列化形态：function、namespace、tool_search、web_search、custom 等。</td></tr>
+        <tr><td><code>ToolExecutor</code></td><td><code>codex-rs/tools/src/tool_executor.rs</code></td><td>每个 handler 必备的 name/spec/exposure/handle 绑定。</td></tr>
+        <tr><td><code>ToolExposure</code></td><td><code>codex-rs/tools/src/tool_executor.rs</code></td><td>Direct、Deferred、DirectModelOnly、Hidden 决定模型可见性和分发能力。</td></tr>
+        <tr><td><code>CoreToolRuntime</code></td><td><code>codex-rs/core/src/tools/registry.rs</code></td><td>core 对 `ToolExecutor` 的扩展：payload 类型、hook payload、telemetry、diff consumer。</td></tr>
+        <tr><td><code>ToolInvocation</code></td><td><code>codex-rs/core/src/tools/context.rs</code></td><td>执行上下文：session、turn、step_context、取消 token、tracker、call_id、tool_name、payload。</td></tr>
+        <tr><td><code>ToolOutput</code></td><td><code>codex-rs/tools/src/tool_output.rs</code></td><td>统一输出协议；core 中的 `FunctionToolOutput`、`ApplyPatchToolOutput` 实现它。</td></tr>
+        <tr><td><code>ToolRuntime</code></td><td><code>codex-rs/core/src/tools/sandboxing.rs</code></td><td>runtime 与 `ToolOrchestrator` 的接口，负责可审批、可沙箱、可重试执行。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>最小调用序列</h2>
+    <div class="diagram">模型请求阶段
+  build_tool_specs_and_registry
+    → add_tool_sources
+    → append_tool_search_executor
+    → prepend_code_mode_executors
+    → build_model_visible_specs_and_registry
+
+模型返回阶段
+  ResponseItem
+    → ToolRouter::build_tool_call
+    → ToolRouter::dispatch_tool_call_with_terminal_outcome
+    → ToolRegistry::dispatch_any_with_terminal_outcome
+    → handler.handle(invocation)
+    → ToolOutput::to_response_item</div>
+    <p>调试工具“不出现”时，先看规划阶段；调试工具“出现但不能执行”时，先看路由与 registry；调试“执行失败”时，再进入 handler/runtime。注意：<code>NewContextWindowHandler</code>、<code>CurrentTimeHandler</code>、<code>SleepHandler</code> 等是 Rust handler 或注册入口名称，不等同于模型侧看到的 wire/tool name。</p>
+  </section>
+
+  <section>
+    <h2>Shell 执行阅读顺序</h2>
+    <ol>
+      <li><code>codex-rs/core/src/tools/handlers/shell_spec.rs</code>：看 <code>exec_command</code>、<code>write_stdin</code>、<code>shell_command</code> 的参数 schema。</li>
+      <li><code>codex-rs/core/src/tools/handlers/shell/shell_command.rs</code>：看 <code>ToolExecutor</code> 实现、参数解析、<code>to_exec_params</code>。</li>
+      <li><code>codex-rs/core/src/tools/handlers/shell.rs</code>：看 <code>run_exec_like</code> 如何处理权限、审批、apply_patch 拦截和 <code>ShellRequest</code>。</li>
+      <li><code>codex-rs/core/src/tools/runtimes/shell.rs</code>：看 approval key、network approval、sandbox command 和 <code>execute_env</code>。</li>
+      <li><code>codex-rs/core/src/exec.rs</code>：看进程、超时、取消、输出 cap 和 delta 事件。</li>
+      <li><code>codex-rs/exec-server/README.md</code>：远端环境时看 process/filesystem RPC 生命周期。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Apply Patch 阅读顺序</h2>
+    <ol>
+      <li><code>codex-rs/core/src/tools/handlers/apply_patch_spec.rs</code>：看 custom/freeform 工具规格。</li>
+      <li><code>codex-rs/core/src/tools/handlers/apply_patch.rs</code>：看 patch 解析、验证、环境选择、diff consumer、权限路径计算。</li>
+      <li><code>codex-rs/core/src/tools/runtimes/apply_patch.rs</code>：看审批 key、sandbox filesystem context、真实 <code>codex_apply_patch::apply_patch</code> 调用。</li>
+      <li><code>codex-rs/apply-patch/src/</code>：看 patch grammar、parser、streaming parser、standalone executable。</li>
+      <li><code>codex-rs/apply-patch/tests/</code>：看 add/update/delete/move、空 patch、缺失上下文、目录删除失败等行为边界。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>独立 crate 依赖关系</h2>
+    <table>
+      <thead>
+        <tr><th>crate</th><th>职责</th><th>与工具执行层关系</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>codex-tools</code></td><td>工具规格、schema、executor trait、工具搜索和 Responses API 适配。</td><td>被 core 和扩展层复用，不携带 session/沙箱上下文。</td></tr>
+        <tr><td><code>codex-apply-patch</code></td><td>patch grammar、解析、验证、应用和测试夹具。</td><td><code>ApplyPatchHandler</code> 与 shell 拦截路径都会调用它。</td></tr>
+        <tr><td><code>codex-shell-command</code></td><td>shell 检测、bash/powershell 命令解析、安全分类。</td><td>为 shell 工具和审批策略提供命令理解能力。</td></tr>
+        <tr><td><code>codex-shell-escalation</code></td><td>Unix zsh fork 执行包装、提权协议、socket、策略。</td><td><code>ShellRuntimeBackend::ShellCommandZshFork</code> 满足条件时使用。</td></tr>
+        <tr><td><code>codex-exec-server</code></td><td>本地/远端进程和文件系统 JSON-RPC 服务。</td><td>为 turn environment 提供可执行、可读写的后端能力。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>源码阅读顺序总表</h2>
+    <ol>
+      <li><code>codex-rs/tools/Cargo.toml</code>：确认共享 crate 的依赖边界。</li>
+      <li><code>codex-rs/tools/src/lib.rs</code>：看 re-export 后的公共 API 面。</li>
+      <li><code>codex-rs/tools/src/tool_executor.rs</code>：先记住执行契约。</li>
+      <li><code>codex-rs/tools/src/tool_spec.rs</code>：再看模型可见规格。</li>
+      <li><code>codex-rs/core/src/tools/spec_plan.rs</code>：理解工具从哪些来源进入本轮。</li>
+      <li><code>codex-rs/core/src/tools/router.rs</code>：理解模型输出如何变成内部调用。</li>
+      <li><code>codex-rs/core/src/tools/registry.rs</code>：理解统一包裹层。</li>
+      <li><code>codex-rs/core/src/tools/handlers/</code>：按具体工具进入 handler。</li>
+      <li><code>codex-rs/core/src/tools/runtimes/</code>：继续追到审批、沙箱和真实执行。</li>
+      <li><code>codex-rs/core/src/exec.rs</code>、<code>codex-rs/exec-server/</code>：最后看进程/远端环境基础设施。</li>
+    </ol>
+  </section>
+</main>
+</body>
+</html>

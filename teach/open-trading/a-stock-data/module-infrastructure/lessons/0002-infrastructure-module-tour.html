@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>核心函数实战 — a-stock-data 基础设施（下）</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: #1a1a1a; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  pre { background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.8rem 1rem; font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 1rem 0; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85rem; font-family: "SF Mono", Consolas, monospace; }
+  pre code { background: transparent; padding: 0; }
+  .diagram {
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; line-height: 1.65;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px;
+    padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  .callout { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .callout strong { color: #2c5282; }
+  .warn { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.88rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: #f5f7fa; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>核心函数实战 — 基础设施（下）</h1>
+<p class="meta">
+  <span class="badge">L1 基础设施</span>
+  <span class="badge">第 2 节 / 共 2 节</span>
+  估计时长：15 分钟
+</p>
+
+<p>
+  上一节我们理解了<strong>为什么</strong>需要数据源优先级体系。本节深入到<strong>怎么做</strong>——四个核心函数的实现精要。源码文件全部来自 <code>SKILL.md</code> 的 Prerequisites 章节。
+</p>
+
+<h2>1. em_get() — 东财防封的三件套</h2>
+
+<p>
+  em_get() 是整个 a-stock-data 中<strong>调用频率最高</strong>的基础设施函数。所有东财接口（datacenter、push2、reportapi 等）都通过它发起请求。它自动实现了防封铁律的前三条：
+</p>
+
+<p>
+  <strong>一、串行限流 + 随机抖动：</strong>每次请求前检查距离上次调用的间隔。不足 1 秒则 sleep 补偿，再叠加 0.1-0.5 秒的随机抖动。这保证了 QPS 永远不会超过 2，且请求间隔不呈现规律性——反爬系统很难识别。
+</p>
+
+<p>
+  <strong>二、会话复用：</strong>全局 <code>EM_SESSION = requests.Session()</code> 对象持久化 TCP 连接，避免每次请求的 TLS 握手开销，同时减少服务端看到的"新连接"数量。
+</p>
+
+<p>
+  <strong>三、连接级自动重试：</strong>通过 urllib3 的 HTTPAdapter+Retry 配置，对 429/5xx 做最多 3 次指数退避重试（backoff_factor=0.6）。注意 403 <strong>不重试</strong>——因为 403 是东财风控信号，重试只会加速封禁。
+</p>
+
+<pre><code>def em_get(url, params=None, headers=None, timeout=15, **kwargs):
+    """东财统一请求入口：自动节流 + 复用 session + 默认 UA"""
+    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.5))  # 限流 + 抖动
+    try:
+        return EM_SESSION.get(url, params=params,
+                              headers=headers, timeout=timeout, **kwargs)
+    finally:
+        _em_last_call[0] = time.time()                 # 更新时间戳</code></pre>
+
+<div class="warn">
+  <strong>批量任务调参：</strong>默认 <code>EM_MIN_INTERVAL=1.0</code> 秒。当需要循环 100 只股票逐个拉数据时，建议调到 1.5-2 秒。换算：100 只 × 1.5s = 2.5 分钟，安全通过 5 分钟 ≤300 次的阈值。
+</div>
+
+<h2>2. tdx_client() — 绕过 mootdx 0.11.x 的 BESTIP 陷阱</h2>
+
+<p>
+  mootdx 是通达信行情的 Python 客户端。0.11.x 版本存在一个隐蔽 bug：全新安装后首次调用 <code>Quotes.factory(market='std')</code> 时，BESTIP.HQ 配置项是空字符串（不是缺失），导致内部拆包失败抛出 ValueError。
+</p>
+
+<p>
+  <strong>为什么不能锁版本？</strong>锁 <code>mootdx==0.10.12</code> 在 Python 3.9 下会因 numpy/pandas 二进制不兼容直接崩溃。正确做法是 a-stock-data 的 tdx_client()——用显式 server 参数绕过 BESTIP 机制。
+</p>
+
+<div class="diagram">tdx_client() 三级 fallback 流程
+
+  _probe() 顺序探测 _TDX_SERVERS 列表
+  │
+  ├── 有可达服务器 → Quotes.factory(server=(ip, port))  ✅ 最优路径
+  │
+  └── 全部不可达（海外网络）
+      │
+      ├── fallback 1: Quotes.factory(bestip=True)   # 让mootdx自己测速
+      │   └── 失败（老用户config已填充时成功）
+      │
+      ├── fallback 2: Quotes.factory(market='std')  # 裸调用
+      │   └── 失败 → RuntimeError("所有服务器不可达")
+      │
+      └── 明确报错，不挂起、不死等</div>
+
+<p>
+  _TDX_SERVERS 是 10 个实测可用的通达信服务器（IP + 7709 端口），按延迟排序。_probe() 用 TCP 3 次握手（timeout=2s）快速判断可达性，而非等待应用层响应超时。
+</p>
+
+<pre><code># _probe() — 只做 TCP 握手，2 秒超时
+def _probe(ip, port, timeout=2.0):
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+# 创建客户端 — 一行替代 Quotes.factory()
+client = tdx_client()  # 自动三级 fallback，不抛 BESTIP bug</code></pre>
+
+<h2>3. get_prefix() + ticker 归一化</h2>
+
+<p>
+  这是最简洁但影响最广的基础设施函数。所有数据层的端点都需要区分上证（sh）、深证（sz）、北证（bj）：
+</p>
+
+<pre><code>def get_prefix(code: str) -> str:
+    if code.startswith(("6", "9")):     # 6xxxxx 上证主板 / 9xxxxx 上证B股
+        return "sh"
+    elif code.startswith("8"):           # 8xxxxx 北交所
+        return "bj"
+    else:                                 # 0xxxxx 深证主板 / 3xxxxx 创业板
+        return "sz"</code></pre>
+
+<p>
+  Ticker 格式归一化在 get_prefix 调用前完成——剥离 SH/SZ/BJ 前缀和 .SH/.SZ 后缀，统一为纯 6 位数字：
+</p>
+
+<table>
+  <tr><th>输入格式</th><th>归一化结果</th><th>说明</th></tr>
+  <tr><td><code>688017</code></td><td><code>688017</code></td><td>纯数字 → 直接使用</td></tr>
+  <tr><td><code>SH688017</code></td><td><code>688017</code></td><td>带前缀 → 剥离 SH</td></tr>
+  <tr><td><code>688017.SH</code></td><td><code>688017</code></td><td>带后缀 → 剥离 .SH</td></tr>
+  <tr><td><code>SZ000001</code></td><td><code>000001</code></td><td>深证前缀 → 剥离 SZ</td></tr>
+  <tr><td><code>BJ832000</code></td><td><code>832000</code></td><td>北证前缀 → 剥离 BJ</td></tr>
+</table>
+
+<h2>4. eastmoney_datacenter() — 一个函数覆盖 6 类数据</h2>
+
+<p>
+  东财数据中心（datacenter-web.eastmoney.com）是龙虎榜、限售解禁、融资融券、大宗交易、股东户数、分红送转<strong>六类数据的共用入口</strong>。它们的 API 结构完全相同——同一 base URL、同一参数格式，只是 <code>reportName</code> 不同：
+</p>
+
+<table>
+  <tr><th>reportName 值</th><th>数据类型</th><th>属于哪层</th></tr>
+  <tr><td><code>RPT_DAILYBILLBOARD_DETAILSNEW</code></td><td>龙虎榜（个股席位 + 全市场）</td><td>L3 信号层</td></tr>
+  <tr><td><code>RPT_LIFT_STAGE</code></td><td>限售解禁日历</td><td>L3 信号层</td></tr>
+  <tr><td><code>RPTA_WEB_RZRQ_GGMX</code></td><td>融资融券明细</td><td>L4 资金/筹码层</td></tr>
+  <tr><td><code>RPT_DATA_BLOCKTRADE</code></td><td>大宗交易</td><td>L4 资金/筹码层</td></tr>
+  <tr><td><code>RPT_HOLDERNUMLATEST</code></td><td>股东户数变化</td><td>L4 资金/筹码层</td></tr>
+  <tr><td><code>RPT_SHAREBONUS_DET</code></td><td>分红送转历史</td><td>L4 资金/筹码层</td></tr>
+</table>
+
+<p>
+  <strong>统一的好处：</strong>所有 6 类数据走同一套 columns/filter/sort 参数体系，通过 em_get() 自动限流。新增一种数据类型只需多加一个调用，不增加维护成本。
+</p>
+
+<div class="callout">
+  <strong>下节预告：</strong>基础设施掌握后，下一步进入 <a href="../../module-market-data/lessons/0001-market-data-module-tour.html">行情层</a>——用 mootdx 拉 K 线、五档盘口，用腾讯获取实时估值，理解第一层数据如何组合多个不封 IP 的数据源。
+</div>
+
+<div class="exercise">
+  <h3>编码练习</h3>
+  <p>不看源码，尝试回答（每题 30 秒）：</p>
+  <ol>
+    <li>em_get() 为什么对 403 不做重试？思路是什么？</li>
+    <li>tdx_client() 的三级 fallback 中，哪一级是绕过 BESTIP bug 的关键？</li>
+    <li>get_prefix("000001") 和 get_prefix("688017") 分别返回什么？</li>
+    <li>如果要在 eastmoney_datacenter 中查询大宗交易，reportName 应该填什么？</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('answers').classList.toggle('show')">显示参考答案</button>
+  <div class="answer" id="answers">
+    <strong>参考答案：</strong><br>
+    1. 403 是东财风控信号（主动拒绝），重试无益反而加重封禁风险。正确做法是降频——调大 EM_MIN_INTERVAL 或增加 sleep。<br>
+    2. 第一级——probe 探测后用 <code>server=(ip, port)</code> 显式传参，完全绕过 BESTIP.HQ 空串。第二、三级只在第一级全部失败时作为兜底。<br>
+    3. get_prefix("000001") → "sz"（0 开头，深证）。get_prefix("688017") → "sh"（6 开头，上证）。<br>
+    4. <code>reportName="RPT_DATA_BLOCKTRADE"</code>，查询大宗交易明细。
+  </div>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>想深入理解某个函数的实现细节？追问 AI 老师："em_get 的 _em_last_call 为什么用单元素列表而不是普通变量？""_TDX_SERVERS 列表过期了怎么更新？"
+</div>
+
+<div class="ref-links">
+  <strong>关联资料：</strong>
+  <a href="../reference/infrastructure-overview.html">基础设施速查表</a> ·
+  <a href="0001-infrastructure-module-tour.html">上一节：数据源优先级</a> ·
+  <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a> ·
+  <a href="../RESOURCES.md">学习资源</a>
+</div>
+
+</body>
+</html>

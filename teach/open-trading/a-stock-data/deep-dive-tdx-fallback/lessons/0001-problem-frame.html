@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mootdx 崩溃：BESTIP.HQ 空串的根因分析</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: #f8f9fb; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.9rem 1.1rem; font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 1rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.86rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; }
+  th { background: #f5f7fa; font-weight: 600; font-size: 0.82rem; }
+  tr:nth-child(even) { background: #fafbfc; }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .warn { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .warn strong { color: #991b1b; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+</style>
+</head>
+<body>
+
+<h1>mootdx 崩溃：BESTIP.HQ 空串的根因分析</h1>
+<p class="meta">
+  <span class="badge">L4 深度剖析</span>
+  <span class="badge">mootdx fallback</span>
+  <span class="badge">第 1/2 节</span>
+  估计时长：12 分钟
+</p>
+
+<h2>1. 崩溃现场：一个让新手困惑的报错</h2>
+
+<p>假设你刚装好 mootdx 0.11.x，在干净的 Python 环境中运行：</p>
+
+<pre>from mootdx.quotes import Quotes
+client = Quotes.factory(market='std')
+# ValueError: not enough values to unpack (expected 2, got 0)</pre>
+
+<p>这个报错对新手来说非常不友好——<strong>没有任何关键信息</strong>提示是网络或配置问题。更迷惑的是：同样的代码在老用户的机器上跑得好好的。这就是 BESTIP 空串 bug 的典型表现。</p>
+
+<h2>2. 根因：config.json 的 BESTIP.HQ 是空字符串</h2>
+
+<p>mootdx 在首次运行时会在 <code>~/.mootdx/config.json</code> 中写入默认配置。关键文件内容类似：</p>
+
+<pre>{
+  "BESTIP": {
+    "HQ": "",       // ← 初始值是空字符串 ""
+    "ZQ": ""
+  }
+}</pre>
+
+<p>mootdx 内部取这个值时用的是 <code>dict.get("HQ", default)</code>。但 Python 的 <code>dict.get()</code> 只有在 <strong>键不存在</strong>时才返回 default——键存在但值为空字符串 <code>""</code> 时，返回的就是 <code>""</code>。mootdx 拿到空字符串后尝试拆包（例如 <code>ip, port = bestip.split(":")</code>），拆出 0 个值，触发 ValueError。</p>
+
+<div class="principle">
+  <strong>核心认知：</strong>这不是 mootdx 的"严重 bug"——它是首次安装时的默认配置文件未填充真实 IP 导致的。老用户之所以不触发，是因为他们的 config.json 曾在某次成功连接后被写入过真实 IP。这是一个<strong>环境差异 bug</strong>——在开发者的机器上永远测不出来。
+</div>
+
+<h2>3. 为什么不能锁版本解决</h2>
+
+<p>一个直觉方案是：锁定 mootdx 版本到 0.10.12（该版本可能用过不同的 BESTIP 处理逻辑）。但这个方案有一个致命问题：</p>
+
+<div class="warn">
+  <strong>mootdx 0.10.12 在干净的 Python 3.9 环境下 import 直接崩溃。</strong>根因是 mootdx 依赖的 numpy/pandas 版本与 0.10.12 编译时使用的版本存在二进制不兼容。不同 Python 版本、不同操作系统，崩溃的概率不同——这意味着锁版本方案<strong>在不同机器上的行为不可预测</strong>。
+</div>
+
+<p>对比两种方案：</p>
+
+<table>
+  <tr><th>方案</th><th>优点</th><th>致命缺陷</th></tr>
+  <tr><td>锁 mootdx==0.10.12</td><td>简单，一行 pip install</td><td>部分 Python 版本 import 就崩，跨环境不可靠</td></tr>
+  <tr><td>tdx_client() 动态探测</td><td>对 0.10/0.11 都适用，跨环境稳定</td><td>多 20 行代码（可接受的代价）</td></tr>
+</table>
+
+<p>a-stock-data 选择了后者——不依赖 mootdx 的内部 BESTIP 机制，而是自己管理一组已知可用的通达信服务器 IP，通过 TCP 探测选择可用节点。</p>
+
+<h2>4. 不仅是 BESTIP 问题：海外网络超时</h2>
+
+<p>除了 BESTIP 空串，mootdx 还有一个对海外用户致命的场景：<strong>TCP 7709 端口在海外网络通常全部超时</strong>。通达信服务器部署在国内，海外 VPS 直连大概率不通。tdx_client() 的设计在这一点上也优于裸 factory：它会在探测阶段快速识别"全部不可达"并抛出明确的 RuntimeError，而非让用户等到 TCP 超时（默认可能数分钟）。</p>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p><strong>问题：</strong>以下哪个场景<strong>不是</strong> BESTIP 空串 bug 的触发条件？</p>
+  <ol type="A">
+    <li>全新安装 mootdx 0.11.x，从未运行过，config.json 中 BESTIP.HQ 为 ""</li>
+    <li>已使用 mootdx 半年，某天 config.json 文件被手动清空</li>
+    <li>在海外 VPS 上运行 tdx_client()，所有 TCP 探测超时</li>
+    <li>卸载重装 mootdx 后直接 Quotes.factory(market='std')</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('ex1-answer').classList.toggle('show')">显示答案</button>
+  <div class="answer" id="ex1-answer">
+    <strong>答案：C。</strong>海外 TCP 超时不是 BESTIP 空串 bug——它是网络层面的问题。tdx_client() 探测到全部超时后抛出的是 RuntimeError（"所有 mootdx 服务器均不可达"），而非 ValueError。A、B、D 都会使 config.json 中缺少可用 IP，触发 BESTIP 空串 → ValueError 路径。关键区别：BESTIP bug 是<strong>配置层</strong>问题，海外超时是<strong>网络层</strong>问题。
+  </div>
+</div>
+
+<div class="ref-links">
+  <p><strong>交叉链接：</strong></p>
+  <ul>
+    <li>下一节：<a href="./0002-core-mechanism.html">三级 fallback：TCP 探测 → bestip 测速 → 裸 factory</a></li>
+    <li>前置课程：<a href="../../module-infrastructure/lessons/0001-infrastructure-module-tour.html">L1 基础设施层总览</a></li>
+    <li>源码参考：<a href="../../../../../open-trading/a-stock-data/SKILL.md">a-stock-data SKILL.md § mootdx 客户端（必读）</a></li>
+  </ul>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>想在自己的项目中用 tdx_client()？直接从 a-stock-data SKILL.md § Prerequisites 复制 _TDX_SERVERS + _probe() + tdx_client() 三段即可。有疑问向 agent 追问。
+</div>
+
+</body>
+</html>

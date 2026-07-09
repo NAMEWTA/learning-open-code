@@ -112,8 +112,10 @@ def _looks_like_file_ref(text):
     """判断文本是否像文件引用"""
     if len(text) < 4 or len(text) > 250:
         return False
-    if re.search(r'\.(java|ts|vue|xml|yml|yaml|json|js|jsx|tsx|css|scss|less|sql|md|properties|gradle|pom|html)$',
-                 text, re.IGNORECASE):
+    # 先去掉行号后缀（如 :592, :422-902, :155,442），扩展名检查才能命中
+    clean = re.sub(r':\d+[-\d,]*$', '', text)
+    if re.search(r'\.(java|ts|vue|xml|yml|yaml|json|js|jsx|tsx|css|scss|less|sql|md|properties|gradle|pom|html|rs)$',
+                 clean, re.IGNORECASE):
         return True
     if 'ruoyi-' in text.lower():
         return True
@@ -162,7 +164,7 @@ def extract_source_refs(html_file):
 
 def normalize_ref(ref):
     """规范化引用路径"""
-    ref = re.sub(r':\d+[-\d]*$', '', ref)
+    ref = re.sub(r':\d+[-\d,]*$', '', ref)
     ref = ref.strip()
     ref = ref.replace('.../', '')
     ref = re.sub(r'^RuoYi[-_]Vue[-_]Plus/', '', ref, flags=re.IGNORECASE)

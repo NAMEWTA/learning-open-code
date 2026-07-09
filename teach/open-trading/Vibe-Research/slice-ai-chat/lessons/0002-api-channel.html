@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0002 API 接入通道：function-calling 循环</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>API 接入通道：function-calling 循环</h1>
+  <p class="meta">学习目标：15 分钟内能讲清 API 通道从前端填 key 到流式回答返回的每一步，理解 function-calling 循环的 6 轮上限设计。</p>
+
+  <h2>1. 前端配置：怎么选模型</h2>
+  <p>用户在 Settings 页面选择"API 接入"模式后，看到的是一个下拉选择 + 三个输入框。下拉框来自 <code>ai-models.ts</code> 的 <code>apiModels</code> 数组（订阅版 <code>subscriptionModels</code> 被过滤掉），共 12 个选项：</p>
+  <div class="filetree">apiModels [
+  ├── DeepSeek V4 Flash/Pro      ← provider: deepseek
+  ├── SiliconFlow · DeepSeek V3  ← provider: silicon
+  ├── OpenAI GPT-4o             ← provider: openai
+  ├── MiniMax M2                ← provider: minimax
+  ├── 豆包 Pro                  ← provider: openai-compatible
+  ├── OpenRouter · GPT-4o       ← provider: openrouter
+  ├── Groq · Llama 3.3 70B     ← provider: groq
+  ├── Together · Llama 3.3 70B ← provider: together
+  ├── MiMo V2.5 Pro            ← provider: mimo
+  └── 其它 OpenAI 兼容          ← provider: openai-compatible
+]</div>
+  <p>每个选项绑定了 <code>provider</code>（如 <code>deepseek</code>），选中后 <code>pickApiModel()</code> 自动填入 <code>PROVIDER_BASE</code> 中的默认 baseURL。用户只需再填 API key 和 model 名。所有配置通过 <code>saveLlm()</code> 写入 <code>localStorage</code> 的 <code>vr-llm</code> 键，不上传服务器。</p>
+
+  <h2>2. 前端发起对话：chatStream</h2>
+  <p><code>llm.ts:59</code> 的 <code>chatStream()</code> 是前端的唯一对话入口。流程：</p>
+  <div class="diagram">chatStream(messages, context, handlers, signal)
+ │  1. loadLlm() → 从 localStorage 读配置
+ │     (provider 非 cli-* 需 baseURL+apiKey+model 三者齐全)
+ │  2. fetch POST /api/chat
+ │     body: { messages, context, llm: {provider, baseURL, apiKey, model} }
+ │  3. 检查 resp.ok — 401=鉴权错误, 400=配置缺失
+ │  4. resp.body.getReader() → 逐字节读
+ │  5. 按 \n 切行 → JSON.parse → 分发事件:
+ │     type: "delta" → 追加 content, 回调 onDelta(text)
+ │     type: "tool"  → 回调 onTool(tool, args)
+ │     type: "done"  → 取 trace + rounds
+ │     type: "error" → 记录 errMsg
+ │  6. 返回 {content, trace, rounds}
+ │  7. 支持 AbortController.signal 中止</div>
+  <p><strong>防乱码技巧</strong>：<code>buf.split("\n")</code> 保留最后一段不完整行，等下一块数据到了再拼——这样不会在 UTF-8 多字节字符中间切断。</p>
+
+  <h2>3. 后端核心：run_chat_stream 的 function-calling 循环</h2>
+  <p><code>chat.py:320</code> 是 API 通道的核心。它的本质是：<strong>反复调 LLM，每次拿到 tool_calls 就执行、注入结果，直到 LLM 不再要工具为止</strong>。</p>
+  <div class="diagram">run_chat_stream(cfg, user_messages, context)
+ │
+ ├─ 构建 messages: [system(SYSTEM_PROMPT), ...user_messages]
+ │
+ ├─ for rnd = 1..6:                     ← 最多 6 轮
+ │   │
+ │   ├─ _call_llm_stream(cfg, messages, use_tools=True)
+ │   │   │  POST {baseURL}/v1/chat/completions
+ │   │   │  payload: {model, messages, tools=TOOLS, tool_choice="auto", stream:true}
+ │   │   └─ 返回 resp (SSE 流)
+ │   │
+ │   ├─ _iter_sse_deltas(resp)
+ │   │   │  逐字节缓冲 → 按 \n 切行 → 只处理 "data:" 行
+ │   │   │  data == "[DONE]" → 终止迭代
+ │   │   │  解析 JSON → yield choices[0].delta
+ │   │   └─ 逐 delta 推: content → yield {type:delta, text}
+ │   │                   tool_calls → 按 index 归位累积
+ │   │
+ │   ├─ 若 tool_acc 为空 → yield {type:done}, 结束 ✓
+ │   │
+ │   └─ 若有工具调用:
+ │       │ messages.append(assistant 消息含 tool_calls)
+ │       │ for each tool:
+ │       │   │ 解析 arguments JSON
+ │       │   │ yield {type:tool, tool, args}
+ │       │   │ result = _exec_tool(name, args)  ← 实际查数据
+ │       │   │ messages.append(tool 消息含 result)
+ │       │   └─ trace.append({tool, args})
+ │
+ └─ 超 6 轮: 最后一次不传 tools, 取文本收尾 → done</div>
+  <p>关键设计决策：</p>
+  <ul>
+    <li><strong>为什么是 6 轮？</strong> <code>MAX_ROUNDS = 6</code>：一轮发问、最多 4 轮调工具（查行情+估值+研报+新闻）、一轮收尾回答。实际使用中极少超过 3 轮。</li>
+    <li><strong>为什么每次 rebuild messages？</strong> 每轮调 API 时带完整的 messages 历史——这是 OpenAI 兼容协议的标准要求，模型不记前一轮的上下文。</li>
+    <li><strong>tool_calls 按 index 归位</strong>：SSE 流中可能交错发来多个 tool_calls 的片段，必须按 <code>index</code>（或 <code>id</code>）归入正确的调用槽，否则 arguments 会串在一起。</li>
+  </ul>
+
+  <h2>4. 五个数据工具（TOOLS）</h2>
+  <p>这 5 个工具是 AI 的"数据手臂"——AI 通过它们拿到客观数据。工具定义在 <code>chat.py:61-124</code>：</p>
+  <table>
+    <tr><th>工具名</th><th>数据源</th><th>参数</th><th>返回</th></tr>
+    <tr><td><code>query_quote</code></td><td>腾讯行情 API</td><td>codes: 6位代码数组</td><td>现价/涨跌/PE/PB/市值/换手</td></tr>
+    <tr><td><code>query_valuation</code></td><td>东财估值 + 腾讯行情</td><td>code: 单个6位代码</td><td>完整估值：前向 PE/PEG/PE 消化年数</td></tr>
+    <tr><td><code>query_reports</code></td><td>东财研报</td><td>code: 单个6位代码</td><td>最近 15 篇研报标题/机构/评级</td></tr>
+    <tr><td><code>query_news</code></td><td>同花顺新闻</td><td>code: 单个6位代码</td><td>最近 15 条新闻标题/时间/来源</td></tr>
+    <tr><td><code>query_global_stock</code></td><td>push2 美股/港股</td><td>symbol: 美股代码或港股代码</td><td>行情 + 关键财务指标</td></tr>
+  </table>
+  <p>每个工具的结果通过 <code>_TOOL_RESULT_CAP = 6000</code> 截断——防止一次估值查询把整个 JSON 塞进下一轮 context，耗尽 token。</p>
+
+  <h3>5. SYSTEM_PROMPT：投研五维框架</h3>
+  <p><code>chat.py:31</code> 的 <code>ANALYSIS_FRAMEWORK</code> 是整条通道的"灵魂"。它规定了 AI 分析个股时的组织方式：<strong>估值 → 资金面 → 财报质量 → 行业景气 → 事件催化与风险</strong>。这个框架不做成 UI 选项——直接焊进 SYSTEM_PROMPT，用户不用选，问就是这套标准。</p>
+  <p>合规约束同样焊在 prompt 里：只做信息整理与多视角分析，不荐股、不预测涨跌、不给买卖时机。</p>
+
+  <div class="callout">
+    <p><strong>检索练习：</strong>用户对一只股票同时问了三个问题："现价多少？PE 过高吗？帮我分析一下这个股票。"AI 在 function-calling 循环中最少需要调几次工具？哪几次？</p>
+    <p><strong>参考答案：</strong>最少 2 次。第 1 次：调 <code>query_quote</code> 拿现价 + PE。第 1 轮结果返回后，AI 发现还需要更全面的估值和财务信息，第 2 次同时调 <code>query_valuation</code>（估值分位）和 <code>query_reports</code>（机构观点）。第 2 轮结果拿到后，AI 就有足够数据按五维框架输出完整分析，不再需要调工具。实际可能多达 4 次（再加 <code>query_news</code> 查舆情），但 2 次是最少需要。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/chat.py:31-43</code>（SYSTEM_PROMPT + 五维框架）、<code>320-382</code>（run_chat_stream 循环）、<code>61-124</code>（TOOLS 定义）、<code>frontend/src/lib/llm.ts:59-113</code>（chatStream NDJSON 解析）。更详细的系统 prompt 工程和 SSRF 防护见 <a href="../reference/ai-chat-flow-map.html">AI 对话全链路速查谱</a>。想问某个工具的具体数据格式？让 agent 顺着 <code>astock.py</code> 查对应函数。</p>
+</main>
+</body>
+</html>

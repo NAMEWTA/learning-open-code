@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 持仓管理 — 全链路地图</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; --success:#0f9d58; --danger:#db4437; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.78rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    .green { color: var(--success); }
+    .red { color: var(--danger); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>0001 持仓管理 — 全链路地图</h1>
+  <p class="meta">学习目标：15 分钟内能画出从 Portfolio.tsx 录入到 portfolio.py 持久化的完整数据流，说出五个端点和三个异常路径的降级行为。</p>
+
+  <h2>1. 全链路时序全景</h2>
+  <p>持仓管理是 Vibe-Research 中唯一<strong>写操作</strong>的垂直切片——它不走纯查询模式，而是前端录入 + 后端合并 + 本地 JSON 持久化。以下时序图覆盖录入→实时盈亏→已清仓三条主线：</p>
+
+  <div class="diagram">用户                  Portfolio.tsx            FastAPI app.py           portfolio.py          .cache/portfolio.json    腾讯行情
+  │                        │                        │                        │                        │                      │
+  │  输入代码/股数/成本价    │                        │                        │                        │                      │
+  │──────────────────────►│                        │                        │                        │                      │
+  │                        │  POST /api/portfolio/   │                        │                        │                      │
+  │                        │  holding {code,shares,cost}                      │                        │                      │
+  │                        │───────────────────────►│                        │                        │                      │
+  │                        │                        │  校验：6位数字、shares>0  │                        │                      │
+  │                        │                        │───────────────────────►│                        │                      │
+  │                        │                        │                        │  _load() 读盘           │                      │
+  │                        │                        │                        │───────────────────────►│                      │
+  │                        │                        │                        │◄───────────────────────│                      │
+  │                        │                        │                        │                        │                      │
+  │                        │                        │                        │  同代码？加权平均合并：    │                      │
+  │                        │                        │                        │  cost = (旧股数×旧成本 +  │                      │
+  │                        │                        │                        │   新股数×新成本) / 总股数  │                      │
+  │                        │                        │                        │                        │                      │
+  │                        │                        │                        │  _save() 原子写盘         │                      │
+  │                        │                        │                        │  (.tmp → os.replace)     │                      │
+  │                        │                        │                        │───────────────────────►│                      │
+  │                        │                        │                        │◄── 返回 get_portfolio()  │                      │
+  │                        │                        │                        │                        │                      │
+  │                        │                        │                        │  astock.tencent_quote()  │                      │
+  │                        │                        │                        │──────────────────────────────────────────────────►│
+  │                        │                        │                        │◄──────────────────────────────────────────────────│
+  │                        │                        │                        │                        │                      │
+  │                        │                        │                        │  逐笔算：市值=现价×股数   │                      │
+  │                        │                        │                        │  浮动盈亏=市值-成本       │                      │
+  │                        │                        │                        │  红涨绿跌（A股惯例）      │                      │
+  │                        │                        │                        │                        │                      │
+  │                        │◄── PortfolioData JSON ──│◄───────────────────────│                        │                      │
+  │                        │  holdings[] / totals /  │                        │                        │                      │
+  │                        │  closed[] / realized_pnl│                        │                        │                      │
+  │                        │                        │                        │                        │                      │
+  │◄── 浮动盈亏表格渲染 ────│                        │                        │                        │                      │
+  │    红涨绿跌 / 汇总卡片    │                        │                        │                        │                      │
+  │                        │                        │                        │                        │                      │
+  │  ===== 清仓路径 =====   │                        │                        │                        │                      │
+  │                        │                        │                        │                        │                      │
+  │  输入代码/日期/价/量/成本 │                        │                        │                        │                      │
+  │──────────────────────►│                        │                        │                        │                      │
+  │                        │  POST /api/portfolio/   │                        │                        │                      │
+  │                        │  close {code,date,       │                        │                        │                      │
+  │                        │    price,shares,cost}    │                        │                        │                      │
+  │                        │───────────────────────►│                        │                        │                      │
+  │                        │                        │  校验：price>0, shares>0, │                        │                      │
+  │                        │                        │  date格式YYYY-MM-DD      │                        │                      │
+  │                        │                        │───────────────────────►│                        │                      │
+  │                        │                        │                        │  pnl = (清仓价-成本)×股数 │                      │
+  │                        │                        │                        │  append → d["closed"][]  │                      │
+  │                        │                        │                        │  _save()                 │                      │
+  │                        │                        │                        │───────────────────────►│                      │
+  │                        │◄── PortfolioData(含closed) ──│◄──────────────────│                        │                      │
+  │◄── 已清仓列表 + 已实现盈亏合计                         │                        │                      │</div>
+
+  <h2>2. 三条主线：录入、盈亏计算、清仓</h2>
+  <p>整个持仓链路围绕 <strong>一份本地 JSON 文件</strong> 展开，所有修改都经过 <code>threading.Lock()</code> 保护：</p>
+
+  <table>
+    <tr><th>主线</th><th>入口</th><th>核心逻辑</th><th>持久化</th></tr>
+    <tr>
+      <td><strong>录入持仓</strong></td>
+      <td><code>POST /api/portfolio/holding</code></td>
+      <td><code>add_holding()</code>：同代码按加权平均成本合并（加仓），新代码直接追加</td>
+      <td><code>_save()</code> 先写 .tmp 再 <code>os.replace()</code> 原子改名，防止并发读到半截 JSON</td>
+    </tr>
+    <tr>
+      <td><strong>实时盈亏</strong></td>
+      <td><code>GET /api/portfolio</code> 或 <code>POST /api/portfolio/refresh</code></td>
+      <td><code>get_portfolio()</code>：批量调 <code>astock.tencent_quote()</code>，逐笔算市值和浮动盈亏，汇总到 totals</td>
+      <td>只读不写；updated 字段记录北京时间戳</td>
+    </tr>
+    <tr>
+      <td><strong>已清仓记录</strong></td>
+      <td><code>POST /api/portfolio/close</code></td>
+      <td><code>close_position()</code>：算已实现盈亏 = (清仓价 - 成本) / 成本，存入 closed 数组</td>
+      <td>追加写入；<code>realized_pnl</code> 由 get_portfolio() 动态汇总</td>
+    </tr>
+  </table>
+
+  <p>前端 <code>Portfolio.tsx</code> 通过 <code>api.ts</code> 中统一的 <code>request()</code> 函数调用这些端点——所有请求经 Vite 代理转发到 FastAPI :8900。每 30 分钟 <code>setInterval</code> 自动刷新；手动点"刷新"按钮则调 <code>POST /api/portfolio/refresh</code> 立即重拉行情。</p>
+
+  <h2>3. 异常路径与降级</h2>
+  <p>全链路中有三类关键异常，每一类都有明确的错误处理：</p>
+
+  <table>
+    <tr><th>异常</th><th>触发条件</th><th>检测层</th><th>降级行为</th></tr>
+    <tr>
+      <td><strong>代码非法</strong></td>
+      <td>输入非 6 位数字</td>
+      <td>前端 <code>/^\d{6}$/</code> 正则 + 后端 <code>isdigit()</code> 双重校验</td>
+      <td>前端直接 setErr 提示"请输入 6 位股票代码"，不发起请求</td>
+    </tr>
+    <tr>
+      <td><strong>数量为零/负</strong></td>
+      <td>shares &lt;= 0</td>
+      <td>前端 <code>parseFloat(shares)</code> 检查 + 后端 <code>h.shares &lt;= 0</code></td>
+      <td>前端 setErr "数量须大于 0"；后端返回 HTTP 400</td>
+    </tr>
+    <tr>
+      <td><strong>行情源失败</strong></td>
+      <td>腾讯行情接口不可达或超时</td>
+      <td><code>get_portfolio()</code> 中 try/except 兜底</td>
+      <td><code>quotes = {}</code>——价格字段为 0.0，表格仍渲染但现价/浮盈列可能全为零，不抛 500</td>
+    </tr>
+    <tr>
+      <td><strong>后端宕机</strong></td>
+      <td>FastAPI 未启动或端口不对</td>
+      <td><code>api.ts request()</code> 的 fetch catch</td>
+      <td>抛 ApiError "连接不到后端，请先启动 backend"，前端展示红色错误横幅</td>
+    </tr>
+  </table>
+
+  <h2>4. 关键设计决策</h2>
+  <p><strong>为什么用加权平均成本而不是 FIFO？</strong>Vibe-Research 是个人投研工具而非交易系统，不需要精确的税务批次追踪。加权平均成本在代码上只需一行公式，对个人用户来说足够透明——看到的是一个"综合成本价"，加仓后成本自动摊平。</p>
+  <p><strong>为什么成本和清仓价允许为负数？</strong>融券做空时卖出价是正的，但持仓方向相反导致成本为负；某些返息场景也会产生负成本。不限制符号是<strong>尊重用户计算逻辑</strong>的选择——"你输入的，我们原样算"。</p>
+
+  <div class="callout">
+    <p><strong>检索练习：</strong>如果用户在已持有 100 股成本 10 元的股票上，再录入 200 股成本 13 元，最终的合并成本是多少？<code>get_portfolio()</code> 返回的 totals 中 cost 是合并成本还是总成本？</p>
+    <p><strong>参考答案：</strong>合并成本 = (100/10 + 200/13) / 300 = (1000 + 2600) / 300 = 12.0 元。totals 中的 cost 是所有持仓的<strong>总成本</strong>（合并成本 × 总股数 = 12.0 \* 300 = 3600），不是合并成本本身。这点容易混淆——每笔 holding.cost 是合并均价，totals.cost 是总持仓成本。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/portfolio.py:46-59</code>（add_holding 加权合并）、<code>backend/portfolio.py:99-137</code>（get_portfolio 实时盈亏计算）、<code>frontend/src/pages/Portfolio.tsx:48-61</code>（前端录入与校验）。五个端点速查见 <a href="../reference/portfolio-flow-map.html">portfolio-flow-map 参考</a>。</p>
+</main>
+</body>
+</html>

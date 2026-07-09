@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 — 异常与边界路径</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .error-box { border-left: 4px solid #c94043; background: #fef7f7; padding: 14px 18px; margin: 18px 0; border-radius: 0 8px 8px 0; }
+  .error-box strong { display: block; margin-bottom: 6px; color: #8b2022; }
+  .fix-box { border-left: 4px solid #2a7d4f; background: #f4faf6; padding: 14px 18px; margin: 18px 0; border-radius: 0 8px 8px 0; }
+  .fix-box strong { display: block; margin-bottom: 6px; color: #1d5c37; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 3 节 &middot; 预计 14 分钟</p>
+
+<h1>0003 — 异常与边界路径</h1>
+
+<p class="objective"><strong>学习目标：</strong>能用调试思路定位三种典型异常——东财封 IP（_em_get 限流失效）、mootdx TCP 不可达（三级 fallback 与手动代码回退）、中文 ticker 解析失败（_build_name_code_map 失败链路）。</p>
+
+<h2>1. 东财封 IP — _em_get 限流与批量场景调参</h2>
+
+<div class="error-box">
+<strong>典型现象：</strong>多 Agent 批量跑分析时，东财系接口（push2 / datacenter / search-api 等）突然全部返回空或 ConnectionError。其他数据源（新浪/同花顺/腾讯）正常。
+</div>
+
+<p>东财风控的触发阈值：每秒 &gt;5 次、单 IP 并发 &ge;10、1 分钟 &ge;200 次、5 分钟 &ge;300 次。封 IP 时长通常 5-30 分钟。</p>
+
+<p>防护机制就是 <code>_em_get()</code>——所有 eastmoney.com 请求的统一入口：</p>
+
+<pre># a_stock.py:258-288 — 东财防封限流核心
+_EM_SESSION = _requests.Session()            # Keep-Alive 会话复用
+_EM_MIN_INTERVAL = float(os.environ.get(
+    "EM_MIN_INTERVAL", "1.0"))                # 默认 1s，可环境变量覆盖
+_em_last_call = [0.0]                         # 模块级时间戳
+
+def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
+    wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.5))  # 串行限流 + 随机抖动
+    try:
+        return _EM_SESSION.get(url, params=params, ...)
+    finally:
+        _em_last_call[0] = time.time()</pre>
+
+<div class="fix-box">
+<strong>排查与修复：</strong>
+<ol>
+  <li>确认所有东财调用点是否都走了 <code>_em_get()</code>（共 7 个调用点：push2 实时/历史/个股信息、datacenter-web、search-api、np-weblist）。如果新增了东财端点但直接用了 <code>requests.get()</code>，会被风控识别。</li>
+  <li>批量场景调大 <code>EM_MIN_INTERVAL</code>：<code>export EM_MIN_INTERVAL=1.5</code> 或 <code>2.0</code>，给东财服务器更多"喘息"时间。</li>
+  <li>如果已被封 IP——只能等 5-30 分钟自动解封，或切换网络出口 IP。</li>
+  <li>非东财源（mootdx / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度）不受影响——确认这些源的方法没有"误入" <code>_em_get()</code>。</li>
+</ol>
+</div>
+
+<h2>2. mootdx TCP 不可达 — 三级 fallback 与手动代码回退</h2>
+
+<div class="error-box">
+<strong>典型现象：</strong>海外网络环境或公司防火墙封了 TCP 7709 端口时，<code>get_stock_data</code> 直接报错 "mootdx和新浪备用源均不可用"。同时中文 ticker 解析也失败（因为 <code>_build_name_code_map</code> 依赖 mootdx）。
+</div>
+
+<p><code>_get_mootdx_client()</code> 有三层兜底：</p>
+
+<pre># a_stock.py:172-201 — 三级 fallback
+def _get_mootdx_client():
+    # Level 1: TCP 握手探测内置服务器列表（10 个备选 IP）
+    for ip, port in _TDX_SERVERS:
+        if _probe_tdx(ip, port):          # socket.create_connection
+            return Quotes.factory(market="std", server=(ip, port))
+
+    # Level 2: mootdx 内置 BESTIP 测速（国内网络通常成功）
+    try: return Quotes.factory(market="std", bestip=True)
+    except: pass
+
+    # Level 3: 裸 factory（老用户 config 已有 IP 缓存）
+    try: return Quotes.factory(market="std")
+    except Exception as e:
+        raise RuntimeError("mootdx 通达信服务器均不可达（TCP 7709）")</pre>
+
+<div class="fix-box">
+<strong>排查与修复：</strong>
+<ol>
+  <li>确认 TCP 7709 端口可达：<code>nc -zv 119.97.185.59 7709</code>。海外网络通常全部超时——这是已知限制。</li>
+  <li>如果仅 OHLCV 数据不可达，K线链路会自动触发新浪 HTTP fallback（<code>_sina_kline_fallback</code>），但财务快照和 F10 没有冗余源。</li>
+  <li>中文 ticker 解析依赖 mootdx 的全市场股票列表——如果 mootdx 不可达，只能手动输入 6 位数字代码绕过。</li>
+  <li>国内代理环境下：检查代理是否对非 HTTP 协议的 TCP 连接做了拦截。</li>
+</ol>
+</div>
+
+<h2>3. 中文 ticker 解析失败 — 链路全景</h2>
+
+<p>这是多 Agent 场景下的高频故障点——LLM 在 tool call 时可能返回中文股票名（如"宝光股份"）而非 6 位代码。解析链路的完整路径为：</p>
+
+<pre># 完整中文解析链路
+safe_ticker_component("宝光股份")     # utils.py:20-47 — 检测中文
+  → resolve_ticker("宝光股份")        # a_stock.py:115-144
+    → _build_name_code_map()          # a_stock.py:79-112 — 两级缓存
+      → _get_mootdx_client()          # TCP :7709
+        → client.stocks(market=0)     # 深市全量
+        → client.stocks(market=1)     # 沪市全量
+        → 构建 {name→code} + {code→name} 双映射
+    → 精确匹配 → 模糊匹配(contains) → ValueError</pre>
+
+<div class="error-box">
+<strong>典型现象：</strong>
+<ul>
+  <li>mootdx 不可达时：<code>ValueError: 无法通过 mootdx 解析股票名称（通达信服务暂时不可达）</code></li>
+  <li>名称模糊匹配到多只股票：<code>ValueError: '科技' 匹配到多只股票: xx科技(300xxx), ...</code></li>
+  <li>名称完全找不到：<code>ValueError: 找不到股票 '某名称'，请检查名称是否正确</code></li>
+</ul>
+</div>
+
+<div class="fix-box">
+<strong>修复方向：</strong>
+<ol>
+  <li><strong>mootdx 不可达</strong> — 直接输入 6 位代码绕过 <code>resolve_ticker</code>。这是最终兜底方案。</li>
+  <li><strong>多个模糊匹配</strong> — 输入完整股票名称（而非部分关键字），或直接用代码。</li>
+  <li><strong>找不到名称</strong> — 确认名称中无多余空格/全角半角混用（<code>_build_name_code_map</code> 会做 <code>.replace(" ", "").replace("　", "")</code> 清洗）。</li>
+  <li><strong>LLM 输出非标准名称</strong> — 这是最隐蔽的问题。不同模型对"股票标识"的理解不同：deepseek 系列可能返回中文名，GPT 系列通常返回代码。建议在 Agent prompt 中明确要求返回 6 位代码。</li>
+</ol>
+</div>
+
+<h2>4. 空数据与 look-ahead bias 防护</h2>
+
+<p>两个容易被忽略的边界条件：</p>
+<ul>
+  <li><strong>空数据返回：</strong>所有 17 个 get_* 方法在无数据时不抛异常，而是返回带中文说明的错误字符串（如 <code>"K线数据获取失败：mootdx和新浪备用源均不可用"</code>）。这是给 LLM Analyst 看的——让 Agent 知情降级，而非崩溃。</li>
+  <li><strong>look-ahead bias：</strong><code>_load_ohlcv_astock</code> 和 <code>load_ohlcv</code>（yfinance 版本）都会按 <code>curr_date</code> 截断数据：<code>data[data["Date"] &lt;= cutoff]</code>。这确保回测场景下 Analyst 看不到"未来"的K线——属于数据层的安全边界。</li>
+  <li><strong>财报日期过滤：</strong>新浪财报 API 返回的 <code>_get_financial_report_sina</code> 也会按 <code>curr_date</code> 过滤 <code>报告日</code>，防止回测时用到未来季度的财报数据。</li>
+</ul>
+
+<div class="quiz">
+  <h3>检索练习 + 诊断任务</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li><code>_em_get</code> 的三要素是什么？如果已被东财封 IP，最快恢复方案是什么？</li>
+    <li>mootdx TCP 7709 不可达时，哪些功能会受影响？哪些不受影响？</li>
+    <li>中文 ticker 解析链路中，<code>safe_ticker_component</code> 和 <code>resolve_ticker</code> 的分工是什么？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> 三要素：串行限流（模块级时间戳 + EM_MIN_INTERVAL）、随机抖动（0.1~0.5s）、Session 复用（Keep-Alive）。被封后最快方案是等 5-30 分钟自动解封，或切换出口 IP。调大 <code>EM_MIN_INTERVAL</code> 可避免再次被封。</p>
+      <p><strong>2.</strong> 受影响：OHLCV K线（会触发新浪 fallback）、财务快照、F10 股东研究、中文名称→代码映射。不受影响：腾讯报价、东财系接口、新浪财报三表、同花顺 EPS/热股/北向资金、财联社快讯、百度概念板块——这些全部走 HTTP。</p>
+      <p><strong>3.</strong> <code>safe_ticker_component</code> 是安全边界——检测输入是否含中文，含中文则调用 <code>resolve_ticker</code> 转码，同时校验最终结果不含路径穿越字符。<code>resolve_ticker</code> 是解析引擎——通过 mootdx 全市场映射把中文名转为 6 位代码，支持精确匹配和模糊匹配。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>上一节：</strong><a href="0002-main-path.html">K线/财务/新闻主成功路径</a> — 核心方法的完整调用链路。<br>
+  <strong>速查资料：</strong><a href="../reference/data-fetching-flow-map.html">数据获取完整链路速查图谱</a> — 异常码速查、config 调参建议。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

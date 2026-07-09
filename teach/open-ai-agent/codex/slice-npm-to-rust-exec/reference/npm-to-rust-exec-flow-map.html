@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>npm 到 Rust exec 调用链速查表</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <section class="reference">
+        <h1>npm 到 Rust exec 调用链速查表</h1>
+        <p class="meta">用途：快速定位 `codex exec` 从 npm bin 到 Rust exec 进程的每一层入口、关键函数和异常处理。基于当前本地源码快照。</p>
+
+        <h2>层级概览</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>层</th>
+              <th>入口文件</th>
+              <th>关键函数</th>
+              <th>输入</th>
+              <th>输出</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>1. npm bin</td>
+              <td><code>codex-cli/package.json</code></td>
+              <td><code>"bin": { "codex": "bin/codex.js" }</code></td>
+              <td>终端命令 <code>codex exec "hello"</code></td>
+              <td>Node.js 进程执行 <code>bin/codex.js</code></td>
+            </tr>
+            <tr>
+              <td>2. Node.js 入口</td>
+              <td><code>codex-cli/bin/codex.js</code></td>
+              <td>顶层脚本（ESM）</td>
+              <td><code>process.platform</code>、<code>process.arch</code>、<code>process.argv</code></td>
+              <td>target triple + binaryPath</td>
+            </tr>
+            <tr>
+              <td>3. 平台检测</td>
+              <td><code>codex-cli/bin/codex.js</code></td>
+              <td>switch (platform/arch)</td>
+              <td><code>"darwin" + "arm64"</code></td>
+              <td><code>"aarch64-apple-darwin"</code></td>
+            </tr>
+            <tr>
+              <td>4. 二进制发现</td>
+              <td><code>codex-cli/bin/codex.js</code></td>
+              <td><code>findCodexExecutable()</code></td>
+              <td>target triple</td>
+              <td><code>vendor/{triple}/bin/codex</code> 的绝对路径</td>
+            </tr>
+            <tr>
+              <td>5. spawn 子进程</td>
+              <td><code>codex-cli/bin/codex.js</code></td>
+              <td><code>spawn(binaryPath, args, opts)</code></td>
+              <td>binaryPath + <code>["exec", "hello"]</code></td>
+              <td>原生 <code>codex</code> 进程（stdio 继承）</td>
+            </tr>
+            <tr>
+              <td>6. Rust CLI 入口</td>
+              <td><code>codex-rs/cli/src/main.rs</code></td>
+              <td><code>main() → arg0_dispatch_or_else → cli_main</code></td>
+              <td>OS 进程参数</td>
+              <td><code>MultitoolCli</code> 已解析</td>
+            </tr>
+            <tr>
+              <td>7. 子命令分发</td>
+              <td><code>codex-rs/cli/src/main.rs</code></td>
+              <td><code>match subcommand { Subcommand::Exec(..) => .. }</code></td>
+              <td><code>Subcommand::Exec(exec_cli)</code></td>
+              <td><code>codex_exec::run_main(exec_cli, arg0_paths)</code></td>
+            </tr>
+            <tr>
+              <td>8. exec 模块启动</td>
+              <td><code>codex-rs/exec/src/main.rs</code></td>
+              <td><code>codex_exec::run_main(inner, arg0_paths)</code></td>
+              <td><code>Cli { command, config_overrides, .. }</code></td>
+              <td>agent 循环（本切片终点）</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>平台的 target triple 映射表</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>platform</th>
+              <th>arch</th>
+              <th>target triple</th>
+              <th>npm package</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>linux / android</td><td>x64</td><td><code>x86_64-unknown-linux-musl</code></td><td><code>@openai/codex-linux-x64</code></td></tr>
+            <tr><td>linux / android</td><td>arm64</td><td><code>aarch64-unknown-linux-musl</code></td><td><code>@openai/codex-linux-arm64</code></td></tr>
+            <tr><td>darwin</td><td>x64</td><td><code>x86_64-apple-darwin</code></td><td><code>@openai/codex-darwin-x64</code></td></tr>
+            <tr><td>darwin</td><td>arm64</td><td><code>aarch64-apple-darwin</code></td><td><code>@openai/codex-darwin-arm64</code></td></tr>
+            <tr><td>win32</td><td>x64</td><td><code>x86_64-pc-windows-msvc</code></td><td><code>@openai/codex-win32-x64</code></td></tr>
+            <tr><td>win32</td><td>arm64</td><td><code>aarch64-pc-windows-msvc</code></td><td><code>@openai/codex-win32-arm64</code></td></tr>
+          </tbody>
+        </table>
+
+        <h2>异常路径一览</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>异常</th>
+              <th>触发层</th>
+              <th>错误信息</th>
+              <th>排查方向</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>平台不支持</td>
+              <td>codex.js switch 语句</td>
+              <td><code>Unsupported platform: {platform} ({arch})</code></td>
+              <td>检查 platform/arch 组合是否在 6 种映射中；新增架构需修改 <code>PLATFORM_PACKAGE_BY_TARGET</code></td>
+            </tr>
+            <tr>
+              <td>二进制缺失</td>
+              <td><code>findCodexExecutable()</code></td>
+              <td><code>Missing optional dependency {pkg}. Reinstall Codex: ...</code></td>
+              <td>检查平台 npm 包是否安装；<code>npm ls {platformPkg}</code>；重新 <code>npm install -g</code></td>
+            </tr>
+            <tr>
+              <td>spawn ENOENT</td>
+              <td><code>child.on("error")</code></td>
+              <td>系统级错误（文件不存在/无执行权限）</td>
+              <td>检查 binaryPath 是否可执行；<code>ls -l</code> 确认权限位</td>
+            </tr>
+            <tr>
+              <td>信号中断</td>
+              <td>信号转发处理器</td>
+              <td>SIGINT/SIGTERM/SIGHUP → 子进程终止</td>
+              <td>正常行为；检查子进程是否正确响应终止信号</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>关键环境变量</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>变量</th>
+              <th>设置层</th>
+              <th>用途</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>CODEX_MANAGED_BY_NPM</code></td><td>codex.js</td><td>标记 npm 管理的安装，Rust 侧据此选择更新策略</td></tr>
+            <tr><td><code>CODEX_MANAGED_BY_BUN</code></td><td>codex.js</td><td>标记 bun 管理的安装</td></tr>
+            <tr><td><code>CODEX_MANAGED_PACKAGE_ROOT</code></td><td>codex.js</td><td>npm 包的根目录绝对路径，供 Rust 侧定位资源</td></tr>
+            <tr><td><code>npm_config_user_agent</code></td><td>npm 自动设置</td><td>codex.js 据此检测包管理器（npm/bun）</td></tr>
+          </tbody>
+        </table>
+
+        <h2>codex-rs 独立 exec 入口说明</h2>
+        <p>
+          <code>codex-rs/exec/src/main.rs</code> 是 <code>codex-exec</code> 二进制（而非 <code>codex</code>）的入口。它同样使用 <code>arg0_dispatch_or_else</code>，当以 <code>codex-linux-sandbox</code> 名称调用时会切换到沙箱模式。在正常路径中，它解析 <code>TopCli</code>（内嵌 <code>Cli</code>），合并根级配置覆盖后调用同样的 <code>codex_exec::run_main</code>。这意味着 <code>codex exec</code>（通过 cli main.rs）和 <code>codex-exec</code>（独立二进制）共享同一套 exec 运行时。
+        </p>
+
+        <p>
+          回到课程：<a href="../lessons/0001-flow-map.html">链路地图课程</a>。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

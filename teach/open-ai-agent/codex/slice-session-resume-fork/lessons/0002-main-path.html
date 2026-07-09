@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>冷 Resume 主路径——从 JSONL 到 Session 再生</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .code-block {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 0.8rem 1rem;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>冷 Resume 主路径：从 JSONL 到 Session 再生</h1>
+    <p class="meta">学习目标：追踪 ThreadStore::resume_thread() -> load_history() -> reconstruct_history_from_rollout() 的完整调用链，理解反向扫描算法。</p>
+    <p class="meta">前置：<a href="0001-flow-map.html">链路全景地图</a></p>
+  </header>
+
+  <section>
+    <h2>1. ThreadStore — 入口契约</h2>
+    <p>一切持久化操作经过 <code>ThreadStore</code> trait。它不是实现，而是一组存储中立的接口契约。理解这 3 个方法就掌握了入口：</p>
+
+    <div class="code-block">// thread-store/src/store.rs — ThreadStore trait（摘录）
+pub trait ThreadStore: Any + Send + Sync {
+    /// 创建新的 live thread，分配 ThreadId 和 rollout 路径
+    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture&lt;'_, ()&gt;;
+
+    /// 重新打开已有 thread，准备追加新 item
+    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture&lt;'_, ()&gt;;
+
+    /// 加载持久化历史 → 返回 StoredThreadHistory（含 Vec&lt;RolloutItem&gt;）
+    fn load_history(
+        &self, params: LoadThreadHistoryParams
+    ) -> ThreadStoreFuture&lt;'_, StoredThreadHistory&gt;;
+
+    /// 将 thread 标记为 archived，移动文件到 archived_sessions/
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture&lt;'_, ()&gt;;
+}</div>
+
+    <p><code>create_thread</code> 和 <code>resume_thread</code> 的区别：前者创建全新的 thread（分配新的 ThreadId 和 rollout 路径），后者重新打开已存在的 thread（保持相同的 ThreadId 和 rollout 文件），允许追加新的对话内容。</p>
+  </section>
+
+  <section>
+    <h2>2. reconstruct_history_from_rollout — 反向扫描算法</h2>
+    <p>这是冷 resume 的核心——从一个扁平的 JSONL 行数组中重建出结构化的 <code>Session</code> 状态。算法采用<strong>从新到旧反向扫描</strong>，因为 rollout 末尾是最新状态，只需要找到最近的 relevant metadata 即可。</p>
+
+    <p>算法的输出是 <code>RolloutReconstruction</code>，包含 5 个关键字段：</p>
+    <table>
+      <tr><th>字段</th><th>类型</th><th>含义</th></tr>
+      <tr><td><code>history</code></td><td><code>Vec&lt;ResponseItem&gt;</code></td><td>重建后的完整对话历史</td></tr>
+      <tr><td><code>previous_turn_settings</code></td><td><code>Option&lt;PreviousTurnSettings&gt;</code></td><td>上一轮使用的 model / comp_hash</td></tr>
+      <tr><td><code>reference_context_item</code></td><td><code>Option&lt;TurnContextItem&gt;</code></td><td>最近的 TurnContext 基线（用于 resume 水合）</td></tr>
+      <tr><td><code>world_state_baseline</code></td><td><code>Option&lt;WorldStateSnapshot&gt;</code></td><td>恢复的世界状态快照</td></tr>
+      <tr><td><code>window_number</code></td><td><code>u64</code></td><td>上下文窗口编号</td></tr>
+    </table>
+
+    <div class="code-block">// core/src/session/rollout_reconstruction.rs — 反向扫描主循环（摘录）
+for (index, item) in rollout_items.iter().enumerate().rev() {
+    match item {
+        RolloutItem::Compacted(compacted) => {
+            // 检查是否有 replacement_history → 截断 rollout_suffix
+            if let Some(replacement_history) = &compacted.replacement_history {
+                active_segment.base_replacement_history = Some(replacement_history);
+                rollout_suffix = &rollout_items[index + 1..]; // ← 截断点
+            }
+            // 记录 window_number、first_window_id 等
+        }
+        RolloutItem::TurnContext(ctx) => {
+            // 记录上一轮的 model / comp_hash / realtime_active
+            active_segment.previous_turn_settings = Some(PreviousTurnSettings { ... });
+            // 记录最近的 TurnContextItem 作为 reference_context_item
+        }
+        // ... Rollback、UserMessage、WorldState 等其他 item 类型的处理
+    }
+    // 提前终止：当 replacement_history + previous_turn_settings
+    //            + reference_context_item 三者都已确定时，停止扫描
+    if base_replacement_history.is_some()
+        && previous_turn_settings.is_some()
+        && !matches!(reference_context_item, TurnReferenceContextItem::NeverSet)
+    { break; }
+}</div>
+
+    <p><strong>关键性能优化</strong>：一旦找到最新的 <code>replacement_history</code>（压缩后的完整历史基线）、<code>previous_turn_settings</code> 和 <code>reference_context_item</code> 三者，扫描立即终止（<code>break</code>），不需要解析全部 JSONL。长会话的 resume 只扫描最近的少量行。</p>
+  </section>
+
+  <section>
+    <h2>3. SQLite Backfill — 从 JSONL 到结构化查询</h2>
+    <p>Resume 重建的是 Session 的<strong>运行时状态</strong>。而 SQLite backfill 是独立的<strong>后台任务</strong>，将 rollout 中的结构化信息（如 ThreadMetadata、agent_jobs）提取到 SQLite，供 list/search 等查询接口使用。</p>
+
+    <p>Backfill 的核心函数是 <code>apply_rollout_item()</code>：</p>
+    <div class="code-block">// state/src/extract.rs — 单条 rollout item 的 SQLite 提取
+pub fn apply_rollout_item(
+    conn: &mut SqliteConnection,
+    thread_id: ThreadId,
+    item: &RolloutItem,
+    anchor: Anchor,
+) -> Result&lt;ExtractionOutcome&gt; {
+    match item {
+        RolloutItem::SessionMeta(meta) => {
+            // INSERT OR REPLACE INTO threads (...)
+            // 写入 model、cwd、permission_profile 等
+        }
+        RolloutItem::Compacted(compacted) => {
+            // UPDATE threads SET window_number = ...
+        }
+        // ... 其他 item 类型的提取
+    }
+}</div>
+    <p>Backfill 和 resume 是两条<strong>并行路径</strong>：resume 用 <code>reconstruct_history_from_rollout()</code> 重建运行时 Session，backfill 用 <code>apply_rollout_item()</code> 更新 SQLite 查询索引。两者都从同一个 JSONL 文件读取，但服务于不同目的。</p>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>ThreadStore::create_thread() 和 resume_thread() 的核心区别是什么？</li>
+        <li>reconstruct_history_from_rollout() 为什么采用反向扫描？什么条件下会提前终止？</li>
+        <li>SQLite backfill 和 Session resume 都读 JSONL，它们的关系是什么？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. create 分配新的 ThreadId + rollout 路径，resume 重新打开已有的 ThreadId 和 rollout 文件以追加新内容。2. 因为最新的 rollout 行携带了重建所需的最新元数据，反向扫描可以最快找到这些信息。当 replacement_history + previous_turn_settings + reference_context_item 三者都确定时提前终止。3. 它们是并行但独立的路径：resume 重建运行时 Session 状态（内存中的 history），backfill 提取结构化元数据到 SQLite（供查询接口使用）。两者无直接依赖关系。</p>
+    </div>
+    <p>下一步：<a href="0003-error-path.html">异常路径——resume 失败、fork 冲突、archive 回滚</a>。如有疑问，追问 agent。</p>
+  </section>
+</main>
+</body>
+</html>

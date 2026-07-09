@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>主路径详解：从策略查询到平台沙箱创建</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>主路径详解：execpolicy 决策 → 沙箱创建</h1>
+    <p class="meta">学习目标：追踪一条正常执行路径中 execpolicy 三态决策、permissions 编译和沙箱选择的完整代码流。</p>
+    <p class="meta">前置：<a href="0001-flow-map.html">第 1 节 — 链路地图</a></p>
+  </header>
+
+  <section>
+    <h2>1. execpolicy 三态决策</h2>
+    <p>Codex 的执行策略引擎定义三种决策结果，优先级从低到高：</p>
+
+    <div class="filetree">codex-rs/execpolicy/src/decision.rs
+├── pub enum Decision {
+│   ├── Allow      ← 命令可直接执行，无需审批
+│   ├── Prompt     ← 请求用户显式批准；approval_policy="never" 时直接拒绝
+│   └── Forbidden  ← 命令被无条件阻塞
+}</div>
+
+    <p>策略匹配流程：<code>Policy::check()</code> 先按命令首 token 精确匹配规则（<code>match_exact_rules</code>），若未命中则尝试 <code>match_host_executable_rules</code> 解析绝对路径后按 basename 匹配；若仍未命中，调用 <code>heuristics_fallback</code> 返回启发式决策。最终结果由 <code>Evaluation::from_matches()</code> 取所有匹配规则中优先级最高的 Decision。</p>
+
+    <pre><code>// execpolicy/src/policy.rs — check() 核心逻辑
+pub fn check&lt;F&gt;(&self, cmd: &[String], heuristics_fallback: &F) -> Evaluation
+where F: Fn(&[String]) -> Decision,
+{
+    let matched_rules = self.matches_for_command_with_options(
+        cmd,
+        Some(heuristics_fallback),
+        &MatchOptions::default(),
+    );
+    Evaluation::from_matches(matched_rules)
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>2. 权限 profile 编译</h2>
+    <p>引擎通过 <code>compile_permission_profile_selection()</code> 将配置转为运行时策略。首先判断是否为内置 profile：</p>
+
+    <pre><code>// core/src/config/permissions.rs — 内置 profile 匹配
+pub(crate) fn builtin_permission_profile(
+    profile_name: &str,
+    workspace_write: Option<&SandboxWorkspaceWrite>,
+) -> Option&lt;PermissionProfile&gt; {
+    match profile_name {
+        BUILT_IN_READ_ONLY_PROFILE => Some(PermissionProfile::read_only()),
+        BUILT_IN_WORKSPACE_PROFILE => Some(match workspace_write {
+            Some(config) => PermissionProfile::workspace_write_with(/*...*/),
+            None => PermissionProfile::workspace_write(),
+        }),
+        BUILT_IN_DANGER_FULL_ACCESS_PROFILE => Some(PermissionProfile::Disabled),
+        _ => None,
+    }
+}</code></pre>
+
+    <p>若为用户自定义 profile，走 <code>resolve_permission_profile()</code> 解析 TOML 的 <code>extends</code> 继承链，循环检测无误后执行 <code>merge_permission_profiles()</code>（父先子后，子覆盖父），再由 <code>compile_filesystem_permission()</code> 逐条编译成 <code>FileSystemSandboxEntry</code>。</p>
+  </section>
+
+  <section>
+    <h2>3. 沙箱类型选择决策树</h2>
+    <p><code>SandboxManager::select_initial()</code> 是沙箱类型选择的核心入口。决策路径如下：</p>
+
+    <pre><code>// sandboxing/src/manager.rs — select_initial()
+pub fn select_initial(
+    &self,
+    file_system_policy: &FileSystemSandboxPolicy,
+    network_policy: NetworkSandboxPolicy,
+    pref: SandboxablePreference,
+    windows_sandbox_level: WindowsSandboxLevel,
+    has_managed_network_requirements: bool,
+) -> SandboxType {
+    if self.should_sandbox(/*...*/) {
+        get_platform_sandbox(windows_sandbox_level != WindowsSandboxLevel::Disabled)
+            .unwrap_or(SandboxType::None)
+    } else {
+        SandboxType::None
+    }
+}</code></pre>
+
+    <p><code>should_sandbox()</code> 的三条分支：</p>
+    <ul>
+      <li><code>Forbid</code> — 强制不用沙箱，返回 <code>false</code></li>
+      <li><code>Require</code> — 强制用沙箱，返回 <code>true</code></li>
+      <li><code>Auto</code> — 委托给 <code>should_require_platform_sandbox()</code>：当有 managed network 要求时必用；当 <code>FileSystemSandboxKind::ExternalSandbox</code> 时不需；当 <code>Restricted</code> 且无全盘写权限时需用</li>
+    </ul>
+
+    <p><code>get_platform_sandbox()</code> 按编译目标平台返回对应类型：macOS 返回 <code>MacosSeatbelt</code>，Linux 返回 <code>LinuxSeccomp</code>，Windows 在启用沙箱时返回 <code>WindowsRestrictedToken</code>（否则 <code>None</code>）。</p>
+  </section>
+
+  <section>
+    <h2>4. 异常路径：权限拒绝与沙箱降级</h2>
+
+    <h3>4.1 权限拒绝路径</h3>
+    <p>当 execpolicy 返回 <code>Decision::Forbidden</code> 时，<code>ToolOrchestrator</code> 在阶段 [1] 后直接终止链路。工具的 <code>approval</code> 回调收到 Forbidden 后构造拒绝响应，不进入权限编译和沙箱创建。代码路径：<code>Policy::check()</code> → <code>Evaluation.decision == Forbidden</code> → 工具调用被阻塞。</p>
+
+    <h3>4.2 沙箱降级路径</h3>
+    <p>当权限 profile 为 <code>danger-full-access</code>（<code>PermissionProfile::Disabled</code> — 文件系统非受限 + 网络启用）时，<code>should_require_platform_sandbox()</code> 对 <code>FileSystemSandboxKind::Unrestricted</code> 返回 <code>false</code>。此时 <code>select_initial()</code> 返回 <code>SandboxType::None</code>，<code>transform()</code> 中对应的 match 分支仅做简单的 argv 字符串转换，不加任何沙箱包装器。</p>
+  </section>
+
+  <div class="exercise">
+    <h3>判断题</h3>
+    <p>以下说法是否正确？"当 <code>SandboxablePreference::Auto</code> 且 <code>NetworkSandboxPolicy::Enabled</code> 时，<code>should_require_platform_sandbox()</code> 一定返回 <code>true</code>。"</p>
+  </div>
+  <div class="answer">
+    <h3>参考答案</h3>
+    <p><strong>错误。</strong> 当 <code>file_system_policy.kind == FileSystemSandboxKind::Unrestricted</code> 且网络启用时，<code>should_require_platform_sandbox()</code> 返回 <code>false</code>（因为 Unrestricted 变体在 match 中排在 Restricted 之前，直接返回 false）。只有 Restricted + 非全盘写权限 时才会因网络启用而返回 true。</p>
+  </div>
+
+  <p style="margin-top: 28px; color: var(--muted);">
+    上一篇：<a href="0001-flow-map.html">第 1 节 — 链路地图与 Mermaid 时序图</a><br>
+    速查参考：<a href="../reference/sandbox-permission-decision-flow-map.html">Sandbox 权限决策流程速查图</a><br>
+    有疑问？追问本 Agent 获取更深入的解释。
+  </p>
+</main>
+</body>
+</html>

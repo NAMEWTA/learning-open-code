@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — 数据获取层模块总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; text-align: center; margin: 18px 0; line-height: 2; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L1 模块总览 &middot; 第 1 节 &middot; 预计 12 分钟</p>
+
+<h1>0001 — 数据获取层模块总览</h1>
+
+<p class="objective"><strong>学习目标：</strong>能说出 dataflows 模块的 5 大数据类别、3 种 vendor 策略、7 个数据源及其协议，以及东财防封限流和中文 ticker 解析两条关键链路的实现要点。</p>
+
+<h2>1. 模块定位与架构位置</h2>
+
+<p><code>tradingagents/dataflows/</code> 是整个 TradingAgents-Astock 的<strong>数据基座</strong>。它位于 Agent 层和 Graph 层之下，负责从 7 个免费数据源拉取原始行情、基本面、新闻、资金流等数据，以结构化文本格式（CSV / Markdown 表格）返回给上层的 7 个 Analyst Agent 使用。</p>
+
+<div class="flow">
+┌─────────────────────────────────┐
+│   Agent 层（7 Analyst + 辩论）    │
+├─────────────────────────────────┤
+│   Graph 层（LangGraph 工作流）    │
+├─────────────────────────────────┤
+│   <strong>dataflows 层 ◀── 本节重点</strong>   │
+├─────────────────────────────────┤
+│   7 数据源（HTTP/TCP 直连）       │
+└─────────────────────────────────┘
+</div>
+
+<p>模块通过 <code>interface.py</code> 向上层暴露 <strong>17 个数据方法</strong>（get_stock_data、get_indicators、get_fundamentals 等），归类为 5 大类别：core_stock_apis、technical_indicators、fundamental_data、news_data、signal_data。signal_data 是 A 股专属层（龙虎榜、资金流、北向资金、解禁日历等 8 个方法），yfinance 和 alpha_vantage 无对应实现。</p>
+
+<h2>2. Vendor 路由模式</h2>
+
+<p>核心设计：<strong>策略模式 + 字典路由 + 降级链</strong>。调用方只需指定方法名，不感知底层 vendor。</p>
+
+<div class="filetree">
+# VENDOR_METHODS 路由注册表（interface.py，节选）
+VENDOR_METHODS = {
+    "get_stock_data": {
+        "a_stock": get_astock_stock_data,       # mootdx TCP
+        "alpha_vantage": get_alpha_vantage_stock,
+        "yfinance": get_YFin_data_online,
+    },
+    "get_fundamentals": {
+        "a_stock": get_astock_fundamentals,      # 腾讯+东财+同花顺
+        ...
+    },
+    # signal_data — A 股专属，无 yfinance/AV 实现
+    "get_dragon_tiger_board": {
+        "a_stock": get_astock_dragon_tiger_board,
+    },
+    "get_northbound_flow": {
+        "a_stock": get_astock_northbound_flow,
+    },
+    ...
+}
+</div>
+
+<p><code>route_to_vendor(method, *args)</code> 的执行流程：查 TOOLS_CATEGORIES 确定类别 → 查 config 获取首选 vendor（支持逗号分隔的主备链）→ 构建 fallback 链（首选在前，其余在后）→ 逐个尝试，仅在 <code>AlphaVantageRateLimitError</code> 时触发降级。</p>
+
+<p>切换数据源只需改 config（如 <code>data_vendors.core_stock_apis = "alpha_vantage"</code>），无需修改任何调用方代码。新增 vendor 只需在 VENDOR_METHODS 中注册实现函数即可。</p>
+
+<h2>3. 7 数据源全景</h2>
+
+<table>
+  <tr><th>数据源</th><th>协议</th><th>提供数据</th><th>故障降级</th></tr>
+  <tr>
+    <td><strong>mootdx</strong></td>
+    <td>TCP :7709</td>
+    <td>OHLCV K 线、财务快照、F10 股东研究、全市场股票名-代码映射</td>
+    <td>→ 新浪 HTTP K 线</td>
+  </tr>
+  <tr>
+    <td><strong>腾讯财经</strong></td>
+    <td>HTTP (GBK)</td>
+    <td>实时报价、PE/PB、市值、换手率、涨跌停价</td>
+    <td>无独立降级</td>
+  </tr>
+  <tr>
+    <td><strong>东方财富</strong></td>
+    <td>HTTP（走 _em_get）</td>
+    <td>个股信息、龙虎榜、限售解禁、资金流、板块行情、滚动新闻</td>
+    <td>→ 新浪新闻</td>
+  </tr>
+  <tr>
+    <td><strong>新浪财经</strong></td>
+    <td>HTTP</td>
+    <td>K 线 fallback、财报三表（资产负债表/利润表/现金流量表）、个股新闻 fallback</td>
+    <td>—（自身是 fallback）</td>
+  </tr>
+  <tr>
+    <td><strong>同花顺</strong></td>
+    <td>HTTP (GBK)</td>
+    <td>EPS 一致预期、热股题材（人工标注涨停原因）、北向资金实时流向</td>
+    <td>无独立降级</td>
+  </tr>
+  <tr>
+    <td><strong>财联社</strong></td>
+    <td>HTTP</td>
+    <td>全球财经快讯（telegraphList），与东财 7x24 互为补充</td>
+    <td>→ 东财全球资讯</td>
+  </tr>
+  <tr>
+    <td><strong>百度股市通</strong></td>
+    <td>HTTP</td>
+    <td>概念板块归属（申万行业、概念主题、地域分类）</td>
+    <td>无独立降级</td>
+  </tr>
+</table>
+
+<p><strong>关键依赖：</strong>仅 mootdx 需要第三方库（<code>mootdx</code>，TCP 连接），其余 6 个均为标准库 <code>urllib</code> + <code>requests</code> 直连 HTTP，零外部数据服务依赖。</p>
+
+<h2>4. 两个关键机制</h2>
+
+<p><strong>东财防封限流 — <code>_em_get()</code>：</strong>东财对高频请求有严格风控（每秒 &gt;5 次 / 单 IP 并发 &ge;10 / 1 分钟 &ge;200 次 → 临时封 IP）。所有 eastmoney.com 请求强制走 <code>_em_get()</code> 统一入口：</p>
+
+<div class="filetree">
+# a_stock.py — 东财防封限流核心
+_EM_SESSION = _requests.Session()           # 复用 TCP 连接（Keep-Alive）
+_EM_MIN_INTERVAL = float(os.environ.get(
+    "EM_MIN_INTERVAL", "1.0"))               # 可通过环境变量调大降速
+_em_last_call = [0.0]                        # 模块级上次请求时间戳
+
+def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
+    wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.5))  # 串行限流+随机抖动
+    try:
+        return _EM_SESSION.get(url, params=params, ...)
+    finally:
+        _em_last_call[0] = time.time()
+</div>
+
+<p>覆盖 push2 / push2his / datacenter-web / search-api / np-weblist 共 7 个调用点。mootdx (TCP) / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度等非东财源<strong>不走此限流</strong>。</p>
+
+<p><strong>中文 ticker 解析链路：</strong>用户或 LLM 输入中文股票名（如"宝光股份"）→ <code>safe_ticker_component()</code> 检测中文字符 → 调用 <code>resolve_ticker()</code> → <code>_build_name_code_map()</code> 通过 mootdx 拉取沪深两市全量股票列表（缓存至模块级变量）→ 精确匹配/模糊匹配 → 返回 6 位代码 "600379"。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>dataflows 模块向上层暴露了哪 5 大数据类别？signal_data 为什么是 A 股专属？</li>
+    <li><code>route_to_vendor</code> 的 fallback 链是如何构建的？哪种异常会触发降级？</li>
+    <li>东财防封限流 <code>_em_get()</code> 的三要素是什么？哪些数据源不走此限流？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> core_stock_apis、technical_indicators、fundamental_data、news_data、signal_data。signal_data 包含龙虎榜、北向资金、资金流、解禁日历等 A 股特有数据，yfinance 和 alpha_vantage 无对应实现。</p>
+      <p><strong>2.</strong> 首选 vendor 在前，其余可用 vendor 追加在后（去重）。仅 <code>AlphaVantageRateLimitError</code> 触发降级，其他异常直接抛出。</p>
+      <p><strong>3.</strong> 三要素：串行限流（模块级时间戳 + 最小间隔）、随机抖动（0.1~0.5s）、Session 复用（Keep-Alive）。mootdx / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度不走此限流——仅东财系接口走 <code>_em_get()</code>。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>速查资料：</strong><a href="../reference/dataflows-overview.html">数据获取层参考文档</a> —— 完整方法清单、数据源字段对照、config 配置项速查。<br>
+  <strong>下一节预告：</strong>中文 ticker 解析链路详解（L2）——从 mootdx 全市场映射到 safe_ticker_component 安全边界。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

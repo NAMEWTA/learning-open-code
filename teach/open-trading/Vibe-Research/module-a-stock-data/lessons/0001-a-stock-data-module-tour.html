@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 A股数据工具箱模块总览 — 十层数据架构与40端点</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    .exercise { border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.2rem; margin: 1.2rem 0; background: #fefefe; }
+    .exercise h3 { margin: 0 0 0.6rem; font-size: 1.05rem; color: var(--accent); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>A股数据工具箱模块总览</h1>
+  <p class="meta">学习目标：15 分钟内能说出 a-stock-data 的十层架构、数据源优先级规则，并能根据场景快速定位到正确的端点。</p>
+
+  <h2>1. 工具箱定位与移植关系</h2>
+  <p><code>a-stock-data</code> 是 Vibe-Research 的 A 股数据引擎（v3.3.0），核心载体是一个 <code>SKILL.md</code> 文件——把分散在通达信、腾讯、东财、同花顺、新浪、巨潮等 13 个数据源的 A 股原始数据，整合成 10 层架构、40 个端点，内嵌全部调用代码，AI 助手直接读取执行。</p>
+
+  <p>在 Vibe-Research 项目中，<code>backend/astock.py</code>（809 行）从 SKILL.md 移植而来：将独立代码片段整合为 FastAPI 端点，增加全站共享缓存（行情 5 分钟/公告 15 分钟）、分级依赖（腾讯仅需标准库、mootdx/akshare 惰性导入）、优雅降级（缺失依赖返回 501 而非崩溃）。</p>
+
+  <div class="callout">
+    <strong>关键原则：</strong>SKILL.md = 独立可执行代码片段的源头；astock.py = 将这些片段移植为 FastAPI 服务的生产级封装。学一个端点时，先看 SKILL.md 的原生代码，再看 astock.py 的适配方式。
+  </div>
+
+  <h2>2. 十层数据架构全景</h2>
+  <p>十层按<strong>封 IP 风险</strong>从上到下排列。行情层（mootdx TCP/腾讯 HTTP）不封 IP，越往下越依赖东财独有数据，必须走 <code>em_get()</code> 限流。</p>
+
+  <div class="diagram">A 股全栈数据 · 十层架构 · V3.3.0 （优先级：mootdx/腾讯不封IP优先；东财仅独有数据，已内置限流）
+
+  ① 行情层   mootdx+腾讯+百度       K线(带MA)+五档盘口+PE/PB/市值+指数/ETF
+  ② 研报层   东财reportapi+同花顺+iwencai  个股/行业研报+PDF+一致预期+NL搜索
+  ③ 信号层   同花顺+东财             强势股+题材归因+北向+板块+资金流+龙虎榜+解禁
+  ④ 资金面   东财datacenter+push2    两融+大宗+股东户数+分红+资金流120日
+  ⑤ 新闻层   东财 HTTP              个股新闻 / 全球资讯（财联社已下线）
+  ⑥ 基础数据 mootdx+东财+新浪        季报37字段+F10九大类+财报三表
+  ⑦ 公告层   巨潮cninfo+mootdx      沪深北全量公告
+  ⑧ 打板层★ 东财push2ex+同花顺      涨停池/炸板/跌停/昨涨停/涨停原因/连板梯队
+  ⑨ 期权层★ 新浪hq.sinajs          ETF期权T型报价/希腊字母/隐含波动率
+  ⑩ 舆情互动★ 巨潮互动易+同花顺+东财  互动易问答/热榜/人气榜/概念命中</div>
+
+  <h2>3. 数据源优先级与防封策略</h2>
+  <table>
+    <tr><th>优先级</th><th>数据源</th><th>协议</th><th>封 IP 风险</th><th>覆盖</th></tr>
+    <tr><td><strong>1 首选</strong></td><td>mootdx（通达信）</td><td>TCP 7709</td><td><strong>不封 IP</strong></td><td>K线、盘口、逐笔、财务、F10</td></tr>
+    <tr><td><strong>2</strong></td><td>腾讯财经</td><td>HTTP GBK</td><td><strong>不封 IP</strong></td><td>PE/PB/市值/换手率/涨跌停/指数/ETF</td></tr>
+    <tr><td>3</td><td>新浪/巨潮/同花顺</td><td>HTTP</td><td>低</td><td>财报、公告、一致预期/热点</td></tr>
+    <tr><td><strong>4 仅独有数据</strong></td><td>东财 eastmoney</td><td>HTTP</td><td><strong>有风控，会封 IP</strong></td><td>龙虎榜/解禁/两融/大宗/股东/分红/资金流/研报</td></tr>
+  </table>
+
+  <div class="callout">
+    <strong>防封铁律：</strong>所有东财请求走 <code>em_get()</code>（串行限流≥1s+随机抖动+Keep-Alive）。批量场景每只股票之间必须 sleep。触发阈值：每秒>5次/并发≥10/1分钟≥200次=封禁。被封表现：<code>403</code>/<code>429</code>/连接超时/空数据，通常几分钟到几小时。
+  </div>
+
+  <h2>4. 端点速查与调用示例</h2>
+  <p>典型场景到端点的映射（完整 40 端点清单见 <a href="../reference/a-stock-data-overview.html">参考文档</a>）：</p>
+
+  <table>
+    <tr><th>你想做什么</th><th>层</th><th>端点函数</th><th>数据源</th></tr>
+    <tr><td>查行情 + PE/PB/市值</td><td>行情</td><td><code>tencent_quote()</code></td><td>腾讯（不封IP）</td></tr>
+    <tr><td>拉 K 线</td><td>行情</td><td><code>client.bars(frequency=9)</code></td><td>mootdx（不封IP）</td></tr>
+    <tr><td>搜研报 + 下载 PDF</td><td>研报</td><td><code>eastmoney_reports()</code> + <code>download_pdf()</code></td><td>东财（限流）</td></tr>
+    <tr><td>一致预期 EPS</td><td>研报</td><td><code>ths_eps_forecast()</code></td><td>同花顺</td></tr>
+    <tr><td>当日强势股 + 题材归因</td><td>信号</td><td><code>ths_hot_reason()</code></td><td>同花顺（零鉴权）</td></tr>
+    <tr><td>北向资金实时</td><td>信号</td><td><code>hsgt_realtime()</code></td><td>同花顺</td></tr>
+    <tr><td>概念板块归属</td><td>信号</td><td><code>eastmoney_concept_blocks()</code></td><td>东财（限流）</td></tr>
+    <tr><td>龙虎榜 + 席位</td><td>信号</td><td><code>dragon_tiger_board()</code></td><td>东财（限流）</td></tr>
+    <tr><td>股东户数（筹码集中度）</td><td>资金面</td><td><code>holder_num_change()</code></td><td>东财（限流）</td></tr>
+    <tr><td>涨停打板情绪</td><td>打板</td><td><code>em_zt_pool()</code></td><td>东财（限流）</td></tr>
+    <tr><td>互动易问答</td><td>舆情</td><td><code>cninfo_irm()</code></td><td>巨潮</td></tr>
+  </table>
+
+  <p><strong>三步估值示例（组合腾讯+同花顺）：</strong></p>
+  <div class="diagram">quotes = tencent_quote(["688017"])         # 腾讯：PE/PB/市值，不封IP
+  df = ths_eps_forecast("688017")            # 同花顺：一致预期EPS
+  eps_fwd = float(df[df["年度"].str.contains("2026")]["均值"].iloc[0])
+  pe_fwd = quotes["688017"]["price"] / eps_fwd   # 前向市盈率</div>
+
+  <div class="exercise">
+    <h3>练习：端点速查挑战</h3>
+    <p><strong>场景：</strong>你想研究"人形机器人产业链"，需要：① 找产业链研报；② 查看某只股票（如 688017）的估值和概念板块；③ 检查近期有无解禁。</p>
+    <p><strong>问题：</strong>三个需求分别应调用哪一层的哪个函数？哪些需要走 <code>em_get()</code> 限流？</p>
+    <details>
+      <summary>点击查看参考答案</summary>
+      <p>① <strong>研报层</strong> — <code>iwencai_search("人形机器人 行星滚柱丝杠", channel="report")</code>，数据源 iwencai，需 API Key，不走 em_get()；或 <code>eastmoney_reports("688017")</code>，走东财 reportapi，需限流。</p>
+      <p>② <strong>行情层</strong> — <code>tencent_quote(["688017"])</code>，不封 IP；<strong>信号层</strong> — <code>eastmoney_concept_blocks("688017")</code>，需限流。</p>
+      <p>③ <strong>信号层</strong> — <code>lockup_expiry("688017", "2026-07-08")</code>，东财 datacenter，需限流。</p>
+    </details>
+  </div>
+
+  <p><strong>下一步：</strong>打开 <a href="../../../../open-trading/a-stock-data/SKILL.md">SKILL.md</a> 找到对应端点章节，复制代码即用。完整端点清单见 <a href="../reference/a-stock-data-overview.html">参考文档</a>。</p>
+
+  <p class="source">—— 基于 a-stock-data v3.3.0 SKILL.md (2026-06-28) 编写。推荐配合阅读原始 SKILL.md 第三章"数据源优先级 & 东财防封"。</p>
+</main>
+</body>
+</html>

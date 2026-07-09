@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETF期权链分析 — 5步流水线与数据流</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: #1a1a1a; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  .diagram {
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.75rem; line-height: 1.5;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px;
+    padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  code { background: #f0f0f0; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.9rem; }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .warn { background: #fff7ed; border-left: 3px solid #ea580c; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .warn strong { color: #9a3412; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.88rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; }
+  th { background: #f5f7fa; font-weight: 600; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+</style>
+</head>
+<body>
+
+<h1>ETF期权链分析 — 5步流水线与数据流</h1>
+<p class="meta">
+  <span class="badge">L2 垂直切片</span>
+  <span class="badge">第 1 节 / 共 2 节</span>
+  估计时长：14 分钟
+</p>
+
+<h2>1. 期权链分析流水线概览</h2>
+
+<p>
+  期权交易的核心决策永远围绕一个问题：<strong>当前这个月份、这个行权价的合约，是否值得交易？</strong>回答这个问题需要拉通 5 步数据流水线——每一步都是上一步的自然延续，共同构成从标的选取到风险判断的完整分析链路。
+</p>
+
+<table>
+  <tr><th>步序</th><th>操作</th><th>核心函数</th><th>输出</th><th>数据源</th></tr>
+  <tr><td>1</td><td>选标的</td><td>用户输入 underlying</td><td>"510050" / "510300" / "588000" / "510500"</td><td>—</td></tr>
+  <tr><td>2</td><td>获取合约清单</td><td><code>sina_option_codes()</code></td><td>{月份: [合约代码,...]}</td><td>新浪 StockOptionService</td></tr>
+  <tr><td>3</td><td>选月份</td><td><code>list(codes)[0]</code></td><td>近月/次近月 YYMM</td><td>—（源自步骤2输出）</td></tr>
+  <tr><td>4</td><td>T型报价</td><td><code>sina_option_tquote()</code></td><td>买卖五档、持仓量、行权价、涨跌幅</td><td>新浪 hq.sinajs.cn (CON_OP_)</td></tr>
+  <tr><td>5</td><td>希腊字母+IV</td><td><code>sina_option_greeks()</code></td><td>Delta/Gamma/Theta/Vega/IV/理论价</td><td>新浪 hq.sinajs.cn (CON_SO_)</td></tr>
+</table>
+
+<div class="principle">
+  <strong>核心设计原则：</strong>步骤 2~3 是准备阶段（确定分析的目标合约集合），步骤 4~5 是分析阶段（获取每个合约的报价与风险指标）。步骤 4 和 5 对每个合约独立调用，可以逐个合约处理，也可以批量拉取后对比分析。
+</div>
+
+<h2>2. Mermaid 流程时序图</h2>
+
+<p>以下展示 5 步的串行依赖关系。步骤 2 获取月份列表和合约清单，步骤 3 从中选取目标月份，步骤 4~5 对目标月份内的所有合约逐一遍历报价和希腊字母。</p>
+
+<div class="diagram">sequenceDiagram
+    participant U as 用户选择标的
+    participant C as 合约清单(Step2)
+    participant M as 月份筛选(Step3)
+    participant T as T型报价(Step4)
+    participant G as 希腊字母(Step5)
+
+    U->>C: sina_option_codes("510050", call=True)
+    Note over C: ①GET StockOptionService.getStockName
+    Note over C: ②逐月GET OP_UP_510050{YYMM}
+    C-->>M: {"06":[code...], "07":[...], "09":[...], "12":[...]}
+
+    M->>M: 选近月 = list(codes)[0]
+    Note over M: 近月=06, 共 N 个合约
+    M-->>T: codes["06"] = [c1,c2,...,cN]
+
+    loop 近月每个合约
+        T->>T: sina_option_tquote(ci)
+        Note over T: GET CON_OP_{ci} → 17字段
+        T-->>G: tquote dict
+        G->>G: sina_option_greeks(ci)
+        Note over G: GET CON_SO_{ci} → 13字段
+        G-->>G: greeks dict
+    end
+
+    Note over G: 合并 → 完整期权链 [{**tq, **gk},...]</div>
+
+<p>
+  注意步骤 4 和 5 虽然对每个合约是串行的（先报价再希腊字母），但<strong>不同合约之间没有数据依赖</strong>。如果网络延迟是瓶颈，可以用 ThreadPoolExecutor 并行拉取多个合约的 tquote + greeks，只需注意不超过新浪的并发上限（建议 ≤5 并发）。
+</p>
+
+<div class="warn">
+  <strong>新浪源并发限制：</strong>新浪 hq.sinajs.cn 对高频请求会返回空数据甚至暂时拒绝连接。批量拉取期权链时，建议每个请求间隔 ≥200ms，或先串行拉取近月核心合约（平值附近 ±5 档），再逐步扩展。
+</div>
+
+<h2>3. 逐层数据流转</h2>
+
+<p>5 步流水线中，数据如何在各步骤间流转？关键是理解每步的输出如何成为下一步的输入：</p>
+
+<div class="diagram">输入: underlying = "510050", direction = call
+
+  步骤1: 选标的
+    └─ underlying → 映射为新浪分类名 "50ETF"
+
+  步骤2: sina_option_codes("510050", call=True)
+    ├─ GET StockOptionService.getStockName?cate=50ETF
+    │   └─ 返回 months = ["2026-06", "2026-07", "2026-09", "2026-12"]
+    ├─ months 转 YYMM: ["06","07","09","12"]
+    └─ 逐月 GET OP_UP_510050{YYMM}
+        └─ 返回 {"06":["10007923",...], "07":[...], ...}
+           第一个 key "06" = 近月（最活跃）
+
+  步骤3: 选月份
+    near = list(codes)[0]          → "06"
+    target_codes = codes["06"]     → ["10007923","10007924",...,"10007946"]
+    atm_idx = len(target_codes)//2  → 中间合约 ≈ 平值附近
+
+  步骤4: T型报价 (对每个 code)
+    sina_option_tquote("10007923")
+    └─ GET hq.sinajs.cn/list=CON_OP_10007923
+       返回: {bid, bid_vol, last, ask, ask_vol,
+              open_interest, strike, pct, name,
+              volume, amount, prev_close, ...}
+
+  步骤5: 希腊字母 (对每个 code)
+    sina_option_greeks("10007923")
+    └─ GET hq.sinajs.cn/list=CON_SO_10007923
+       返回: {delta, gamma, theta, vega, iv,
+              strike, last, theory, name, ...}
+
+  最终输出: chain = [{**tquote, **greeks}, ...]
+    按 strike 升序排列 → 完整的近月期权链</div>
+
+<p>
+  <strong>关键点：</strong>步骤 2 中 <code>sina_option_codes()</code> 返回的字典 key 已经是 YYMM 格式，第一个 key 即近月——这是交易所的标准排序，不需要额外排序。近月合约流动性最好、持仓量最大，是期权分析的首选目标。
+</p>
+
+<h2>4. 关联的 L1 模块总览</h2>
+
+<p>本垂直切片直接基于 L1 module-options 模块。以下是需要前置了解的内容：</p>
+
+<table>
+  <tr><th>L1 内容</th><th>入口</th><th>本切片应用</th></tr>
+  <tr><td>sina_option_codes() 参数与返回值</td><td><a href="../../module-options/lessons/0001-options-module-tour.html">L1 模块导览 --2</a></td><td>步骤2：获取合约清单，按月份分组</td></tr>
+  <tr><td>T型报价 17 字段含义</td><td><a href="../../module-options/reference/options-overview.html">L1 速查表 --三</a></td><td>步骤4：解读买卖档位和持仓量</td></tr>
+  <tr><td>希腊字母 13 字段含义</td><td><a href="../../module-options/reference/options-overview.html">L1 速查表 --四</a></td><td>步骤5：评估风险敞口</td></tr>
+  <tr><td>4 个踩坑点（GBK/Referer/空串/IV小数）</td><td><a href="../../module-options/lessons/0001-options-module-tour.html">L1 模块导览 --4</a></td><td>全链路的基础保障——不处理这4点则数据全错</td></tr>
+  <tr><td>希腊字母基本含义卡</td><td><a href="../../module-options/reference/options-overview.html">L1 速查表 --五</a></td><td>风险判断的知识前提</td></tr>
+</table>
+
+<div class="principle">
+  <strong>学习路径建议：</strong>如果还没看过 L1 module-options 导览课，建议花 13 分钟先完成。L1 让你"会用"三个函数，L2 教你"串起来"做完整分析。
+</div>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p>不看屏幕，尝试回答（每题 30 秒）：</p>
+  <ol>
+    <li>sina_option_codes() 返回的字典第一个 key 是什么？为什么它是近月？</li>
+    <li>步骤4和步骤5调用的新浪端点前缀分别是什么？为什么需要不同前缀？</li>
+    <li>如果目标月份有 24 个合约，步骤4~5需要发多少次 HTTP 请求？</li>
+    <li>为什么不建议对全部 24 个合约开 24 线程并发请求新浪？</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('answers').classList.toggle('show')">显示参考答案</button>
+  <div class="answer" id="answers">
+    <strong>参考答案：</strong><br>
+    1. 第一个 key 是 YYMM 格式（如 "06"），它是上市交易所按到期时间排序后的最近月份，流动性最大、持仓最集中。<br>
+    2. T型报价用 CON_OP_ 前缀，希腊字母用 CON_SO_ 前缀——新浪用不同前缀区分不同的数据通道，底层返回的字段结构完全不同。<br>
+    3. 24 个合约 × 2 次请求（tquote + greeks）= 48 次 HTTP 请求。每个合约需要先拉报价再拉希腊字母。<br>
+    4. 新浪 hq.sinajs.cn 对高并发敏感——24 线程同时请求可能触发临时封禁。建议 ≤5 并发 + 200ms 间隔，或先串行拉核心合约。
+  </div>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong> 对流水线有疑问？向 AI 老师追问："步骤3如果用户想比较近月和次近月怎么办？""新浪的 StockOptionService.getStockName 端点是否有时效性？""所有 4 个 ETF 标的的合约代码格式是否一致？"
+</div>
+
+<div class="ref-links">
+  <strong>关联资料：</strong>
+  <a href="0002-iv-skew-risk.html">下一节：IV偏度与风险分析</a> ·
+  <a href="../../module-options/lessons/0001-options-module-tour.html">L1 ETF期权层模块导览</a> ·
+  <a href="../../module-options/reference/options-overview.html">L1 速查表</a> ·
+  <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a> ·
+  <a href="../MISSION.md">学习使命</a>
+</div>
+
+</body>
+</html>

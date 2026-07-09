@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Vibe-Research 项目全景架构与学习地图</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Vibe-Research 项目全景架构与学习地图</h1>
+  <p class="meta">学习目标：15 分钟内能说清 Vibe-Research 的定位、技术栈、架构分层和后续阅读路线。</p>
+
+  <h2>1. 项目定位与核心场景</h2>
+  <p><code>Vibe-Research</code> 是一个开源的<strong>个人 AI 投研看板</strong>，主推 A 股，兼看美股和港股。它的核心问题不是"选什么股票"——而是把行情、研报、估值、财务、公告、资金面、资讯全部配齐，装进一个干净的看板，再留一个接口接入<strong>你自己的 AI</strong>。方向与结论，由你自己配置的模型/agent 决定。</p>
+  <p>依据 <code>open-trading/Vibe-Research/README.md</code>，它提供 9 个功能页面：每日复盘、资讯雷达、个股数据、自选股、板块中心、我的持仓、我的研报、研究记录、接入 AI。三条 AI 出口（订阅接入/API 接入/MCP）覆盖了从本机 CLI 一键调用到 agent 多步工具调用的全部场景。</p>
+
+  <h2>2. 总体架构图</h2>
+  <div class="diagram">浏览器 :5899 (Vite + React 19 + TS + Tailwind 玻璃暖橙主题)
+  │  React Router 路由 10 个页面
+  │  Vite 代理 /api → localhost:8900
+  │
+  ▼
+  FastAPI :8900 (Python 3.10+, uvicorn)
+  │  CORS 默认放行 | VR_API_KEY 可选鉴权
+  │  数据请求全站共享缓存: 行情5分钟 / 公告15分钟 / 估值分位30分钟
+  │
+  ├─ astock.py       ← A股行情/估值/研报/资金面 (移植自 a-stock-data v3.3)
+  ├─ gstock.py       ← 美股/港股行情+关键财务 (移植自 global-stock-data v1.0.1)
+  ├─ market.py       ← 市场情绪/板块资金流/全球指数/短线情绪
+  ├─ newsradar.py    ← 资讯雷达 12赛道108公开RSS源
+  ├─ portfolio.py    ← 持仓+已清仓 (本地缓存, 30分钟刷新)
+  ├─ chat.py         ← 系统AI (OpenAI兼容function-calling流式)
+  ├─ cli_runtime.py  ← 订阅接入: Claude Code/Codex/Qwen/DeepSeek CLI
+  ├─ mcp_server.py   ← MCP Server (给Claude Code等agent调数据工具)
+  └─ myreports.py    ← 研报上传/下载/行业分类 (本地存储)
+  │
+  ▼
+  数据源层
+  ├─ 腾讯财经 qt.gtimg.cn      ← 行情/PB/PE/市值/涨跌停 (不封IP,首选)
+  ├─ 东财 eastmoney.com         ← 研报/龙虎榜/融资融券/大宗交易 (独有数据,限流)
+  ├─ 同花顺 10jqka.com.cn       ← 一致预期/热点归因/涨停揭秘
+  ├─ mootdx TCP 7709            ← K线/盘口/逐笔成交/财务 (不封IP)
+  └─ akshare (惰性导入)         ← 新闻/公告/基本面 (缺失时返回501)</div>
+  <p>这张图的关键是<strong>分级依赖</strong>：行情（腾讯）+ 研报/公告（东财）秒装可用；akshare/mootdx 惰性导入，缺失时对应端点返回 501 + 安装提示，不拖垮服务。</p>
+
+  <h2>3. 顶层目录结构与职责</h2>
+  <div class="filetree">open-trading/Vibe-Research/
+├── a-stock-data/                 ← A股全栈数据工具箱 (v3.3, 10层 40端点)
+│   └── SKILL.md                  ← 内嵌全部调用代码, 自包含零第三方依赖
+├── global-stock-data/            ← 美股/港股数据工具箱 (v1.0.1, 8层 18端点)
+│   └── SKILL.md                  ← 内嵌全部调用代码
+├── backend/                      ← FastAPI 后端 :8900
+│   ├── app.py                    ← FastAPI 主入口, 全部 /api/* 端点 (602行)
+│   ├── astock.py                 ← A股数据层 (移植自 a-stock-data)
+│   ├── gstock.py                 ← 美股/港股数据层 (移植自 global-stock-data)
+│   ├── market.py                 ← 市场情绪 + 板块资金流 + 全球指数
+│   ├── newsradar.py              ← 资讯雷达 (移植自 investment-news)
+│   ├── portfolio.py              ← 持仓管理 (本地缓存)
+│   ├── chat.py                   ← 系统AI (OpenAI兼容function-calling)
+│   ├── cli_runtime.py            ← CLI运行时检测与spawn
+│   ├── mcp_server.py             ← MCP Server
+│   ├── myreports.py              ← 研报上传与管理
+│   └── requirements.txt          ← Python依赖 (轻量核心版)
+├── frontend/                     ← Vite + React 19 + TS + Tailwind :5899
+│   ├── src/router.tsx            ← 前端路由表, 10个页面入口
+│   ├── src/pages/                ← 9个功能页面 + 1个设置页
+│   ├── tailwind.config.ts        ← 玻璃暖橙主题配置
+│   └── package.json              ← 前端依赖声明
+├── docs/                         ← 产品截图与文档
+│   └── screenshots/              ← PNG产品预览图 (豁免)
+├── README.md                     ← 项目完整说明 (196行)
+└── LICENSE                       ← MIT</div>
+  <p>后续学习时从 <code>backend/app.py</code> 了解全部 API 端点，从 <code>frontend/src/router.tsx</code> 了解前端页面划分，从两个 <code>SKILL.md</code> 了解数据工具箱的完整能力边界。参考 <a href="../reference/00-overview.html">00-overview 参考图谱</a> 获取更详细的源码索引。</p>
+
+  <h2>4. 核心设计哲学与豁免清单</h2>
+  <div class="callout">
+    <p><strong>五条核心设计哲学：</strong></p>
+    <p><strong>本地优先</strong> — 持仓、关注股、上传的研报、API key 只存本地，不上传、不进仓库。用户数据完全由自己掌控。</p>
+    <p><strong>数据只读</strong> — 后端只做客观数据整理与公开榜单呈现，不荐股、不预测涨跌、不给买卖时机、不做主观评分。UI 无买卖按钮。</p>
+    <p><strong>AI 中立</strong> — 不内置任何模型或建议倾向。三条 AI 出口（订阅接入/API 接入/MCP）支持用户自行选择模型，分析方向由你自己的 AI 决定。</p>
+    <p><strong>渐进依赖</strong> — 行情（腾讯）+ 研报（东财）秒装可用。akshare/mootdx 惰性导入，缺失时端点返回 501 而非崩溃。让用户按需安装，不强加重型依赖。</p>
+    <p><strong>隐私保护</strong> — 全站无埋点、不收集用户数据。API key 存浏览器 localStorage，随请求发给自己的后端，不上传。持仓数据只在本机。</p>
+  </div>
+  <p><strong>源码文件豁免清单：</strong>L0 导览阶段豁免以下文件——<code>docs/screenshots/*.png</code>（产品截图）、<code>a-stock-data/assets/*</code>（赞助图）、<code>frontend/public/favicon.svg</code>（网站图标）、<code>frontend/package-lock.json</code>（自动生成）、<code>frontend/node_modules/</code>（第三方依赖）、<code>backend/.venv/</code>（虚拟环境）、<code>backend/__pycache__/</code>（字节码）、<code>.gitignore</code>（Git 配置）。这些文件要么是构建产物，要么是二进制静态资源，不决定主架构路径。</p>
+
+  <p><strong>暂停回忆：</strong>如果 Vibe-Research 后端启动后，调用 <code>/api/news</code> 返回 501，最可能的原因是什么？这个设计的目的是什么？</p>
+  <p><strong>参考答案：</strong>返回 501 说明 akshare 未安装。这是<strong>渐进依赖</strong>设计的体现——akshare 作为较重依赖被惰性导入，缺失时端点返回 501 + 安装提示而非崩溃，让行情和研报等核心功能不受影响。运行 <code>pip install akshare</code> 即可恢复。</p>
+
+  <p class="source">主要来源：<code>open-trading/Vibe-Research/README.md</code> 的整体说明、<code>backend/app.py</code> 的全部端点注册、<code>frontend/src/router.tsx</code> 的路由表、<code>a-stock-data/SKILL.md</code> 与 <code>global-stock-data/SKILL.md</code> 的数据层定义。不清楚某个模块时，可以继续让 agent 顺着对应源码做 L1/L2 深挖，或查阅 <a href="../reference/00-overview.html">00-overview 参考图谱</a>。</p>
+</main>
+</body>
+</html>

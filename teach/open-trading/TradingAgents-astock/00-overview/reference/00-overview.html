@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考 — TradingAgents-Astock 项目总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .diagram {
+    text-align: center;
+    margin: 24px 0;
+  }
+  .toc {
+    background: #f9fafc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .toc ol {
+    margin: 4px 0;
+    padding-left: 20px;
+  }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">参考文档 &middot; L0 项目总览 &middot; 速查用</p>
+
+<h1>TradingAgents-Astock 项目总览参考</h1>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#sec-basics">基本信息</a></li>
+    <li><a href="#sec-arch">架构决策记录</a></li>
+    <li><a href="#sec-agents">Agent 角色速查</a></li>
+    <li><a href="#sec-data">数据源对照表</a></li>
+    <li><a href="#sec-config">配置参数速查</a></li>
+    <li><a href="#sec-entry">入口点映射</a></li>
+    <li><a href="#sec-deps">依赖分类</a></li>
+  </ol>
+</div>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-basics">1. 基本信息</h2>
+
+<table>
+  <tr><th>属性</th><th>值</th></tr>
+  <tr><td>项目名</td><td>TradingAgents-Astock</td></tr>
+  <tr><td>版本</td><td>0.2.16</td></tr>
+  <tr><td>上游</td><td><a href="https://github.com/TauricResearch/TradingAgents">TauricResearch/TradingAgents</a>（commit 7e9e7b8, 2026-05-04）</td></tr>
+  <tr><td>许可证</td><td>Apache 2.0</td></tr>
+  <tr><td>Python</td><td>>= 3.10</td></tr>
+  <tr><td>仓库</td><td><a href="https://github.com/simonlin1212/tradingagents-astock">github.com/simonlin1212/tradingagents-astock</a></td></tr>
+  <tr><td>论文</td><td><a href="https://arxiv.org/abs/2412.20138">arXiv:2412.20138</a></td></tr>
+  <tr><td>部署方式</td><td>pip install -e .（推荐）/ Docker（可选）</td></tr>
+  <tr><td>外部服务依赖</td><td>零——7 个数据源全部免费直连，无需 API Key</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-arch">2. 架构决策记录</h2>
+
+<table>
+  <tr><th>决策</th><th>选择</th><th>理由</th></tr>
+  <tr><td>Agent 编排框架</td><td>LangGraph StateGraph</td><td>原生支持多节点条件路由、状态持久化、checkpoint 断点续跑</td></tr>
+  <tr><td>LLM 调用模式</td><td>双 LLM（quick + deep）</td><td>成本优化：30-50 次调用中仅 2 次用深度模型</td></tr>
+  <tr><td>LLM 供应商扩展</td><td>工厂模式 + lazy import</td><td>新增供应商只需添加客户端类 + 注册到工厂，不影响已有代码</td></tr>
+  <tr><td>数据供应商扩展</td><td>VENDOR_METHODS 路由表</td><td>每个方法注册多个 vendor 实现，config 切换，fallback 链自动降级</td></tr>
+  <tr><td>结构化输出</td><td>Pydantic BaseModel</td><td>Research Manager/Trader/Portfolio Manager 用 JSON Schema 约束输出格式</td></tr>
+  <tr><td>输出语言</td><td>分层策略</td><td>用户报告中文，内部辩论英文——保证推理质量</td></tr>
+  <tr><td>东财接口防封</td><td>串行限流 + 随机抖动</td><td>_em_get() 统一节流入口，间隔 >=1s + 0.1~0.5s 抖动 + Keep-Alive 复用</td></tr>
+  <tr><td>断点续跑</td><td>SQLite Checkpointer</td><td>LangGraph checkpoint 机制，崩溃后同名 ticker+date 自动恢复</td></tr>
+  <tr><td>交易记忆</td><td>Markdown 日志 + 批量更新</td><td>pending → resolved 两阶段，下一轮同 ticker 运行时批量回填 alpha 反思</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-agents">3. Agent 角色速查</h2>
+
+<h3>7 Analyst（研报生成层）</h3>
+
+<table>
+  <tr><th>角色</th><th>Python 模块</th><th>LLM</th><th>工具集</th></tr>
+  <tr><td>🏪 市场分析师</td><td><code>market_analyst.py</code></td><td>quick</td><td>get_stock_data, get_indicators</td></tr>
+  <tr><td>💬 舆情分析师</td><td><code>social_media_analyst.py</code></td><td>quick</td><td>get_news</td></tr>
+  <tr><td>📰 新闻分析师</td><td><code>news_analyst.py</code></td><td>quick</td><td>get_news, get_global_news, get_insider_transactions</td></tr>
+  <tr><td>📊 基本面分析师</td><td><code>fundamentals_analyst.py</code></td><td>quick</td><td>get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement, get_profit_forecast, get_industry_comparison</td></tr>
+  <tr><td>🏛️ 政策分析师</td><td><code>policy_analyst.py</code></td><td>quick</td><td>get_news, get_global_news</td></tr>
+  <tr><td>🔥 游资追踪师</td><td><code>hot_money_tracker.py</code></td><td>quick</td><td>get_stock_data, get_news, get_insider_transactions, get_hot_stocks, get_northbound_flow, get_concept_blocks, get_fund_flow, get_dragon_tiger_board, get_industry_comparison</td></tr>
+  <tr><td>🔓 解禁监控师</td><td><code>lockup_watcher.py</code></td><td>quick</td><td>get_insider_transactions, get_news, get_fundamentals, get_lockup_expiry</td></tr>
+</table>
+
+<h3>辩论与决策层</h3>
+
+<table>
+  <tr><th>角色</th><th>Python 模块</th><th>LLM</th><th>结构化输出</th></tr>
+  <tr><td>🐂 Bull Researcher</td><td><code>bull_researcher.py</code></td><td>quick</td><td>—</td></tr>
+  <tr><td>🐻 Bear Researcher</td><td><code>bear_researcher.py</code></td><td>quick</td><td>—</td></tr>
+  <tr><td>🎯 Research Manager</td><td><code>research_manager.py</code></td><td>deep</td><td>ResearchPlan</td></tr>
+  <tr><td>💹 Trader</td><td><code>trader.py</code></td><td>quick</td><td>TraderProposal</td></tr>
+  <tr><td>⚔️ Aggressive Debator</td><td><code>aggressive_debator.py</code></td><td>quick</td><td>—</td></tr>
+  <tr><td>🛡️ Conservative Debator</td><td><code>conservative_debator.py</code></td><td>quick</td><td>—</td></tr>
+  <tr><td>⚖️ Neutral Debator</td><td><code>neutral_debator.py</code></td><td>quick</td><td>—</td></tr>
+  <tr><td>🏦 Portfolio Manager</td><td><code>portfolio_manager.py</code></td><td>deep</td><td>PortfolioDecision</td></tr>
+</table>
+
+<h3>辅助节点</h3>
+
+<table>
+  <tr><th>节点</th><th>Python 模块</th><th>职责</th></tr>
+  <tr><td>质量门控</td><td><code>quality_gate.py</code></td><td>报告评级 A-F，硬检查 + LLM 复审</td></tr>
+  <tr><td>信号处理</td><td><code>signal_processing.py</code></td><td>从最终决策文本中提取核心信号</td></tr>
+  <tr><td>交易反思</td><td><code>reflection.py</code></td><td>根据实际收益生成反思，存入记忆</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-data">4. 数据源对照表</h2>
+
+<table>
+  <tr><th>来源</th><th>协议</th><th>提供内容</th><th>分类</th><th>是否需要 API Key</th></tr>
+  <tr><td>mootdx</td><td>TCP 7709</td><td>OHLCV K 线、财务快照、F10 文本</td><td>core_stock_apis / fundamental_data</td><td>否</td></tr>
+  <tr><td>腾讯财经</td><td>HTTP (qt.gtimg.cn)</td><td>PE / PB / 市值 / 换手率</td><td>fundamental_data</td><td>否</td></tr>
+  <tr><td>东方财富 datacenter</td><td>HTTP</td><td>龙虎榜、限售解禁、板块行情</td><td>signal_data</td><td>否</td></tr>
+  <tr><td>东方财富 push2</td><td>HTTP</td><td>实时行情、个股信息、资金流</td><td>core_stock_apis / signal_data</td><td>否</td></tr>
+  <tr><td>东方财富 np-weblist</td><td>HTTP</td><td>滚动新闻</td><td>news_data</td><td>否</td></tr>
+  <tr><td>新浪财经</td><td>HTTP</td><td>K 线历史、财报三表</td><td>core_stock_apis / fundamental_data</td><td>否</td></tr>
+  <tr><td>同花顺 10jqka</td><td>HTTP</td><td>EPS 一致预期</td><td>signal_data</td><td>否</td></tr>
+  <tr><td>财联社 cls.cn</td><td>HTTP</td><td>全球财经快讯</td><td>news_data</td><td>否</td></tr>
+  <tr><td>百度股市通</td><td>HTTP</td><td>概念板块分类</td><td>signal_data</td><td>否</td></tr>
+</table>
+
+<p><strong>东财防封限流规则（v0.2.11+）：</strong>所有东财请求统一走 <code>_em_get()</code> 节流入口——串行限流默认间隔 >=1s + 0.1~0.5s 随机抖动 + Keep-Alive 会话复用。仅东财限流，mootdx/腾讯/新浪/同花顺/财联社/百度不受影响。可通过环境变量 <code>EM_MIN_INTERVAL=1.5</code> 进一步降速。</p>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-config">5. 配置参数速查</h2>
+
+<table>
+  <tr><th>参数</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>llm_provider</code></td><td><code>"minimax"</code></td><td>9 选 1: minimax / deepseek / qwen / glm / openai / anthropic / google / xai / ollama</td></tr>
+  <tr><td><code>deep_think_llm</code></td><td><code>"MiniMax-M2.7"</code></td><td>Research Manager + Portfolio Manager 用的模型</td></tr>
+  <tr><td><code>quick_think_llm</code></td><td><code>"MiniMax-M2.7-highspeed"</code></td><td>所有 Analyst / Researcher / Trader / Risk Debater</td></tr>
+  <tr><td><code>backend_url</code></td><td><code>None</code></td><td>自定义 API 端点 / 第三方中转网关</td></tr>
+  <tr><td><code>output_language</code></td><td><code>"Chinese"</code></td><td>报告输出语言（内部辩论始终英文）</td></tr>
+  <tr><td><code>max_debate_rounds</code></td><td><code>1</code></td><td>Bull vs Bear 辩论轮数</td></tr>
+  <tr><td><code>max_risk_discuss_rounds</code></td><td><code>1</code></td><td>三方风险辩论轮数</td></tr>
+  <tr><td><code>data_vendors</code></td><td>全部 <code>"a_stock"</code></td><td>5 个分类的供应商: core_stock_apis / technical_indicators / fundamental_data / news_data / signal_data</td></tr>
+  <tr><td><code>checkpoint_enabled</code></td><td><code>False</code></td><td>启用 SQLite 断点续跑</td></tr>
+  <tr><td><code>memory_log_max_entries</code></td><td><code>None</code></td><td>交易记忆最大条目数</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-entry">6. 入口点映射</h2>
+
+<table>
+  <tr><th>命令</th><th>入口文件</th><th>入口函数/类</th></tr>
+  <tr><td><code>tradingagents</code></td><td><code>cli/main.py</code></td><td><code>app</code> (Typer)</td></tr>
+  <tr><td><code>tradingagents-web</code></td><td><code>web/launch.py</code></td><td><code>main()</code></td></tr>
+  <tr><td><code>streamlit run web/app.py</code></td><td><code>web/app.py</code></td><td>模块级 Streamlit 脚本</td></tr>
+  <tr><td><code>python main.py</code></td><td><code>main.py</code></td><td>模块级（快速测试脚本）</td></tr>
+  <tr><td>Python API</td><td><code>tradingagents/graph/trading_graph.py</code></td><td><code>TradingAgentsGraph</code> 类</td></tr>
+  <tr><td>批量运行</td><td><code>examples/run_cases.py</code></td><td>模块级（复用 CLI 报告落盘逻辑）</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-deps">7. 依赖分类</h2>
+
+<table>
+  <tr><th>类别</th><th>包</th><th>用途</th></tr>
+  <tr><td>Agent 框架</td><td>langchain-core, langgraph, langgraph-checkpoint-sqlite, langchain-anthropic, langchain-openai, langchain-experimental</td><td>LLM 调用、工具定义、工作流编排、断点续跑</td></tr>
+  <tr><td>数据</td><td>mootdx, pandas, stockstats, yfinance, parsel</td><td>A 股数据获取、数据处理、技术指标计算</td></tr>
+  <tr><td>Web / CLI</td><td>streamlit, typer, rich, questionary</td><td>Web UI、命令行交互</td></tr>
+  <tr><td>基础设施</td><td>requests, redis, python-dotenv, pytz, tqdm, setuptools</td><td>HTTP 请求、缓存、环境变量、时区、进度条</td></tr>
+  <tr><td>报告导出</td><td>fpdf2</td><td>PDF 报告（含中文字体）</td></tr>
+  <tr><td>可选</td><td>langchain-google-genai</td><td>Google Gemini 模型支持</td></tr>
+  <tr><td>回测</td><td>backtrader</td><td>策略回测框架</td></tr>
+</table>
+
+<p style="margin-top:28px;">
+  <strong>关联课程：</strong><a href="../lessons/0001-project-map.html">0001 — 项目全景图</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的术语或概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

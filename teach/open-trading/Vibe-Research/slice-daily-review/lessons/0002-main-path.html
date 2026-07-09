@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0002 主成功路径 — 8 路并行加载、渲染与 AI 复盘闭环</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>主成功路径 — 8 路并行加载、渲染与 AI 复盘闭环</h1>
+  <p class="meta">学习目标：15 分钟内能解释 DailyReview 从 <code>useEffect</code> 到 AI 复盘 Markdown 渲染的完整成功路径，理解并行加载、双态占位与流式输出的协作方式。</p>
+
+  <h2>1. 阶段一：8 路数据并行发射</h2>
+  <p>页面挂载瞬间，<code>loadIndices()</code> 发射 5 路请求，<code>refreshWatch()</code> 发射 1 路——共 6 个 HTTP GET 在同一个事件循环中发出。另有 <code>api.indices()</code> 和 <code>api.globalIndices()</code> 共享 <code>loadIndices</code> 但各自独立 resolve，实际是 5+1=6 路独立 Promise。</p>
+
+  <div class="filetree">// DailyReview.tsx:44-50 — loadIndices 并行发射
+const loadIndices = () => {
+  api.indices().then(setIndices).catch(() => setIdxErr(true));
+  api.globalIndices().then(setGlobalIdx).catch(() => {});
+  api.marketOverview().then(setOverview).catch(() => {})
+    .finally(() => setOvDone(true));
+  api.emotion().then(setEmotion).catch(() => {})
+    .finally(() => setEmoDone(true));
+  api.turnoverTop().then(setTurnover).catch(() => {})
+    .finally(() => setToDone(true));
+};</div>
+  <p>注意 <strong>catch 的差异</strong>：指数行情失败时设置 <code>idxErr=true</code> 以显示"行情未接通"；其余 4 路失败时静默吞错，渲染层由 <code>pending(done)</code> 兜底。这是分层容错——核心模块显式报错，辅助模块优雅降级。</p>
+
+  <h2>2. 阶段二：各数据块的条件渲染</h2>
+  <p>数据到达后，React setState 触发重渲染。页面分为 8 个可视化区域，每个区域有自己的空态渲染逻辑：</p>
+
+  <table>
+    <tr><th>数据块</th><th>成功态</th><th>空态（数据未到）</th><th>空态（数据源不可用）</th></tr>
+    <tr><td>大盘指数</td><td>4 列 GlassCard 网格</td><td>4 个骨架占位 + "加载中…"</td><td>4 个骨架 + "行情未接通"（idxErr）</td></tr>
+    <tr><td>全球市场</td><td>5 列 GlassCard 网格</td><td>不渲染（<code>globalIdx.length &gt; 0</code>）</td><td>整块隐藏</td></tr>
+    <tr><td>市场情绪</td><td>宽度/投机+涨跌家数</td><td><code>pending(false)</code> → "加载中…"</td><td><code>pending(true)</code> → "暂无数据"</td></tr>
+    <tr><td>短线情绪</td><td>连板梯队+比率+表格</td><td><code>pending(false)</code> → "加载中…"</td><td><code>pending(true)</code> → "暂无数据"</td></tr>
+    <tr><td>成交额 TOP20</td><td>20 行表格</td><td><code>pending(false)</code> → "加载中…"</td><td><code>pending(true)</code> → "暂无数据"</td></tr>
+    <tr><td>板块资金</td><td>15 行表格+资金轮动</td><td>同上</td><td>同上</td></tr>
+    <tr><td>自选行情</td><td>网格卡片+实时价格</td><td>"加上你关注的股票"引导</td><td>无自选则不显示</td></tr>
+    <tr><td>AI 复盘</td><td>Markdown 渲染+保存按钮</td><td>"点上方按钮"引导文字</td><td>错误提示+设置引导（needConfig）</td></tr>
+  </table>
+
+  <p>核心函数 <code>pending(done)</code> 接收一个布尔值——请求是否已结束（无论成败）。已结束但数据为空 → 数据源不可用；未结束 → 加载中。这个简单的双态模型避免了用户面对"永远转圈"的焦虑。</p>
+
+  <h2>3. 阶段三：AI 复盘的数据组装与流式渲染</h2>
+  <p>用户点击"让 AI 复盘今天"，触发 <code>runReview()</code>。它不直接调 LLM——而是先把当前 <code>indices</code> 状态拼接成文本摘要 <code>dataSummary</code>，作为 prompt 的一部分发给用户自己的 AI。</p>
+
+  <div class="filetree">// DailyReview.tsx:85-101 — dataSummary 组装与流式调用
+const dataSummary = indices.length
+  ? indices.map((i) =>
+      `${i.name} ${i.price}（${i.change_pct > 0 ? "+" : ""}${i.change_pct}%）`
+    ).join("；")
+  : "（指数数据未取到）";
+
+const runReview = async () => {
+  if (!hasLlm()) { setNeedConfig(true); return; }
+  setReviewLoading(true); setReview("");
+  const prompt = `以下是今天 A 股大盘的客观数据：\n${dataSummary}\n\n` +
+    "请用中文做一段当天大盘复盘...";
+  await chatStream(
+    [{ role: "user", content: prompt }],
+    `今日大盘数据：${dataSummary}`,
+    { onDelta: (t) => setReview((r) => r + t) }
+  );
+};</div>
+
+  <p><code>chatStream</code>（<code>llm.ts</code>）做三件事：(1) 从 localStorage 读 LLM 配置；(2) POST <code>/api/chat</code> 发起 NDJSON 流式请求；(3) 逐行解析 <code>{"type":"delta","text":"..."}</code> 事件，回调 <code>onDelta</code> 追加文本。后端 <code>chat.py</code> 将消息连同 context 转发给用户配置的模型（API 接入走 OpenAI 兼容 function-calling，订阅接入 spawn 本机 CLI），边生成边 yield NDJSON 行。前端用 <code>ReactMarkdown</code> + <code>remarkGfm</code> 渲染最终内容，并由 <code>SaveNoteButton</code> 存入 localStorage。</p>
+
+  <h2>4. 一条完整请求的逐帧回放</h2>
+  <div class="diagram">时刻 T+0ms    useEffect 触发 → loadIndices() + refreshWatch()
+T+0ms    6 个 fetch() 并行发出（Vite 代理透明转发）
+T+5ms    后端 FastAPI 收到 6 个 GET，各自委托 market.py/astock.py
+T+5ms    market.py 检查 _CACHE TTL：命中直接返回，未命中调外部 API
+T+200ms  最快响应到达 → setState → React 首次重渲染（骨架→数据）
+T+800ms  最慢响应到达 → 所有 ovDone/emoDone/toDone 置 true
+         → 用户看到完整看板
+T+user   用户点击"让 AI 复盘今天"
+T+user   runReview() → hasLlm() 检测 → 组装 dataSummary
+         → POST /api/chat (NDJSON)
+T+user+  后端 chat.py 调用户 LLM，逐 token 流式返回
+T+user+  onDelta 逐块更新 review state → ReactMarkdown 增量渲染
+T+done   reviewLoading=false → SaveNoteButton 出现</div>
+
+  <p><strong>暂停回忆：</strong>如果后端 <code>/api/market/overview</code> 返回了数据但 <code>sentiment</code> 字段为 <code>null</code>，前端市场情绪卡片会显示什么？请追踪 <code>DailyReview.tsx</code> 第 264 行的判断条件。</p>
+  <p><strong>参考答案：</strong><code>{!sentiment?.breadth ? pending(ovDone) : ...}</code>——只要 <code>sentiment</code> 为 null 或缺少 <code>breadth</code> 字段，就进入 <code>pending(ovDone)</code> 分支。此时 <code>ovDone</code> 已为 true（请求已结束），所以显示"暂无数据：可能是非交易时段或数据源暂时不可用"。</p>
+
+  <p class="source">主要来源：<code>DailyReview.tsx:44-68</code>（并行加载+watchlist 刷新）、<code>DailyReview.tsx:85-108</code>（AI 复盘触发+流式）、<code>llm.ts:59-113</code>（chatStream NDJSON 解析）。交叉引用：<a href="0001-flow-map.html">0001 链路地图</a>、<a href="../../module-backend/lessons/0001-backend-module-tour.html">L1 后端模块</a>、<a href="../../module-frontend/lessons/0001-frontend-module-tour.html">L1 前端模块</a>。有任何不清楚的地方，让 agent 顺着对应源码继续深挖。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TUI 模块速查：边界、入口与后续切片</title>
+  <style>
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:#202124; line-height:1.68; background:white; }
+    main { max-width:1040px; margin:0 auto; padding:32px 20px 56px; }
+    h1 { font-size:2rem; margin:.2rem 0 1rem; letter-spacing:0; }
+    h2 { font-size:1.18rem; margin:2rem 0 .75rem; border-top:1px solid #e6e8eb; padding-top:1rem; }
+    table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:.94rem; }
+    th, td { border:1px solid #e6e8eb; padding:.62rem .7rem; vertical-align:top; }
+    th { background:#f8fafc; text-align:left; }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.9em; }
+    .where { display:inline-block; font-family:"SF Mono",Consolas,monospace; font-size:.86rem; color:#334155; background:#eef6f5; padding:.08rem .35rem; border-radius:6px; }
+    .diagram { background:#f8fafc; border:1px solid #e6e8eb; border-radius:8px; padding:1rem; overflow-x:auto; }
+    .muted { color:#5f6368; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="muted"><a href="../lessons/0001-tui-module-tour.html">返回短课</a></p>
+  <h1>TUI 模块速查：边界、入口与后续切片</h1>
+  <p>这份参考文档用于快速定位 `codex-tui` 在整体架构中的位置。它不是完整源码讲解，而是后续 L2/L3/L4 的地图。</p>
+
+  <h2>一、模块定位</h2>
+  <div class="diagram">
+    用户终端 / shell<br>
+    ↓ 键盘、粘贴、resize、启动参数<br>
+    <strong>codex-tui</strong>：配置启动、事件分发、聊天 UI、输入区、状态展示<br>
+    ↓ <code>AppCommand</code> / app-server protocol<br>
+    app-server / core runtime：thread、turn、工具执行、审批、模型请求
+  </div>
+
+  <h2>二、关键源码入口</h2>
+  <table>
+    <thead><tr><th>源文件</th><th>职责</th><th>阅读重点</th></tr></thead>
+    <tbody>
+      <tr><td><span class="where">codex-rs/cli/src/main.rs</span></td><td>顶层 CLI 分发</td><td>无子命令时走交互路径：`subcommand == None` 调用 `run_interactive_tui`，最终进入 `codex_tui::run_main`。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/Cargo.toml</span></td><td>crate 边界与依赖</td><td>确认 `codex-tui` 同时依赖终端库、app-server client、protocol、config、login、state。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/main.rs</span></td><td>`codex-tui` 二进制入口</td><td>解析 `TopCli`，合并 `-c` overrides，调用 `run_main`，退出后打印 token/resume 信息。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/cli.rs</span></td><td>TUI 参数</td><td>`prompt`、`--strict-config`、resume/fork 内部字段、`--ask-for-approval`、`--search`、`--no-alt-screen`。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/lib.rs</span></td><td>运行时组装</td><td>`run_main` 加载配置和认证，选择 app-server target，准备终端模式，进入 `App::run`。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/app.rs</span></td><td>顶层应用状态</td><td>`App` 字段、`select!` 事件循环、终端事件、thread 事件、app-server 事件分发。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/chatwidget.rs</span></td><td>聊天主体</td><td>transcript、active cell、状态行、slash command 接收、`submit_op` 到 `AppCommand`。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/bottom_pane/</span></td><td>输入与弹层</td><td>`BottomPane`、`ChatComposer`、`BottomPaneView`、approval、footer、status surface。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/src/status_indicator_widget.rs</span></td><td>运行状态组件</td><td>elapsed、details、interrupt binding、暂停/恢复、动画刷新。</td></tr>
+      <tr><td><span class="where">codex-rs/tui/styles.md</span></td><td>样式约定</td><td>header/primary/secondary 文本，cyan/green/red/magenta 的语义使用，避免自定义颜色。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、对外暴露接口清单</h2>
+  <p>`codex-rs/tui/src/lib.rs` 是 crate 的 public API 汇总点。它没有公开子模块，外部调用者主要通过重导出的类型、少量启动/地址函数，以及 release 构建下的更新检测函数访问 TUI。</p>
+  <table>
+    <thead><tr><th>类别</th><th>公开项</th><th>来源/用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>pub use</code>：启动与退出</td><td><code>LocalStateDbStartupError</code><br><code>AppExitInfo</code><br><code>ExitReason</code><br><code>RemoteAppServerEndpoint</code></td><td>分别来自 `startup_error`、`app`、`codex-app-server-client`。用于把 TUI 启动失败、退出原因、token/resume 信息和远端 app-server 端点交给上游 CLI。</td></tr>
+      <tr><td><code>pub use</code>：会话归档命令</td><td><code>DeleteConfirmation</code><br><code>SessionArchiveAction</code><br><code>SessionArchiveCommandOptions</code><br><code>run_session_archive_command</code></td><td>来自 `session_archive_commands`。顶层 CLI 的 `archive`、`delete`、`unarchive` 子命令复用这些 TUI 侧命令实现。</td></tr>
+      <tr><td><code>pub use</code>：展示与渲染支持</td><td><code>TokenUsage</code><br><code>Terminal</code><br><code>insert_history_lines</code><br><code>RowBuilder</code><br><code>render_markdown_text</code></td><td>分别来自 `token_usage`、`custom_terminal`、`insert_history`、`live_wrap`、`markdown_render`。它们服务 token 摘要、终端抽象、历史行插入、软换行构建和 Markdown 文本渲染。</td></tr>
+      <tr><td><code>pub use</code>：更新与 CLI</td><td><code>UpdateAction</code><br><code>get_update_action</code>（仅 `not(debug_assertions)`）<br><code>Cli</code></td><td>来自 `update_action` 和 `cli`。顶层 CLI 用 `UpdateAction` 执行升级动作；`Cli` 是 TUI 参数结构。</td></tr>
+      <tr><td><code>pub use</code>：公开组件</td><td><code>ComposerAction</code><br><code>ComposerInput</code></td><td>来自 `public_widgets::composer_input`，把 composer 输入组件的动作和输入结构作为可复用公共组件暴露。</td></tr>
+      <tr><td><code>pub fn</code></td><td><code>resolve_remote_addr(addr: &amp;str)</code><br><code>remote_addr_supports_auth_token(endpoint: &amp;RemoteAppServerEndpoint)</code></td><td>解析 `ws://`、`wss://`、`unix://` 远端地址，并判断端点是否允许认证 token。顶层 CLI 的 remote 参数路径会使用这些能力。</td></tr>
+      <tr><td><code>pub async fn</code></td><td><code>run_main(cli, arg0_paths, loader_overrides, explicit_remote_endpoint)</code></td><td>TUI 主入口。完成配置、认证、app-server target、终端模式和 `App::run` 运行时组装，返回 `AppExitInfo`。</td></tr>
+      <tr><td><code>pub enum</code></td><td><code>LoginStatus</code></td><td>登录状态查询结果：`AuthMode(AuthMode)` 或 `NotAuthenticated`。内部轻量读取 account 后用于判断认证状态。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>四、核心依赖速查</h2>
+  <table>
+    <thead><tr><th>依赖类别</th><th>代表 crate</th><th>在 TUI 中的意义</th></tr></thead>
+    <tbody>
+      <tr><td>终端 UI</td><td><code>ratatui</code>、<code>crossterm</code></td><td>绘制 widget、读取键盘/粘贴/resize、控制 alternate screen。</td></tr>
+      <tr><td>Codex 服务边界</td><td><code>codex-app-server-client</code>、<code>codex-app-server-protocol</code></td><td>连接 embedded/local daemon/remote app-server，并收发 thread、turn、审批事件。</td></tr>
+      <tr><td>配置与认证</td><td><code>codex-config</code>、<code>codex-login</code>、<code>codex-cloud-config</code></td><td>加载配置层、登录限制、云端配置和模型提供商信息。</td></tr>
+      <tr><td>协议与状态</td><td><code>codex-protocol</code>、<code>codex-state</code>、<code>codex-rollout</code></td><td>描述权限、sandbox、thread id、状态库和实验开关。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>五、边界与上游入口</h2>
+  <table>
+    <thead><tr><th>方向</th><th>边界说明</th><th>关键落点</th></tr></thead>
+    <tbody>
+      <tr><td>上游入口</td><td>顶层 `codex` CLI 在没有子命令时，把交互参数交给 `run_interactive_tui`，再调用 `codex_tui::run_main`。独立 `codex-tui` 二进制也会从 `codex-rs/tui/src/main.rs` 直接调用 `run_main`。</td><td><code>codex-rs/cli/src/main.rs</code><br><code>codex-rs/tui/src/main.rs</code><br><code>codex-rs/tui/src/lib.rs::run_main</code></td></tr>
+      <tr><td>下游服务</td><td>`run_main` 选择 embedded app-server、本地 daemon 或显式 remote endpoint，随后通过 app-server protocol 与 thread/turn/审批事件交互。</td><td><code>codex-app-server-client</code><br><code>codex-app-server-protocol</code></td></tr>
+      <tr><td>终端边界</td><td>TUI 只拥有终端绘制、键盘/粘贴/resize、alternate screen 和 UI 状态；模型请求、工具执行和 sandbox 策略落在 app-server/core 侧。</td><td><code>ratatui</code><br><code>crossterm</code><br><code>codex-rs/tui/src/app.rs::App::run</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>六、后续 L2/L3 候选</h2>
+  <table>
+    <thead><tr><th>候选层级</th><th>标题</th><th>建议覆盖</th></tr></thead>
+    <tbody>
+      <tr><td>L2</td><td>交互回合垂直切片</td><td>从 composer Enter 到 `InputResult::Submitted`，再到 `ChatWidget::submit_op` 和 app-server thread 请求。</td></tr>
+      <tr><td>L2</td><td>审批弹层切片</td><td>exec/patch approval 如何进入 `BottomPaneView`，用户选择如何转成 approval command。</td></tr>
+      <tr><td>L3</td><td>TUI API 与结构体参考</td><td>`Cli`、`AppEvent`、`AppCommand`、`BottomPaneView`、`ChatWidgetInit` 字段表。</td></tr>
+      <tr><td>L3</td><td>按键与 slash command 速查</td><td>composer 编辑、弹层路由、slash command 接收边界。</td></tr>
+      <tr><td>L4</td><td>`App::run` 事件循环深度剖析</td><td>四路事件源、初始 session 等待、退出语义、terminal restore 和错误路径。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工具调用执行链路地图与 mermaid 时序图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .mermaid {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.7;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>工具调用执行链路地图</h1>
+    <p class="meta">学习目标：画出从模型 tool_use 到结果回写的完整 7 步时序图，说出每一层的职责边界。</p>
+    <p class="meta">前置：<a href="../../module-tools-execution/lessons/0001-tools-execution-module-tour.html">L1 工具执行模块导览</a> | <a href="../../module-core-runtime/lessons/0001-core-runtime-module-tour.html">L1 Core Runtime 模块导览</a></p>
+  </header>
+
+  <section>
+    <h2>1. 链路全景：7 步闭环</h2>
+    <p>一次完整的工具调用，从模型决定使用工具到结果回写供模型继续生成，经过 7 个阶段。每个阶段由不同的模块负责，边界清晰：</p>
+
+    <div class="diagram">模型输出 tool_use content block
+  │
+  ▼
+[1] ToolRouter::build_tool_call()
+    将 ResponseItem::FunctionCall 解析为 ToolCall { tool_name, call_id, payload }
+    所属：codex-rs/core/src/tools/router.rs
+  │
+  ▼
+[2] ToolRegistry::dispatch_any_with_terminal_outcome()
+    查找工具 → PreToolUse hook → 调用 handle_any_tool → PostToolUse hook
+    所属：codex-rs/core/src/tools/registry.rs
+  │
+  ▼
+[3] ShellCommandHandler::handle() / apply_patch::handle()
+    解析工具参数，构造 ExecParams 或 ApplyPatchAction
+    所属：codex-rs/core/src/tools/handlers/shell.rs, apply_patch.rs
+  │
+  ▼
+[4] ToolOrchestrator::run()
+    审批决策(Allow/Prompt/Forbidden) → 沙箱选择 → 网络审批
+    所属：codex-rs/core/src/tools/orchestrator.rs
+  │
+  ▼
+[5] Exec-server 沙箱执行
+    JSON-RPC exec 调用 → 进程启动 → stdout/stderr 流式收集
+    所属：codex-rs/exec-server/src/client.rs
+  │
+  ▼
+[6] 结果格式化与截断
+    format_exec_output_for_model() → 加上 exit code、wall time、output
+    所属：codex-rs/core/src/tools/mod.rs
+  │
+  ▼
+[7] ToolOutput::to_response_item()
+    序列化为 ResponseInputItem::FunctionCallOutput → 回写 turn context
+    所属：codex-rs/tools/src/tool_output.rs</div>
+  </section>
+
+  <section>
+    <h2>2. 三层调度器职责边界</h2>
+    <p>从模型输出到真实执行，经过三层调度。理解它们的分工是读懂这条链路的关键：</p>
+
+    <table>
+      <tr><th>调度器</th><th>文件</th><th>职责</th><th>不负责</th></tr>
+      <tr>
+        <td><code>ToolRouter</code></td>
+        <td><code>router.rs</code></td>
+        <td>解析模型输出 → 构造 ToolCall；管理 model_visible_specs；判断并行支持</td>
+        <td>不执行工具，不处理审批</td>
+      </tr>
+      <tr>
+        <td><code>ToolRegistry</code></td>
+        <td><code>registry.rs</code></td>
+        <td>查找 handler → Pre/Post hook → telemetry → 生命周期通知 → 输出封装</td>
+        <td>不关心工具内部执行逻辑，不做沙箱决策</td>
+      </tr>
+      <tr>
+        <td><code>ToolOrchestrator</code></td>
+        <td><code>orchestrator.rs</code></td>
+        <td>审批策略 → 沙箱选择 → 执行尝试 → 拒绝时沙箱降级重试</td>
+        <td>不直接启动进程，不解析模型输出</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. Mermaid 时序图</h2>
+    <p>以下时序图展示一次 bash 命令执行的完整交互。关键决策点（审批拒绝、超时）用 alt 分支标注：</p>
+
+    <div class="mermaid">sequenceDiagram
+    participant Model as 模型
+    participant Router as ToolRouter
+    participant Registry as ToolRegistry
+    participant Hook as PreToolUse Hook
+    participant Handler as ShellCommandHandler
+    participant Orch as ToolOrchestrator
+    participant Policy as ExecPolicy
+    participant Sandbox as ExecServer
+    participant Out as ToolOutput
+
+    Model->>Router: ResponseItem::FunctionCall { name, arguments, call_id }
+    Router->>Router: build_tool_call() 解析为 ToolCall
+    Router->>Registry: dispatch_any_with_terminal_outcome(invocation)
+
+    Registry->>Registry: 按 tool_name 查找 CoreToolRuntime
+    alt 工具未注册
+        Registry-->>Router: FunctionCallError::RespondToModel("unsupported tool")
+    end
+
+    Registry->>Hook: run_pre_tool_use_hooks()
+    alt hook 返回 Blocked
+        Hook-->>Registry: 拒绝，返回错误
+    end
+
+    Registry->>Handler: tool.handle(invocation)
+    Handler->>Handler: 解析 ShellCommandToolCallParams
+    Handler->>Orch: orchestrator.run(shell_runtime, req)
+
+    Orch->>Policy: exec_approval_requirement()
+    Policy-->>Orch: Skip / NeedsApproval / Forbidden
+    alt NeedsApproval
+        Orch->>Orch: request_approval() 弹出用户审批
+        alt 用户拒绝
+            Orch-->>Handler: ToolError::Rejected
+        end
+    end
+    alt Forbidden
+        Orch-->>Handler: ToolError::Rejected("forbidden by policy")
+    end
+
+    Orch->>Orch: sandbox_override_for_first_attempt()
+    Orch->>Orch: select_initial() 选择沙箱类型
+    Orch->>Sandbox: run_attempt() → JSON-RPC exec
+    Sandbox-->>Orch: ExecToolCallOutput { exit_code, stdout, duration }
+
+    alt 沙箱拒绝 (SandboxErr::Denied)
+        Orch->>Orch: 尝试沙箱降级重试
+        Orch->>Sandbox: run_attempt() escalated sandbox
+        Sandbox-->>Orch: ExecToolCallOutput
+    end
+
+    Orch-->>Handler: OrchestratorRunResult
+    Handler->>Handler: format_exec_output_for_model()
+    Handler-->>Registry: FunctionToolOutput
+
+    Registry->>Registry: PostToolUse hook
+    Registry->>Out: result.to_response_item()
+    Out-->>Registry: ResponseInputItem::FunctionCallOutput
+    Registry-->>Router: AnyToolResult
+    Router-->>Model: 结果回写 turn context，模型继续生成</div>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>ToolRouter、ToolRegistry、ToolOrchestrator 三者各自负责什么？</li>
+        <li>审批决策发生在时序图的哪个位置？由哪个模块执行？</li>
+        <li>工具执行结果最终以什么类型回写到 turn context？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. Router 负责解析模型输出→ToolCall；Registry 负责查找 handler + hook + telemetry + 生命周期；Orchestrator 负责审批 + 沙箱选择 + 执行尝试 + 降级重试。2. 审批在 Orchestrator::run() 的步骤 1，由 ExecApprovalRequirement 驱动，可能弹出用户审批对话框或被 guardian 自动处理。3. 以 ResponseInputItem::FunctionCallOutput 回写，由 ToolOutput::to_response_item() 序列化。</p>
+    </div>
+    <p>下一步：<a href="0002-main-path.html">主路径详解——bash 命令从 handler 到 exec-server</a>。如有疑问，追问 agent 让它带你单步跟踪某一次具体的工具调用。</p>
+  </section>
+</main>
+</body>
+</html>

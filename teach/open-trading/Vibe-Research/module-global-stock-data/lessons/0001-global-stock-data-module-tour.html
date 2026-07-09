@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 全球股票数据工具箱模块总览</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#2563eb; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>全球股票数据工具箱模块总览</h1>
+  <p class="meta">学习目标：15 分钟内能说清 global-stock-data 的八层架构、市场覆盖范围和 Vibe-Research 后端的移植裁剪策略。</p>
+
+  <h2>1. 工具箱定位</h2>
+  <p><code>global-stock-data</code> 是一个自包含的 AI 编程助手 Skill 文件——本质是一份结构化 Markdown + 内嵌 Python 代码。它把分散在 5 个数据源里的美股/港股原始数据整合成 18 个可直接调用的端点，<strong>零鉴权、仅依赖 requests</strong>。</p>
+  <p>它的核心价值不是"又一个数据封装库"，而是让 AI 编程助手（Claude Code、Codex、OpenClaw）在美股/港股相关对话中<strong>自动激活</strong>——你只需要说"看看 AAPL 的财报"，助手就能自动调用对应的数据端点。</p>
+  <div class="callout">
+    <p><strong>一句话总结：</strong>global-stock-data 是 Vibe-Research 的<strong>全球股票数据引擎</strong>，负责美股、港股、韩股的行情查询和财务指标获取。它与 a-stock-data（A股数据引擎）形成姐妹关系，共同构成 Vibe-Research 的完整数据底座。</p>
+  </div>
+
+  <h2>2. 八层数据架构</h2>
+  <p>global-stock-data v1.0.1 按数据类型分为八层，共 18 个端点，覆盖从实时行情到 SEC 监管文件的完整数据栈。</p>
+  <div class="diagram">全球股票数据 · 八层架构 · V1.0.1
+  │
+  ├─ Layer 1 · 行情层    新浪 + 腾讯 + 东财 push2        实时报价 25-78 字段
+  ├─ Layer 2 · K线层     新浪(回溯至1984) + Yahoo chart   日/周/月/分钟 K线
+  ├─ Layer 3 · 技术指标   MA/EMA+MACD+RSI+KDJ+布林带     纯Python计算，零额外依赖
+  ├─ Layer 4 · 基本面     东财datacenter+Yahoo+SEC XBRL   三表+关键指标+估值+机构持仓
+  ├─ Layer 5 · 资金面     东财 push2his                   日级主力/大单/中单/小单资金流
+  ├─ Layer 6 · 期权层     Yahoo crumb                     期权链 calls+puts（仅美股）
+  ├─ Layer 7 · SEC Filing EDGAR submissions + XBRL         10-K/10-Q/8-K + 503 GAAP指标（仅美股）
+  └─ Layer 8 · 工具层     东财search + 全市场列表 + CIK    搜索/排名/新闻/ticker映射</div>
+  <p>八层之中，<strong>行情层、基本面层、工具层</strong>是最常用的三层。行情层有 3 个数据源互为备份（新浪侧重中文名+EPS+PE，腾讯字段最全 78 个，东财 push2 统一 secid 查询）；基本面层提供中英双版财报（东财中文字段名 + Yahoo 英文结构化报表）；工具层提供全市场 5925+ 只美股和 18000+ 只港股的列表与搜索。</p>
+
+  <h2>3. 从工具箱到后端：合规移植</h2>
+  <p>Vibe-Research 的后端 <code>backend/gstock.py</code>（183 行）并没有把 SKILL.md 的 18 个端点全部搬进来。它只移植了<strong>东财域内合规子集</strong>——即不需要科学上网就能在国内服务器访问的数据源。</p>
+  <div class="filetree">open-trading/Vibe-Research/
+  ├── global-stock-data/
+  │   └── SKILL.md                   ← 完整八层 18 端点（含 Yahoo/SEC 境外源）
+  └── backend/
+      └── gstock.py                  ← 移植子集：东财域内（行情 + 关键指标 + 搜索 + 指数）</div>
+  <p>移植策略很清晰：</p>
+  <table>
+    <tr><th>SKILL.md 原始能力</th><th>gstock.py 移植状态</th><th>原因</th></tr>
+    <tr><td>东财 push2 行情（美股/港股）</td><td>已移植</td><td>国内直连可用</td></tr>
+    <tr><td>东财 datacenter 关键财务指标</td><td>已移植（最新一期）</td><td>国内直连，中文字段名</td></tr>
+    <tr><td>东财 search 代码搜索</td><td>已移植（增强：精确代码匹配）</td><td>解决"搜 AAPL 混入票据"问题</td></tr>
+    <tr><td>全球指数（道指/标普/纳指/恒生）</td><td>已移植（硬编码 5 个指数 secid）</td><td>A 股看隔夜外围脸色的刚需</td></tr>
+    <tr><td>新浪/腾讯行情</td><td>未移植</td><td>东财 push2 已覆盖，避免冗余</td></tr>
+    <tr><td>新浪/Yahoo K线</td><td>未移植</td><td>前端暂不需要独立 K 线图</td></tr>
+    <tr><td>技术指标计算</td><td>未移植</td><td>前端自己算或后续加</td></tr>
+    <tr><td>Yahoo 期权/机构持仓/SEC Filing</td><td>未移植</td><td>需科学上网，非国内部署刚需</td></tr>
+  </table>
+  <p>此外，gstock.py 还有一个<strong>原工具包未覆盖的扩展</strong>：增加了<strong>韩股</strong>（Kospi/Kosdaq）的行情支持，通过东财 MktNum=177 接入三星、SK 海力士等半导体龙头的实时报价。韩股代码为 6 位数字（如 <code>005930.KS</code>），需显式加 <code>.KS</code>/<code>.KQ</code> 后缀来与 A 股 6 位代码区分。</p>
+
+  <h2>4. 市场代码规则与调用速览</h2>
+  <p>调用 global-stock-data 端点时，不同市场和不同数据源需要不同的代码格式。核心规则如下：</p>
+  <table>
+    <tr><th>市场</th><th>东财 secid 前缀</th><th>东财 SECUCODE</th><th>Yahoo 格式</th></tr>
+    <tr><td>美股 NASDAQ</td><td><code>105.AAPL</code></td><td><code>AAPL.O</code></td><td><code>AAPL</code></td></tr>
+    <tr><td>美股 NYSE</td><td><code>106.BABA</code></td><td><code>BABA.N</code></td><td><code>BABA</code></td></tr>
+    <tr><td>港股</td><td><code>116.00700</code></td><td><code>00700.HK</code></td><td><code>0700.HK</code></td></tr>
+    <tr><td>韩股</td><td><code>177.005930</code></td><td>—（无 F10 财务）</td><td>—</td></tr>
+  </table>
+  <p>在 Vibe-Research 后端中，调用入口统一为 <code>gstock.us_hk_stock(query)</code>，它会自动解析代码前缀、搜索东财、拉取行情和关键指标：</p>
+  <div class="diagram"># 示例 1：查苹果美股 — 自动识别 NASDAQ
+  &gt;&gt;&gt; gstock.us_hk_stock("AAPL")
+  {
+    "code": "AAPL", "name": "苹果", "market": "NASDAQ",
+    "quote": {"price": 198.75, "change_pct": 1.23, ...},
+    "metrics": {"revenue": 383285000000, "eps": 6.43, "roe": 158.7, ...}
+  }
+
+  # 示例 2：查腾讯港股 — 数字代码自动补零到 5 位
+  &gt;&gt;&gt; gstock.us_hk_stock("700")   # "700" → "00700"
+  {"code": "00700", "name": "腾讯控股", "market": "HK", ...}
+
+  # 示例 3：查三星韩股 — 显式 .KS 后缀区分 A 股
+  &gt;&gt;&gt; gstock.us_hk_stock("005930.KS")
+  {"code": "005930", "name": "三星电子", "market": "KR", ...}</div>
+  <p>注意韩股没有 F10 财务数据（<code>metrics</code> 为 null），东财对韩股仅提供行情。</p>
+
+  <p><strong>暂停回忆：</strong>为什么 global-stock-data SKILL.md 有 18 个端点，但 gstock.py 只移植了行情 + 关键指标 + 搜索 + 全球指数？未被移植的端点在什么场景下才需要？</p>
+  <p><strong>参考答案：</strong>移植策略是<strong>东财域内合规子集</strong>——只选国内直连可用的数据源（东财 push2/datacenter/search）。Yahoo 期权/机构持仓/SEC Filing 需要科学上网，不适合国内服务器部署；新浪/腾讯行情与东财功能重叠，避免冗余；K 线和技术指标不属于当前前端页面的刚需。如果你想在自己的项目中使用这些功能，可以直接调用 SKILL.md 中的 Python 代码段——它们不依赖后端，独立可用。</p>
+
+  <p class="source">主要来源：<code>global-stock-data/SKILL.md</code> 八层架构与 18 端点定义、<code>backend/gstock.py</code> 移植实现（183 行）、<code>global-stock-data/README.md</code> 快速开始与 FAQ。需要查具体端点代码时，可打开 <a href="../reference/global-stock-data-overview.html">参考手册</a>；不清楚某个市场格式时，可继续让 agent 搜索 SKILL.md 中的市场代码规则表。</p>
+</main>
+</body>
+</html>

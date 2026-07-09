@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>发布链路地图：从 git tag 到多平台二进制包</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>发布链路地图：从 git tag 到多平台二进制包</h1>
+        <p class="meta">学习目标：15 分钟内画出从 <code>git push origin rust-v0.1.0</code> 到 GitHub Release + npm publish 的完整时序图，说出 10 个关键 job 的职责边界。</p>
+
+        <div class="callout">
+          一句话定位：本切片追踪一条 tag 推送如何触发 GitHub Actions，经 prepare、build（4 平台 x 2 bundle）、sign（macOS AKV + Linux cosign）、package、release、npm publish 共 10 个阶段，最终到达用户手中的多平台二进制包。
+          前置知识：<a href="../../module-build-release/lessons/0001-build-release-module-tour.html">L1 构建与发布模块导览</a> | <a href="../../module-cli-packaging/lessons/0001-cli-packaging-module-tour.html">L1 CLI 包装层模块导览</a>。
+        </div>
+
+        <h2>1. 时序总览</h2>
+        <p>
+          下面这张 mermaid 时序图覆盖了从 tag 推送到最终发布的全部 10 个阶段。蓝色为 macOS 特有链路，绿色为 Linux 特有，橙色为 Windows 特有。建议先扫全图建立心理模型，再逐层下钻。
+        </p>
+        <div class="diagram">
+          <pre class="mermaid">sequenceDiagram
+    participant DEV as 开发者
+    participant TAG as tag-check
+    participant BUILD as build (macOS/Linux)
+    participant WIN as build-windows
+    participant SIGN as sign-macos (5 jobs)
+    participant REL as release
+    participant NPM as publish-npm
+
+    DEV->>TAG: git push rust-v0.1.0
+    TAG->>TAG: 校验 tag 格式 = Cargo.toml version
+
+    par 多平台并行构建
+        BUILD->>BUILD: macOS arm64/x86_64 + Linux x64/arm64
+        WIN->>WIN: Windows x64/arm64 MSVC
+    end
+
+    BUILD-->>SIGN: macOS unsigned → AKV签名→公证→DMG→验证
+    SIGN-->>REL: 已签名 macOS artifacts
+    BUILD-->>REL: Linux artifacts (.zst + .tar.gz + .sigstore)
+    WIN-->>REL: Windows artifacts (.exe + .zip)
+
+    REL->>REL: 汇聚 artifacts → SHA256SUMS
+    REL->>REL: stage_npm_packages.py → npm tarballs
+    REL->>GH: GitHub Release (softprops/action-gh-release)
+
+    NPM->>NPM: OIDC认证 → 平台包→主包→SDK 串行发布</pre>
+        </div>
+
+        <h2>2. 入口点：tag 推送与版本校验</h2>
+        <p>
+          整个发布链路由 <b>git tag 推送</b>触发。Workflow <code>rust-release</code> 监听 <code>rust-v*.*.*</code> 格式的 tag。首个 job <code>tag-check</code> 做三项校验：（1）确认 <code>GITHUB_REF_TYPE</code> 为 tag；（2）用正则 <code>^rust-v[0-9]+\\.[0-9]+\\.[0-9]+(-(alpha|beta)(\\.[0-9]+)?)?$</code> 验证 tag 格式；（3）提取 tag 中的版本号与 <code>codex-rs/Cargo.toml</code> 的 <code>version</code> 字段对比，不一致则失败。只有 tag-check 通过后，后续 build 和 release job 才会执行。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-yaml"># .github/workflows/rust-release.yml — tag-check job 核心逻辑
+tag_ver="${GITHUB_REF_NAME#rust-v}"
+cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
+              | sed -E 's/version *= *"([^"]+)".*/\1/')"
+[[ "${tag_ver}" == "${cargo_ver}" ]] \
+  || { echo "❌  Tag ${tag_ver} ≠ Cargo.toml ${cargo_ver}"; exit 1; }</code></pre>
+        </div>
+        <p>
+          <strong>异常路径：</strong>若 tag 格式不匹配，CI 直接失败，不会进入 build。常见错误：tag 缺少 <code>rust-v</code> 前缀、版本号多了一个 <code>v</code> 前缀、或 Cargo.toml 版本未同步更新。排查方向：运行 <code>git tag -l 'rust-v*'</code> 检查已有 tag 格式，对比 <code>grep version codex-rs/Cargo.toml</code> 输出。
+        </p>
+
+        <h2>3. 构建矩阵：4 平台 x 2 bundle 的并行构建</h2>
+        <p>
+          <code>tag-check</code> 通过后，<code>build</code> job 以 8 路并行 matrix 执行：macOS arm64/x86_64 各分 primary 和 app-server bundle；Linux x64/arm64 musl 同样各分 primary 和 app-server。每个 cell 产出：二进制文件、符号归档、<code>codex-package-{target}.tar.gz</code>（Codex 自有的分发格式）、Python runtime wheel。
+        </p>
+        <p>
+          macOS 与 Linux 的关键差异：macOS 构建后只做符号剥离与压缩，暂不签名——签名由后续 <code>sign-macos-binaries</code> job 在 ubuntu runner 上通过 AKV PKCS11 远程完成。Linux 构建后直接调用 <code>cosign</code> 签名，生成 <code>.sigstore</code> 文件。Linux musl 构建还需额外步骤：安装 Zig（交叉编译工具链）、构建 bwrap 沙箱二进制并计算 SHA256 摘要供 codex 嵌入校验。
+        </p>
+
+        <h2>4. 签名与公证链路</h2>
+        <p>
+          <strong>macOS 签名</strong>分四步：（1）<code>build</code> 产出 unsigned 二进制上传为 artifact；（2）<code>sign-macos-binaries</code> 在 ubuntu runner 上通过 Azure Key Vault PKCS11 远程签名 + Apple notarization；（3）<code>package-macos</code> 在 macos runner 上 <code>codesign --verify</code> 验证签名，构建 DMG；（4）<code>sign-macos-dmg</code> 对 DMG 签名 + 公证 + staple。<code>finalize-macos</code> 最后挂载 DMG 再次验证所有二进制签名。整个 macOS 签名链涉及 5 个连续 job，任何一步失败都会阻断发布。
+        </p>
+        <p>
+          <strong>Linux 签名</strong>简单得多：在 <code>build</code> job 内直接调用 <code>.github/actions/linux-code-sign</code> 对每个二进制执行 cosign 签名。<strong>Windows 签名</strong>使用 Azure Trusted Signing，通过 <code>.github/actions/windows-code-sign</code> 完成。
+        </p>
+
+        <div class="practice">
+          <p><strong>检索练习：</strong>macOS 签名链路为什么需要 5 个串行 job 而不能合并？如果 <code>sign-macos-binaries</code> 失败报 "AKV authentication error"，排查方向是什么？</p>
+          <div class="answer">
+            参考答案：<br>
+            5 个 job 分离的原因：（1）签名需要 <code>codesigning</code> GitHub Environment 保护 secrets，与构建环境隔离；（2）AKV PKCS11 工具链仅在 Linux 上可用，签名本身在 ubuntu runner 完成；（3）DMG 构建需要 macOS runner（hdiutil），签名后还需在 macOS 上验证（codesign 命令只在 macOS 上可用）；（4）DMG 签名是独立步骤，因为 DMG 文件在 macOS 上构建后才存在。<br>
+            AKV 认证失败排查：检查 <code>codesigning</code> environment 的 secrets 是否过期（Azure client secret 有效期通常 6-24 个月）；检查 key vault 的 access policy 是否包含当前 service principal 的 sign 权限。<br>
+            还有疑问？向 agent 追问具体错误栈，让它带你定位到对应 job 的 step。
+          </div>
+        </div>
+
+        <p>
+          继续学习主路径细节：<a href="./0002-main-path.html">0002 主路径：GitHub Release 与 npm 发布</a>。
+          速查参考：<a href="../reference/release-package-binary-flow-map.html">发布链路速查表</a>（每层输入/输出/关键文件一览）。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

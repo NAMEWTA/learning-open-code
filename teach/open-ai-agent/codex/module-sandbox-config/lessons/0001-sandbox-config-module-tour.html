@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001：Sandbox 配置到执行的 15 分钟导览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+<article>
+  <h1>Sandbox 配置到执行的 15 分钟导览</h1>
+  <p class="meta">学习目标：看到一段配置时，能说出它如何影响命令执行边界。回到全局架构：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>，或查看 <a href="../../00-overview/reference/00-overview.html">L0 参考总览</a>。</p>
+
+  <h2>1. 先抓住职责边界</h2>
+  <p>Codex 的 sandbox 不是一个单点模块，而是一条管线：配置层读入用户意图，权限层编译成运行态 profile，sandboxing 层决定是否需要平台 sandbox，最后由 macOS、Linux 或 Windows 后端包裹命令。最小骨架如下：</p>
+  <div class="filetree">codex-rs/
+├── config/src/                         ← TOML schema 与 profile 声明
+│   ├── config_toml.rs                  ← ConfigToml：sandbox/profile 配置入口
+│   └── permissions_toml.rs             ← [permissions] profile 与继承
+├── core/src/config/                    ← 运行态 Config 与权限编译
+│   ├── mod.rs                          ← 合并配置层、requirements、trust
+│   └── permissions.rs                  ← 编译 FileSystem/Network policy
+└── sandboxing/src/                     ← 执行前 sandbox 分派
+    └── manager.rs                      ← transform 成 SandboxExecRequest</div>
+  <p>关键源码：<span class="where">codex-rs/config/src/config_toml.rs</span>、<span class="where">codex-rs/core/src/config/mod.rs</span>、<span class="where">codex-rs/sandboxing/src/manager.rs</span>。</p>
+
+  <h2>2. 最小链路：配置变成 profile</h2>
+  <p>用户可见入口主要有四类：`sandbox_mode` 是旧语法，取值来自 `SandboxMode`：`read-only`、`workspace-write`、`danger-full-access`；`default_permissions` 选择内置或命名 profile；`[permissions]` 定义自定义 profile；`approval_policy` 决定何时请求批准。源码会避免同时使用互斥覆盖项，例如 `sandbox_mode` 不能和 `default_permissions` 覆盖同时出现。</p>
+  <pre><code class="language-toml">default_permissions = "work"
+approval_policy = "on-request"
+
+[permissions.work]
+extends = ":workspace"
+
+[permissions.work.network]
+enabled = false</code></pre>
+  <p>这段配置先由 <code>ConfigToml</code> 反序列化，再由 <code>resolve_effective_permission_selection</code> 和 <code>compile_permission_profile_selection</code> 选择并编译。内置 profile 的默认选择还会看项目 trust：可信或不可信项目通常倾向 `:workspace`，否则回到 `:read-only`。</p>
+
+  <h2>3. profile 变成 sandbox 执行</h2>
+  <p>编译后的核心对象是 `PermissionProfile`，它可以拆成 `FileSystemSandboxPolicy` 与 `NetworkSandboxPolicy`。`Permissions::effective_permission_profile()` 会把运行时 workspace roots 物化进去；`SandboxManager::select_initial()` 决定是否需要平台 sandbox；`SandboxManager::transform()` 再把命令变成可执行请求。</p>
+  <div class="diagram">TOML / CLI override
+  → Config::load_config_with_layer_stack
+  → compile_permission_profile_selection
+  → PermissionProfile
+  → SandboxManager::select_initial
+  → SandboxManager::transform
+  → macOS seatbelt / Linux sandbox helper / Windows restricted token</div>
+  <p>平台差异被压在最后一段：Linux 会构造 `codex-linux-sandbox` 参数并默认走 bubblewrap；macOS 使用 `/usr/bin/sandbox-exec` 生成 Seatbelt policy；Windows 在 restricted token 与 elevated backend 间选择。</p>
+
+  <h2>4. 暂停回忆</h2>
+  <div class="practice">
+    <p>不看上文，回答三个问题：</p>
+    <ol>
+      <li>`default_permissions = "work"` 最终会先进入哪个 TOML 结构？</li>
+      <li>`[permissions.work.network] enabled = false` 最终影响哪个运行态 policy？</li>
+      <li>决定是否包裹平台 sandbox 的统一入口在哪个文件？</li>
+    </ol>
+  </div>
+  <div class="answer">
+    <p>参考答案：1. 进入 <code>ConfigToml.default_permissions</code>，并引用 <code>PermissionsToml</code> 中的命名 profile。2. 影响 <code>NetworkSandboxPolicy</code>，`false` 编译为 restricted。3. 入口在 <code>codex-rs/sandboxing/src/manager.rs</code>，重点看 <code>SandboxManager::select_initial</code> 与 <code>SandboxManager::transform</code>。</p>
+  </div>
+  <p class="source">主要来源：<a href="../reference/sandbox-config-overview.html">Sandbox 配置参考总览</a>。继续学习时，可以让 agent 带你逐行读 `core/src/config/permissions.rs` 的 profile 编译逻辑。</p>
+</article>
+</main>
+</body>
+</html>

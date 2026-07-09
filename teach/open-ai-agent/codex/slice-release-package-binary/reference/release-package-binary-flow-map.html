@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>发布链路速查表 — codex 多平台二进制发布</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      .ref-table th:first-child { width: 14%; }
+      .ref-table th:nth-child(2) { width: 16%; }
+      .ref-table th:nth-child(3) { width: 22%; }
+      .ref-table th:nth-child(4) { width: 18%; }
+      .ref-table th:nth-child(5) { width: 30%; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="reference">
+        <h1>发布链路速查表</h1>
+        <p class="meta">从 git tag 推送到多平台用户下载的完整链路速查。用于发布失败时快速定位、或为类似项目搭建 CI/CD 时作为参考清单。</p>
+
+        <h2>1. Job 执行顺序与职责</h2>
+        <table class="ref-table">
+          <thead>
+            <tr>
+              <th>顺序</th>
+              <th>Job 名称</th>
+              <th>Runner</th>
+              <th>输入</th>
+              <th>输出 / 职责</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>0</td>
+              <td><code>rust-release-prepare</code></td>
+              <td>ubuntu-latest</td>
+              <td>schedule / workflow_dispatch</td>
+              <td>更新 models.json，有变更时自动提 PR。独立于发布链路，定时运行</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td><code>tag-check</code></td>
+              <td>ubuntu-latest</td>
+              <td>git tag <code>rust-v*.*.*</code></td>
+              <td>校验 tag 格式与 Cargo.toml version 一致。阻塞所有后续 job</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td><code>build</code> (matrix)</td>
+              <td>macos-15-xlarge / linux-x64-xl / linux-arm64</td>
+              <td>源码 checkout</td>
+              <td>各平台二进制（.zst + .tar.gz）、符号归档、Python runtime wheel。macOS 产出 unsigned artifacts</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td><code>sign-macos-binaries</code></td>
+              <td>ubuntu-latest</td>
+              <td>unsigned macOS 二进制</td>
+              <td>AKV PKCS11 远程签名 + Apple 公证，产出 signed binaries</td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td><code>package-macos</code></td>
+              <td>macos-15-xlarge</td>
+              <td>signed macOS 二进制</td>
+              <td>codesign 验证、构建 DMG、打包 codex-package archive</td>
+            </tr>
+            <tr>
+              <td>5</td>
+              <td><code>sign-macos-dmg</code></td>
+              <td>ubuntu-latest</td>
+              <td>unsigned macOS DMG</td>
+              <td>DMG 签名 + 公证 + staple，产出 signed DMG</td>
+            </tr>
+            <tr>
+              <td>6</td>
+              <td><code>finalize-macos</code></td>
+              <td>macos-15-xlarge</td>
+              <td>packaged artifacts + signed DMG</td>
+              <td>挂载 DMG、验证所有二进制签名与 entitlements，最终产出就绪的 macOS artifacts</td>
+            </tr>
+            <tr>
+              <td>2p</td>
+              <td><code>build-windows</code></td>
+              <td>windows-x64 / windows-arm64</td>
+              <td>源码 checkout</td>
+              <td>Windows 二进制（.exe + .zip + .zst）、Azure Trusted Signing 签名、Python runtime wheel</td>
+            </tr>
+            <tr>
+              <td>7</td>
+              <td><code>release</code></td>
+              <td>ubuntu-latest</td>
+              <td>所有平台 artifacts</td>
+              <td>汇聚 artifacts → SHA256SUMS → npm tarballs → GitHub Release。输出 <code>should_publish_npm</code> 和 <code>npm_tag</code></td>
+            </tr>
+            <tr>
+              <td>8</td>
+              <td><code>publish-npm</code></td>
+              <td>ubuntu-latest</td>
+              <td>GitHub Release 中的 npm tarballs</td>
+              <td>OIDC 认证 → 按序发布平台包 + 主包 + SDK 包到 npm registry</td>
+            </tr>
+            <tr>
+              <td>8p</td>
+              <td><code>publish-dotslash</code></td>
+              <td>ubuntu-latest</td>
+              <td>GitHub Release assets</td>
+              <td>为每个平台二进制生成 DotSlash 可执行条目</td>
+            </tr>
+            <tr>
+              <td>8p</td>
+              <td><code>winget</code></td>
+              <td>ubuntu-latest</td>
+              <td>GitHub Release assets</td>
+              <td>自动向 winget-pkgs 提交 PR（仅稳定版本）</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>2. 构建矩阵速查</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>平台</th>
+              <th>Target Triple</th>
+              <th>Runner</th>
+              <th>Bundle 类型</th>
+              <th>签名方式</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>macOS ARM</td><td><code>aarch64-apple-darwin</code></td><td>macos-15-xlarge</td><td>primary / app-server</td><td>AKV PKCS11 + Apple 公证</td></tr>
+            <tr><td>macOS x64</td><td><code>x86_64-apple-darwin</code></td><td>macos-15-xlarge</td><td>primary / app-server</td><td>AKV PKCS11 + Apple 公证</td></tr>
+            <tr><td>Linux x64</td><td><code>x86_64-unknown-linux-musl</code></td><td>自托管 x64-xl</td><td>primary / app-server</td><td>cosign</td></tr>
+            <tr><td>Linux ARM</td><td><code>aarch64-unknown-linux-musl</code></td><td>自托管 arm64</td><td>primary / app-server</td><td>cosign</td></tr>
+            <tr><td>Windows x64</td><td><code>x86_64-pc-windows-msvc</code></td><td>自托管 windows-x64</td><td>primary / helpers / app-server</td><td>Azure Trusted Signing</td></tr>
+            <tr><td>Windows ARM</td><td><code>aarch64-pc-windows-msvc</code></td><td>自托管 windows-arm64</td><td>primary / helpers / app-server</td><td>Azure Trusted Signing</td></tr>
+          </tbody>
+        </table>
+
+        <h2>3. 每个 Target 产出的发布资产</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>资产类型</th>
+              <th>文件名格式</th>
+              <th>适用平台</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>单二进制 (zst)</td><td><code>codex-{target}.zst</code></td><td>Linux / macOS</td></tr>
+            <tr><td>单二进制 (tar.gz)</td><td><code>codex-{target}.tar.gz</code></td><td>Linux / macOS</td></tr>
+            <tr><td>Codex 包归档</td><td><code>codex-package-{target}.tar.gz</code></td><td>全平台</td></tr>
+            <tr><td>Linux bundle</td><td><code>codex-{target}-bundle.tar.zst</code></td><td>Linux primary only</td></tr>
+            <tr><td>macOS DMG</td><td><code>codex-{target}.dmg</code></td><td>macOS primary only</td></tr>
+            <tr><td>Windows zip bundle</td><td><code>codex-{target}.exe.zip</code></td><td>Windows</td></tr>
+            <tr><td>符号归档</td><td><code>{target}-symbols</code></td><td>全平台</td></tr>
+            <tr><td>Python wheel</td><td><code>openai_codex_cli_bin-*.whl</code></td><td>全平台 primary</td></tr>
+            <tr><td>签名文件</td><td><code>codex-{target}.sigstore</code></td><td>Linux only</td></tr>
+            <tr><td>SHA256 清单</td><td><code>codex-package_SHA256SUMS</code></td><td>全平台汇总</td></tr>
+            <tr><td>安装脚本</td><td><code>install.sh</code> / <code>install.ps1</code></td><td>Linux-macOS / Windows</td></tr>
+            <tr><td>npm tarballs</td><td><code>codex-npm-{platform}-{ver}.tgz</code></td><td>npm 发布用</td></tr>
+          </tbody>
+        </table>
+
+        <h2>4. 关键文件索引</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>文件</th>
+              <th>作用</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>.github/workflows/rust-release.yml</code></td><td>主发布流水线定义（tag 触发、构建矩阵、签名、发布）</td></tr>
+            <tr><td><code>.github/workflows/rust-release-windows.yml</code></td><td>Windows 平台构建与签名（reusable workflow）</td></tr>
+            <tr><td><code>.github/workflows/rust-release-prepare.yml</code></td><td>定时更新 models.json 并自动提 PR</td></tr>
+            <tr><td><code>scripts/stage_npm_packages.py</code></td><td>下载 artifacts、解压、生成 npm tarballs 的协调脚本</td></tr>
+            <tr><td><code>scripts/build_codex_package.py</code></td><td>Codex 自有分发格式的构建脚本入口</td></tr>
+            <tr><td><code>codex-cli/package.json</code></td><td>npm 包定义（不含 optionalDependencies 字段，由构建脚本注入）</td></tr>
+            <tr><td><code>codex-cli/scripts/build_npm_package.py</code></td><td>单个 npm 包的 tarball 构建逻辑（被 stage_npm_packages.py 调用）</td></tr>
+            <tr><td><code>.github/dotslash-config.json</code></td><td>DotSlash 多平台可执行文件配置</td></tr>
+          </tbody>
+        </table>
+
+        <h2>5. 常见发布故障排查</h2>
+        <table>
+          <thead>
+            <tr><th>症状</th><th>可能原因</th><th>排查入口</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>tag push 后 CI 未触发</td>
+              <td>tag 名称不匹配 <code>rust-v*.*.*</code></td>
+              <td>检查 <code>rust-release.yml</code> 的 <code>on.push.tags</code></td>
+            </tr>
+            <tr>
+              <td>tag-check 失败 "Tag ≠ Cargo.toml"</td>
+              <td>Cargo.toml version 未同步更新</td>
+              <td><code>grep version codex-rs/Cargo.toml</code> 对比 tag</td>
+            </tr>
+            <tr>
+              <td>macOS build 超时 (90min)</td>
+              <td>rusty_v8 / webrtc 编译耗时过长</td>
+              <td>检查 setup-rusty-v8 action 的缓存命中</td>
+            </tr>
+            <tr>
+              <td>sign-macos-binaries 失败</td>
+              <td>AKV secrets 过期或权限不足</td>
+              <td>检查 <code>codesigning</code> environment secrets</td>
+            </tr>
+            <tr>
+              <td>npm publish HTTP 409</td>
+              <td>版本已存在或并发发布冲突</td>
+              <td>脚本自动跳过 "previously published" 错误</td>
+            </tr>
+            <tr>
+              <td>npm 安装后找不到二进制</td>
+              <td>optionalDependencies 未安装</td>
+              <td><code>npm ls @openai/codex-{platform}</code></td>
+            </tr>
+            <tr>
+              <td>GitHub Release 缺少某平台资产</td>
+              <td>对应 build matrix cell 失败</td>
+              <td>检查 Actions 日志中对应 target + bundle 的 build job</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="meta">
+          关联课程：<a href="../lessons/0001-flow-map.html">0001 发布链路地图</a> | <a href="../lessons/0002-main-path.html">0002 主路径：GitHub Release 与 npm 发布</a>
+        </p>
+      </div>
+    </main>
+  </body>
+</html>

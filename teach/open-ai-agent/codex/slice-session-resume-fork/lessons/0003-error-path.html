@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>异常路径——Resume 失败、Fork 冲突、Archive 回滚</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .code-block {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 0.8rem 1rem;
+      overflow-x: auto;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>异常路径：Resume 失败、Fork 冲突、Archive 回滚</h1>
+    <p class="meta">学习目标：理解三条主要异常路径的触发条件、代码位置和恢复策略，能在日志中识别对应错误。</p>
+    <p class="meta">前置：<a href="0002-main-path.html">主路径详解</a></p>
+  </header>
+
+  <section>
+    <h2>1. Resume 时 Session 不存在</h2>
+    <p>用户执行 <code>codex resume &lt;thread_id&gt;</code> 或 app-server 收到 <code>thread/resume</code> 请求时，可能出现以下失败场景：</p>
+
+    <table>
+      <tr><th>失败场景</th><th>触发条件</th><th>代码位置</th><th>返回错误</th></tr>
+      <tr>
+        <td>Thread 不在内存中且 rollout 文件缺失</td>
+        <td>thread_id 对应 .jsonl 被手动删除或从未创建</td>
+        <td><code>thread_processor.rs::thread_resume_inner()</code></td>
+        <td><code>JSONRPCError: "failed to load thread"</code></td>
+      </tr>
+      <tr>
+        <td>Thread 正在关闭中</td>
+        <td>pending_thread_unloads 集合中包含该 thread_id</td>
+        <td><code>thread_processor.rs:2644-2660</code></td>
+        <td><code>JSONRPCError: "thread is closing; retry after closed"</code></td>
+      </tr>
+      <tr>
+        <td>Rollout JSON 解析失败</td>
+        <td>.jsonl 文件部分损坏或格式不正确</td>
+        <td><code>rollout_reconstruction.rs 主循环</code></td>
+        <td><code>serde_json::Error</code> → 内部错误</td>
+      </tr>
+    </table>
+
+    <div class="code-block">// app-server thread_processor.rs — 冷 resume 的三条路径（摘录）
+let resume_result = if let Some(history) = history {
+    // 路径 A：客户端直接提供了 history array
+    self.resume_thread_from_history(history.as_slice()).await
+} else if let Some(mut stored_thread) = stored_thread_from_running_probe {
+    // 路径 B：thread 已在 store 中有记录
+    self.stored_thread_to_initial_history(&mut stored_thread).await
+} else {
+    // 路径 C：从 rollout 文件加载（最常规的冷 resume）
+    self.resume_thread_from_rollout(&thread_id, path.as_ref()).await
+};
+let (thread_history, resume_source_thread) = match resume_result {
+    Ok(value) => value,
+    Err(error) => {
+        self.outgoing.send_error(request_id, error).await;
+        return Ok(());  // ← 优雅终止，不崩整个 app-server
+    }
+};</div>
+
+    <p><strong>恢复策略</strong>：路径 C 失败时不会降级尝试其他路径，而是直接返回错误给客户端。客户端可以重新发送请求（因为错误不改变磁盘状态）。如果 rollout 文件确实损坏且无备份，该 session 无法恢复——但 SQLite 中的 ThreadMetadata 可能仍然存在，list 接口还能看到这个 thread。</p>
+  </section>
+
+  <section>
+    <h2>2. Fork 冲突</h2>
+    <p>Fork 操作从源 thread 的历史中截断创建新 thread。可能出现的冲突场景：</p>
+
+    <table>
+      <tr><th>冲突场景</th><th>触发条件</th><th>处理方式</th></tr>
+      <tr>
+        <td>源 thread 未提供 history</td>
+        <td><code>source_thread.history</code> 为 None</td>
+        <td>返回 <code>internal_error("did not include persisted history")</code></td>
+      </tr>
+      <tr>
+        <td>last_turn_id 指定的 turn 不存在</td>
+        <td><code>truncate_rollout_after_turn_id()</code> 找不到匹配</td>
+        <td>返回 <code>core_thread_write_error</code></td>
+      </tr>
+      <tr>
+        <td>源 thread 已被 archive</td>
+        <td>源 thread 的 <code>archived_at</code> 不为 NULL</td>
+        <td>fork 仍然成功（从 archived 源 fork 是允许的）</td>
+      </tr>
+    </table>
+
+    <div class="code-block">// app-server thread_processor.rs — fork 核心逻辑（摘录）
+let history_items = if let Some(last_turn_id) = last_turn_id.as_deref() {
+    Arc::new(
+        truncate_rollout_after_turn_id(&history_items, last_turn_id)
+            .map_err(|err| core_thread_write_error("truncate thread for fork", err))?
+    )
+} else {
+    Arc::new(history_items) // ← 不截断，fork 完整历史
+};
+
+// 持久化 fork 写独立 rollout；临时 fork 仅内存持有
+let mut thread = if session_configured.rollout_path.is_some() {
+    let stored_thread = self
+        .read_stored_thread_for_new_fork(thread_id, include_turns).await?;
+    self.stored_thread_to_api_thread(stored_thread, ...)
+} else {
+    // ephemeral fork：不写文件，从源 history 构建 UI 展示
+    let mut thread = build_thread_from_snapshot(...);
+    thread.forked_from_id = Some(source_thread_id.to_string()); // ← 记录来源
+    thread
+};</div>
+
+    <p><strong>关键设计</strong>：ephemeral fork 不写 rollout 文件。它的 ThreadId 仅存在于 app-server 内存中，重启后消失。如果 fork 创建失败（如 ThreadManager 内部错误），整个操作回滚——不会留下半残的新 thread。</p>
+  </section>
+
+  <section>
+    <h2>3. Archive 失败与子树回滚</h2>
+    <p>Archive 操作不仅归档目标 thread，还会归档其通过 fork 产生的所有后代（spawned descendants）。这是一个<strong>多步骤操作</strong>，可能出现部分成功：</p>
+
+    <div class="code-block">// app-server thread_processor.rs — archive 子树处理（摘录）
+async fn thread_archive_response(&self, params) -> Result {
+    let thread_ids = self.state_db_spawn_subtree_thread_ids(thread_id).await?;
+    // thread_ids: [parent, descendant_1, descendant_2, ...]
+
+    // Step 1：收集所有未归档的 thread
+    for each thread in [parent, ...descendants] {
+        if thread.archived_at.is_none() {
+            archive_thread_ids.push(thread_id);
+        }
+    }
+
+    // Step 2：逐条归档。父 thread 失败 → 整体返回错误
+    self.thread_store.archive_thread(parent).await?;
+
+    // Step 3：后代归档。单个失败只 warn，不阻断整体
+    for descendant in descendants.rev() {
+        match self.thread_store.archive_thread(descendant).await {
+            Ok(()) => archived_thread_ids.push(...),
+            Err(err) => warn!("failed to archive descendant: {err}"), // ← 仅警告
+        }
+    }
+}</div>
+
+    <p><strong>失败语义</strong>：</p>
+    <ul>
+      <li><strong>父 thread 归档失败</strong> → 整体操作返回错误，后代不归档，RPC 返回 error response。</li>
+      <li><strong>后代归档失败</strong> → 父 thread 已归档（不回滚），失败的后代保持未归档状态。app-server 仅打印 warn 日志。这是有意设计：archive 的原子性边界是单个 thread，而非整个子树。</li>
+    </ul>
+
+    <p>归档的具体行为在 ThreadStore 实现中：将 rollout 文件从 <code>sessions/</code> 移动到 <code>archived_sessions/</code>，并在 SQLite 中设置 <code>archived_at</code> 时间戳。unarchive 是反向操作——移回 sessions/ 并清除 archived_at。</p>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>判断以下说法是否正确：</p>
+      <ol>
+        <li>冷 resume 失败时，app-server 会崩溃重启。</li>
+        <li>Fork 一个已 archive 的 thread 会失败。</li>
+        <li>Archive 父 thread 成功后，如果某个后代归档失败，整个操作会回滚。</li>
+        <li>Ephemeral fork 的 ThreadId 在 app-server 重启后不再有效。</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. 错误——app-server 仅返回 error response 给客户端，不会崩溃。2. 错误——从 archived 源 fork 是允许的，fork 操作不检查 archived_at。3. 错误——父 thread 已归档的不回滚，后代失败仅 warn 日志。4. 正确——ephemeral fork 不写 rollout 文件，只存在于 app-server 内存中。</p>
+    </div>
+    <p>如有疑问，追问 agent 让它带你查看具体错误处理的代码。也可以对照 <a href="../reference/session-resume-fork-flow-map.html">快速参考图谱</a> 回顾完整的状态变迁表。</p>
+  </section>
+</main>
+</body>
+</html>

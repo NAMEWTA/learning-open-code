@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>主路径：bash 工具从 handler 到 exec-server 执行详解</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>主路径：bash 工具从 handler 到 exec-server 执行详解</h1>
+    <p class="meta">学习目标：逐层追踪一次 bash 命令从 ShellCommandHandler 到 exec-server JSON-RPC 调用并拿到 ExecToolCallOutput 的完整过程。</p>
+    <p class="meta">前置：<a href="0001-flow-map.html">链路地图与时序图</a></p>
+  </header>
+
+  <section>
+    <h2>1. 入参：ToolInvocation 携带了什么</h2>
+    <p>当 <code>dispatch_any_with_terminal_outcome</code> 调用 <code>handle_any_tool</code> 时，传入的 <code>ToolInvocation</code> 已经包含了工具执行所需的所有上下文：</p>
+
+    <div class="filetree">ToolInvocation {
+    session: Arc&lt;Session&gt;,           ← 会话级服务（extensions、state_db、hooks）
+    turn: Arc&lt;TurnContext&gt;,          ← 当前 turn 的配置、权限、cwd、网络状态
+    step_context: Arc&lt;StepContext&gt;,  ← 步骤上下文（模型信息、token 预算）
+    cancellation_token: CancellationToken,  ← 取消信号
+    tracker: SharedTurnDiffTracker,  ← 文件变更追踪器
+    call_id: String,                 ← 模型分配的调用 ID
+    tool_name: ToolName,             ← "shell_command" 或 "bash"
+    source: ToolCallSource,          ← Direct 或 CodeMode
+    payload: ToolPayload,            ← Function { arguments: "{...}" }
+}</div>
+
+    <p><code>ToolPayload::Function { arguments }</code> 中的 JSON 字符串会被反序列化为 <code>ShellCommandToolCallParams</code>，其中 <code>command</code> 字段就是模型要执行的 shell 命令文本。</p>
+  </section>
+
+  <section>
+    <h2>2. ShellCommandHandler：解析参数并委托 run_exec_like</h2>
+    <p><code>ShellCommandHandler</code> 的 <code>handle()</code> 方法做的事很直接：解析参数、准备执行上下文、调用 <code>run_exec_like</code>。关键代码路径如下：</p>
+
+    <pre><code>// codex-rs/core/src/tools/handlers/shell.rs（简化）
+async fn run_exec_like(args: RunExecLikeArgs)
+    -&gt; Result&lt;FunctionToolOutput, FunctionCallError&gt;
+{
+    // 1. 获取文件系统和进程执行器
+    let fs = turn_environment.environment.get_filesystem();
+    let process = turn_environment.environment.get_process();
+
+    // 2. 构造 ExecParams（命令文本、cwd、环境变量、超时等）
+    let exec_params = ExecParams { ... };
+
+    // 3. 构造 ShellRuntime 并委托给 ToolOrchestrator
+    let mut runtime = ShellRuntime::new(shell_runtime_backend, ...);
+    let result = orchestrator.run(&amp;mut runtime, &amp;req, &amp;tool_ctx, ...).await?;
+
+    // 4. 格式化输出为模型可读文本
+    let output_text = format_exec_output_for_model(
+        &amp;result.output.exec_output, truncation_policy);
+    Ok(FunctionToolOutput::from_text(output_text, Some(ok)))
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>3. ToolOrchestrator::run：审批与沙箱选择</h2>
+    <p>这是安全策略的集中决策点，分为两个阶段：</p>
+
+    <p><strong>阶段 A — 审批决策：</strong><code>exec_approval_requirement()</code> 根据工具的审批策略、文件系统沙箱策略和用户配置，返回三种结果之一：</p>
+
+    <table>
+      <tr><th>结果</th><th>含义</th><th>后续行为</th></tr>
+      <tr><td><code>Skip</code></td><td>无需审批，直接执行</td><td>跳过用户交互，但 strict_auto_review 下仍走 guardian</td></tr>
+      <tr><td><code>NeedsApproval</code></td><td>需要用户确认</td><td>弹出审批对话框或走 guardian 自动审核</td></tr>
+      <tr><td><code>Forbidden</code></td><td>策略禁止执行</td><td>立即返回 ToolError::Rejected</td></tr>
+    </table>
+
+    <p><strong>阶段 B — 沙箱选择：</strong><code>sandbox_override_for_first_attempt()</code> + <code>select_initial()</code> 决定首次尝试用哪种沙箱（None / LocalSeccomp / BubbleWrap / WorkspaceWrite），然后构造 <code>SandboxAttempt</code> 传给 <code>run_attempt()</code>。</p>
+  </section>
+
+  <section>
+    <h2>4. run_attempt → exec-server：JSON-RPC 远程执行</h2>
+    <p><code>run_attempt()</code> 调用 <code>tool.run(req, attempt, tool_ctx)</code>，对于 shell 工具即 <code>ShellRuntime::run()</code>。底层通过 <code>exec-server</code> 的 JSON-RPC 协议与沙箱进程通信：</p>
+
+    <div class="diagram">ShellRuntime::run()
+  → process.exec(ExecOptions { command, cwd, env, timeout })
+  → ExecServerClient::exec(ExecParams)
+  → JSON-RPC request: { "method": "exec", "params": { "command": "...", ... } }
+  → 沙箱进程 fork + exec
+  → 流式通知: ExecOutputDelta { stdout/stderr chunks }
+  → 终止通知: ExecExited { exit_code }
+  → ExecToolCallOutput { exit_code, aggregated_output, duration }</div>
+
+    <p>exec-server 通过 <code>ExecOutputDelta</code> 通知流式传输 stdout/stderr，最终通过 <code>ExecExited</code> 通知返回 exit code。这些事件被聚合到 <code>ExecToolCallOutput</code> 结构体中。</p>
+
+    <p>返回后，<code>format_exec_output_for_model()</code> 将原始输出格式化为模型易读的文本：<code>Exit code: 0\nWall time: 1.2 seconds\nOutput:\n...</code>。超过 token 预算的输出会被截断。</p>
+
+    <p>主要阅读来源：<span class="where">codex-rs/core/src/tools/handlers/shell.rs</span>、<span class="where">codex-rs/core/src/tools/orchestrator.rs</span>、<span class="where">codex-rs/exec-server/src/client.rs</span>。继续阅读 <a href="0003-error-path.html">异常路径</a> 了解权限拒绝、超时和命令失败的处理。</p>
+
+    <div class="exercise">
+      <p><strong>暂停回忆：</strong>不看上文，回答三个问题：</p>
+      <ol>
+        <li>ToolInvocation 的 payload 字段是什么类型？模型的 shell 命令文本存在哪里？</li>
+        <li>ToolOrchestrator::run() 的两个阶段分别做什么决策？</li>
+        <li>exec-server 通过哪两个 JSON-RPC 通知类型流式传输命令输出和终止信号？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. payload 是 ToolPayload 枚举的 Function 变体，包含 arguments 字段（JSON 字符串），反序列化为 ShellCommandToolCallParams，其中 command 字段存 shell 命令文本。2. 阶段 A 做审批决策（Skip/NeedsApproval/Forbidden），阶段 B 做沙箱选择（None/LocalSeccomp/BubbleWrap/WorkspaceWrite）。3. ExecOutputDelta 流式传输 stdout/stderr chunks，ExecExited 通知返回 exit code。</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工具定义与执行抽象：15 分钟模块导览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>工具定义与执行抽象：15 分钟模块导览</h1>
+    <p class="meta">学习目标：能从一次模型工具调用追到 Codex 的 handler 与 runtime，并说清每一层负责什么。</p>
+    <p class="meta">架构位置：先看 L0 <a href="../../00-overview/lessons/0001-project-map.html">项目地图</a>；完整清单见 <a href="../reference/tools-execution-overview.html">工具执行参考</a>。</p>
+  </header>
+
+  <section>
+    <h2>1. 模块职责</h2>
+    <p>这个模块不是“某一个工具”，而是一组把模型能力接到宿主环境的抽象。`codex-tools` 定义模型可见的工具规格、schema、输出协议和 `ToolExecutor` trait；`codex-core/src/tools` 把这些规格注册进会话，接收 Responses API 返回的 tool call，再交给本地 handler 或外部扩展执行。</p>
+    <p>最关键的边界是：共享 crate 不知道 session、审批、沙箱；core 知道这些上下文，并在执行前后加上 hook、telemetry、生命周期事件、权限检查和输出转换。</p>
+    <div class="filetree">codex-rs/
+├── tools/                      ← 共享工具协议 crate
+│   ├── src/tool_spec.rs        ← Responses API 工具形态
+│   ├── src/tool_executor.rs    ← handler 共同契约
+│   └── src/tool_definition.rs  ← 动态/插件工具元数据
+└── core/src/tools/             ← 会话内注册、路由、执行
+    ├── spec_plan.rs            ← 决定本轮有哪些工具
+    ├── router.rs               ← 模型输出转 ToolCall
+    ├── registry.rs             ← 执行包裹层
+    ├── handlers/               ← 工具入口
+    └── runtimes/               ← shell / patch 等执行后端</div>
+  </section>
+
+  <section>
+    <h2>2. 对外接口看三件事</h2>
+    <p>读一个工具时先找三件事：`tool_name()` 决定调用名，`spec()` 决定模型看到的参数，`handle()` 决定真实执行。它们被统一收进 `ToolExecutor&lt;ToolInvocation&gt;`。</p>
+    <pre><code>pub trait ToolExecutor&lt;Invocation&gt; {
+    fn tool_name(&self) -&gt; ToolName;
+    fn spec(&self) -&gt; ToolSpec;
+    fn exposure(&self) -&gt; ToolExposure { ToolExposure::Direct }
+    fn handle(&self, invocation: Invocation) -&gt; ToolExecutorFuture&lt;'_&gt;;
+}</code></pre>
+    <p>`ToolExposure` 决定工具是否直接暴露、延迟搜索、只对模型暴露或仅注册分发。`spec_plan.rs` 再按 feature、模型能力、环境数量合成最终 `model_visible_specs`。</p>
+  </section>
+
+  <section>
+    <h2>3. 最小执行序列</h2>
+    <p>以 `shell_command` 为例，模型调用不会直接跑进程，而是经过一条稳定管线：</p>
+    <div class="diagram">ResponseItem::FunctionCall
+  → ToolRouter::build_tool_call
+  → ToolInvocation
+  → ToolRegistry::dispatch_any_with_terminal_outcome
+  → PreToolUse hook
+  → ShellCommandHandler::handle_call
+  → run_exec_like
+  → ToolOrchestrator + ShellRuntime
+  → sandbox / approval / execute_env
+  → FunctionToolOutput
+  → PostToolUse hook
+  → ResponseInputItem::FunctionCallOutput</div>
+    <p>`apply_patch` 走同一 registry 包裹层，但 payload 是 custom/freeform，handler 会先解析和验证 patch，再用 `ApplyPatchRuntime` 对选中的环境文件系统执行。shell 命令里出现 apply_patch 时，`run_exec_like` 还会先尝试拦截成内部 patch 流程。</p>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>哪个文件决定本轮会有哪些工具进入 registry？</li>
+        <li>`ToolExecutor` 的哪两个方法分别对应“模型可见形态”和“真实执行”？</li>
+        <li>shell 工具执行前，为什么还要经过 registry 而不是直接调用 runtime？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. `core/src/tools/spec_plan.rs`。2. `spec()` 对应模型可见形态，`handle()` 对应真实执行。3. registry 负责统一处理工具查找、payload 类型校验、Pre/Post hook、telemetry、生命周期事件、取消语义和输出转换；runtime 只处理具体执行。</p>
+    </div>
+    <p>主要阅读来源：`codex-rs/tools/src/tool_executor.rs` 和 `codex-rs/core/src/tools/registry.rs`。如果后续追问，可以让 agent 带你从某一个具体工具的 `spec()` 开始单步读到 runtime。</p>
+  </section>
+</main>
+</body>
+</html>

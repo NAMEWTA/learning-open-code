@@ -27,6 +27,7 @@ Manage git submodules in this learning-open-code mono-repo. Every submodule live
 | 知识管理与编辑器 | `open-knowledge/` | Note apps, knowledge bases, markdown/rich-text editors |
 | 效率工具 | `open-productivity/` | Productivity tools (todo, time tracking) |
 | Java 企业开发 | `open-java/` | Java enterprise backend projects |
+| 量化交易与金融数据 | `open-trading/` | Quantitative trading, backtesting, stock data tools |
 
 ## Workflows
 

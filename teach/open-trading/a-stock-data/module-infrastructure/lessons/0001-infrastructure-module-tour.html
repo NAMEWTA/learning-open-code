@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据源优先级 — a-stock-data 基础设施（上）</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: #1a1a1a; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  .diagram {
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.75rem; line-height: 1.5;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px;
+    padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  .filetree {
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.75;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px;
+    padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .danger { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .danger strong { color: #991b1b; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.88rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: #f5f7fa; font-weight: 600; }
+  .green { color: #065f46; font-weight: 600; }
+  .red { color: #991b1b; font-weight: 600; }
+  .yellow { color: #92400e; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85rem; font-family: "SF Mono", Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<h1>数据源优先级 — 基础设施（上）</h1>
+<p class="meta">
+  <span class="badge">L1 基础设施</span>
+  <span class="badge">第 1 节 / 共 2 节</span>
+  估计时长：14 分钟
+</p>
+
+<h2>1. 一个问题：所有数据走东财不行吗？</h2>
+
+<p>
+  初看 a-stock-data 的 40 个端点，东财占了约 14 个——龙虎榜、解禁、两融、资金流、研报、新闻，看起来覆盖面最广。直觉反应是"统一用东财，代码最简单"。但这个直觉在实战中会直接导致 IP 被封。
+</p>
+
+<p>
+  a-stock-data 的设计者因此制定了<strong>数据源优先级体系</strong>——这是整个项目最先读取的章节（SKILL.md:104-150），也是所有 10 层数据层选源时必须遵守的规则。它的核心思想只有一句话：<strong>能用不封 IP 的数据源，就别用东财。</strong>
+</p>
+
+<div class="principle">
+  <strong>设计哲学落地：</strong>"数据源优先级分明"是 L0 总览中 5 大设计哲学的第 2 条。本节将其展开为可执行的选源决策表。
+</div>
+
+<h2>2. 13 个数据源的封 IP 风险分级</h2>
+
+<p>
+  a-stock-data 将 13 个数据源分为 4 个优先级层级，分级依据是「封 IP 风险」而非数据覆盖率：
+</p>
+
+<table>
+  <tr><th>优先级</th><th>数据源</th><th>协议</th><th>封 IP</th><th>覆盖数据</th></tr>
+  <tr>
+    <td class="green">1（首选）</td>
+    <td><strong>mootdx（通达信）</strong></td>
+    <td>TCP 7709</td>
+    <td class="green">不封</td>
+    <td>K线、五档盘口、逐笔成交、财务快照、F10</td>
+  </tr>
+  <tr>
+    <td class="green">2（首选）</td>
+    <td><strong>腾讯财经</strong></td>
+    <td>HTTP</td>
+    <td class="green">不封</td>
+    <td>实时价、PE/PB/市值/换手率、指数/ETF</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>新浪 / 巨潮 / 同花顺</td>
+    <td>HTTP</td>
+    <td>低</td>
+    <td>财报三表、公告全文、互动易、一致预期</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td>百度股市通 / iwencai</td>
+    <td>HTTP</td>
+    <td>极低</td>
+    <td>K线(MA均线)、NL语义搜索</td>
+  </tr>
+  <tr>
+    <td class="red">4（仅独有）</td>
+    <td><strong>东财 eastmoney</strong></td>
+    <td>HTTP</td>
+    <td class="red">会封 IP</td>
+    <td>龙虎榜、解禁、两融、大宗、资金流、研报等</td>
+  </tr>
+</table>
+
+<p>
+  关键洞察：<strong>TCP 协议不封 IP</strong>。通达信走的是二进制 TCP 7709 端口，不存在 HTTP 层反爬机制。腾讯财经虽是 HTTP，但实测高频调用也不会触发封禁——它面向的是普通股民页面访问，天然高并发。这两个数据源覆盖了行情、盘口、估值、指数等最常用场景，应当作为所有代码的首选通道。
+</p>
+
+<div class="danger">
+  <strong>常见错误：</strong>用东财 pull2 接口拉实时行情。每只股票一次请求，100 只就是 100 次/分钟——超过风控阈值，5 分钟内必封。
+</div>
+
+<h2>3. 东财独有数据 —— 不得不走东财的场景</h2>
+
+<p>
+  以下 6 类数据<strong>只有东财提供</strong>，通达信/腾讯/新浪都没有。此时必须走东财，但只要遵守防封铁律，仍然安全：
+</p>
+
+<table>
+  <tr><th>数据类别</th><th>端点示例</th><th>所属层级</th></tr>
+  <tr><td>龙虎榜</td><td>个股席位 + 全市场日榜</td><td>信号层 L3</td></tr>
+  <tr><td>资金流向</td><td>分钟级主力/散户/超大单</td><td>信号层 L3</td></tr>
+  <tr><td>融资融券 + 大宗交易</td><td>两融余额、大宗成交明细</td><td>资金/筹码层 L4</td></tr>
+  <tr><td>股东户数 + 分红送转</td><td>筹码集中度、历史分红</td><td>资金/筹码层 L4</td></tr>
+  <tr><td>限售解禁日历</td><td>历史 + 未来待解禁</td><td>信号层 L3</td></tr>
+  <tr><td>研报 + 个股新闻</td><td>reportapi / search</td><td>研报层 L2 + 新闻层 L5</td></tr>
+</table>
+
+<p>
+  <strong>风控阈值实测数据（社区 2026-05）：</strong>
+  每秒 &gt;5 次请求 / 单 IP 并发 &ge;10 / 1 分钟 &ge;200 次 / 5 分钟 &ge;300 次触发封禁。被封表现：连续 <code>403</code> / <code>429</code> / 连接超时。
+</p>
+
+<div class="principle">
+  <strong>防封铁律：</strong>① 串行不并发 ② 每次间隔 &ge;1s + 随机抖动（QPS &le;2）③ 复用 HTTP 会话（Keep-Alive）④ 正常 UA + Referer ⑤ 批量场景每只股票之间 sleep。
+</div>
+
+<h2>4. 基础设施 —— 所有 10 层数据层的底座</h2>
+
+<p>
+  em_get()、tdx_client()、get_prefix() 这三个核心函数构成了 a-stock-data 的基础设施层。它们不直接提供数据，但<strong>被所有 10 个数据层调用</strong>——没有它们，每一层都要自己处理限流、连接容错、代码格式校验。
+</p>
+
+<div class="diagram">SKILL.md 模块依赖全景
+│
+├── 基础设施层（本文主题）
+│   ├── em_get()              ← 东财统一入口（被 L2-L10 调用）
+│   ├── tdx_client()          ← mootdx 连接（被 L1、L6 调用）
+│   ├── get_prefix()          ← 代码前缀映射（被所有层调用）
+│   └── eastmoney_datacenter()← 数据中心查询（被 L3、L4 调用）
+│
+├── L1 行情层 ───────────── 依赖 tdx_client + get_prefix
+├── L2 研报层 ───────────── 依赖 em_get
+├── L3 信号层 ───────────── 依赖 em_get + eastmoney_datacenter + get_prefix
+├── L4 资金/筹码层 ──────── 依赖 em_get + eastmoney_datacenter
+├── L5 新闻层 ───────────── 依赖 em_get
+├── L6 基础数据层 ───────── 依赖 tdx_client + em_get + get_prefix
+├── L7 公告层 ───────────── 依赖 get_prefix（巨潮）
+├── L8 打板层 ───────────── 依赖 em_get
+├── L9 ETF期权层 ────────── 依赖 get_prefix
+└── L10 舆情互动层 ──────── 依赖 em_get + get_prefix</div>
+
+<p>
+  <strong>下节预告：</strong>第 2 节将深入 em_get() 的限流代码、tdx_client() 的三级 fallback 机制，以及 get_prefix() 的归一化规则。这些是基础设施层"怎么做"的核心代码。
+</p>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p>不看屏幕，尝试回答（每题 30 秒）：</p>
+  <ol>
+    <li>为什么 mootdx 和腾讯财经被封 IP 的风险最低？技术原因是什么？</li>
+    <li>列出 3 个<strong>只有</strong>东财才提供的数据类别。</li>
+    <li>如果你需要批量获取 100 只股票的 PE/PB 数据，应该选哪个数据源？为什么？</li>
+    <li>东财的风控阈值中，5 分钟内超过多少次请求会触发封禁？</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('answers').classList.toggle('show')">显示参考答案</button>
+  <div class="answer" id="answers">
+    <strong>参考答案：</strong><br>
+    1. mootdx 走 TCP 7709 二进制协议，不存在 HTTP 层反爬机制；腾讯财经面向股民页面访问，天然高并发不封 IP。<br>
+    2. 龙虎榜（席位+全市场日榜）、资金流向（分钟级主力/散户）、融资融券+大宗交易（两融余额+大宗明细）——均由东财 datacenter 独家提供。<br>
+    3. 用腾讯财经（tencent_quote），一次请求即可拿到 PE/PB/市值/换手率。走东财不仅慢（限流 1s/次），还会无谓累积风控计数。<br>
+    4. &ge;300 次 / 5 分钟。
+  </div>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>对优先级体系有疑问？追问 AI 老师："为什么分批请求 100 只股票的 PE/PB 会被封？""东财 datacenter 和 push2 两个子系统的风控阈值有区别吗？"
+</div>
+
+<div class="ref-links">
+  <strong>关联资料：</strong>
+  <a href="../reference/infrastructure-overview.html">基础设施速查表</a> ·
+  <a href="0002-infrastructure-module-tour.html">下一节：核心函数实战</a> ·
+  <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a> ·
+  <a href="../RESOURCES.md">学习资源</a>
+</div>
+
+</body>
+</html>

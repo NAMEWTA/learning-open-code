@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — Agent 系统模块总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L1 模块总览 · 第 1 节 · 预计 15 分钟</p>
+
+<h1>0001 — Agent 系统模块总览</h1>
+
+<p class="objective"><strong>学习目标：</strong>能够画出 agents 模块的 5 层内部架构图，说出每层的 Agent 角色名称及其工厂函数签名，并理解 Agent 之间通过 AgentState 字典传递信息的协作方式。</p>
+
+<h2>1. 模块职责与架构位置</h2>
+
+<p><code>tradingagents/agents/</code> 是整个框架的<strong>核心决策引擎</strong>。在 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目全景图</a> 中，它位于数据层之上、工作流引擎之下的中间层——负责接收数据、生成研报、组织辩论、输出决策。</p>
+
+<p>模块职责一句话：<strong>将 17 个 AI Agent 角色组织成 5 层流水线，通过共享状态字典协作，完成从 7 维度研报生成到 Buy/Hold/Sell 决策的全流程。</strong></p>
+
+<div class="decision-box">
+  <strong>关键依赖</strong>
+  上游：<code>dataflows</code>（数据获取）、<code>llm_clients</code>（LLM 调用）。下游：<code>graph</code>（LangGraph 编排）。自身不直接发起 HTTP 请求或调用 LLM SDK——工具的绑定和 LLM 实例的注入均由外部完成。
+</div>
+
+<h2>2. 五层内部架构</h2>
+
+<p>agents 模块按职责分为 5 个子包 + 1 个工具层：</p>
+
+<div class="filetree">
+tradingagents/agents/
+├── analysts/          ← 第 1 层：研报生成（7 个 Analyst）
+│   ├── market_analyst.py         市场分析师（技术面）
+│   ├── social_media_analyst.py   舆情分析师（社交媒体）
+│   ├── news_analyst.py           新闻分析师（宏观/行业）
+│   ├── fundamentals_analyst.py   基本面分析师（财报/估值）
+│   ├── policy_analyst.py         政策分析师（A股特化）
+│   ├── hot_money_tracker.py      游资追踪师（A股特化）
+│   └── lockup_watcher.py         解禁监控师（A股特化）
+├── researchers/       ← 第 2 层：多空辩论（2 个 Researcher）
+│   ├── bull_researcher.py        多头研究员
+│   └── bear_researcher.py        空头研究员
+├── managers/          ← 第 3 层：决策综合（2 个 Manager）
+│   ├── research_manager.py       研究经理（辩论裁决 + 投资计划）
+│   └── portfolio_manager.py      投资组合经理（最终交易决策）
+├── risk_mgmt/         ← 第 4 层：风险辩论（3 个 Debator）
+│   ├── aggressive_debator.py     激进风控
+│   ├── conservative_debator.py   保守风控
+│   └── neutral_debator.py        中立风控
+├── trader/            ← 第 5 层：交易执行（1 个 Trader）
+│   └── trader.py                 交易员（A 股约束 + 价位/仓位）
+└── utils/             ← 共享设施
+    ├── agent_states.py           AgentState / 子状态定义
+    └── agent_utils.py            工具函数导入 + 语言指令
+</div>
+
+<p><strong>执行顺序：</strong>第 1 层 7 个 Analyst 并行生成研报 -> 第 2 层 Bull/Bear 辩论 -> 第 3 层 Research Manager 裁决 -> 第 5 层 Trader 生成交易方案 -> 第 4 层三方风险辩论 -> 第 3 层 Portfolio Manager 最终决策。</p>
+
+<h2>3. 统一工厂模式</h2>
+
+<p>所有 17 个 Agent 节点遵循统一的工厂函数签名：<code>create_xxx(llm) -> node_function</code>。即<strong>外部注入 LLM 实例，返回一个签名为 <code>(state) -> dict</code> 的 LangGraph 节点函数</strong>。</p>
+
+<p>以市场分析师为例（源码 <code>market_analyst.py</code>）：</p>
+
+<pre><code>def create_market_analyst(llm):
+    def market_analyst_node(state):
+        current_date = state["trade_date"]
+        tools = [get_stock_data, get_indicators]
+        # ... 构建 prompt、绑定工具、调用 LLM ...
+        return {
+            "messages": [result],
+            "market_report": report,
+        }
+    return market_analyst_node</code></pre>
+
+<p>这个模式的核心优势：</p>
+<ul>
+  <li><strong>依赖注入</strong>：LLM 实例由 graph 层创建并传入，Agent 不关心供应商细节</li>
+  <li><strong>状态隔离</strong>：每个 Agent 只读写自己负责的 state 字段，互不干扰</li>
+  <li><strong>可测试性</strong>：替换 llm 参数即可用 mock 进行单元测试</li>
+</ul>
+
+<p>3 个决策型 Agent（Research Manager、Trader、Portfolio Manager）在此基础上叠加了<strong>结构化输出</strong>——通过 <code>schemas.py</code>（详见 <a href="../reference/agents-overview.html">参考文档</a>）定义的 Pydantic BaseModel 约束 LLM 输出格式。</p>
+
+<h2>4. 状态传递与调用示例</h2>
+
+<p>Agent 之间的全部信息传递通过一个共享的 <code>AgentState</code> 字典完成（定义在 <code>agent_states.py</code>）。简化后的核心字段如下：</p>
+
+<pre><code>class AgentState(MessagesState):
+    company_of_interest: str    # 股票代码
+    trade_date: str             # 交易日期
+    market_report: str          # 市场分析师报告
+    sentiment_report: str       # 舆情报告
+    # ... 其余 5 个报告字段 ...
+    investment_debate_state: InvestDebateState  # 多空辩论状态
+    investment_plan: str        # Research Manager 的投资计划
+    trader_investment_plan: str # Trader 的交易方案
+    risk_debate_state: RiskDebateState          # 风险辩论状态
+    final_trade_decision: str   # Portfolio Manager 最终决策</code></pre>
+
+<p>如果你在 Python 中调用（使用 L0 中介绍的 <code>TradingAgentsGraph</code>）：</p>
+
+<pre><code>from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+graph = TradingAgentsGraph()
+result = graph.run(
+    ticker="600519",       # 贵州茅台
+    date="2026-07-08",
+)
+# result 包含完整的 AgentState，可提取：
+print(result["final_trade_decision"])  # Buy/Hold/Sell
+print(result["market_report"])         # 技术分析报告</code></pre>
+
+<p>要点：<strong>你不需要直接实例化任何 Agent 工厂函数</strong>——TradingAgentsGraph 在内部完成所有 create_xxx 调用、LLM 注入和节点注册。理解工厂模式的意义在于：当你需要自定义 Agent 时，只需实现一个同名签名的 create 函数并注册到图中。</p>
+
+<!-- ──────────────────────────────────────────── -->
+<div class="quiz">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong>agents 模块的 5 层架构分别是哪 5 层？每层包含哪些 Agent 角色？试试不翻看上面内容，凭记忆列出。</p>
+<p><strong>问题 2：</strong>为什么所有 Agent 都使用 <code>create_xxx(llm) -> node_function</code> 的工厂模式，而不是直接在模块中实例化 LLM？这带来了哪 3 个好处？</p>
+<p><strong>问题 3：</strong>7 个 Analyst 中有 3 个是 A 股特化的，它们分别是什么？和原版 4 个 Analyst 相比，它们分别填补了 A 股市场的哪些信息盲区？</p>
+
+<div class="answer" style="margin-top:16px;">
+<strong>参考答案</strong><br>
+<strong>1：</strong>analysts（7 个：市场/舆情/新闻/基本面/政策/游资/解禁）、researchers（2 个：Bull/Bear）、risk_mgmt（3 个：激进/保守/中立）、managers（2 个：Research Manager/Portfolio Manager）、trader（1 个）。<br>
+<strong>2：</strong>依赖注入（不关心 LLM 供应商）、状态隔离（只读写自己的 state 字段）、可测试性（替换 llm 参数即可 mock）。<br>
+<strong>3：</strong>政策分析师（产业政策/监管风向）、游资追踪师（龙虎榜/北向资金/概念板块）、解禁监控师（限售解禁/股东减持）。填补了 A 股政策市、游资驱动、解禁冲击三大特有信息盲区。
+</div>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>关联课程：</strong><a href="../../00-overview/lessons/0001-project-map.html">0001 — 项目全景图（L0）</a><br>
+  <strong>参考文档：</strong><a href="../reference/agents-overview.html">Agent 角色与状态字段速查</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的 Agent 角色、状态字段或调用流程。
+</p>
+
+</div>
+</main>
+</body>
+</html>

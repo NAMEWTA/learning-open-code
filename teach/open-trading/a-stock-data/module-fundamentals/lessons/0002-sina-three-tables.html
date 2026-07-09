@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>基础数据层（下）— 新浪财报三表 + 跨源数据拼装</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: #1a1a1a; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  .diagram {
+    font-family: "SF Mono", Consolas, monospace; font-size: 0.75rem; line-height: 1.5;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px;
+    padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 1rem 0;
+  }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .danger { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .danger strong { color: #991b1b; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.88rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: #f5f7fa; font-weight: 600; }
+  .green { color: #065f46; font-weight: 600; }
+  .red { color: #991b1b; font-weight: 600; }
+  .yellow { color: #92400e; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85rem; font-family: "SF Mono", Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<h1>基础数据层（下）— 新浪财报三表 + 跨源数据拼装</h1>
+<p class="meta">
+  <span class="badge">L1 基础数据层</span>
+  <span class="badge">第 2 节 / 共 2 节</span>
+  估计时长：14 分钟
+</p>
+
+<h2>1. 新浪财报三表 — 补齐 mootdx 快照的历史维度</h2>
+
+<p>
+  上节课的 mootdx <code>finance()</code> 只返回单期快照，无法做同比环比分析。新浪财报 API 填补了这个空白——<code>sina_financial_report(code, report_type, num=8)</code> 一次拉取最近 N 期完整财务报表，每条记录含几十个会计科目及其同比数据。
+</p>
+
+<table>
+  <tr><th>report_type</th><th>报表名称</th><th>核心科目示例</th></tr>
+  <tr><td><code>"fzb"</code></td><td>资产负债表</td><td>总资产、总负债、股东权益、流动资产、固定资产</td></tr>
+  <tr><td><code>"lrb"</code></td><td>利润表</td><td>营业收入、营业成本、净利润、扣非净利润</td></tr>
+  <tr><td><code>"llb"</code></td><td>现金流量表</td><td>经营活动现金流、投资活动现金流、筹资活动现金流</td></tr>
+</table>
+
+<p>
+  代码前缀规则：上证 6 开头 → <code>sh</code>，其余 → <code>sz</code>。这个规则与 <code>get_prefix()</code> 一致，但新浪要求的是带前缀的完整代码如 <code>sh600519</code>。
+</p>
+
+<h2>2. V3.2.1 关键修复 — 旧代码为什么永久返回空？</h2>
+
+<p>
+  这是本节<strong>最重要的工程洞察</strong>。V3.2.0 之前的旧代码直接取 <code>result.data.{lrb}</code>：
+</p>
+
+<div class="danger">
+  <strong>旧代码 BUG：</strong><code>r.json()["result"]["data"]["lrb"]</code> — 永远返回 <code>None</code>。因为新浪的实际 JSON 结构是 <code>result.data.report_list</code>（按报告期为键的 dict），不是 <code>result.data.lrb</code>。这个 bug 导致 <code>sina_financial_report()</code> 在 V3.2.0 之前完全不可用。
+</div>
+
+<div class="diagram"># V3.2.1 修复后的正确提取逻辑（简化示意）
+report_list = r.json()["result"]["data"]["report_list"]
+
+rows = []
+for period in sorted(report_list.keys(), reverse=True)[:num]:
+    obj = report_list[period]      # 每期一个对象
+    rec = {"报告期": f"{period[:4]}-{period[4:6]}-{period[6:8]}"}
+    for it in obj.get("data", []):  # 遍历该期的 data 数组
+        rec[it["item_title"]] = it["item_value"]     # 科目名→值
+        if it.get("item_tongbi"):                    # 有同比则附上
+            rec[it["item_title"] + "_同比"] = it["item_tongbi"]
+    rows.append(rec)</div>
+
+<div class="principle">
+  <strong>设计要点：</strong>修复后的代码不依赖任何固定的 key 名（如 "lrb"），而是遍历 <code>report_list</code> 的所有期次键，每期内部再遍历 <code>data</code> 数组的 <code>item_title</code>。这意味着即使新浪新增报表类型，代码也不需要修改。
+</div>
+
+<h2>3. 三表的结构差异与使用场景</h2>
+
+<p>
+  三表的科目体系完全不同，不能混用 <code>report_type</code>。以下是选表决策：
+</p>
+
+<table>
+  <tr><th>分析需求</th><th>用哪张表</th><th>关键科目</th></tr>
+  <tr><td>公司赚了多少钱？</td><td>利润表 <code>lrb</code></td><td>营业收入、净利润、扣非净利润</td></tr>
+  <tr><td>公司欠了多少债？</td><td>资产负债表 <code>fzb</code></td><td>总资产、总负债、资产负债率</td></tr>
+  <tr><td>赚的钱是真金白银吗？</td><td>现金流量表 <code>llb</code></td><td>经营活动现金流净额（与净利润对比）</td></tr>
+  <tr><td>盈利质量检验</td><td><code>llb</code> + <code>lrb</code></td><td>经营现金流 / 净利润 > 1 说明盈利含金量高</td></tr>
+</table>
+
+<div class="danger">
+  <strong>常见踩坑：</strong><code>report_type</code> 参数值必须是 <code>"fzb"</code>/<code>"lrb"</code>/<code>"llb"</code>（新浪拼音缩写），不能写成 balance/income/cashflow。拼写错误不会报错，但返回空列表。
+</div>
+
+<h2>4. 跨源数据拼装 — 构建完整基本面快照</h2>
+
+<p>
+  下面是三个数据源的<strong>实战组合模式</strong>——用 mootdx 拿财务快照、东财拿基本信息、新浪拿历史三表，拼成一只股票的完整基本面画像：
+</p>
+
+<div class="diagram"># 跨源基本面快照（伪代码，演示组合模式）
+from mootdx.quotes import Quotes
+
+code = "600519"
+client = tdx_client()
+
+# ① mootdx：最新季报核心财务指标
+fin = client.finance(symbol=code)
+snapshot = {
+    "eps": fin.get("eps"), "roe": fin.get("roe"),
+    "bvps": fin.get("bvps"), "profit": fin.get("profit")
+}
+
+# ② 东财：公司元信息
+info = eastmoney_stock_info(code)
+snapshot.update({
+    "name": info["name"], "industry": info["industry"],
+    "mcap_yi": info["mcap"] / 1e8,
+    "list_date": info["list_date"]
+})
+
+# ③ 新浪：最近 4 期利润表（看趋势）
+lrb = sina_financial_report(code, "lrb", num=4)
+for r in lrb:
+    print(f"{r['报告期']} 净利润={r.get('净利润')}")</div>
+
+<p>
+  <strong>组合原则：</strong>mootdx 拿指标（快、单期）、新浪拿趋势（慢、多期）、东财拿元信息（行业/市值/上市日期）。三者互补，各取所长。不要跨源重复获取同一类数据——比如 mootdx 的 eps 和新浪利润表的每股收益是同一个值，选 TCP 通道的 mootdx 更快。
+</p>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p>不看屏幕，尝试回答（每题 30 秒）：</p>
+  <ol>
+    <li>V3.2.0 的 <code>sina_financial_report()</code> 为什么永远返回空？修复后用什么方式提取数据？</li>
+    <li>如果要判断一家公司"赚的钱是否真金白银"，应该对比哪两张报表的什么科目？</li>
+    <li>新浪财报 API 的 <code>paper_code</code> 参数中，代码 <code>000001</code> 对应的前缀是什么？</li>
+    <li>跨源拼装时，为什么优先用 mootdx 拿 eps 而不是新浪利润表？</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('answers').classList.toggle('show')">显示参考答案</button>
+  <div class="answer" id="answers">
+    <strong>参考答案：</strong><br>
+    1. 旧代码直接取 <code>result.data.lrb</code>，但新浪实际结构是 <code>result.data.report_list</code>（按报告期为键的 dict）。修复后改为遍历 <code>report_list</code> 的期次键，每期内部再遍历 <code>data</code> 数组的 <code>item_title</code> 提取科目。<br>
+    2. 对比现金流量表(llb)的"经营活动现金流净额"与利润表(lrb)的"净利润"。经营现金流/净利润 > 1 说明盈利含金量高。<br>
+    3. <code>sz</code>——0 开头非上证代码走深圳前缀。<br>
+    4. mootdx 走 TCP 不封 IP、速度快（单次 TCP 请求），且 finance() 一次拿到 37 个字段。新浪利润表虽然也能拿 eps，但需要解析 JSON 结构，效率低。
+  </div>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>对三表结构有疑问？追问 AI 老师："资产负债表里的'商誉'在哪个科目下？""怎么用现金流量表识别财务造假？"
+</div>
+
+<div class="ref-links">
+  <strong>关联资料：</strong>
+  <a href="../reference/fundamentals-overview.html">基础数据速查表</a> ·
+  <a href="0001-fundamentals-module-tour.html">上一节：mootdx 快照+F10</a> ·
+  <a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a> ·
+  <a href="../../../module-infrastructure/lessons/0001-infrastructure-module-tour.html">基础设施层</a>
+</div>
+
+</body>
+</html>

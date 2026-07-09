@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 资讯雷达主链路：页面加载 → 缓存读取 → 12赛道渲染</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>资讯雷达主链路：页面加载 → 缓存读取 → 12赛道渲染</h1>
+  <p class="meta">学习目标：15 分钟内能画出资讯雷达从页面加载到数据展示的完整时序图，理解 React 状态管理、API 调用封装、后端缓存读取三级降级策略。</p>
+
+  <h2>1. 入口：Intel 页面组件树</h2>
+  <p>用户点击导航栏"资讯雷达"，React Router 渲染 <code>Intel</code> 组件。该组件使用 Tab 切换模式，默认选中"Investment News"标签页，对应 <code>InvestmentNewsPanel</code> 子组件——它是本切片的真正主角。</p>
+  <div class="filetree">frontend/src/pages/Intel.tsx
+├── export function Intel()              ← 页面入口，Tab 切换容器
+│   └── InvestmentNewsPanel              ← 资讯雷达核心面板（本课焦点）
+│       ├── useState&lt;RadarData|null&gt;     ← 雷达数据状态
+│       ├── useState&lt;string|null&gt;        ← 错误信息状态
+│       ├── useState("ai")               ← 当前选中赛道（默认 AI）
+│       └── useState&lt;Digest&gt;             ← AI 要点提炼状态</div>
+  <p><code>InvestmentNewsPanel</code> 在 <code>useEffect</code> 中调用 <code>api.radar()</code> 发起初始数据请求，这是整条链路的起点。</p>
+
+  <h2>2. 第一层：前端 API 调用</h2>
+  <p><code>api.radar()</code> 定义在 <code>frontend/src/lib/api.ts</code> 中。它是一个薄封装——通过共享的 <code>request&lt;T&gt;()</code> 泛型函数发出 GET 请求，自动附加鉴权头和处理错误：</p>
+  <div class="diagram">Intel.tsx: useEffect → api.radar() → request&lt;RadarData&gt;("/radar","GET") → fetch("/api/radar", {headers})
+                                                              │
+                                                              ▼ 失败
+                                                    throw ApiError("连接不到后端…")</div>
+  <p>关键类型定义（来自 <code>api.ts:167-176</code>）：</p>
+  <table>
+    <tr><th>类型</th><th>字段</th><th>说明</th></tr>
+    <tr><td><code>RadarData</code></td><td>generated_at, recent_days, industries[], stats</td><td>顶层返回结构</td></tr>
+    <tr><td><code>Industry</code></td><td>key, name, accent, total, items[]</td><td>单个赛道（如 AI/大模型）</td></tr>
+    <tr><td><code>RadarItem</code></td><td>title, url, time, source, summary?, zh?</td><td>单条资讯</td></tr>
+  </table>
+
+  <h2>3. 后端：三级降级策略与缓存结构</h2>
+  <p>前端请求到达后端 <code>GET /api/radar</code>（<code>app.py:233-239</code>），路由函数只做一件事：调用 <code>newsradar.get_radar(force=False)</code>。它实现了一个<strong>三级降级策略</strong>——要么读缓存、要么返回骨架，从不主动触发抓取：</p>
+  <div class="diagram">get_radar(force=False)
+  │
+  ├─ 1. load_cache()          ← 读 .cache/radar.json
+  │   └─ 命中 → 返回缓存数据（99% 的请求走这条路）
+  │
+  └─ 2. skeleton()            ← 缓存文件不存在 / JSON 解析失败
+      └─ 返回赛道骨架（空 items）：12 个 industry 对象，items=[]</div>
+  <p>缓存文件结构（<code>backend/.cache/radar.json</code>）：</p>
+  <div class="filetree">radar.json
+├── generated_at: "2026-07-08 14:30"   ← 缓存生成时间（北京时间）
+├── recent_days: 7                     ← 只保留最近 7 天资讯
+├── industries: [                      ← 12 个赛道数组
+│   ├── { key:"ai", name:"AI/大模型", accent:"#ff5a1f",
+│   │     total:16, items: [...] }     ← 该赛道 16 个源，资讯按时间倒序
+│   ├── { key:"semi", ... }
+│   └── ...（共 12 个）
+└── stats: { industries:12, total_sources:108,
+             failed_sources: 3 }       ← 抓取统计（3 个源失败）</div>
+  <p><strong>设计要点：</strong>这种"读和写分离"的设计避免了每次页面加载都触发 108 个 HTTP 请求。<code>skeleton()</code> 降级路径直接从 <code>news_sources.json</code> 构造同样的结构，但 <code>items=[]</code>、<code>generated_at=null</code>。前端通过检查 <code>!!data?.generated_at</code> 判断是否有真实数据。</p>
+
+  <h2>4. 前端渲染：状态驱动的条件 UI</h2>
+  <p>数据回到前端后，<code>InvestmentNewsPanel</code> 根据 <code>hasData</code> 标志渲染三种状态：</p>
+  <table>
+    <tr><th>状态</th><th>条件</th><th>渲染内容</th></tr>
+    <tr><td>空状态</td><td><code>!hasData && !err</code></td><td>引导文案："还没有抓取资讯，点刷新拉取"</td></tr>
+    <tr><td>错误状态</td><td><code>err !== null</code></td><td>红色错误卡片，显示 <code>err</code> 消息</td></tr>
+    <tr><td>数据状态</td><td><code>!!data?.generated_at</code></td><td>12 赛道 Pill 按钮 + 资讯列表 + AI 要点提炼区</td></tr>
+  </table>
+  <p>赛道切换通过 <code>active</code> 状态变量实现，点击 Pill 按钮即设置 <code>setActive(ind.key)</code>，触发对应赛道的资讯列表和 AI 提炼区重新渲染——全程纯前端操作，无需再请求后端。</p>
+
+  <div class="callout">
+    <p><strong>检索练习：</strong>如果用户浏览器请求 <code>/api/radar</code> 时 <code>.cache/radar.json</code> 文件不存在，后端返回什么？前端展示什么？</p>
+    <p><strong>参考答案：</strong>后端 <code>load_cache()</code> 捕获 <code>FileNotFoundError</code> 返回 <code>None</code>，<code>get_radar()</code> 转而调用 <code>skeleton()</code>，返回 12 个空赛道的 JSON。前端收到后 <code>data.generated_at</code> 为 <code>null</code>，<code>hasData</code> 为 <code>false</code>，渲染引导文案："还没有抓取资讯，点上方刷新拉取（约 20-40 秒）"。这是优雅降级的典型案例——无缓存时不报错，而是引导用户主动触发抓取。</p>
+  </div>
+
+  <p class="source">主要来源：<code>frontend/src/pages/Intel.tsx</code>（InvestmentNewsPanel 完整组件）、<code>frontend/src/lib/api.ts</code>（RadarData 类型 + api.radar）、<code>backend/app.py:233-239</code>（GET /api/radar）、<code>backend/newsradar.py</code>（get_radar/load_cache/skeleton 三级降级）。下一节课 <a href="0002-refresh-flow.html">0002 强制刷新链路</a> 讲解用户点击"刷新"后 fetch_radar() 的并发抓取全流程。对 AI 要点提炼的 chatStream 调用链感兴趣？那是 <a href="../../slice-ai-chat/lessons/0001-flow-map.html">L2 AI 对话切片</a> 的内容。</p>
+</main>
+</body>
+</html>

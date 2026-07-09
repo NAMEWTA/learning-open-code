@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>会话持久化链路地图与 Mermaid 时序图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .mermaid {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.7;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>会话持久化链路地图</h1>
+    <p class="meta">学习目标：画出从用户启动到 Session 持久化、Resume 恢复、Fork 分支、Archive 归档的完整链路时序图，说出每一层的职责边界。</p>
+    <p class="meta">前置：<a href="../../module-state-model-backend/lessons/0001-state-model-backend-module-tour.html">L1 State Model Backend 模块导览</a> | <a href="../../module-core-runtime/lessons/0001-core-runtime-module-tour.html">L1 Core Runtime 模块导览</a></p>
+    <p class="meta">参考：<a href="../reference/session-resume-fork-flow-map.html">快速参考图谱——接口清单与状态变迁表</a></p>
+  </header>
+
+  <section>
+    <h2>1. 链路全景：从创建到归档的 5 个阶段</h2>
+    <p>一个 Codex 会话从诞生到退休，经历 5 个离散的持久化阶段。每个阶段涉及不同的 crate 和持久化介质：</p>
+
+    <div class="diagram">用户启动 (CLI / VSCode / Atlas / ChatGPT)
+  │
+  ▼
+[1] Session 发现与创建
+    扫描 sessions/ 目录下已存在的 rollout → 列出可选 session
+    或创建新 ThreadStore::create_thread() → 分配 ThreadId、创建 rollout 路径
+    所属：cli/src/main.rs, rollout/src/list.rs, thread-store/src/store.rs
+  │
+  ▼
+[2] Rollout JSONL 实时写入
+    RolloutRecorder::append() → 每条 ResponseItem、EventMsg 追加为一行 JSON
+    文件路径：{codex_home}/sessions/{date}/{thread_id}.jsonl
+    所属：rollout/src/recorder.rs
+  │
+  ▼
+[3] SQLite Backfill 镜像
+    StateRuntime 后台任务扫描 rollout → extract rollout_item → 写入 state_5.sqlite
+    从 JSONL 中提取：ThreadMetadata、Window 编号、agent_jobs 等
+    所属：state/src/runtime.rs (backfill), state/src/extract.rs
+  │
+  ▼
+[4] Resume 恢复 & Fork 分支
+    Resume: reconstruct_history_from_rollout() 反向扫描 JSONL → 重建 Session::history
+    Fork: 基于源 thread 的 rollout_items 截断 → 创建新 ThreadId → 独立 rollout
+    所属：core/src/session/rollout_reconstruction.rs, app-server thread_processor.rs
+  │
+  ▼
+[5] Archive 归档
+    ThreadStore::archive_thread() → 文件移动到 archived_sessions/
+    子树归档：连同 spawned descendants 一起标记为 archived
+    所属：app-server thread_processor.rs, rollout/src/list.rs (find_archived_thread_path)</div>
+  </section>
+
+  <section>
+    <h2>2. 四层持久化介质的职责边界</h2>
+    <p>Codex 并非只用一种存储。不同生命周期阶段使用不同的持久化介质，各有侧重：</p>
+
+    <table>
+      <tr><th>持久化介质</th><th>Crate / 文件</th><th>职责</th><th>特点</th></tr>
+      <tr>
+        <td>JSONL Rollout</td>
+        <td><code>rollout/src/recorder.rs</code></td>
+        <td>逐行追加 response item 和 event，是会话的完整事件日志</td>
+        <td>追加写、人类可读、zstd 压缩、用于 replay 重建</td>
+      </tr>
+      <tr>
+        <td>SQLite state_5.sqlite</td>
+        <td><code>state/src/runtime.rs</code></td>
+        <td>从 rollout 提取结构化元数据（ThreadMetadata、job、goal）</td>
+        <td>快速查询、支持 backfill 增量更新、有 migration</td>
+      </tr>
+      <tr>
+        <td>SQLite goals_1.sqlite</td>
+        <td><code>state/src/runtime.rs</code></td>
+        <td>存储 thread goal 追踪数据</td>
+        <td>独立数据库文件，避免锁竞争</td>
+      </tr>
+      <tr>
+        <td>SQLite memories_1.sqlite</td>
+        <td><code>state/src/runtime.rs</code></td>
+        <td>存储跨会话的持久化记忆</td>
+        <td>独立数据库文件，支持清空操作</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. Mermaid 时序图：完整持久化链路</h2>
+    <p>以下时序图展示从 CLI 启动到 session 创建、persist、resume、fork、archive 的完整交互。关键分叉点（session 已存在/不存在、fork 持久化/临时）用 alt 标注：</p>
+
+    <div class="mermaid">sequenceDiagram
+    participant CLI as CLI / Client
+    participant AppSrv as App-Server
+    participant TM as ThreadManager
+    participant TS as ThreadStore
+    participant Session as Session (core)
+    participant Recorder as RolloutRecorder
+    participant StateRT as StateRuntime (SQLite)
+    participant FS as File System
+
+    Note over CLI,FS: === [1] Session 创建 ===
+    CLI->>AppSrv: thread/new (model, cwd, config)
+    AppSrv->>TM: create_thread(config)
+    TM->>TS: create_thread(params)
+    TS-->>TM: ThreadId + rollout_path
+    TM->>Session: new (thread_id, config)
+    Session->>Recorder: new (rollout_path)
+    Recorder->>FS: 创建 {codex_home}/sessions/{date}/{thread_id}.jsonl
+    AppSrv-->>CLI: ThreadCreated { thread_id, session_id }
+
+    Note over CLI,FS: === [2] 对话持久化 ===
+    CLI->>AppSrv: thread/turn (user message)
+    AppSrv->>Session: process_turn()
+    Session->>Recorder: append(RolloutItem::ResponseItem)
+    Recorder->>FS: 追加一行 JSON 到 .jsonl
+    Session->>Recorder: append(RolloutItem::EventMsg)
+    Recorder->>FS: 追加事件行
+    Session-->>AppSrv: turn result
+
+    Note over CLI,FS: === [3] SQLite Backfill (后台) ===
+    StateRT->>FS: 扫描 sessions/ 下新 rollout
+    StateRT->>StateRT: extract rollout_item
+    StateRT->>StateRT: apply_rollout_item() 写入 SQLite
+    StateRT->>FS: INSERT INTO threads (...) state_5.sqlite
+
+    Note over CLI,FS: === [4] Resume 恢复 ===
+    CLI->>AppSrv: thread/resume (thread_id)
+    AppSrv->>TM: resume_thread_with_history()
+    TM->>TS: resume_thread(params)
+    alt Thread 已在内存中 (热 resume)
+        TS-->>TM: 返回 live writer
+        AppSrv->>Session: 已有 session 实例，附加 listener
+    else Thread 不在内存中 (冷 resume)
+        TS->>FS: load_history() 读取 JSONL
+        FS-->>TS: Vec&lt;RolloutItem&gt;
+        TS-->>TM: StoredThreadHistory
+        TM->>Session: reconstruct_history_from_rollout()
+        Session->>Session: 反向扫描 rollout，重建 history + metadata
+        Session-->>TM: RolloutReconstruction { history, window, world_state }
+        TM->>Recorder: 重新打开 rollout writer
+    end
+    AppSrv-->>CLI: ThreadResumeResponse { thread, turns, config }
+
+    Note over CLI,FS: === [5] Fork 分支 ===
+    CLI->>AppSrv: thread/fork (thread_id, last_turn_id?)
+    AppSrv->>TM: fork_thread_from_history()
+    TM->>TS: read_thread() 获取源 history_items
+    alt 指定 last_turn_id
+        AppSrv->>AppSrv: truncate_rollout_after_turn_id()
+    end
+    TM->>TS: create_thread() 新 ThreadId
+    TS-->>TM: 新 thread_id + rollout_path
+    TM->>Session: new(forked config, truncated history)
+    Session->>Recorder: 为新 fork 创建独立 rollout
+    alt 持久化 fork
+        Recorder->>FS: 创建新 .jsonl, 写入 truncated history
+    else 临时 fork (ephemeral)
+        Note over Session: 不写 rollout, 仅内存持有 history
+    end
+    AppSrv-->>CLI: ThreadForkResponse { thread, model, config }
+
+    Note over CLI,FS: === [6] Archive 归档 ===
+    CLI->>AppSrv: thread/archive (thread_id)
+    AppSrv->>StateRT: state_db_spawn_subtree_thread_ids()
+    StateRT-->>AppSrv: 子树 thread_id 列表
+    AppSrv->>TS: archive_thread(parent)
+    TS->>FS: 移动 rollout → archived_sessions/
+    TS->>FS: UPDATE threads SET archived_at = now
+    loop 对每个 descendant
+        AppSrv->>TS: archive_thread(descendant)
+        TS->>FS: 移动文件 + 标记归档
+    end
+    AppSrv-->>CLI: ThreadArchiveResponse
+    AppSrv-->>CLI: ThreadArchived notification (per thread)</div>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>Codex 使用了哪 4 种持久化介质？各自存放什么数据？</li>
+        <li>冷 resume 和热 resume 的区别是什么？代码中如何判断走哪条路径？</li>
+        <li>Fork 时如果指定了 last_turn_id，历史数据如何处理？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. JSONL Rollout（完整事件日志）、state_5.sqlite（结构化元数据）、goals_1.sqlite（goal 追踪）、memories_1.sqlite（持久化记忆）。2. 冷 resume 是 Thread 不在内存中，需要从 JSONL 文件 load_history() 然后 reconstruct_history_from_rollout() 重建整个 Session；热 resume 是 Thread 已加载，直接附加 listener 即可。代码通过 ThreadManager::get_thread() 尝试获取已有 thread 来判断。3. 通过 truncate_rollout_after_turn_id() 截断源 thread 的 rollout_items，只保留指定 turn 及之前的历史，然后基于截断后的 items 创建新 fork。</p>
+    </div>
+    <p>下一步：<a href="0002-main-path.html">主路径详解——从 JSONL 到 Session 再生的冷 resume 全流程</a>。如有疑问，追问 agent 让它带你逐步跟踪某一次具体的 resume 调用。</p>
+  </section>
+</main>
+</body>
+</html>

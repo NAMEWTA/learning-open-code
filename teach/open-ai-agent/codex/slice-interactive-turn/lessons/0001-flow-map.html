@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 链路地图：一次交互 Turn 的完整时序</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      .filetree {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.75;
+        background: #fafbfc;
+        border: 1px solid #ebebeb;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+      .diagram {
+        background: #fbfcfd;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        overflow-x: auto;
+        white-space: pre;
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.78rem;
+        line-height: 1.3;
+      }
+      .codenote {
+        color: var(--muted);
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>链路地图：一次交互 Turn 的完整时序</h1>
+        <p class="meta">
+          学习目标：15 分钟内画出从 TUI 用户输入到模型流式响应渲染的完整 mermaid 时序图，识记链路上每一层的职责边界。
+          <br /><span class="codenote">前置：<a href="../../module-tui/lessons/0001-tui-module-tour.html">L1 TUI 模块导览</a>、<a href="../../module-core-runtime/lessons/0001-core-runtime-module-tour.html">L1 Core Runtime 模块导览</a></span>
+        </p>
+
+        <div class="callout">
+          一句话定位：一次交互 turn 是 11 个步骤组成的纵向链路——用户输入逐层穿透 TUI ChatWidget → App 事件循环 → App-server Session → CodexThread → ModelClient → 远端 API，响应再沿同一链路逆流回到 TUI 屏幕。本课提供这张完整地图。
+        </div>
+
+        <h2>1. 先看清 11 层</h2>
+        <p>
+          抛开编译单元细节，一次 turn 的逻辑层级只有 11 步。这 11 步分布在 CLI、TUI、App-server、Core、Network 五个进程/线程边界之间。每一层的输入输出都有明确的数据类型做合同。
+        </p>
+        <div class="diagram">用户 Enter 键
+    │
+    ▼
+[1]  cli/src/main.rs          ── run_interactive_tui() → codex_tui::run_main()
+    │                                CLI 参数解析 + TERM 检查
+    ▼
+[2]  tui/src/lib.rs           ── run_main()：加载 config → 启动 app-server → 创建 Tui + App
+    │                                App::run() 进入 select! 事件循环
+    ▼
+[3]  tui/src/app.rs           ── handle_tui_event(TuiEvent::Key) → ChatWidget 处理键盘事件
+    │
+    ▼
+[4]  tui/src/chatwidget.rs    ── 用户按 Enter → InputResult::Submitted
+    │                               → submit_op(AppCommand::UserInput { items, .. })
+    │
+    ▼
+[5]  tui/app_server_session.rs ── AppServerSession 发送 user input 至 app-server
+    │                               内嵌或远程 app-server 接收并注入 session 队列
+    ▼
+[6]  core/src/codex_thread.rs ── CodexThread::submit_user_input_with_client_user_message_id()
+    │                               Op 进入 session.input_queue
+    ▼
+[7]  core/src/session/turn.rs ── run_turn() 启动：pre-compact → step_context → sampling loop
+    │
+    ▼
+[8]  core/src/client.rs       ── ModelClientSession::stream()：WebSocket/HTTP 发送 Responses API 请求
+    │
+    ▼
+[9]  OpenAI API (Network)     ── SSE 事件流返回（reasoning → content delta → finished）
+    │
+    ▼
+[10] core/src/stream_events_utils.rs ── handle_non_tool_response_item() 处理每个 SSE 事件
+    │                               每个事件转为 EventMsg，经 app-server 推送 TUI
+    │
+    ▼
+[11] tui/src/app.rs           ── handle_active_thread_event(EventMsg)
+        tui/src/chatwidget.rs     → ChatWidget 更新 active_cell（markdown stream 渲染）
+                                   → 提交 frame → ratatui 绘制到终端屏幕</div>
+
+        <h2>2. mermaid 时序图</h2>
+        <p>以下时序图覆盖从用户按 Enter 到模型回答渲染完成的完整闭环。</p>
+        <div class="diagram">sequenceDiagram
+    actor User as 用户
+    participant CLI as CLI main.rs
+    participant TUI_LIB as tui lib.rs
+    participant App as App 事件循环
+    participant CW as ChatWidget
+    participant AS as AppServerSession
+    participant CT as CodexThread
+    participant RT as run_turn()
+    participant MC as ModelClient
+    participant API as OpenAI API
+
+    User->>CW: 输入文本并按 Enter
+    CW->>CW: InputResult::Submitted
+    CW->>AS: submit_op(AppCommand::UserInput)
+    AS->>CT: submit_user_input(op)
+    CT->>RT: 启动 run_turn()
+    RT-->>CW: EventMsg::TurnStarted
+    RT->>RT: pre-sampling compact (如需)
+    RT->>RT: capture_step_context()
+    RT->>MC: stream(prompt, tools, metadata)
+    MC->>API: WebSocket response.create
+    API-->>MC: SSE: response.created
+    API-->>MC: SSE: reasoning content delta
+    MC-->>RT: ResponseEvent::ReasoningDelta
+    RT-->>CW: EventMsg::ReasoningContentDelta
+    CW->>CW: 更新 active_cell (reasoning 折叠)
+    API-->>MC: SSE: output_text delta (逐 token)
+    MC-->>RT: ResponseEvent::ContentDelta
+    RT-->>CW: EventMsg::AgentMessageContentDelta
+    CW->>CW: markdown 增量渲染 → 每帧 commit_tick
+    API-->>MC: SSE: response.completed
+    MC-->>RT: ResponseEvent::Finished
+    RT-->>CW: EventMsg::TurnComplete
+    CW->>CW: active_cell 提交为 history_cell
+    CW->>CW: BottomPane 恢复 composer
+    User->>CW: 看到完整回答</div>
+
+        <h2>3. 边界识别与异常路径</h2>
+        <p>记住这张地图，你就能回答三类排障问题：</p>
+        <ul>
+          <li><strong>TUI 无响应？</strong> 检查步骤 [2] 中 TERM 检查是否失败、[3] 中 select! 是否还在运行、[4] 中 ThreadInputState 是否卡在 Submitting。</li>
+          <li><strong>模型不回答？</strong> 检查步骤 [8] 中 WebSocket 是否连接成功、[9] 中 API 是否返回错误码、[7] 中 cancellation_token 是否被触发。</li>
+          <li><strong>流式渲染卡顿？</strong> 检查步骤 [11] 中 AdaptiveChunkingPolicy 是否过于保守、commit_tick 间隔是否过大。</li>
+        </ul>
+        <h3>一条异常路径：API 返回错误</h3>
+        <p>
+          当步骤 [9] 返回 429（Rate Limit）或 5xx 错误时，<code>client.rs</code> 中的 retry/fallback 逻辑会介入。简化流程如下：
+        </p>
+        <div class="diagram">API-->>MC: HTTP 429 / 5xx
+MC->>MC: handle_retryable_response_stream_error()
+MC->>MC: 判断是否可重试 (retry budget, HTTP fallback)
+alt 可重试
+    MC->>API: 重试请求 (可能走 HTTP fallback)
+else 不可重试
+    MC-->>RT: Err(CodexErr::...)
+    RT-->>CW: EventMsg::Error
+    CW->>CW: 显示红色错误信息 + 恢复 composer
+end</div>
+        <p>这段逻辑在 <code>core/src/responses_retry.rs</code> 中实现，lesson 0002 会详细展开。速查表见 <a href="../reference/interactive-turn-flow-map.html">参考文档</a>。</p>
+
+        <h2>4. 检索练习</h2>
+        <div class="practice">
+          <p><strong>暂停回忆：</strong>合上屏幕，从步骤 [1] 到 [11] 默写一次交互 turn 的层级链路。每个步骤只需写出入口函数名和所在文件。</p>
+          <div class="answer">
+            <strong>参考答案：</strong>
+            [1] <code>run_interactive_tui()</code> → cli/main.rs；
+            [2] <code>run_main()</code> → tui/lib.rs；
+            [3] <code>App::run()</code> → tui/app.rs；
+            [4] <code>ChatWidget::submit_op()</code> → tui/chatwidget.rs；
+            [5] <code>AppServerSession</code> → tui/app_server_session.rs；
+            [6] <code>CodexThread::submit_user_input()</code> → core/codex_thread.rs；
+            [7] <code>run_turn()</code> → core/session/turn.rs；
+            [8] <code>ModelClientSession::stream()</code> → core/client.rs；
+            [9] OpenAI Responses API (SSE over WebSocket/HTTP)；
+            [10] <code>handle_non_tool_response_item()</code> → core/stream_events_utils.rs；
+            [11] <code>ChatWidget</code> active_cell 更新 + render → tui/app.rs & tui/chatwidget.rs。
+          </div>
+        </div>
+
+        <div class="callout">
+          下节课 <a href="0002-main-path.html">0002 主成功路径详解</a> 将深入步骤 [4]～[11]，逐层分析用户输入如何变成 Op、run_turn 循环的每一次采样如何组织、SSE 事件如何映射为 TUI 增量渲染。
+        </div>
+        <p style="margin-top:24px;color:var(--muted);font-size:0.92rem;">
+          学完这节课还有疑问？让 agent 老师帮你进一步解释链路中的任何一层。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

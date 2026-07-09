@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L3 扩展系统 API 参考：Hooks / Plugin / Connectors / File-Search / Context-Fragments</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <section class="reference">
+        <h1>L3 扩展系统 API 参考</h1>
+        <p class="meta">
+          层级：L3 微观 API 参考。覆盖 5 个扩展子系统 —— hooks 拦截点、plugin 清单、connectors 协议、file-search 引擎、context-fragments 类型。
+          配套导览：<a href="../lessons/0001-extensions-skills-mcp-module-tour.html">0001 扩展系统导览</a>；
+          L1 速查：<a href="extensions-skills-mcp-overview.html">扩展系统参考</a>。
+        </p>
+
+        <!-- ================================================================== -->
+        <h2>1. Hooks 拦截点 API</h2>
+        <p>
+          源码根：<span class="where">codex-rs/hooks/src/</span>。hooks crate 定义 10 种生命周期事件、命令发现与执行引擎、以及 JSON/Toml schema。
+        </p>
+
+        <h3>1.1 事件清单（10 种）</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>事件名</th>
+              <th>常量</th>
+              <th>作用域</th>
+              <th>支持 Matcher</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>PreToolUse</code></td>
+              <td><code>HookEventName::PreToolUse</code></td>
+              <td>Turn</td>
+              <td>是（工具名 regex）</td>
+              <td>工具调用前拦截，可 block / 改写输入 / 追加上下文</td>
+            </tr>
+            <tr>
+              <td><code>PostToolUse</code></td>
+              <td><code>HookEventName::PostToolUse</code></td>
+              <td>Turn</td>
+              <td>是（工具名 regex）</td>
+              <td>工具调用后处理，可改写 MCP 工具输出 / 追加上下文</td>
+            </tr>
+            <tr>
+              <td><code>PermissionRequest</code></td>
+              <td><code>HookEventName::PermissionRequest</code></td>
+              <td>Turn</td>
+              <td>是（工具名 regex）</td>
+              <td>权限审批阶段决策：allow / deny</td>
+            </tr>
+            <tr>
+              <td><code>PreCompact</code></td>
+              <td><code>HookEventName::PreCompact</code></td>
+              <td>Turn</td>
+              <td>是（trigger: manual / auto）</td>
+              <td>上下文压缩前，可返回 <code>additionalInstructions</code></td>
+            </tr>
+            <tr>
+              <td><code>PostCompact</code></td>
+              <td><code>HookEventName::PostCompact</code></td>
+              <td>Turn</td>
+              <td>是（trigger: manual / auto）</td>
+              <td>上下文压缩后通知，无业务决策</td>
+            </tr>
+            <tr>
+              <td><code>SessionStart</code></td>
+              <td><code>HookEventName::SessionStart</code></td>
+              <td>Thread</td>
+              <td>是（source: startup / resume / clear / compact）</td>
+              <td>会话启动时注入 initial context</td>
+            </tr>
+            <tr>
+              <td><code>UserPromptSubmit</code></td>
+              <td><code>HookEventName::UserPromptSubmit</code></td>
+              <td>Turn</td>
+              <td>否（忽略 matcher）</td>
+              <td>用户提交提示词后，可 block（含 reason）或追加上下文</td>
+            </tr>
+            <tr>
+              <td><code>SubagentStart</code></td>
+              <td><code>HookEventName::SubagentStart</code></td>
+              <td>Thread</td>
+              <td>是（agent_type regex）</td>
+              <td>子 agent 启动时注入上下文</td>
+            </tr>
+            <tr>
+              <td><code>SubagentStop</code></td>
+              <td><code>HookEventName::SubagentStop</code></td>
+              <td>Turn</td>
+              <td>是（agent_type regex）</td>
+              <td>子 agent 停止时可 block（含 reason）</td>
+            </tr>
+            <tr>
+              <td><code>Stop</code></td>
+              <td><code>HookEventName::Stop</code></td>
+              <td>Turn</td>
+              <td>否（忽略 matcher）</td>
+              <td>Agent 停止时可 block（含 reason）或追加 prompt fragment</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>1.2 核心类型</h3>
+
+        <h4>HooksConfig（注册入口）</h4>
+        <div class="filetree">pub struct HooksConfig {
+    pub legacy_notify_argv: Option&lt;Vec&lt;String&gt;&gt;,
+    pub feature_enabled: bool,
+    pub bypass_hook_trust: bool,
+    pub config_layer_stack: Option&lt;ConfigLayerStack&gt;,
+    pub plugin_hook_sources: Vec&lt;PluginHookSource&gt;,
+    pub plugin_hook_load_warnings: Vec&lt;String&gt;,
+    pub shell_program: Option&lt;String&gt;,
+    pub shell_args: Vec&lt;String&gt;,
+}</div>
+        <p>
+          <code>HooksConfig</code> 汇合了配置层栈（含 JSON/Toml hooks）、插件 hook 源和 shell 参数。
+          传给 <code>Hooks::new(config)</code> 后构造 <code>ClaudeHooksEngine</code> 并运行全量发现。
+        </p>
+
+        <h4>Hooks（运行时门面）</h4>
+        <div class="filetree">pub struct Hooks {
+    after_agent: Vec&lt;Hook&gt;,         // 遗留 notify hook
+    engine: ClaudeHooksEngine,        // Claude hooks 引擎
+}</div>
+        <p>公开方法（每事件一组 preview + run）：</p>
+        <table>
+          <thead><tr><th>方法</th><th>返回</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td><code>preview_session_start(&amp;SessionStartRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览将运行的 handler</td></tr>
+            <tr><td><code>run_session_start(SessionStartRequest, Option&lt;String&gt;)</code></td><td><code>SessionStartOutcome</code></td><td>执行并返回 additional_contexts</td></tr>
+            <tr><td><code>preview_pre_tool_use(&amp;PreToolUseRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_pre_tool_use(PreToolUseRequest)</code></td><td><code>PreToolUseOutcome</code></td><td>可能 block / 改写输入 / 追加上下文</td></tr>
+            <tr><td><code>preview_permission_request(&amp;PermissionRequestRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_permission_request(PermissionRequestRequest)</code></td><td><code>PermissionRequestOutcome</code></td><td>allow / deny 决策</td></tr>
+            <tr><td><code>preview_post_tool_use(&amp;PostToolUseRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_post_tool_use(PostToolUseRequest)</code></td><td><code>PostToolUseOutcome</code></td><td>改写 MCP 输出 / feedback / 追加上下文</td></tr>
+            <tr><td><code>preview_pre_compact(&amp;PreCompactRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_pre_compact(PreCompactRequest)</code></td><td><code>PreCompactOutcome</code></td><td>返回 additionalInstructions</td></tr>
+            <tr><td><code>preview_post_compact(&amp;PostCompactRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_post_compact(PostCompactRequest)</code></td><td><code>StatelessHookOutcome</code></td><td>无业务决策</td></tr>
+            <tr><td><code>preview_user_prompt_submit(&amp;UserPromptSubmitRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_user_prompt_submit(UserPromptSubmitRequest)</code></td><td><code>UserPromptSubmitOutcome</code></td><td>block / 追加上下文</td></tr>
+            <tr><td><code>preview_stop(&amp;StopRequest)</code></td><td><code>Vec&lt;HookRunSummary&gt;</code></td><td>预览</td></tr>
+            <tr><td><code>run_stop(StopRequest)</code></td><td><code>StopOutcome</code></td><td>block / 追加 continuation fragment</td></tr>
+          </tbody>
+        </table>
+
+        <h4>HookResult（基础回调结果）</h4>
+        <div class="filetree">pub enum HookResult {
+    Success,
+    FailedContinue(Box&lt;dyn Error + Send + Sync&gt;),
+    FailedAbort(Box&lt;dyn Error + Send + Sync&gt;),  // 阻止后续 hook 执行
+}</div>
+
+        <h4>Outcome 类型速查</h4>
+        <table>
+          <thead><tr><th>Outcome</th><th>关键字段</th></tr></thead>
+          <tbody>
+            <tr><td><code>PreToolUseOutcome</code></td><td><code>decision: PreToolUseDecision</code>（Approve / Block），<code>updated_input</code>，<code>additional_contexts</code>，<code>permission_decision</code>（Allow / Deny / Ask）</td></tr>
+            <tr><td><code>PostToolUseOutcome</code></td><td><code>additional_contexts</code>，<code>updated_mcp_tool_output</code>，<code>feedback_message</code></td></tr>
+            <tr><td><code>PermissionRequestOutcome</code></td><td><code>decision: PermissionRequestDecision</code>（Allow / Deny），<code>message</code></td></tr>
+            <tr><td><code>SessionStartOutcome</code></td><td><code>additional_contexts: Vec&lt;String&gt;</code></td></tr>
+            <tr><td><code>UserPromptSubmitOutcome</code></td><td><code>decision: BlockDecision</code>（Block），<code>reason</code>，<code>additional_contexts</code></td></tr>
+            <tr><td><code>StopOutcome</code></td><td><code>decision: BlockDecision</code>（Block），<code>reason</code>，<code>continuation_fragments</code></td></tr>
+            <tr><td><code>PreCompactOutcome</code></td><td><code>additional_instructions: Option&lt;String&gt;</code></td></tr>
+            <tr><td><code>StatelessHookOutcome</code></td><td>无业务字段（仅用 universal continue / stopReason / suppressOutput / systemMessage）</td></tr>
+          </tbody>
+        </table>
+
+        <h3>1.3 发现与分发流水线</h3>
+        <pre>discover_handlers()
+  ├── append_managed_requirement_handlers()     ← 托管需求中的 hooks
+  ├── 遍历 ConfigLayerStack 各层
+  │     ├── load_hooks_json()                   ← &lt;layer&gt;/hooks/hooks.json
+  │     └── load_toml_hooks_from_layer()        ← config.toml 中的 [hooks]
+  └── append_plugin_hook_sources()               ← 插件 hook 源（含 PLUGIN_ROOT 等环境变量）
+
+每条 handler → ConfiguredHandler { event_name, matcher, command, timeout_sec, ... }
+  → 受 HookStateToml 控制 enabled / trust_status
+  → trust_status: Managed | Trusted | Modified | Untrusted
+
+dispatch 时:
+  select_handlers() → 按 event_name + matcher 过滤
+  execute_handlers() → FuturesUnordered 并发执行（stdin 注入 JSON）
+  output_parser → 解析 JSON 输出 → 组装 Outcome</pre>
+
+        <h3>1.4 公开符号索引</h3>
+        <table>
+          <thead><tr><th>符号</th><th>源文件</th></tr></thead>
+          <tbody>
+            <tr><td><code>HOOK_EVENT_NAMES</code></td><td><span class="where">hooks/src/lib.rs</span></td></tr>
+            <tr><td><code>HOOK_EVENT_NAMES_WITH_MATCHERS</code></td><td><span class="where">hooks/src/lib.rs</span></td></tr>
+            <tr><td><code>Hooks</code> / <code>HooksConfig</code> / <code>list_hooks</code></td><td><span class="where">hooks/src/registry.rs</span></td></tr>
+            <tr><td><code>Hook</code> / <code>HookResult</code> / <code>HookPayload</code> / <code>HookEvent</code> / <code>HookResponse</code></td><td><span class="where">hooks/src/types.rs</span></td></tr>
+            <tr><td><code>HookListEntry</code> / <code>HookListOutcome</code></td><td><span class="where">hooks/src/registry.rs</span> + <span class="where">hooks/src/engine/mod.rs</span></td></tr>
+            <tr><td><code>ConfiguredHandler</code> / <code>ClaudeHooksEngine</code></td><td><span class="where">hooks/src/engine/mod.rs</span>（pub(crate)）</td></tr>
+            <tr><td><code>discover_handlers()</code></td><td><span class="where">hooks/src/engine/discovery.rs</span></td></tr>
+            <tr><td><code>select_handlers()</code> / <code>execute_handlers()</code></td><td><span class="where">hooks/src/engine/dispatcher.rs</span></td></tr>
+            <tr><td><code>PluginHookDeclaration</code></td><td><span class="where">hooks/src/declarations.rs</span></td></tr>
+            <tr><td><code>write_schema_fixtures()</code></td><td><span class="where">hooks/src/schema.rs</span></td></tr>
+            <tr><td>各 event request/outcome 类型</td><td><span class="where">hooks/src/events/{pre_tool_use,post_tool_use,permission_request,compact,session_start,user_prompt_submit,stop}.rs</span></td></tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>2. Plugin 清单 API</h2>
+        <p>
+          源码根：<span class="where">codex-rs/plugin/src/</span>。定义插件包模型、manifest 结构、provider trait 和加载结果。
+        </p>
+
+        <h3>2.1 PluginManifest（清单结构）</h3>
+        <div class="filetree">pub struct PluginManifest&lt;Resource&gt; {
+    pub name: String,
+    pub version: Option&lt;String&gt;,
+    pub description: Option&lt;String&gt;,
+    pub keywords: Vec&lt;String&gt;,
+    pub paths: PluginManifestPaths&lt;Resource&gt;,
+    pub interface: Option&lt;PluginManifestInterface&lt;Resource&gt;&gt;,
+}</div>
+
+        <h4>PluginManifestPaths（能力声明）</h4>
+        <div class="filetree">pub struct PluginManifestPaths&lt;Resource&gt; {
+    pub skills: Vec&lt;Resource&gt;,                           // 技能目录列表
+    pub mcp_servers: Option&lt;PluginManifestMcpServers&lt;Resource&gt;&gt;,  // MCP server
+    pub apps: Option&lt;Resource&gt;,                           // app 声明文件路径
+    pub hooks: Option&lt;PluginManifestHooks&lt;Resource&gt;&gt;,    // hook 文件路径或内联
+}
+
+pub enum PluginManifestMcpServers&lt;Resource&gt; {
+    Path(Resource),          // 指向 .mcp.json 或目录
+    Object(String),           // 内联 JSON 字符串
+}
+
+pub enum PluginManifestHooks&lt;Resource&gt; {
+    Paths(Vec&lt;Resource&gt;),    // 指向 hooks.json 文件列表
+    Inline(Vec&lt;HooksFile&gt;),  // 内联 hooks 事件定义
+}</div>
+
+        <h4>PluginManifestInterface（UI 元数据）</h4>
+        <div class="filetree">pub struct PluginManifestInterface&lt;Resource&gt; {
+    pub display_name: Option&lt;String&gt;,
+    pub short_description: Option&lt;String&gt;,
+    pub long_description: Option&lt;String&gt;,
+    pub developer_name: Option&lt;String&gt;,
+    pub category: Option&lt;String&gt;,
+    pub capabilities: Vec&lt;String&gt;,
+    pub website_url: Option&lt;String&gt;,
+    pub privacy_policy_url: Option&lt;String&gt;,
+    pub terms_of_service_url: Option&lt;String&gt;,
+    pub default_prompt: Option&lt;Vec&lt;String&gt;&gt;,
+    pub brand_color: Option&lt;String&gt;,
+    pub composer_icon: Option&lt;Resource&gt;,
+    pub logo: Option&lt;Resource&gt;,
+    pub logo_dark: Option&lt;Resource&gt;,
+    pub screenshots: Vec&lt;Resource&gt;,
+}</div>
+
+        <h3>2.2 PluginProvider（插件解析 trait）</h3>
+        <div class="filetree">pub trait PluginProvider: Send + Sync {
+    type Error: StdError + Send + Sync + 'static;
+
+    fn resolve(
+        &amp;self,
+        root: &amp;SelectedCapabilityRoot,
+    ) -&gt; impl Future&lt;Output = Result&lt;Option&lt;ResolvedPlugin&gt;, Self::Error&gt;&gt; + Send;
+}</div>
+        <p>
+          <code>PluginProvider</code> 是能力根（capability root）到 <code>ResolvedPlugin</code> 的转换器。
+          <code>ResolvedPlugin</code> 持有 <code>ResolvedPluginLocation::Environment { environment_id, root }</code>
+          和 <code>PluginManifest&lt;PluginResourceLocator&gt;</code>，资源路径带 authority 信息。
+        </p>
+
+        <h3>2.3 PluginLoadOutcome（加载结果）</h3>
+        <div class="filetree">pub struct PluginLoadOutcome&lt;M&gt; {
+    plugins: Vec&lt;LoadedPlugin&lt;M&gt;&gt;,
+    capability_summaries: Vec&lt;PluginCapabilitySummary&gt;,
+}
+
+pub struct LoadedPlugin&lt;M&gt; {
+    pub config_name: String,
+    pub manifest_name: Option&lt;String&gt;,
+    pub plugin_namespace: Option&lt;String&gt;,
+    pub manifest_description: Option&lt;String&gt;,
+    pub root: AbsolutePathBuf,
+    pub enabled: bool,
+    pub skill_roots: Vec&lt;AbsolutePathBuf&gt;,
+    pub disabled_skill_paths: HashSet&lt;AbsolutePathBuf&gt;,
+    pub has_enabled_skills: bool,
+    pub mcp_servers: HashMap&lt;String, M&gt;,
+    pub apps: Vec&lt;AppDeclaration&gt;,
+    pub hook_sources: Vec&lt;PluginHookSource&gt;,
+    pub hook_load_warnings: Vec&lt;String&gt;,
+    pub error: Option&lt;String&gt;,
+}</div>
+        <p>关键方法：</p>
+        <table>
+          <thead><tr><th>方法</th><th>返回</th></tr></thead>
+          <tbody>
+            <tr><td><code>effective_skill_roots()</code></td><td><code>Vec&lt;AbsolutePathBuf&gt;</code> —— 所有活跃插件的 skill 根目录</td></tr>
+            <tr><td><code>effective_plugin_skill_roots()</code></td><td><code>Vec&lt;PluginSkillRoot&gt;</code> —— 带 plugin namespace 的 skill 根</td></tr>
+            <tr><td><code>effective_mcp_servers()</code></td><td><code>HashMap&lt;String, M&gt;</code> —— 合并后的 MCP server</td></tr>
+            <tr><td><code>effective_apps()</code></td><td><code>Vec&lt;AppConnectorId&gt;</code></td></tr>
+            <tr><td><code>effective_plugin_hook_sources()</code></td><td><code>Vec&lt;PluginHookSource&gt;</code></td></tr>
+            <tr><td><code>capability_summaries()</code></td><td><code>&amp;[PluginCapabilitySummary]</code></td></tr>
+          </tbody>
+        </table>
+
+        <h3>2.4 PluginCapabilitySummary（能力摘要）</h3>
+        <div class="filetree">pub struct PluginCapabilitySummary {
+    pub config_name: String,
+    pub display_name: String,
+    pub description: Option&lt;String&gt;,
+    pub has_skills: bool,
+    pub mcp_server_names: Vec&lt;String&gt;,
+    pub app_connector_ids: Vec&lt;AppConnectorId&gt;,
+}</div>
+
+        <h3>2.5 公开符号索引</h3>
+        <table>
+          <thead><tr><th>符号</th><th>源文件</th></tr></thead>
+          <tbody>
+            <tr><td><code>PluginManifest</code></td><td><span class="where">plugin/src/manifest.rs</span></td></tr>
+            <tr><td><code>PluginManifestPaths</code> / <code>PluginManifestMcpServers</code> / <code>PluginManifestHooks</code></td><td><span class="where">plugin/src/manifest.rs</span></td></tr>
+            <tr><td><code>PluginManifestInterface</code></td><td><span class="where">plugin/src/manifest.rs</span></td></tr>
+            <tr><td><code>PluginProvider</code> / <code>ResolvedPlugin</code> / <code>PluginResourceLocator</code></td><td><span class="where">plugin/src/provider.rs</span></td></tr>
+            <tr><td><code>LoadedPlugin</code> / <code>PluginLoadOutcome</code> / <code>PluginCapabilitySummary</code></td><td><span class="where">plugin/src/load_outcome.rs</span></td></tr>
+            <tr><td><code>PluginId</code> / <code>validate_plugin_segment</code></td><td><span class="where">plugin/src/plugin_id.rs</span></td></tr>
+            <tr><td><code>PluginHookSource</code> / <code>AppDeclaration</code> / <code>AppConnectorId</code></td><td><span class="where">plugin/src/lib.rs</span></td></tr>
+            <tr><td><code>PluginTelemetryMetadata</code></td><td><span class="where">plugin/src/lib.rs</span></td></tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>3. Connectors 协议 API</h2>
+        <p>
+          源码根：<span class="where">codex-rs/connectors/src/</span>。管理 connector（App）目录发现、元数据、缓存和可访问性。
+        </p>
+
+        <h3>3.1 AppInfo（connector 核心模型）</h3>
+        <div class="filetree">pub struct AppInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option&lt;String&gt;,
+    pub logo_url: Option&lt;String&gt;,
+    pub logo_url_dark: Option&lt;String&gt;,
+    pub icon_assets: Option&lt;HashMap&lt;String, String&gt;&gt;,
+    pub icon_dark_assets: Option&lt;HashMap&lt;String, String&gt;&gt;,
+    pub distribution_channel: Option&lt;String&gt;,
+    pub branding: Option&lt;AppBranding&gt;,
+    pub app_metadata: Option&lt;AppMetadata&gt;,
+    pub labels: Option&lt;HashMap&lt;String, String&gt;&gt;,
+    pub install_url: Option&lt;String&gt;,
+    pub is_accessible: bool,
+    pub is_enabled: bool,
+    pub plugin_display_names: Vec&lt;String&gt;,
+}</div>
+
+        <h4>AppBranding</h4>
+        <div class="filetree">pub struct AppBranding {
+    pub category: Option&lt;String&gt;,
+    pub developer: Option&lt;String&gt;,
+    pub website: Option&lt;String&gt;,
+    pub privacy_policy: Option&lt;String&gt;,
+    pub terms_of_service: Option&lt;String&gt;,
+    pub is_discoverable_app: bool,
+}</div>
+
+        <h4>AppMetadata</h4>
+        <div class="filetree">pub struct AppMetadata {
+    pub review: Option&lt;AppReview&gt;,
+    pub categories: Option&lt;Vec&lt;String&gt;&gt;,
+    pub sub_categories: Option&lt;Vec&lt;String&gt;&gt;,
+    pub seo_description: Option&lt;String&gt;,
+    pub screenshots: Option&lt;Vec&lt;AppScreenshot&gt;&gt;,
+    pub developer: Option&lt;String&gt;,
+    pub version: Option&lt;String&gt;,
+    pub version_id: Option&lt;String&gt;,
+    pub version_notes: Option&lt;String&gt;,
+    pub first_party_type: Option&lt;String&gt;,
+    pub first_party_requires_install: Option&lt;bool&gt;,
+    pub show_in_composer_when_unlinked: Option&lt;bool&gt;,
+}</div>
+
+        <h3>3.2 目录发现流程</h3>
+        <div class="filetree">pub async fn list_all_connectors_with_options&lt;F, Fut&gt;(
+    cache_context: ConnectorDirectoryCacheContext,
+    is_workspace_account: bool,
+    force_refetch: bool,
+    fetch_page: F,                              // FnMut(String) -&gt; Fut(Result&lt;DirectoryListResponse&gt;)
+) -&gt; anyhow::Result&lt;Vec&lt;AppInfo&gt;&gt;
+
+pub fn cached_directory_connectors(
+    cache_context: &amp;ConnectorDirectoryCacheContext,
+) -&gt; Option&lt;Vec&lt;AppInfo&gt;&gt;</div>
+        <p>发现流程：内存缓存（TTL 1 小时）→ 磁盘缓存 → 远端分页拉取 → 合并同名 app → 标准化名称/描述/install_url → 写回缓存。</p>
+
+        <h3>3.3 可访问性</h3>
+        <div class="filetree">pub struct AccessibleConnectorTool {
+    pub connector_id: String,
+    pub connector_name: Option&lt;String&gt;,
+    pub connector_description: Option&lt;String&gt;,
+    pub plugin_display_names: Vec&lt;String&gt;,
+}
+
+pub fn collect_accessible_connectors&lt;I&gt;(tools: I) -&gt; Vec&lt;AppInfo&gt;
+where I: IntoIterator&lt;Item = AccessibleConnectorTool&gt;</div>
+        <p>将已安装可访问的 connector 工具转为 AppInfo 列表（去重、排序：已可访问在前，按名称排列）。</p>
+
+        <h3>3.4 AppToolPolicy（工具权限策略）</h3>
+        <div class="filetree">pub struct AppToolPolicy { /* tool access control */ }
+pub struct AppToolPolicyEvaluator { /* evaluates policy at runtime */ }
+pub struct AppToolPolicyInput { /* input for evaluation */ }
+
+pub fn app_is_enabled(apps_config: &amp;[AppToolPolicy], app_id: &amp;str) -&gt; bool
+pub fn apps_config_from_layer_stack(stack: &amp;ConfigLayerStack) -&gt; Vec&lt;AppToolPolicy&gt;</div>
+
+        <h3>3.5 公开符号索引</h3>
+        <table>
+          <thead><tr><th>符号</th><th>源文件</th></tr></thead>
+          <tbody>
+            <tr><td><code>AppInfo</code> / <code>AppBranding</code> / <code>AppMetadata</code> / <code>AppReview</code> / <code>AppScreenshot</code></td><td><span class="where">connectors/src/app_info.rs</span></td></tr>
+            <tr><td><code>DirectoryListResponse</code> / <code>DirectoryApp</code></td><td><span class="where">connectors/src/lib.rs</span></td></tr>
+            <tr><td><code>list_all_connectors_with_options()</code> / <code>cached_directory_connectors()</code></td><td><span class="where">connectors/src/lib.rs</span></td></tr>
+            <tr><td><code>ConnectorDirectoryCacheKey</code> / <code>ConnectorDirectoryCacheContext</code></td><td><span class="where">connectors/src/lib.rs</span> + <span class="where">connectors/src/directory_cache.rs</span></td></tr>
+            <tr><td><code>AccessibleConnectorTool</code> / <code>collect_accessible_connectors()</code></td><td><span class="where">connectors/src/accessible.rs</span></td></tr>
+            <tr><td><code>AppToolPolicy</code> / <code>app_is_enabled()</code> / <code>apps_config_from_layer_stack()</code></td><td><span class="where">connectors/src/app_tool_policy.rs</span></td></tr>
+            <tr><td><code>ConnectorSnapshot</code> / <code>PluginConnectorSource</code></td><td><span class="where">connectors/src/snapshot.rs</span></td></tr>
+            <tr><td><code>connector_display_label()</code> / <code>connector_mention_slug()</code></td><td><span class="where">connectors/src/metadata.rs</span></td></tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>4. File-Search 引擎 API</h2>
+        <p>
+          源码根：<span class="where">codex-rs/file-search/src/</span>。基于 <code>nucleo</code> 的模糊文件名搜索引擎，支持并行文件树遍历和增量查询更新。
+        </p>
+
+        <h3>4.1 核心类型</h3>
+
+        <h4>FileMatch（单条匹配结果）</h4>
+        <div class="filetree">pub struct FileMatch {
+    pub score: u32,                  // nucleo 相关性评分
+    pub path: PathBuf,               // 相对于搜索根目录的路径
+    pub match_type: MatchType,       // File 或 Directory
+    pub root: PathBuf,               // 所属搜索根目录
+    pub indices: Option&lt;Vec&lt;u32&gt;&gt;,  // 匹配字符索引（仅 compute_indices=true 时填充）
+}
+
+pub enum MatchType { File, Directory }</div>
+
+        <h4>FileSearchOptions</h4>
+        <div class="filetree">pub struct FileSearchOptions {
+    pub limit: NonZero&lt;usize&gt;,         // 最大返回条数（默认 20）
+    pub exclude: Vec&lt;String&gt;,           // 排除模式
+    pub threads: NonZero&lt;usize&gt;,        // 工作线程数（默认 2）
+    pub compute_indices: bool,          // 是否计算匹配字符索引
+    pub respect_gitignore: bool,        // 是否遵守 .gitignore（默认 true）
+}</div>
+
+        <h4>FileSearchResults / FileSearchSnapshot</h4>
+        <div class="filetree">pub struct FileSearchResults {
+    pub matches: Vec&lt;FileMatch&gt;,
+    pub total_match_count: usize,       // 实际匹配总数（可能多于返回条数）
+}
+
+pub struct FileSearchSnapshot {
+    pub query: String,
+    pub matches: Vec&lt;FileMatch&gt;,
+    pub total_match_count: usize,
+    pub scanned_file_count: usize,      // 已扫描文件数
+    pub walk_complete: bool,            // 文件遍历是否完成
+}</div>
+
+        <h3>4.2 核心 API</h3>
+
+        <h4>同步一次性搜索</h4>
+        <div class="filetree">pub fn run(
+    pattern_text: &amp;str,
+    roots: Vec&lt;PathBuf&gt;,
+    options: FileSearchOptions,
+    cancel_flag: Option&lt;Arc&lt;AtomicBool&gt;&gt;,
+) -&gt; anyhow::Result&lt;FileSearchResults&gt;</div>
+
+        <h4>流式会话搜索（支持增量查询更新）</h4>
+        <div class="filetree">pub fn create_session(
+    search_directories: Vec&lt;PathBuf&gt;,
+    options: FileSearchOptions,
+    reporter: Arc&lt;dyn SessionReporter&gt;,
+    cancel_flag: Option&lt;Arc&lt;AtomicBool&gt;&gt;,
+) -&gt; anyhow::Result&lt;FileSearchSession&gt;
+
+impl FileSearchSession {
+    pub fn update_query(&amp;self, pattern_text: &amp;str);
+    // Drop 时自动发送 Shutdown 信号
+}
+
+pub trait SessionReporter: Send + Sync + 'static {
+    fn on_update(&amp;self, snapshot: &amp;FileSearchSnapshot);  // 去抖后的 top-N 更新
+    fn on_complete(&amp;self);                                 // 空闲或取消时调用
+}</div>
+
+        <h4>CLI 入口</h4>
+        <div class="filetree">pub struct Cli {
+    pub json: bool,
+    pub limit: NonZero&lt;usize&gt;,     // 默认 64
+    pub cwd: Option&lt;PathBuf&gt;,
+    pub compute_indices: bool,
+    pub threads: NonZero&lt;usize&gt;,    // 默认 2
+    pub exclude: Vec&lt;String&gt;,
+    pub pattern: Option&lt;String&gt;,
+}
+
+pub async fn run_main&lt;T: Reporter&gt;(cli: Cli, reporter: T) -&gt; anyhow::Result&lt;()&gt;</div>
+
+        <h3>4.3 架构流水线</h3>
+        <pre>create_session()
+  ├── build_override_matcher()        ← 排除模式 → ignore::Override
+  ├── Nucleo::new()                   ← nucleo 模糊匹配引擎（match_paths 模式）
+  │     └── notify → NucleoNotify 信号
+  ├── spawn walker_worker()            ← 并行遍历目录树
+  │     ├── WalkBuilder（follow_links, require_git, git_ignore 等）
+  │     ├── 每 1024 条检查 cancel / shutdown 标志
+  │     └── injector.push(path) → nucleo 索引
+  └── spawn matcher_worker()           ← 匹配循环
+        ├── WorkSignal::QueryUpdated → reparse pattern（支持追加式补全）
+        ├── WorkSignal::NucleoNotify → nucleo.tick() → snapshot
+        └── WorkSignal::WalkComplete → 最终 snapshot → on_complete()</pre>
+
+        <h3>4.4 公开符号索引</h3>
+        <table>
+          <thead><tr><th>符号</th><th>源文件</th></tr></thead>
+          <tbody>
+            <tr><td><code>FileMatch</code> / <code>MatchType</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>FileSearchOptions</code> / <code>FileSearchResults</code> / <code>FileSearchSnapshot</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>FileSearchSession</code> / <code>SessionReporter</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>create_session()</code> / <code>run()</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>Reporter</code> trait</td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>Cli</code> / <code>run_main()</code></td><td><span class="where">file-search/src/cli.rs</span> + <span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>cmp_by_score_desc_then_path_asc()</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+            <tr><td><code>file_name_from_path()</code></td><td><span class="where">file-search/src/lib.rs</span></td></tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>5. Context-Fragments 类型 API</h2>
+        <p>
+          源码根：<span class="where">codex-rs/context-fragments/src/</span>。定义上下文片段的注入协议 —— 带标记的消息片段如何被构造、渲染和后续识别。
+        </p>
+
+        <h3>5.1 ContextualUserFragment（核心 trait）</h3>
+        <div class="filetree">pub trait ContextualUserFragment {
+    fn role(&amp;self) -&gt; &amp;'static str;                       // "user" 或 "developer"
+    fn markers(&amp;self) -&gt; (&amp;'static str, &amp;'static str);      // 包裹 body 的前后标记
+    fn body(&amp;self) -&gt; String;                                // 片段正文
+    fn type_markers() -&gt; (&amp;'static str, &amp;'static str)        // 类型级标记（用于后续匹配）
+        where Self: Sized;
+    fn matches_text(text: &amp;str) -&gt; bool                      // 判断一段文本是否属于此类型
+        where Self: Sized;
+
+    // 派生方法
+    fn render(&amp;self) -&gt; String;                              // markers.0 + body + markers.1
+    fn into(self) -&gt; ResponseItem;                            // 转为 ResponseItem::Message
+    fn into_boxed_response_item(self: Box&lt;Self&gt;) -&gt; ResponseItem;
+    fn into_response_input_item(self) -&gt; ResponseInputItem;
+}</div>
+
+        <h3>5.2 FragmentRegistration（类型注册）</h3>
+        <div class="filetree">pub trait FragmentRegistration: Sync {
+    fn matches_text(&amp;self, text: &amp;str) -&gt; bool;
+}
+
+pub struct FragmentRegistrationProxy&lt;T&gt; { /* PhantomData */ }
+
+impl&lt;T: ContextualUserFragment&gt; FragmentRegistration
+    for FragmentRegistrationProxy&lt;T&gt; { ... }</div>
+        <p>
+          <code>FragmentRegistrationProxy</code> 是一个零大小类型，将任意 <code>ContextualUserFragment</code>
+          实现注册为可匹配的片段注册项。用于上下文过滤代码中识别已注入的片段，无需构造具体载荷。
+        </p>
+
+        <h3>5.3 AdditionalContextUserFragment（用户角色附加上下文）</h3>
+        <div class="filetree">pub struct AdditionalContextUserFragment {
+    key: String,     // 上下文键名
+    value: String,   // 上下文值
+}
+
+// role → "user"
+// markers → ("&lt;external_", "&gt;")  ... 实际匹配用前缀/后缀检测
+// body   → "{key}&gt;{truncated_value}&lt;/external_{key}&gt;"
+//    其中 value 被 truncate_middle_with_token_budget(MAX=1000) 截断</div>
+
+        <h3>5.4 AdditionalContextDeveloperFragment（开发者角色附加上下文）</h3>
+        <div class="filetree">pub struct AdditionalContextDeveloperFragment {
+    key: String,
+    value: String,
+}
+
+// role → "developer"
+// markers → ("", "")  —— 无标记，不参与 matches_text
+// body   → "&lt;{key}&gt;{truncated_value}&lt;/{key}&gt;"
+//    其中 value 被 truncate_middle_with_token_budget(MAX=1000) 截断</div>
+
+        <h3>5.5 片段标记匹配规则</h3>
+        <p>
+          <code>matches_marked_text(start, end, text)</code> 使用大小写不敏感的 trim 匹配：
+          text 去掉前导空白后以 start_marker 开头，去掉尾部空白后以 end_marker 结尾。
+          无标记的片段（markers 均为空串）永远不匹配。
+        </p>
+
+        <h3>5.6 公开符号索引</h3>
+        <table>
+          <thead><tr><th>符号</th><th>源文件</th></tr></thead>
+          <tbody>
+            <tr><td><code>ContextualUserFragment</code> trait</td><td><span class="where">context-fragments/src/fragment.rs</span></td></tr>
+            <tr><td><code>FragmentRegistration</code> trait / <code>FragmentRegistrationProxy&lt;T&gt;</code></td><td><span class="where">context-fragments/src/fragment.rs</span></td></tr>
+            <tr><td><code>AdditionalContextUserFragment</code></td><td><span class="where">context-fragments/src/additional_context.rs</span></td></tr>
+            <tr><td><code>AdditionalContextDeveloperFragment</code></td><td><span class="where">context-fragments/src/additional_context.rs</span></td></tr>
+            <tr><td><code>matches_marked_text()</code></td><td><span class="where">context-fragments/src/fragment.rs</span>（pub(crate)）</td></tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>6. 跨模块关键路径</h2>
+        <table>
+          <thead>
+            <tr><th>场景</th><th>涉及模块</th><th>关键调用</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>插件安装后 hook 生效</td>
+              <td>plugin → hooks</td>
+              <td><code>core-plugins loader</code> 解析 <code>PluginHookSource</code> → <code>HooksConfig.plugin_hook_sources</code> → <code>discover_handlers()</code> → 注入 <code>PLUGIN_ROOT</code> 等环境变量</td>
+            </tr>
+            <tr>
+              <td>插件 MCP server 工具路由</td>
+              <td>plugin → MCP</td>
+              <td><code>PluginLoadOutcome.effective_mcp_servers()</code> → <code>McpConnectionManager</code> 启动 client → <code>tools/list</code> → <code>tools/call</code></td>
+            </tr>
+            <tr>
+              <td>插件 skills 注入</td>
+              <td>plugin → core-skills</td>
+              <td><code>PluginLoadOutcome.effective_skill_roots()</code> → <code>SkillsService</code> extra roots → <code>SkillLoadOutcome</code></td>
+            </tr>
+            <tr>
+              <td>Hook 输出追加到上下文</td>
+              <td>hooks → context-fragments</td>
+              <td>Hook outcome 的 <code>additional_contexts</code> 经 <code>AdditionalContextUserFragment</code> 渲染 → turn input 注入</td>
+            </tr>
+            <tr>
+              <td>Connector 工具可访问性</td>
+              <td>connectors → tools</td>
+              <td><code>collect_accessible_connectors()</code> → 合并已安装 connector 列表 → 决定模型可见工具</td>
+            </tr>
+            <tr>
+              <td>文件搜索用于模型工具</td>
+              <td>file-search → tools</td>
+              <td><code>FileSearchSession</code> 创建 → <code>update_query()</code> 响应模型文件搜索请求 → 结果返回模型</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- ================================================================== -->
+        <h2>7. 源码对照速查</h2>
+        <div class="filetree">codex-rs/
+├── hooks/src/                        ← 1. Hooks 拦截点
+│   ├── lib.rs                        ← HOOK_EVENT_NAMES, 公开符号导出
+│   ├── types.rs                      ← Hook, HookResult, HookPayload, HookEvent
+│   ├── registry.rs                   ← Hooks, HooksConfig, list_hooks
+│   ├── schema.rs                     ← 10 种事件的 input/output JSON schema
+│   ├── engine/
+│   │   ├── mod.rs                    ← ClaudeHooksEngine, ConfiguredHandler, HookListEntry
+│   │   ├── discovery.rs              ← discover_handlers() 全量发现
+│   │   ├── dispatcher.rs             ← select_handlers(), execute_handlers()
+│   │   ├── command_runner.rs         ← run_command() 进程执行
+│   │   └── output_parser.rs          ← JSON 输出解析
+│   └── events/
+│       ├── pre_tool_use.rs           ← PreToolUseRequest / PreToolUseOutcome
+│       ├── post_tool_use.rs          ← PostToolUseRequest / PostToolUseOutcome
+│       ├── permission_request.rs     ← PermissionRequestRequest / PermissionRequestOutcome
+│       ├── compact.rs                ← PreCompact / PostCompact request/outcome
+│       ├── session_start.rs          ← SessionStartRequest / SessionStartOutcome
+│       ├── user_prompt_submit.rs     ← UserPromptSubmitRequest / UserPromptSubmitOutcome
+│       └── stop.rs                   ← StopRequest / StopOutcome
+├── plugin/src/                       ← 2. Plugin 清单
+│   ├── manifest.rs                   ← PluginManifest, paths, interface
+│   ├── provider.rs                   ← PluginProvider, ResolvedPlugin, PluginResourceLocator
+│   ├── load_outcome.rs               ← LoadedPlugin, PluginLoadOutcome, PluginCapabilitySummary
+│   ├── plugin_id.rs                  ← PluginId, segment 校验
+│   └── lib.rs                        ← AppDeclaration, PluginHookSource, PluginTelemetryMetadata
+├── connectors/src/                   ← 3. Connectors 协议
+│   ├── lib.rs                        ← list_all_connectors_with_options, 目录缓存
+│   ├── app_info.rs                   ← AppInfo, AppBranding, AppMetadata
+│   ├── accessible.rs                 ← AccessibleConnectorTool, collect_accessible_connectors
+│   ├── app_tool_policy.rs            ← AppToolPolicy, app_is_enabled
+│   ├── metadata.rs                   ← connector_display_label, connector_mention_slug
+│   ├── directory_cache.rs            ← 磁盘缓存持久化
+│   └── merge.rs                      ← 目录 app 合并逻辑
+├── file-search/src/                  ← 4. File-Search 引擎
+│   ├── lib.rs                        ← FileMatch, FileSearchSession, create_session, run
+│   ├── cli.rs                        ← Cli 参数定义
+│   └── main.rs                       ← CLI 入口
+└── context-fragments/src/            ← 5. Context-Fragments 类型
+    ├── lib.rs                        ← 公开符号导出
+    ├── fragment.rs                   ← ContextualUserFragment, FragmentRegistration
+    └── additional_context.rs         ← AdditionalContextUserFragment, AdditionalContextDeveloperFragment</div>
+
+        <h2>审计提示</h2>
+        <p>
+          排查扩展相关问题时，按以下链路定位：
+        </p>
+        <ol>
+          <li><strong>Plugins 加载</strong>：检查 <code>PluginLoadOutcome</code> 的 <code>error</code> 字段、<code>hook_load_warnings</code>。</li>
+          <li><strong>Hooks 触发</strong>：先用 <code>preview_*()</code> 确认 handler 是否被选中；再检查 trust_status（Managed / Trusted / Modified / Untrusted）。未信任的非 managed hook 不会执行。</li>
+          <li><strong>MCP tools 可见</strong>：确认 <code>effective_mcp_servers()</code> 有目标 server；用 <code>McpConnectionManager</code> 的 startup status 排查连接失败。</li>
+          <li><strong>Connector 不可用</strong>：检查 <code>is_accessible</code>、<code>is_enabled</code>、<code>app_tool_policy</code> 是否禁用。</li>
+          <li><strong>File-Search 无结果</strong>：确认 <code>respect_gitignore</code> 设置；检查 <code>exclude</code> 模式；<code>total_match_count</code> vs <code>matches.len()</code> 判断是否截断。</li>
+          <li><strong>Context 片段不显示</strong>：确认 fragment markers 非空；检查 <code>truncate_middle_with_token_budget(1000)</code> 是否截断了关键内容。</li>
+        </ol>
+      </section>
+    </main>
+  </body>
+</html>

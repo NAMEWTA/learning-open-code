@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0002 个股数据 — 估值+财务路径</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>0002 个股数据 — 估值+财务路径</h1>
+  <p class="meta">学习目标：15 分钟内能画出 /api/valuation → /api/valuation/percentile → /api/financials 的请求链，说出各端点的数据源、缓存 TTL 和前端二次加工逻辑。</p>
+
+  <h2>1. 主数据块的五个端点</h2>
+  <p>在 <a href="./0001-flow-map.html">0001 全链路地图</a> 中我们了解到，主数据块通过 <code>Promise.all</code> 并发发起 5 个端点（news 独立降级不计在内）。这 5 个端点构成了个股页面的核心信息密度：</p>
+
+  <table>
+    <tr><th>端点</th><th>后端函数</th><th>数据源</th><th>缓存</th><th>依赖</th></tr>
+    <tr><td><code>/api/valuation</code></td><td><code>astock.full_valuation(code)</code></td><td>腾讯行情 + 东财一致预期</td><td>无缓存</td><td>标准库 + requests</td></tr>
+    <tr><td><code>/api/valuation/percentile</code></td><td><code>astock.valuation_percentile(code)</code></td><td>同花顺 5 年历史序列</td><td>30 分钟</td><td>akshare（501 降级）</td></tr>
+    <tr><td><code>/api/financials</code></td><td><code>astock.financials(code)</code></td><td>同花顺财务摘要</td><td>30 分钟</td><td>akshare（501 降级）</td></tr>
+    <tr><td><code>/api/reports</code></td><td><code>astock.eastmoney_reports(code)</code></td><td>东财研报列表</td><td>无缓存</td><td>requests</td></tr>
+    <tr><td><code>/api/announcements</code></td><td><code>astock.announcements(code)</code></td><td>东财公告</td><td>15 分钟</td><td>requests</td></tr>
+  </table>
+
+  <p><strong>缓存设计逻辑：</strong>估值分位和财务数据基于同花顺的历史序列和最新报告期，变化频率是季度/年级别，因此给 30 分钟长缓存。公告可能在盘中发布，给 15 分钟缓存。而估值和研报数据涉及实时行情和 PDF 链接，变化快，不做缓存。这体现了分级缓存的核心理念——<strong>越静态的数据缓存越久</strong>。</p>
+
+  <h2>2. 估值端点：full_valuation 的数据聚合</h2>
+  <p><code>/api/valuation</code> 是整个页面中信息密度最高的端点。它返回的数据不仅包含实时行情，还聚合了机构一致预期：</p>
+  <div class="diagram">astock.full_valuation(code)
+  │
+  ├─ 1. 调用 tencent_quote([code]) → 获取实时行情
+  │     现价 / PE(TTM) / PB / 总市值 / 涨停价 / 跌停价
+  │
+  ├─ 2. 调用 eastmoney_forecast(code) → 获取一致预期
+  │     26E EPS / 27E EPS / 机构覆盖家数
+  │
+  └─ 3. 客户端计算 → 前向 PE / PEG / 消化年数
+        PE_26e = price / eps_26e
+        PEG = PE_26e / CAGR（CAGR 为负时 PEG 无效）
+        digest_years = PE_ttm / CAGR（估值需要多少年盈利增长来消化）</div>
+
+  <p>注意前向 PE 和 PEG 是<strong>在 astock.py 内部计算</strong>的，不是直接从数据源获取的。这意味着如果一致预期数据缺失（很多中小票没有分析师覆盖），这些字段就是 null，前端用 "—" 显示。理解这一点很重要：<strong>估值的精度取决于一致预期数据的可得性，不同市值的股票信息密度天然不对等</strong>。</p>
+
+  <h2>3. 估值分位带：理杏仁式可视化</h2>
+  <p>估值分位端点的缓存键是 <code>(code)</code>——它是一个全局字典 <code>_PCT_CACHE</code>，直接以代码为键。这与资金面端点的 <code>(endpoint, code)</code> 复合键不同（见 <a href="./0003-fund-flow-signals.html">0003 资金面</a>），因为分位数据是单端点的。</p>
+
+  <div class="diagram">_PCT_CACHE[code] = (timestamp, data)   ← 30 分钟 TTL
+data = {
+  period: "近5年",
+  metrics: {
+    pe_ttm: { current, percentile, min, max, p20, p50, p80, n },
+    pb:      { current, percentile, min, max, p20, p50, p80, n }
+  }
+}</div>
+
+  <p>前端 <code>ValBand</code> 组件（StockData.tsx:53-78）将这个数据渲染为一条三色带：绿=低估区（分位 &lt;20%）、灰=合理区（20-80%）、红=高估区（&gt;80%）。这条带子<strong>只显示位置，不划买卖线</strong>——源码注释反复强调"不构成买卖建议"，这是合规要求。</p>
+
+  <h2>4. 财报速览：终端二次加工</h2>
+  <p>数据到了前端不是直接展示，<code>EarningsSnapshot</code> 组件（<code>EarningsSnapshot.tsx</code>）对原始数据做了<strong>机械分档信号标签</strong>：</p>
+  <div class="diagram">val/fin/pctl 三个对象 → 纯前端计算 →
+
+信号标签（机械分档，不含买卖倾向）：
+  "营收正增长"       ← revenue_yoy >= 0
+  "营收高增长"       ← revenue_yoy >= 30
+  "利润增速快于营收"  ← net_profit_yoy >= revenue_yoy
+  "高 ROE 15%"       ← roe >= 15
+  "PE 低分位 25%"    ← pe_ttm.percentile < 30
+  "PEG 0.8"          ← 直接取自 val.peg
+
+前向预期行：
+  "一致预期 26E EPS 3.2 · 前向 PE 18.5 · 估值消化 3 年 · 15 家机构覆盖"</div>
+
+  <p>这个组件的设计理念是<strong>"结论先行"</strong>——把财报、估值、一致预期三个维度的数据压缩成一句话级别的判断。但它严格保持客观：只做机械分档（高/中/低、正/负），不做任何预测或推荐。</p>
+
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>估值分位端点的 30 分钟缓存为什么用代码作为单键而非 <code>(endpoint, code)</code> 复合键？如果后续新增一个也在 <code>_PCT_CACHE</code> 中存数据的端点，会发生什么问题？</p>
+    <p><strong>参考答案：</strong>因为 <code>_PCT_CACHE</code> 是一个专用字典，只服务 <code>/api/valuation/percentile</code> 这一个端点，所以代码本身就是唯一键。但如果将来有人把其他端点的数据也写进这个字典且恰好用了相同的代码键，就会发生缓存污染——估值分位数据被其他端点覆盖，导致展示错误。这就是为什么资金面端点用的是 <code>_DC_CACHE[(endpoint, code)]</code> 复合键——它是 10 个端点共享的通用缓存池，必须用复合键隔离。设计缓存键时，要考虑缓存的<strong>共享范围</strong>。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/app.py:329-344</code>（估值分位端点+缓存）、<code>backend/app.py:368-395</code>（财务与估值端点）、<code>frontend/src/components/ui/EarningsSnapshot.tsx</code>（机械分档逻辑）、<code>frontend/src/pages/StockData.tsx:53-78</code>（ValBand 组件）。端点速查表见 <a href="../reference/stock-data-flow-map.html">stock-data-flow-map</a>。下节课深入资金面+信号路径：<a href="./0003-fund-flow-signals.html">0003 资金面+信号路径</a>。</p>
+</main>
+</body>
+</html>

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — Provider 路由全貌地图</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .route-block { text-align: center; margin: 20px 0; }
+  .route-block pre { display: inline-block; text-align: left; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 1 节 &middot; 预计 14 分钟</p>
+
+<h1>0001 — Provider 路由全貌地图</h1>
+
+<p class="objective"><strong>学习目标：</strong>能画出 11 种 provider 经工厂路由到 4 个 Client 类的完整映射关系，解释 <code>_OPENAI_COMPATIBLE</code> 元组的 8 合 1 复用设计，并说出双 LLM（quick_think / deep_think）在配置层、注册表层和工厂层的三段体现方式。</p>
+
+<h2>1. 配置层入口：两条 LLM 链路的起点</h2>
+
+<p>整条路由链路的起点在 <code>default_config.py</code> 的三个配置键：</p>
+
+<pre><code>DEFAULT_CONFIG = {
+    "llm_provider": "openai",        # 默认供应商（CLI 可覆盖）
+    "deep_think_llm": "gpt-5.4",     # 深度推理模型
+    "quick_think_llm": "gpt-5.4-mini", # 快速响应模型
+    "backend_url": None,             # 自定义代理网关
+}</code></pre>
+
+<p>这三个键定义了两条并行的 LLM 链路——<strong>quick_think</strong> 链路服务 14 个快速 Agent（7 Analyst + 2 Researcher + 3 Risk Debator + 1 Trader + 1 Quality Gate），<strong>deep_think</strong> 链路仅服务 2 个核心决策 Agent（Research Manager + Portfolio Manager）。每条约 30-50 次调用中，只有 2 次走深度模型，这是成本控制的核心策略。</p>
+
+<p>CLI 交互时会覆盖 <code>llm_provider</code>，但 quick/deep 的模型选择来自 <code>model_catalog.py</code> 的 MODEL_OPTIONS 注册表——它为 9 个供应商（不含 OpenRouter 和 Azure）各自维护 quick 和 deep 两套候选列表。这构成了<strong>配置层 + 注册表层</strong>的双层模型选择机制。</p>
+
+<h2>2. 工厂路由决策树：11 进 4 出</h2>
+
+<p><code>factory.py</code> 的 <code>create_llm_client()</code> 是整条链路的<strong>唯一入口</strong>。graph 层的 <code>setup.py</code> 调用它 16 次（14 个 quick + 2 个 deep），每次传入 provider 字符串和模型名，获得一个已配置的 Client 实例。路由逻辑分 4 路：</p>
+
+<div class="route-block">
+<pre>
+create_llm_client(provider, model, base_url, **kwargs)
+  │
+  ├─ provider in _OPENAI_COMPATIBLE? ──→ OpenAIClient      (8 种)
+  │   ("openai","xai","deepseek","qwen","glm",
+  │    "ollama","openrouter","minimax")
+  │
+  ├─ provider == "anthropic"? ──→ AnthropicClient           (1 种)
+  │
+  ├─ provider == "google"? ──→ GoogleClient                 (1 种)
+  │
+  ├─ provider == "azure"? ──→ AzureOpenAIClient             (1 种)
+  │
+  └─ 都不匹配 ──→ ValueError("Unsupported LLM provider")
+</pre>
+</div>
+
+<p>三个关键设计决策：</p>
+<ul>
+  <li><strong>8 合 1 复用</strong>——OpenAI、xAI、DeepSeek、Qwen、GLM、Ollama、OpenRouter、MiniMax 全部兼容 OpenAI Chat Completions 协议，统一走 <code>OpenAIClient</code>。差异点（base_url、API Key 环境变量、DeepSeek thinking-mode）在 <code>get_llm()</code> 内部通过 provider 参数区分</li>
+  <li><strong>懒加载 import</strong>——每个分支内部才 import 具体 Client 类，避免模块导入时就拉入重型 SDK（如 <code>langchain_anthropic</code>），也不会因缺少某家 API Key 而导致整个模块导入失败</li>
+  <li><strong>provider 参数透传</strong>——OpenAIClient 构造函数接收 <code>provider=</code> 参数，存储为实例属性，供 <code>get_llm()</code> 内部查表选择 base_url 和 API Key 环境变量</li>
+</ul>
+
+<h2>3. base_client 抽象接口契约</h2>
+
+<p>所有 4 个 Client 类必须实现 <code>BaseLLMClient(ABC)</code> 的两个抽象方法，构成工厂返回值的统一契约：</p>
+
+<pre><code>class BaseLLMClient(ABC):
+    def __init__(self, model, base_url=None, **kwargs): ...
+
+    @abstractmethod
+    def get_llm(self) -> Any:
+        """返回已配置的 LangChain ChatModel 实例"""
+        pass
+
+    @abstractmethod
+    def validate_model(self) -> bool:
+        """校验模型名是否在已知列表中"""
+        pass
+
+    def warn_if_unknown_model(self) -> None:
+        """模板方法：校验失败发 RuntimeWarning，不阻断"""</code></pre>
+
+<p>同文件中的 <code>normalize_content(response)</code> 是模块级工具函数——多家供应商返回的 <code>response.content</code> 是 <code>[{"type":"reasoning",...}, {"type":"text","text":"..."}]</code> 列表而非字符串。此函数提取所有 text 块拼接为纯字符串，确保下游 Agent 收到统一格式。</p>
+
+<p>通过这个接口契约，graph 层调用 <code>client.get_llm()</code> 即可获得可用的 LangChain ChatModel，无需知道底层是 ChatOpenAI、ChatAnthropic 还是 ChatGoogleGenerativeAI。</p>
+
+<h2>4. 双 LLM 在整条链路中的三段体现</h2>
+
+<p>将前三节串起来，双 LLM 策略在链路上有三个明确的体现点：</p>
+
+<table>
+  <tr><th>阶段</th><th>位置</th><th>体现</th></tr>
+  <tr>
+    <td>配置层</td>
+    <td><code>default_config.py</code></td>
+    <td><code>quick_think_llm</code> 和 <code>deep_think_llm</code> 两个键，定义默认模型名</td>
+  </tr>
+  <tr>
+    <td>注册表层</td>
+    <td><code>model_catalog.py</code></td>
+    <td>MODEL_OPTIONS 为每个 provider 维护 quick 和 deep 两套候选列表</td>
+  </tr>
+  <tr>
+    <td>调用层</td>
+    <td><code>graph/setup.py</code></td>
+    <td>对 14 个 quick Agent 传 quick 模型创建 Client；对 2 个 deep Agent 传 deep 模型创建 Client</td>
+  </tr>
+</table>
+
+<p>客户端层本身<strong>不做 quick/deep 决策</strong>——它只负责按传入参数配置 LLM 实例。选择权在上游的 graph 编排层。这种关注点分离使得：切换 provider 只需改配置键；调整某个角色的模型只需改 setup 中的传参；新增模型只需改 MODEL_OPTIONS 注册表。三层各自独立演进。</p>
+
+<!-- ──────────────────────────────────────────── -->
+<div class="quiz">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong>不翻看上文，凭记忆写出 11 种 provider 到 4 个 Client 类的完整映射关系。</p>
+<p><strong>问题 2：</strong>为什么 <code>_OPENAI_COMPATIBLE</code> 元组能包含 8 种不同供应商？它们共享的协议基础是什么？</p>
+<p><strong>问题 3：</strong>双 LLM 策略在链路中有三段体现——配置层、注册表层、调用层。如果要把 Anthropic 的 quick 模型从 Sonnet 4.6 换成 Haiku 4.5，需要改哪几处？</p>
+
+<div class="answer" style="margin-top:16px;">
+<strong>参考答案</strong><br>
+<strong>1：</strong>OpenAI / xAI / DeepSeek / Qwen / GLM / Ollama / OpenRouter / MiniMax（8 种）→ OpenAIClient；Anthropic → AnthropicClient；Google → GoogleClient；Azure → AzureOpenAIClient。共 4 个具体 Client 类。<br>
+<strong>2：</strong>它们都兼容 OpenAI Chat Completions 协议（/v1/chat/completions 端点），仅在 base_url 和认证方式上有差异。LangChain 的 ChatOpenAI 封装了这个协议，8 种 provider 只需替换 base_url 和 API Key 即可复用同一套代码。<br>
+<strong>3：</strong>只需改一处——model_catalog.py 中 anthropic.quick 列表的默认选项。调用层（setup.py）和配置层（default_config）不需要改动，因为 Anthropic 的 provider 路由和 quick_think_llm 键名不变。
+</div>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>关联课程：</strong><a href="../../module-llm-clients/lessons/0001-llm-clients-module-tour.html">L1 — LLM 客户端模块总览</a> · <a href="../../00-overview/lessons/0001-project-map.html">L0 — 项目全景图</a> · <a href="0002-main-path.html">0002 — MiniMax 主路径追踪</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问任何 provider 路由细节、工厂模式设计或双 LLM 策略问题。
+</p>
+
+</div>
+</main>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>阶段详解：X-Claw 鉴权、去重逻辑与 PDF 异常处理</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: #f8f9fb; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.9rem 1.1rem; font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 1rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.86rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; }
+  th { background: #f5f7fa; font-weight: 600; font-size: 0.82rem; }
+  tr:nth-child(even) { background: #fafbfc; }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .warn { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .warn strong { color: #991b1b; }
+  .tip { background: #f0fdf4; border-left: 3px solid #16a34a; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .tip strong { color: #166534; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+</style>
+</head>
+<body>
+
+<h1>阶段详解：鉴权、去重与异常处理</h1>
+<p class="meta">
+  <span class="badge">L2 垂直切片</span>
+  <span class="badge">主题研报检索</span>
+  <span class="badge">第 2/2 节</span>
+  估计时长：14 分钟
+</p>
+
+<h2>1. 阶段一：iwencai X-Claw 鉴权与搜索</h2>
+
+<p>
+  iwencai 开放平台要求 <strong>SkillHub 2.0 协议头</strong>，缺一则返回 401。与普通 API 只需 <code>Authorization: Bearer xxx</code> 不同，iwencai 额外要求五个 X-Claw 头：
+</p>
+
+<pre>headers = {
+    "Authorization": f"Bearer {IWENCAI_KEY}",
+    "Content-Type": "application/json",
+    "X-Claw-Call-Type": "normal",
+    "X-Claw-Skill-Id": "report-search",
+    "X-Claw-Skill-Version": "2.0.0",
+    "X-Claw-Plugin-Id": "none",
+    "X-Claw-Plugin-Version": "none",
+    "X-Claw-Trace-Id": secrets.token_hex(32),  # 每次请求唯一
+}</pre>
+
+<p>一个关键细节：<code>X-Claw-Trace-Id</code> 每次请求必须生成新的 32 字节随机 hex，不能用固定值。这是请求追踪和防重放机制的一部分。</p>
+
+<div class="warn">
+  <strong>异常路径 — 401 未授权：</strong>首先检查 <code>IWENCAI_KEY</code> 环境变量是否设置、Key 是否过期。其次确认 X-Claw-Skill-Id 为 <code>"report-search"</code>（不是随意值）。如果刚申请 Key，可能需要等待几分钟生效。
+</div>
+
+<div class="warn">
+  <strong>异常路径 — 超时：</strong>iwencai 请求设置了 30 秒超时。如果某个冷门关键词搜索耗时过长，建议缩小 <code>size</code> 参数（默认 50 可降到 20），或为关键词列表添加 <code>try/except</code> 包裹，确保一个关键词失败不影响其余。
+</div>
+
+<h2>2. 阶段二：dedup_articles 去重逻辑详解</h2>
+
+<p>
+  <code>dedup_articles()</code> 的核心逻辑只有 7 行，但有两个值得深究的设计决策：
+</p>
+
+<pre>def dedup_articles(articles: list[dict]) -> list[dict]:
+    best = {}
+    for a in articles:
+        uid = a.get("uid", "") or f"{a.get('title','')}|{a.get('publish_date','')}"
+        score = float(a.get("score", 0))
+        if uid not in best or score > float(best[uid].get("score", 0)):
+            best[uid] = a
+    return sorted(best.values(), key=lambda x: x.get("publish_date", ""), reverse=True)</pre>
+
+<p><strong>决策 1 — uid fallback：</strong>当文章没有 <code>uid</code> 字段时，用 <code>title|publish_date</code> 拼接作为去重键。这是兜底策略——两个同标题同日期的文章近乎可以视为同一篇。缺点：如果同一机构同一天发布了两篇不同内容但有相同标题的研报，会误去重（概率极低）。</p>
+
+<p><strong>决策 2 — 按 score 保留最高分：</strong>去重冲突时保留 <code>score</code> 最高的一篇，而非最新的。这假设 iwencai 的 score 反映了与查询关键词的相关度——保留最相关段落比保留最新更重要。最终排序按日期倒序，确保使用者先看到最新研报。</p>
+
+<div class="tip">
+  <strong>关键词无结果降级：</strong>某关键词返回空列表时，循环继续执行下一个 query，不会中断。最终 <code>all_articles</code> 只包含有结果的关键词对应的文章。建议打印每个 query 的结果数，方便判断哪些关键词搜索效果不佳。
+</div>
+
+<h2>3. 阶段三与四：东财翻页 + PDF Referer 鉴权</h2>
+
+<p>
+  东财 reportapi 的翻页逻辑注意一个坑——接口参数中有三套翻页字段同时存在：
+</p>
+
+<pre>params = {
+    "pageNo": str(page),    # ← 翻页核心参数
+    "pageNum": str(page),   # 冗余但需同时传
+    "pageNumber": str(page), # 冗余但需同时传
+}</pre>
+
+<p>三个参数需要同时传同一页码，因为东财后端可能对不同客户端使用不同参数名。单独传一个在某些版本可能不生效。</p>
+
+<p>PDF 下载的 URL 模板固定为：</p>
+
+<pre>PDF_TPL = "https://pdf.dfcfw.com/pdf/H3_{info_code}_1.pdf"
+# 例: info_code="AP202607081234567890" → H3_AP202607081234567890_1.pdf</pre>
+
+<div class="warn">
+  <strong>异常路径 — PDF 403 Forbidden：</strong>东财 PDF 服务器检查 <code>Referer</code> 头，必须包含 <code>https://data.eastmoney.com/</code>。如果忘了传 Referer，直接访问 PDF URL 会返回 403。已下载过的 PDF 会自动跳过（检查本地文件是否存在），避免重复下载。
+</div>
+
+<div class="warn">
+  <strong>异常路径 — PDF 内容为空：</strong>即使 HTTP 200，返回内容也可能不是有效 PDF。代码检查 <code>len(r.content) >= 1024</code>——小于 1KB 的响应通常是错误页面 HTML，不是真实 PDF。这类 case 返回 <code>None</code> 并跳过。
+</div>
+
+<h2>4. 异常处理检查清单</h2>
+
+<p>全线异常覆盖清单，排查问题时逐项对照：</p>
+
+<table>
+  <tr><th>异常类型</th><th>症状</th><th>排查方向</th></tr>
+  <tr><td>iwencai 401</td><td>search 返回 HTTP 401</td><td>检查 IWENCAI_KEY 环境变量；确认 X-Claw 五个头齐全</td></tr>
+  <tr><td>iwencai 超时</td><td>30s 后 requests.Timeout</td><td>缩小 size；try/except 包裹单个 query 避免中断</td></tr>
+  <tr><td>iwencai 业务错误</td><td>status_code != 0</td><td>检查 status_msg；query 语法是否合法</td></tr>
+  <tr><td>关键词无结果</td><td>返回空列表</td><td>换更精准/更宽泛的关键词；先搜大类再细分</td></tr>
+  <tr><td>东财翻页不生效</td><td>总是返回第 1 页数据</td><td>确认 pageNo/pageNum/pageNumber 三参数同时传</td></tr>
+  <tr><td>PDF 403</td><td>download 返回 None</td><td>检查 Referer 头是否设为 data.eastmoney.com</td></tr>
+  <tr><td>PDF 空文件</td><td>HTTP 200 但文件 &lt; 1KB</td><td>infoCode 可能已失效或 PDF 未生成</td></tr>
+  <tr><td>东财限流</td><td>频繁 503 或连接被拒</td><td>确认使用 em_get() 统一入口，内置 3s 间隔</td></tr>
+</table>
+
+<!-- 练习 -->
+<div class="exercise">
+  <h3>判断题</h3>
+  <p><strong>问题：</strong>以下说法是否正确？"dedup_articles 去重时，如果两篇文章 uid 相同，保留发布日期最新的那一篇。"</p>
+  <button class="show-btn" onclick="document.getElementById('ex2-answer').classList.toggle('show')">显示答案</button>
+  <div class="answer" id="ex2-answer">
+    <strong>错误。</strong>去重时保留 <code>score</code> 最高的一篇（与查询关键词最相关），而非最新的。最终排序才是按日期倒序——这是两个独立操作：先按 score 去重，再按日期排序展示。
+  </div>
+</div>
+
+<div class="ref-links">
+  <p><strong>交叉链接：</strong></p>
+  <ul>
+    <li>上一节：<a href="./0001-flow-map.html">流程地图 — 四阶段调用链与双数据源对比</a></li>
+    <li>参考资料：<a href="../../module-research/lessons/0001-research-module-tour.html">L1 研报层总览</a></li>
+    <li>推荐阅读：<a href="../../../open-trading/a-stock-data/SKILL.md#L705" target="_blank">源码 — iwencai_search 完整实现</a></li>
+  </ul>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>对某个异常场景不太确定？向 agent 追问——它可以帮助排查具体错误信息或给出针对性的修复建议。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0003 CLI 适配与 MCP 服务</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>CLI 适配与 MCP 服务</h1>
+  <p class="meta">学习目标：15 分钟内能说清四种 CLI 的三种投递方式差异、cli_runtime.py 的超时控制设计，以及 MCP server 如何零依赖复用 chat.TOOLS。</p>
+
+  <h2>1. CLI 通道总览：四种引擎，三种投递方式</h2>
+  <p><code>cli_runtime.py:25</code> 的 <code>_CLI_DEFS</code> 字典是 CLI 适配的"注册表"。每个 CLI 有三个属性：可执行文件候选名、投递方式、参数构建函数：</p>
+  <table>
+    <tr><th>CLI</th><th>可执行文件</th><th>投递方式</th><th>关键参数</th></tr>
+    <tr><td>Claude</td><td><code>claude</code> / <code>openclaude</code></td><td><strong>system-file</strong></td><td><code>-p --system-prompt-file</code> + 禁用所有工具</td></tr>
+    <tr><td>Qwen</td><td><code>qwen</code></td><td><strong>stdin</strong></td><td><code>--yolo</code>（跳过确认）</td></tr>
+    <tr><td>DeepSeek</td><td><code>deepseek</code> / <code>codewhale</code></td><td><strong>arg</strong></td><td><code>exec --auto</code>（提示词作为位置参数）</td></tr>
+    <tr><td>Codex</td><td><code>codex</code></td><td><strong>stdin</strong></td><td><code>exec --skip-git-repo-check -</code>（<code>-</code> 从 stdin 读）</td></tr>
+  </table>
+  <p><strong>三种投递方式的本质差异</strong>——不同 CLI 对"系统提示词"和"用户提示词"的接收方式不同：</p>
+  <div class="diagram">方式 1: system-file（Claude 专属）
+  ├─ 系统提示词 → 写临时文件 (Path(tmpdir)/system.txt)
+  ├─ CLI 参数 → -p --system-prompt-file <文件路径>
+  └─ 用户提示词 → 走 stdin (proc.stdin.write(user_prompt))
+
+方式 2: stdin（Qwen / Codex）
+  ├─ system + user 合并为一段文本
+  └─ 全部走 stdin (proc.stdin.write(combined))
+
+方式 3: arg（DeepSeek 专属）
+  ├─ system + user 合并为一段文本
+  ├─ 作为最后一个位置参数传给 CLI
+  └─ 限制：≤ 110KB（_MAX_ARG_BYTES），超长抛异常</div>
+  <p>Claude 之所以能单独传 system prompt，是因为 Claude Code CLI 原生支持 <code>--system-prompt-file</code> 参数，这是 Claude 的独家能力。其他 CLI 没有这个接口，只能合并传入。</p>
+
+  <h2>2. 流式管道：读线程 + 带超时的队列</h2>
+  <p><code>run_cli_stream()</code>（140 行）是流式版的核心。它不能简单地 <code>for line in proc.stdout</code>——因为这是无限期阻塞读，CLI 卡住时永远走不到 <code>proc.wait(timeout=...)</code>。解决方案：</p>
+  <div class="diagram">run_cli_stream(kind, system_prompt, user_prompt)
+ │
+ ├─ 1. detect_cli(kind) → 查 PATH + 额外目录
+ │      遍历 _EXTRA_PATH_DIRS（Homebrew/npm/bun/deno/yarn 全局 bin）
+ │      判定: os.access(p, os.X_OK)
+ │
+ ├─ 2. 按投递方式构建 args + stdin_payload
+ │
+ ├─ 3. subprocess.Popen(..., text=True, bufsize=1)
+ │      stdin → 写入提示词后立即 close()
+ │      stdout → 管道，stderr → DEVNULL
+ │
+ ├─ 4. 读线程 + queue.Queue
+ │      daemon 线程: for line in proc.stdout → q.put(line) → q.put(None)
+ │      主线程: q.get(timeout=min(remaining, 1.0))
+ │      超时 → RuntimeError("生成超时")
+ │      None → EOF → break
+ │
+ ├─ 5. proc.wait(timeout=10) → 取退出码
+ │      rc != 0 → RuntimeError
+ │
+ └─ 6. finally: 若进程未退出 → kill()
+              清理临时目录 shutil.rmtree()</div>
+  <p><strong>设计要点</strong>：<code>_CLI_TIMEOUT_S = 300</code>（5 分钟）是兜底超时。读线程 + 队列的组合确保即使子进程挂起，主线程也不会被永久阻塞——每 1 秒检查一次剩余时间。</p>
+
+  <h2>3. CLI 通道的限制：为什么不能 function-calling</h2>
+  <p><code>chat.py:251</code> 的 <code>run_chat_cli()</code> 非常简短——拼好 prompt，调 CLI，返回文本。没有循环、没有工具调用。原因是：</p>
+  <ul>
+    <li>CLI 不像 API 那样有标准的 <code>tool_calls</code> 响应格式，无法自动触发工具执行。</li>
+    <li>CLI 的一次调用是"黑盒"——你只能读 stdout，无法在中间拦截"它想调工具"的信号。</li>
+    <li>即使 CLI 输出 JSON 格式的工具调用请求，没有统一的协议标准，每个 CLI 的输出格式不同。</li>
+  </ul>
+  <p><strong>因此 CLI 通道的数据必须已在 context 里</strong>。前端在发起请求时，把当前页面的数据（如持仓列表、个股行情、今日复盘摘要）序列化后塞进 <code>context</code> 参数，CLI 只做文本分析。对比 API 通道：context 参数同样可以传，但 API 通道还能让 AI 自己调工具——这是两条通道最本质的区别。</p>
+
+  <h2>4. MCP Server：将工具暴露给 agent</h2>
+  <p><code>mcp_server.py</code> 只有 107 行，是三条通道中最精简的。它的设计哲学是<strong>零依赖复用</strong>——不引入任何第三方库（纯标准库），直接复用 <code>chat.TOOLS</code> 和 <code>chat._exec_tool</code>：</p>
+  <div class="diagram">MCP 生命周期（5 步 handshake）:
+ │
+ ├─ 1. initialize
+ │     客户端 → {"method":"initialize", "params":{...}}
+ │     服务端 → {protocolVersion, capabilities:{tools:{}}, serverInfo}
+ │
+ ├─ 2. initialized（通知，无 id，不响应）
+ │     客户端 → {"method":"notifications/initialized"}
+ │
+ ├─ 3. tools/list
+ │     客户端 → {"method":"tools/list"}
+ │     服务端 → {tools: [MCP_TOOLS]}  ← 从 chat.TOOLS 转换
+ │     转换: OpenAI {type:"function", function:{name, description, parameters}}
+ │           → MCP   {name, description, inputSchema}
+ │
+ ├─ 4. tools/call（反复调用）
+ │     客户端 → {"method":"tools/call", params:{name, arguments}}
+ │     服务端 → chat._exec_tool(name, args)
+ │     返回 → {content:[{type:"text", text: JSON结果}], isError: ...}
+ │
+ └─ 5. ping（心跳）
+      客户端 → {"method":"ping"}
+      服务端 → {}</div>
+  <p><strong>通信方式</strong>：JSON-RPC 2.0 over stdio——每行一个 JSON 对象，<code>sys.stdin</code> 读入、<code>sys.stdout</code> 写出。这是 MCP 协议的标准传输层，无需 TCP 端口、无需 HTTP 服务器。</p>
+  <p><strong>挂载方式</strong>：在 Claude Code 中执行 <code>claude mcp add vibe-research -- /path/to/python /path/to/mcp_server.py</code>，之后 agent 就能在对话中直接调用 A 股数据工具。</p>
+
+  <h3>5. 三通道选型决策树</h3>
+  <div class="diagram">我要用 AI 分析投研数据……
+ │
+ ├─ 场景：自己用，想填个 key 就用
+ │   → API 接入（通道 1）
+ │   理由：最通用，支持 function-calling，AI 可以自己查数据
+ │
+ ├─ 场景：本机已装 Claude Code / 其他 CLI，不想再买 API key
+ │   → CLI 订阅接入（通道 2）
+ │   条件：数据已在页面上（复盘/要点/持仓分析），不需要 AI 再查
+ │   注意：不能 function-calling，数据靠前端 context
+ │
+ └─ 场景：用 Claude Code 做深度投研，想让它直接查数据
+     → MCP 服务（通道 3）
+     条件：已安装 Claude Code，配置了 mcp add
+     注意：这是给 agent 用的，不是给网页聊天用的</div>
+
+  <div class="callout">
+    <p><strong>检索练习：</strong>cli_runtime.py 的 <code>run_cli_stream()</code> 中，为什么不用简单的 <code>for line in proc.stdout</code> 读输出，而是要用 daemon 线程 + queue.Queue 的组合？</p>
+    <p><strong>参考答案：</strong><code>for line in proc.stdout</code> 是无限期阻塞读——只要子进程不关闭 stdout（比如挂起、死循环输出），主线程就会永远卡在这里。即使外层有 <code>timeout</code> 逻辑，也走不到 <code>proc.wait(timeout=...)</code>，超时形同虚设。线程 + 队列的方案让读操作独立于主线程，主线程用 <code>q.get(timeout=1.0)</code> 轮询，每 1 秒检查一次剩余时间，确保 300 秒兜底超时真正生效。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/cli_runtime.py:25-46</code>（CLI 定义表）、<code>140-216</code>（run_cli_stream 流式管道）、<code>backend/mcp_server.py:1-107</code>（完整 MCP 实现）、<code>backend/chat.py:251-262</code>（run_chat_cli 非流式版）。CLI 超时控制的线程模型细节和 MCP 协议规范见 <a href="../reference/ai-chat-flow-map.html">AI 对话全链路速查谱</a>。想测试某个 CLI 是否可用？让 agent 运行 <code>python -c "import cli_runtime; print(cli_runtime.detect_cli('claude'))"</code>。</p>
+</main>
+</body>
+</html>

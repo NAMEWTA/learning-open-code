@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 — 输入→分析→展示主成功路径</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .step-box {
+    border-left: 4px solid #4a90d9;
+    background: #f4f8fb;
+    padding: 12px 18px;
+    margin: 14px 0;
+    border-radius: 0 8px 8px 0;
+  }
+  .step-box h3 { margin: 0 0 6px; font-size: 1rem; color: #0b4f6b; }
+  .step-box pre { margin: 8px 0 0; font-size:0.78rem; }
+  .parallel-note {
+    background: #fef9e7;
+    border: 1px solid #f9e79f;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin: 14px 0;
+    font-size: 0.92rem;
+  }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 · 第 2 节 · 预计 15 分钟</p>
+
+<h1>0002 — 输入→分析→展示主成功路径</h1>
+
+<p class="objective"><strong>学习目标：</strong>能逐步骤走通从 ticker 解析、后台线程启动、stream chunk 阶段检测、到 finalize 落盘、最终报告渲染的完整主成功路径（happy path），理解每个步骤的输入/输出和线程上下文。</p>
+
+<h2>1. 入口：ticker 解析与线程启动</h2>
+
+<p>主路径的起点在侧边栏的"开始分析"按钮（<code>sidebar.py:235-253</code>）。用户输入可以是 6 位代码（300750）或中文名（宁德时代），由 <code>_resolve_user_input()</code> 统一转为代码：</p>
+
+<div class="step-box">
+<h3>Step 1 — ticker 解析</h3>
+<pre><code># sidebar.py:241
+resolved_code, err = _resolve_user_input(ticker)
+# 调用链：resolve_ticker() → _build_name_code_map()
+# 通过 mootdx TCP 查询全市场股票名称映射表（有缓存）
+# 成功返回 6 位代码，失败返回 (None, "未找到该股票")</code></pre>
+</div>
+
+<p>解析成功后，将 <code>{"ticker": code, "trade_date": ..., "fresh": True}</code> 推入 <code>st.session_state["start_analysis"]</code>。注意：此时并未直接启动分析——Streamlit 的脚本执行模型要求先完成当前 render 周期，下一次 rerun 时 <code>app.py:189</code> 才会 pop 这个 dict。</p>
+
+<div class="step-box">
+<h3>Step 2 — app.py 调度</h3>
+<pre><code># app.py:189-212
+start_req = st.session_state.pop("start_analysis", None)
+if start_req:
+    if start_req.get("fresh"):          # 仅全新开始才清理
+        clear_incomplete_task(...)       # 删 ~/.tradingagents/incomplete_tasks.json
+        clear_checkpoint(...)            # 删 LangGraph checkpoint 目录
+    tracker = ProgressTracker(ticker=..., trade_date=...)
+    st.session_state["tracker"] = tracker
+    st.session_state["viewing_history"] = None
+    run_analysis_in_thread(ticker, trade_date, config, tracker)</code></pre>
+</div>
+
+<p>这里 <code>fresh=True</code> 保证"开始分析"按钮始终清理旧状态，而侧边栏"未完成任务"的恢复按钮传 <code>fresh=False</code>，利用已有 checkpoint 从上次中断处继续。</p>
+
+<h2>2. 后台执行：stream 遍历与阶段检测</h2>
+
+<p><code>runner.py:_run()</code> 是主路径中<strong>唯一跑在 daemon 线程里的函数</strong>。它的核心是一个 while 循环遍历 <code>graph.stream()</code> 返回的迭代器：</p>
+
+<div class="step-box">
+<h3>Step 3 — graph 流式迭代</h3>
+<pre><code># runner.py:120-146
+stream = graph.graph.stream(init_state, **args)   # LangGraph astream
+while True:
+    tracker.wait_if_paused()        # 暂停闸门检查
+    if tracker.stop_requested:      # 停止信号检查
+        _close_and_discard()
+        return
+    chunk = next(stream)            # 阻塞等待下一个 chunk
+    last_chunk = chunk
+    _detect_completed_stages(chunk, tracker)  # 检测新完成的阶段
+    _infer_active_stage(tracker)    # 推断当前活跃阶段
+    record_incomplete_task(...)     # 持久化断点供崩溃恢复
+    stats = graph.stats_handler.get_stats()
+    tracker.update_stats(llm_calls, tool_calls, tokens_in, tokens_out)</code></pre>
+</div>
+
+<p><code>_detect_completed_stages()</code> 是这个循环的核心逻辑——它不是等 graph 跑完才一次性标记，而是<strong>每收到一个 chunk 就检查 12 个字段</strong>：7 个 analyst report_key、quality_gate、debate judge_decision、trader_plan、risk judge_decision、final_decision。哪个字段首次出现非空内容，就标记对应阶段为 done。</p>
+
+<div class="parallel-note">
+<strong>关键设计洞察：</strong>12 个阶段不是串行等待的。前 7 个 analyst 在 LangGraph 中可能是并行 fan-out 执行，所以一个 chunk 可能同时包含多个 report_key 的内容。<code>_detect_completed_stages()</code> 用 <code>if content and tracker.stage_status(id) != "done"</code> 保证每个阶段只标记一次。
+</div>
+
+<p>stream 耗尽（<code>StopIteration</code>）后，进入 finalize 阶段：</p>
+
+<div class="step-box">
+<h3>Step 4 — finalize 与落盘</h3>
+<pre><code># runner.py:152-164
+normalize_report_state_mentions(last_chunk, ticker)  # #55: 归一化股票名
+signal = graph.finalize_graph_run(ticker, trade_date, last_chunk)
+# 内部：investment_plan → trader → 提取 BUY/SELL/HOLD 信号
+# 将 last_chunk 写入 ~/.tradingagents/logs/{ticker}/{date}/full_states_log_{date}.json
+tracker.mark_complete(last_chunk, signal)  # 设置 is_running=False, is_complete=True
+clear_incomplete_task(ticker, trade_date)  # 清理断点记录</code></pre>
+</div>
+
+<h2>3. 前端渲染：从 tracker 到报告</h2>
+
+<p>后台线程调用 <code>tracker.mark_complete()</code> 之后，Streamlit 主线程的下一次 <code>st.rerun()</code> 会走到 <code>app.py:238</code> 的完成分支：</p>
+
+<div class="step-box">
+<h3>Step 5 — 报告渲染</h3>
+<pre><code># app.py:238-245
+elif tracker and tracker.is_complete:
+    render_report(
+        tracker.final_state,   # last_chunk 字典（所有 12 个 stage 的输出）
+        tracker.ticker,
+        tracker.trade_date,
+        tracker.signal,        # "BUY" / "SELL" / "HOLD"
+        elapsed=tracker.elapsed,
+    )</code></pre>
+</div>
+
+<p><code>render_report()</code>（<code>report_viewer.py</code>）的渲染顺序：</p>
+<ol>
+  <li><strong>信号卡片</strong>：渐变色背景 + BUY(绿)/SELL(红)/HOLD(黄) 大字 + ticker 标签 + 耗时</li>
+  <li><strong>最终投资建议</strong>（如有）：<code>investment_plan</code> 字段完整展示</li>
+  <li><strong>7 个分析师报告</strong>：每个用 <code>st.expander</code> 折叠，默认关闭</li>
+  <li><strong>多空辩论</strong>：3 个 tabs（多方/空方/研究经理）</li>
+  <li><strong>交易员决策</strong>：独立 expander</li>
+  <li><strong>风控评估</strong>：4 个 tabs（激进/保守/中性/风控决策）</li>
+  <li><strong>数据质量摘要</strong>：独立 expander</li>
+</ol>
+
+<h2>4. 导出：两条路径与降级策略</h2>
+
+<p>报告展示后，用户可通过两个下载按钮导出。关键设计原则：<strong>Markdown 是可靠路径，PDF 是增强路径</strong>。</p>
+
+<table>
+<tr><th>格式</th><th>函数</th><th>依赖</th><th>失败处理</th></tr>
+<tr>
+  <td>Markdown</td>
+  <td><code>generate_markdown()</code></td>
+  <td>零外部依赖，纯字符串拼接</td>
+  <td>总是成功</td>
+</tr>
+<tr>
+  <td>PDF</td>
+  <td><code>generate_pdf()</code></td>
+  <td>fpdf2 + 系统 CJK 字体（文泉驿/Noto/PingFang/微软雅黑）</td>
+  <td>catch 异常后按钮置灰 + tooltip 提示原因，<strong>不崩溃页面</strong></td>
+</tr>
+</table>
+
+<p>PDF 导出的字体探测顺序（<code>pdf_export.py:30-75</code>）：先检查环境变量 <code>TRADINGAGENTS_PDF_FONT</code>，再按内置候选列表依次尝试 Linux → macOS → Windows 路径，接着用 <code>fc-match</code> 命令行兜底，最后遍历 <code>/usr/share/fonts</code> 目录递归搜索。如果全部失败，抛出 <code>PDFExportError</code> 建议安装 fonts-wqy-microhei。</p>
+
+<div class="quiz">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong>描述 <code>_detect_completed_stages()</code> 如何判断一个阶段是否已完成——它依赖的输入是什么？用哪个条件保证不会重复标记？</p>
+<p><strong>问题 2：</strong>为什么 <code>fresh=True</code> 和 <code>fresh=False</code> 在 app.py 中有不同的清理行为？这两种场景分别对应用户的什么操作？</p>
+<p><strong>问题 3：</strong>PDF 导出失败时为什么不让整个页面崩溃？代码中具体如何处理这个异常？</p>
+
+<div class="answer">
+<strong>参考答案</strong><br>
+<strong>1：</strong>输入是 graph.stream() 返回的当前 chunk 字典。对每个 report_key 检查两个条件：(a) <code>chunk.get(report_key, "")</code> 非空——说明 LLM 已经产出了该阶段的报告内容；(b) <code>tracker.stage_status(stage_id) != "done"</code>——该阶段尚未被标记过。两个条件同时满足才调用 <code>tracker.mark_stage_done()</code>，这防止了同一阶段在后续 chunk 中再次出现时重复标记。<br>
+<strong>2：</strong>fresh=True 对应用户点击"开始分析"按钮——全新分析，需要清除旧的 incomplete_tasks 记录和 checkpoint 目录。fresh=False 对应用户点击侧边栏"未完成任务"中的恢复按钮——从中断处继续，保留已有 checkpoint 让 LangGraph 自动从中断节点恢复。不清理 checkpoint 是恢复能成功的关键。<br>
+<strong>3：</strong><code>report_viewer.py:112-118</code> 用 try-except 包裹 <code>generate_pdf()</code>，捕获所有异常（<code>except Exception as exc</code>），失败时不渲染下载按钮，改为渲染一个 disabled 按钮显示"PDF 不可用"，tooltip 中说明原因并引导用户改用 Markdown 导出。try-except 在整个 render_report 之外，所以 PDF 失败不影响报告展示和 Markdown 下载。
+</div>
+</div>
+
+<p style="margin-top:28px;">
+<strong>上一节：</strong><a href="0001-flow-map.html">0001 — Web UI 交互全链路地图</a><br>
+<strong>关联课程：</strong><a href="../../module-web/lessons/0001-web-module-tour.html">L1 Web 模块总览</a> · <a href="../../slice-analysis-pipeline/lessons/0001-flow-map.html">L2 分析流水线切片</a><br>
+<strong>有疑问？</strong>向 AI 教师追问后台线程的任何执行细节、stream chunk 结构或报告渲染逻辑。
+</p>
+
+</div>
+</main>
+</body>
+</html>

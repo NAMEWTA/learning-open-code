@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>主路径：mcp add 从 CLI 到连接建立的逐层追踪</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>主路径：mcp add 从 CLI 到连接建立的逐层追踪</h1>
+    <p class="meta">学习目标：逐层追踪一次 stdio MCP 服务器的添加和启动过程，理解每层的输入输出和错误处理。</p>
+    <p class="meta">前置：<a href="0001-flow-map.html">链路地图与时序图</a></p>
+  </header>
+
+  <section>
+    <h2>1. CLI 层：参数解析与 Transport 构造</h2>
+    <p>当用户执行 <code>codex mcp add my-tool -- node server.js --port 3000</code>，clap 首先将参数解析为 <code>AddArgs</code>。关键点：<code>command</code> 字段用 <code>trailing_var_arg = true</code> 收集 <code>--</code> 之后的所有参数：</p>
+
+    <pre><code>// codex-rs/cli/src/mcp_cmd.rs（简化）
+pub struct AddArgs {
+    pub name: String,                    // "my-tool"
+    pub transport_args: AddMcpTransportArgs,
+}
+
+pub struct AddMcpStdioArgs {
+    #[arg(trailing_var_arg = true, num_args = 0..)]
+    pub command: Vec&lt;String&gt;,            // ["node", "server.js", "--port", "3000"]
+    #[arg(long, value_parser = parse_env_pair)]
+    pub env: Vec&lt;(String, String)&gt;,     // --env 指定的环境变量
+}</code></pre>
+
+    <p><code>run_add()</code> 中，<code>command</code> 向量的第一个元素被取出作为 <code>command_bin</code>（即 <code>node</code>），剩余部分作为 <code>args</code>（即 <code>["server.js", "--port", "3000"]</code>）。然后构造 <code>McpServerTransportConfig::Stdio</code>。</p>
+  </section>
+
+  <section>
+    <h2>2. 配置层：TOML 序列化与原子写入</h2>
+    <p>构造好的 <code>McpServerConfig</code> 通过 <code>ConfigEditsBuilder</code> 写入 <code>~/.codex/config.toml</code>。这个 builder 使用 <code>toml_edit</code> 而非简单的 <code>toml::to_string</code>，目的是保留用户已有的格式和注释：</p>
+
+    <pre><code>// codex-rs/config/src/mcp_edit.rs（简化）
+fn replace_mcp_servers(doc: &amp;mut DocumentMut,
+                       servers: &amp;BTreeMap&lt;String, McpServerConfig&gt;) {
+    let root = doc.as_table_mut();
+    if servers.is_empty() {
+        root.remove("mcp_servers");     // 空时删除整个段
+        return;
+    }
+    let mut table = TomlTable::new();
+    table.set_implicit(true);
+    for (name, config) in servers {
+        table.insert(name, serialize_mcp_server(config));
+    }
+    root.insert("mcp_servers", TomlItem::Table(table));
+}</code></pre>
+
+    <p>序列化时有两个重要的校验点：</p>
+    <ol>
+      <li><strong>禁止 inline bearer_token：</strong><code>ensure_no_inline_bearer_tokens()</code> 在读取配置时检查，如果发现 <code>bearer_token</code> 字段（而非 <code>bearer_token_env_var</code>），直接返回错误。内联 token 是安全反模式。</li>
+      <li><strong>Transport 互斥：</strong>在 <code>RawMcpServerConfig::try_into()</code> 中，如果 <code>command</code> 存在则禁用所有 HTTP 字段（url、bearer_token_env_var、http_headers 等），反之亦然。这由 <code>throw_if_set()</code> 辅助函数强制执行。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>3. 客户端层：Transport 创建与 Initialize 握手</h2>
+    <p>当 Codex 会话启动，<code>McpConnectionManager::new()</code> 为每个 enabled server 创建一个 <code>AsyncManagedClient</code>。其内部的 <code>ManagedClientStartup::start()</code> 是核心入口，分两步：</p>
+
+    <p><strong>步骤 1 — 创建 transport：</strong><code>make_rmcp_client()</code> 根据 transport 类型创建不同的 <code>RmcpClient</code>：</p>
+
+    <div class="filetree">make_rmcp_client() 分支：
+  ├── Stdio
+  │     → RmcpClient::new_stdio_client(program, args, env, launcher)
+  │     → StdioServerLauncher 启动子进程
+  │     → PendingTransport::Stdio { transport }
+  │
+  ├── StreamableHttp（无 OAuth）
+  │     → RmcpClient::new_streamable_http_client(server_name, url, ...)
+  │     → StreamableHttpClientTransport 包装 HTTP client
+  │     → PendingTransport::StreamableHttp { transport }
+  │
+  └── StreamableHttp（有 OAuth）
+        → 同上，但用 AuthClient 包装
+        → 加载存储的 OAuth token → 尝试 bearer 认证
+        → PendingTransport::StreamableHttpWithOAuth { transport, oauth_persistor }</div>
+
+    <p><strong>步骤 2 — Initialize 握手：</strong>创建 transport 后，<code>RmcpClient::initialize()</code> 向 MCP server 发送 <code>initialize</code> 请求，携带 client capabilities（elicitation 类型、sandbox state meta 等）。成功后调用 <code>tools/list</code> 获取服务器提供的工具列表。</p>
+
+    <pre><code>// codex-rs/codex-mcp/src/rmcp_client.rs — ManagedClientStartup::start() 核心流程
+// 1. 创建 RmcpClient（底层 transport）
+let client = Arc::new(make_rmcp_client(&amp;server_name, server, ...).await?);
+
+// 2. 启动并等待完成（initialize + tools/list + 缓存）
+let managed = start_server_task(server_name, client, StartServerTaskParams {
+    startup_timeout: config.startup_timeout_sec
+        .or(Some(DEFAULT_STARTUP_TIMEOUT)),   // 默认 30s
+    tool_timeout: config.tool_timeout_sec
+        .unwrap_or(DEFAULT_TOOL_TIMEOUT),     // 默认 300s
+    tool_filter,
+    ...
+}).await?;</code></pre>
+  </section>
+
+  <section>
+    <h2>4. 异常路径与重试机制</h2>
+    <p>连接可能因为多种原因失败，每条路径有不同的处理方式：</p>
+
+    <table>
+      <tr><th>异常场景</th><th>检测位置</th><th>处理方式</th></tr>
+      <tr>
+        <td>Server name 非法</td>
+        <td><code>validate_server_name()</code> 在 CLI 层</td>
+        <td>立即返回错误，提示只允许字母数字和 <code>-</code> <code>_</code></td>
+      </tr>
+      <tr>
+        <td>内联 bearer_token</td>
+        <td><code>ensure_no_inline_bearer_tokens()</code> 在配置读取时</td>
+        <td>返回 InvalidData 错误，指引使用 bearer_token_env_var</td>
+      </tr>
+      <tr>
+        <td>启动超时（默认 30s）</td>
+        <td><code>ManagedClientStartup::start()</code> 中的 timeout</td>
+        <td>返回 StartupOutcomeError::Failed，提示调整 startup_timeout_sec</td>
+      </tr>
+      <tr>
+        <td>OAuth 认证过期 / 未登录</td>
+        <td><code>is_authentication_required_error()</code> 匹配错误文本</td>
+        <td>返回 "Auth required"，提示运行 <code>codex mcp login</code></td>
+      </tr>
+      <tr>
+        <td>Codex Apps 启动失败</td>
+        <td><code>reconnect_failed_startup()</code></td>
+        <td>独立后台重试循环（指数退避 1s→30s），不影响其他 server</td>
+      </tr>
+    </table>
+
+    <p>主要阅读来源：<span class="where">codex-rs/cli/src/mcp_cmd.rs</span>、<span class="where">codex-rs/config/src/mcp_edit.rs</span>、<span class="where">codex-rs/codex-mcp/src/rmcp_client.rs</span>。继续查看 <a href="../reference/mcp-server-management-flow-map.html">速查图</a> 获取源码索引和关键类型清单。</p>
+
+    <div class="exercise">
+      <p><strong>暂停回忆：</strong>不看上文，回答三个问题：</p>
+      <ol>
+        <li><code>trailing_var_arg = true</code> 在 CLI 参数解析中起什么作用？<code>command_bin</code> 和 <code>args</code> 是如何分离的？</li>
+        <li>配置层为什么使用 <code>toml_edit::DocumentMut</code> 而非简单的 <code>toml::to_string</code>？</li>
+        <li>连接失败时，普通 MCP server 和 Codex Apps MCP server 的重试策略有什么不同？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. trailing_var_arg = true 让 clap 收集 <code>--</code> 之后的所有参数为一个 Vec，第一个元素是程序名（command_bin），后续元素是参数（args）。2. toml_edit 保留用户已有的 TOML 格式、注释和键顺序，避免每次写入时格式化破坏用户手动编辑的内容。3. 普通 MCP server 失败后只报告错误，不自动重试；Codex Apps MCP server 通过 CodexAppsStartupReconnect 在后台独立重试（指数退避 1s→30s），重试成功后会更新 client 状态。
+    </div>
+  </section>
+</main>
+</body>
+</html>

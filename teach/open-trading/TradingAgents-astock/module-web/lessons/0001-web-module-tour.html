@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — Streamlit Web UI 模块总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L1 模块总览 · 第 1 节 · 预计 15 分钟</p>
+
+<h1>0001 — Streamlit Web UI 模块总览</h1>
+
+<p class="objective"><strong>学习目标：</strong>能画出 Web 模块的 5 状态 UI 主循环和组件三层架构，理解 ProgressTracker 如何通过 Thread + Event + Lock 实现后台线程与 Streamlit 前端的线程安全通信，并说出暂停/恢复/停止控制流的技术要点。</p>
+
+<h2>1. 模块职责与文件结构</h2>
+
+<p><code>web/</code> 模块是 TradingAgents-Astock 的浏览器端交互入口。它不包含任何分析逻辑，<strong>只负责将后台分析流水线的进度和结果以可视化方式呈现</strong>。核心职责：接收用户输入（股票代码+日期+LLM 配置），启动后台线程执行 <a href="../../module-agents/lessons/0001-agents-module-tour.html">Agent 系统</a> + <a href="../../module-graph/lessons/0001-graph-module-tour.html">LangGraph 工作流</a>，实时展示 12 阶段进度，渲染最终报告，支持 PDF/Markdown 导出和历史回溯。</p>
+
+<div class="filetree">
+web/
+├── app.py                  ← 主页面：5 状态机 + 自定义 CSS
+├── runner.py               ← 后台线程：Thread + TradingAgentsGraph
+├── progress.py             ← 进度追踪：ProgressTracker + Event/Lock
+├── history.py              ← 历史管理：扫描 / 恢复 / 清理
+├── pdf_export.py           ← PDF 报告：fpdf2 + 中文字体自动探测
+├── launch.py               ← CLI 启动器：streamlit run 封装
+├── stock_display.py        ← 股票名展示：代码↔名称解析
+└── components/             ← UI 组件三层架构
+    ├── sidebar.py             侧边栏（输入+配置+历史）
+    ├── progress_panel.py      实时进度面板
+    └── report_viewer.py       报告展示+导出按钮
+</div>
+
+<div class="decision-box">
+<strong>依赖关系</strong>
+上游依赖：<code>tradingagents.graph</code>（工作流引擎）、<code>tradingagents.dataflows</code>（股票名解析）、<code>tradingagents.llm_clients</code>（模型配置选项）。web 模块自身只做 UI 编排，不直接调用 LLM 也不访问数据库。
+</div>
+
+<h2>2. UI 主循环：5 状态机</h2>
+
+<p><code>app.py</code> 的核心是一个基于 <code>st.session_state</code> 的状态机，通过 <code>tracker</code> 对象的状态驱动 5 种界面渲染：</p>
+
+<table>
+<tr><th>状态</th><th>触发条件</th><th>渲染组件</th></tr>
+<tr><td><strong>0 空闲</strong></td><td><code>tracker</code> 为 <code>None</code></td><td>欢迎页：品牌标题 + 操作提示</td></tr>
+<tr><td><strong>1 查看历史</strong></td><td><code>viewing_history</code> 不为空</td><td><code>render_report()</code> 加载旧 JSON</td></tr>
+<tr><td><strong>2 分析中</strong></td><td><code>tracker.is_running</code></td><td><code>render_progress()</code> + 每 2 秒 <code>st.rerun()</code></td></tr>
+<tr><td><strong>3 完成</strong></td><td><code>tracker.is_complete</code></td><td><code>render_report()</code> 展示结果 + 下载按钮</td></tr>
+<tr><td><strong>4 出错</strong></td><td><code>tracker.error</code> 不为空</td><td>错误提示 + "继续未完成任务"按钮</td></tr>
+</table>
+
+<p>关键设计：状态 2 中 <code>time.sleep(2)</code> + <code>st.rerun()</code> 形成一个<strong>轮询循环</strong>——Streamlit 本身是请求-响应模型，不支持服务端推送，所以通过周期性 rerun 来刷新进度显示。这不是最优雅的方案，但在 Streamlit 的单进程架构下是最简单可行的。</p>
+
+<h2>3. 后台线程模型与进度追踪</h2>
+
+<p>这是整个 Web 模块最核心的设计——如何在 Streamlit 的无状态请求模型中运行一个长时间后台任务并实时汇报进度。</p>
+
+<h3>3.1 线程启动流程</h3>
+
+<p><code>runner.py</code> 的 <code>run_analysis_in_thread()</code> 创建一个 daemon 线程执行完整流水线。同时创建一个 <code>ProgressTracker</code> 对象存入 <code>st.session_state</code>，作为 UI 和后台线程的<strong>共享内存桥梁</strong>：</p>
+
+<pre><code>def run_analysis_in_thread(ticker, trade_date, config, tracker):
+    tracker.is_running = True                           # ① 立即标记运行态
+    tracker.mark_stage_active("market")                  # ② 激活第一阶段
+    record_incomplete_task(ticker, trade_date, ...)      # ③ 持久化断点
+
+    t = threading.Thread(target=_target, daemon=True)   # ④ daemon 线程
+    t.start()
+    return t</code></pre>
+
+<p>后台线程内部遍历 <code>graph.stream()</code> 的每个 chunk，每收到一个 chunk 就调用 <code>_detect_completed_stages()</code> 检测哪些阶段产出了报告，然后更新 tracker 的完成列表。UI 端的轮询循环读取同一个 tracker 对象来刷新进度条。</p>
+
+<h3>3.2 线程安全控制：Event + Lock</h3>
+
+<p><code>ProgressTracker</code>（<code>progress.py</code>）使用两个并发原语：</p>
+<ul>
+<li><strong><code>threading.Lock</code></strong> — 保护所有可变字段（<code>completed_stages</code>、<code>is_running</code> 等）的读写原子性</li>
+<li><strong><code>threading.Event</code></strong>（<code>_pause_gate</code>）— 实现暂停语义：<code>pause()</code> 调用 <code>_pause_gate.clear()</code> 关闭闸门，后台线程在每轮循环中检查 <code>_pause_gate.wait()</code> 阻塞等待；<code>resume()</code> 调用 <code>_pause_gate.set()</code> 恢复通行</li>
+</ul>
+
+<p>暂停/恢复控制流示例：</p>
+
+<pre><code># — UI 线程（Streamlit）调用 —
+def pause(self):
+    with self._lock:
+        self.is_paused = True
+        self._pause_gate.clear()   # 关闭闸门，阻塞后台线程
+
+# — 后台线程（runner）调用 —
+def wait_if_paused(self):
+    self._pause_gate.wait()        # 阻塞直到 resume() 调用 set()</code></pre>
+
+<p>停止操作更复杂——<code>request_stop()</code> 设置 <code>stop_requested=True</code> 并清空所有 UI 可见状态。后台线程检测到该标志后，调用 <code>_discard_stopped_run()</code> 清理断点和缓存。</p>
+
+<h3>3.3 12 阶段 Pipeline 映射</h3>
+
+<p><code>PIPELINE_STAGES</code> 定义了 12 个阶段的 <code>id</code>、展示名、图标和对应的 state 字段 <code>report_key</code>。前 7 个归类为 ANALYSTS（并行研报生成），后 5 个归类为 PIPELINE（串行决策流程）。<code>_detect_completed_stages()</code> 通过检查 chunk 中各 report_key 是否有内容来判断阶段是否完成。完整的阶段对照见 <a href="../reference/web-overview.html">参考文档</a>。</p>
+
+<h2>4. 历史记录与报告导出</h2>
+
+<p><strong>历史机制分两层：</strong></p>
+<ul>
+<li><strong>已完成分析</strong>（<code>get_history()</code>）：扫描 <code>~/.tradingagents/logs/</code> 下所有 <code>full_states_log_*.json</code> 文件，按日期倒序展示</li>
+<li><strong>未完成任务</strong>（<code>get_incomplete_history()</code>）：从 <code>~/.tradingagents/incomplete_tasks.json</code> 读取持久化的断点信息，交叉比对已完成任务进行去重，支持从中断处继续分析</li>
+</ul>
+
+<p><strong>PDF 导出</strong>（<code>pdf_export.py</code>）使用 fpdf2 库，核心复杂度在中文字体探测——按优先级遍历 Linux（文泉驿/Noto）、macOS（PingFang/STHeiti）、Windows（微软雅黑/黑体）等多平台字体路径，并支持通过环境变量 <code>TRADINGAGENTS_PDF_FONT</code> 自定义。Markdown 导出作为无需字体的安全降级方案。</p>
+
+<!-- ──────────────────────────────────────────── -->
+<div class="quiz">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong>app.py 的 5 个 UI 状态分别是什么？触发条件各为什么？</p>
+<p><strong>问题 2：</strong>ProgressTracker 暂停功能使用了哪两个并发原语？为什么不能用 <code>time.sleep()</code> 代替？</p>
+<p><strong>问题 3：</strong>历史记录中"已完成任务"和"未完成任务"各自存在哪里？侧边栏如何区分展示它们？</p>
+
+<div class="answer" style="margin-top:16px;">
+<strong>参考答案</strong><br>
+<strong>1：</strong>0-空闲（tracker=None）、1-查看历史（viewing_history 不为空）、2-分析中（tracker.is_running）、3-完成（tracker.is_complete）、4-出错（tracker.error）。<br>
+<strong>2：</strong>threading.Lock（保护共享字段原子性）和 threading.Event（_pause_gate 实现阻塞等待/唤醒）。不能用 time.sleep() 因为它只能延时不能响应外部信号恢复，且 sleep 期间无法检测 stop_requested。<br>
+<strong>3：</strong>已完成存在 <code>~/.tradingagents/logs/</code> 的 JSON 文件中，通过文件名正则提取 ticker+日期；未完成存在 <code>~/.tradingagents/incomplete_tasks.json</code> 中。侧边栏分两个区域展示，已完成区域可点击查看报告，未完成区域可点击继续分析。
+</div>
+</div>
+
+<p style="margin-top:28px;">
+<strong>关联课程：</strong><a href="../../00-overview/lessons/0001-project-map.html">0001 — 项目全景图（L0）</a> · <a href="../../module-agents/lessons/0001-agents-module-tour.html">Agent 系统模块</a> · <a href="../../module-graph/lessons/0001-graph-module-tour.html">Graph 工作流模块</a><br>
+<strong>参考文档：</strong><a href="../reference/web-overview.html">Web 模块组件与 API 速查</a><br>
+<strong>有疑问？</strong>向 AI 教师追问任何不清楚的组件职责、线程模型或 Streamlit 状态管理细节。
+</p>
+
+</div>
+</main>
+</body>
+</html>

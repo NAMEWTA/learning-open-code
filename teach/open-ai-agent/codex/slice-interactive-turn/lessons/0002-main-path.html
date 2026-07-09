@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0002 主成功路径详解：从输入到回答</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      .filetree {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.75;
+        background: #fafbfc;
+        border: 1px solid #ebebeb;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+      pre {
+        background: #f1f4f8;
+        border: 1px solid #d9dee7;
+        border-radius: 6px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.6;
+      }
+      .codenote {
+        color: var(--muted);
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>主成功路径详解：从输入到回答</h1>
+        <p class="meta">
+          学习目标：15 分钟内理解一次成功 turn 中用户输入提交、模型采样请求、SSE 事件响应和 TUI 增量渲染四个关键环节的代码流转。
+          <br /><span class="codenote">依赖：<a href="0001-flow-map.html">0001 链路地图</a>（请先完成时序图记忆）</span>
+        </p>
+
+        <div class="callout">
+          本课聚焦 <a href="0001-flow-map.html">0001 链路地图</a> 中步骤 [4]～[11] 的主成功路径。源码集中在三个文件：<span class="codenote">tui/src/chatwidget.rs</span>（用户提交）、<span class="codenote">core/src/session/turn.rs</span>（模型采样循环）、<span class="codenote">core/src/client.rs</span>（SSE 流管理）。
+        </div>
+
+        <h2>1. 用户输入提交：ChatWidget → CodexThread</h2>
+        <p>
+          ChatWidget 不直接调用 CodexThread。它通过 <code>submit_op()</code> 将 <code>AppCommand::UserInput</code> 发送到内部 channel，由 App 事件循环中的 <code>handle_event(AppEvent::CodexOp)</code> 统一分发。这条路径之所以存在，是因为 TUI 需要保证事件顺序——用户可能在 turn 运行中继续输入，这些输入进入 pending_steers 队列而非立即发送。
+        </p>
+        <pre><code class="language-rust">// tui/src/chatwidget.rs — ChatWidget::submit_op 简化版
+pub(crate) fn submit_op&lt;T&gt;(&mut self, op: T) -> bool
+where T: Into&lt;AppCommand&gt;,
+{
+    let op: AppCommand = op.into();
+    self.prepare_local_op_submission(&op);
+    match &self.codex_op_target {
+        CodexOpTarget::Direct(codex_op_tx) => {
+            if let Err(e) = codex_op_tx.send(op) {
+                tracing::error!("failed to submit op: {e}");
+                return false;
+            }
+        }
+        CodexOpTarget::AppEvent => {
+            self.app_event_tx.send(AppEvent::CodexOp(op));
+        }
+    }
+    true
+}</code></pre>
+        <p>
+          当 ChatWidget 运行在 App 上下文中时，<code>codex_op_target</code> 为 <code>AppEvent</code>，命令进入 TUI 内部事件总线。App 的 <code>handle_event</code> 将其转发给 <code>app_server_session</code>，后者驱动 <code>CodexThread</code> 的 turn 启动。
+        </p>
+
+        <h2>2. 模型采样循环：run_turn 的四件事</h2>
+        <p>
+          <code>run_turn()</code>（位于 <code>core/src/session/turn.rs</code>）是单次 turn 的核心编排函数。一次成功的纯文本对话只走四次关键步骤。代码中大量逻辑（tool execution、MCP invocation、compaction）在纯文本场景下不触发。
+        </p>
+        <pre><code class="language-rust">// core/src/session/turn.rs — run_turn 的核心循环骨架（简化）
+pub(crate) async fn run_turn(
+    sess: Arc&lt;Session&gt;,
+    turn_context: Arc&lt;TurnContext&gt;,
+    input: Vec&lt;TurnInput&gt;,
+    prewarmed_client_session: Option&lt;ModelClientSession&gt;,
+    cancellation_token: CancellationToken,
+) -> CodexResult&lt;Option&lt;String&gt;&gt; {
+    // ① 如需，执行预先 compaction
+    let _ = run_pre_sampling_compact(&sess, &turn_context, &mut client_session).await;
+
+    // ② 捕获第一个 step context（上下文片段 + 可用工具）
+    let first_step_context = sess
+        .capture_step_context(Arc::clone(&turn_context)).await;
+
+    // ③ 循环：每次采样 → 处理结果 → 决定是否继续
+    loop {
+        let step_context = sess.capture_step_context(Arc::clone(&turn_context)).await;
+
+        // 发送 Responses API 请求并接收事件流
+        match run_sampling_request(/*...*/).await {
+            Ok((output, _input)) => {
+                if output.needs_follow_up {
+                    // 模型要求调用工具 → 执行工具 → 继续循环
+                    continue;
+                }
+                // ④ 模型给出最终回答 → 结束 turn
+                break;
+            }
+            Err(err) => { /* 错误处理 */ break; }
+        }
+    }
+}</code></pre>
+        <p>理解这四步就够了：compact（管理上下文窗口）→ step_context（构建本次请求的上下文片段和工具列表）→ sampling（发送 API 请求并接收 SSE 流）→ 判断是否继续（工具调用继续循环，最终回答则结束）。</p>
+
+        <h2>3. SSE 事件流转与异常处理</h2>
+        <p>
+          模型返回的 SSE（Server-Sent Events）流在 <code>client.rs</code> 中被解析为 <code>ResponseEvent</code> 枚举。纯文本对话中最常见的两种事件是：
+        </p>
+        <ul>
+          <li><code>ResponseEvent::ContentDelta</code> — 模型输出的文本增量（逐 token）</li>
+          <li><code>ResponseEvent::Finished</code> — 模型完成本次响应</li>
+        </ul>
+        <p>
+          每个 <code>ContentDelta</code> 经过 <code>handle_non_tool_response_item()</code>（stream_events_utils.rs）转换为 <code>EventMsg::AgentMessageContentDelta</code>，通过 app-server 推送到 TUI。ChatWidget 将其追加到当前 <code>active_cell</code> 的 markdown 流中。
+        </p>
+        <pre><code class="language-rust">// core/src/stream_events_utils.rs — SSE 文本事件处理（简化）
+fn handle_non_tool_response_item(
+    ctx: &HandleOutputCtx,
+    item: &ResponseItem,
+) -> Option&lt;Vec&lt;EventMsg&gt;&gt; {
+    match item {
+        ResponseItem::Message { content, .. } => {
+            let text = raw_assistant_output_text_from_item(item)?;
+            Some(vec![EventMsg::AgentMessageContentDelta(
+                AgentMessageContentDeltaEvent {
+                    delta: text,
+                    item_id: item.id().to_string(),
+                    turn_id: ctx.turn_context.turn_id.to_string(),
+                },
+            )])
+        }
+        _ => None,
+    }
+}</code></pre>
+
+        <h3>一条异常路径：Turn 被中断</h3>
+        <p>
+          当用户在模型回答过程中按 Ctrl+C，<code>ChatWidget</code> 发出 <code>AppCommand::Interrupt</code>，最终触发 <code>run_turn()</code> 中的 <code>cancellation_token</code>。这导致 WebSocket 流被取消，turn 循环退出，active cell 提交为 history cell（标记"已中断"），bottom pane 恢复 composer。
+        </p>
+        <pre><code class="language-rust">// tui/src/chatwidget.rs — 中断处理（简化）
+fn prepare_local_op_submission(&mut self, op: &AppCommand) {
+    if let AppCommand::Interrupt { behavior } = op
+        && self.turn_lifecycle.agent_turn_running
+    {
+        if *behavior == InterruptBehavior::RestorePromptIfNoOutput {
+            self.arm_cancel_edit();
+        }
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.clear_queue(); // 清空流式缓冲
+        }
+        self.clear_active_stream_tail(); // 清除渲染中的流尾
+        self.request_redraw(); // 触发重新渲染
+    }
+}</code></pre>
+
+        <h2>4. 检索练习</h2>
+        <div class="practice">
+          <p><strong>判断题：</strong>以下哪种情况会导致 <code>run_turn()</code> 的循环继续而非结束？</p>
+          <ol>
+            <li>模型返回 <code>ResponseEvent::Finished</code></li>
+            <li>模型返回 <code>ResponseEvent::FunctionCall</code>（需要调用工具）</li>
+            <li>用户按 Ctrl+C 中断</li>
+            <li><code>cancellation_token</code> 被取消</li>
+          </ol>
+          <div class="answer">
+            <strong>参考答案：</strong>只有选项 2 会导致循环继续——模型请求函数调用时，<code>run_turn()</code> 会执行工具并将结果送回模型，进入下一轮采样循环。选项 1 结束 turn；选项 3 和 4 都会导致提前退出。
+          </div>
+        </div>
+
+        <div class="callout">
+          速查参考：<a href="../reference/interactive-turn-flow-map.html">交互 Turn 链路速查图</a> 提供了完整的源码文件索引、关键数据结构速查表和四种异常路径对照。
+        </div>
+        <p style="margin-top:24px;color:var(--muted);font-size:0.92rem;">
+          对 <code>run_turn()</code> 中的工具执行循环或 compaction 策略感兴趣？让 agent 老师带你深入代码。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

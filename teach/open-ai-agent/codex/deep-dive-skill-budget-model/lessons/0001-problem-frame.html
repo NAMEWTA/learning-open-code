@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>问题背景：为什么需要 Skill 上下文预算模型？</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:920px;margin:40px auto;padding:0 24px;color:#1f2937}
+    h1{font-size:28px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}
+    code,pre{background:#f6f8fa;border-radius:6px;font-family:"SF Mono",Consolas,monospace;font-size:0.9rem}
+    code{padding:2px 5px}
+    pre{padding:14px;overflow:auto;font-size:0.84rem;line-height:1.6}
+    .note{border-left:4px solid #2563eb;padding:10px 14px;background:#eff6ff;margin:16px 0}
+    .practice{border-left:4px solid #16a34a;padding:10px 14px;background:#f0fdf4;margin:16px 0}
+    table{border-collapse:collapse;width:100%;margin:12px 0}
+    th,td{border:1px solid #e5e7eb;padding:8px 12px;text-align:left}
+    th{background:#f9fafb;font-weight:600}
+    .where{font-family:"SF Mono",Consolas,monospace;font-size:0.82rem;color:#6b7280}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>问题背景：为什么需要 Skill 上下文预算模型？</h1>
+    <p class="meta">学习目标：说出 Skill 元数据注入面临的两个核心矛盾（上下文有限 vs 技能数量、描述完整 vs token 消耗），并理解 Codex 选择预算模型而非硬性数量上限的原因。</p>
+  </header>
+
+  <section>
+    <h2>1. 上下文窗口是稀缺资源</h2>
+    <p>LLM 的上下文窗口（context window）不是无限的。以 GPT-5 为例，上下文窗口约 200,000 tokens。Codex 的每一次 turn 都需要将大量信息塞进这个窗口：</p>
+    <ul>
+      <li><strong>系统提示词</strong> — Codex 的行为规范、工具使用说明、安全策略（数万 tokens）</li>
+      <li><strong>会话历史</strong> — 用户与 Codex 的对话记录、工具调用结果</li>
+      <li><strong>项目上下文</strong> — 当前工作目录、文件列表、git 状态</li>
+      <li><strong>Skills 元数据</strong> — 可用 skills 的名称、描述、路径</li>
+      <li><strong>用户输入</strong> — 当前 turn 的指令</li>
+    </ul>
+    <p>Skills 元数据只是这五个"租户"之一。如果不对其加以限制，在极端情况下它可能挤占模型理解任务所需的空间。</p>
+
+    <div class="note">
+      <strong>关键洞察：</strong>Skills 元数据的价值边际递减。前 10 个 skills 的描述帮助模型做出正确的 skill 选择；第 50 个 skill 的完整描述可能几乎不被阅读。预算模型的核心目标是在<em>信息完整性</em>和<em>上下文效率</em>之间找到平衡点。
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Skills 可能很多、很大</h2>
+    <p>Codex 的 skills 来源多样：</p>
+    <table>
+      <tr><th>来源</th><th>说明</th><th>Scope</th></tr>
+      <tr><td>System skills</td><td>Codex 内置的系统级技能，如 skill-creator</td><td><code>System</code></td></tr>
+      <tr><td>Admin skills</td><td>管理员在组织层面配置的技能</td><td><code>Admin</code></td></tr>
+      <tr><td>Plugin skills</td><td>从插件市场安装的技能包（如 GitHub、Slack 等）</td><td><code>Repo</code>/<code>User</code></td></tr>
+      <tr><td>Repo skills</td><td>项目仓库中的 <code>.claude/skills/</code> 目录</td><td><code>Repo</code></td></tr>
+      <tr><td>User skills</td><td>用户个人 <code>~/.codex/skills/</code> 目录</td><td><code>User</code></td></tr>
+    </table>
+
+    <p>一个活跃用户可能同时拥有 50+ 个 skills。每个 skill 的元数据包含：</p>
+    <pre><code>// SkillMetadata 结构（model.rs）
+pub struct SkillMetadata {
+    pub name: String,              // skill 名称，如 "github:gh-fix-ci"
+    pub description: String,       // 完整描述，可能数百字
+    pub path_to_skills_md: AbsolutePathBuf,  // 文件系统绝对路径
+    pub scope: SkillScope,         // System / Admin / Repo / User
+    pub plugin_id: Option&lt;String&gt;,
+    // ... 还有其他字段
+}</code></pre>
+
+    <p>如果 50 个 skills 全部以完整描述注入，仅文件绝对路径就可能占去大量 tokens——想象一下 <code>/Users/xl/.codex/plugins/cache/openai-curated/github/hash123/skills/gh-fix-ci/SKILL.md</code> 这样的路径重复 50 次。</p>
+  </section>
+
+  <section>
+    <h2>3. Codex 的选择：预算模型而非硬性上限</h2>
+    <p>面对"skills 太多"的问题，最直观的方案是设一个硬性数量上限——比如只展示前 20 个 skills。但 Codex 没有走这条路，原因有三：</p>
+    <ol>
+      <li><strong>优先级不是线性的。</strong> 某个 scope 的 skills 天然比另一些更重要——System skills 比 User skills 更应该被模型看到。</li>
+      <li><strong>描述长度差异巨大。</strong> 一个 skill 的描述可能只有 10 个字，另一个可能有 500 字。按数量截断意味着"浪费"短描述 skills 的预算。</li>
+      <li><strong>同源路径重复。</strong> 多个 skills 共享同一个插件根目录时，绝对路径中有大量公共前缀。可以压缩。</li>
+    </ol>
+    <p>Codex 的方案是<strong>基于 token 预算的动态渲染</strong>：</p>
+    <ul>
+      <li>从上下文窗口总容量中划出 <strong>2%</strong> 给 skills 元数据</li>
+      <li>按 scope 优先级排序（System &gt; Admin &gt; Repo &gt; User）</li>
+      <li>在预算内尽可能多地展示信息，超出预算时逐级降级</li>
+    </ul>
+
+    <p>源码入口：</p>
+    <pre><code>// render.rs 第 18-23 行
+const DEFAULT_SKILL_METADATA_CHAR_BUDGET: usize = 8_000;
+const SKILL_METADATA_CONTEXT_WINDOW_PERCENT: usize = 2;
+const MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS: usize = 1_024;
+
+// 第 138-153 行：预算计算
+pub fn default_skill_metadata_budget(context_window: Option&lt;i64&gt;) -> SkillMetadataBudget {
+    context_window
+        .and_then(|window| usize::try_from(window).ok())
+        .filter(|window| *window &gt; 0)
+        .map(|window| {
+            SkillMetadataBudget::Tokens(
+                window.saturating_mul(2).saturating_div(100).max(1)
+            )
+        })
+        .unwrap_or(SkillMetadataBudget::Characters(8_000))
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="practice">
+      <p><strong>检索练习：</strong>不看上文，回答以下问题：</p>
+      <ol>
+        <li>Codex 为 skills 元数据分配了上下文窗口的百分之几？为什么不是 5% 或 10%？</li>
+        <li>如果无法获取模型上下文窗口大小，Codex 回退到什么预算值？</li>
+        <li>为什么 Codex 选择预算模型而非简单的数量上限？列举两个原因。</li>
+      </ol>
+    </div>
+    <div class="practice">
+      <p><strong>参考答案：</strong></p>
+      <ol>
+        <li>2%。具体比例的选择没有公开的设计文档说明，但从代码看 2% 是"给技能元数据留一席之地但不过度挤占主任务空间"的经验值。对 200k token 窗口，2% = 4000 tokens，大约能容纳 50-100 个 skills 的基础元数据。</li>
+        <li>回退到基于字符的预算：8000 个字符（<code>DEFAULT_SKILL_METADATA_CHAR_BUDGET</code>）。</li>
+        <li>（1）优先级非线性：不同 scope 重要性不同；（2）描述长度差异大：按数量截断浪费短描述预算。</li>
+      </ol>
+    </div>
+    <p>下一步：<a href="0002-core-mechanism.html">核心机制——三级降级策略与描述预算分配算法</a>。如有疑问，追问 agent 让它带你单步跟踪 <code>build_available_skills</code> 的一次完整执行。</p>
+  </section>
+</main>
+</body>
+</html>

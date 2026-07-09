@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — LangGraph 工作流引擎模块总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .diagram { text-align: center; margin: 24px 0; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .decision-box {
+    border-left: 4px solid #0f6b8f;
+    background: #f4f8fb;
+    padding: 14px 18px;
+    margin: 18px 0;
+    border-radius: 0 8px 8px 0;
+  }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L1 模块总览 &middot; 第 1 节 &middot; 预计 13 分钟</p>
+
+<h1>0001 — LangGraph 工作流引擎模块总览</h1>
+
+<p class="objective"><strong>目标任务：</strong>能够画出 TradingAgents-Astock 在 LangGraph 中的节点-边拓扑图，说出传播、条件路由、断点续跑与反思的代码实现方式。</p>
+
+<h2>1. 模块定位与文件职责</h2>
+
+<p>TradingAgents-Astock 的 <code>tradingagents/graph/</code> 包是整个框架的<strong>编排中枢</strong>。它不负责分析逻辑本身（那是 agents/ 的职责），也不负责获取数据（那是 dataflows/ 的职责），而是用 LangGraph StateGraph 将所有组件组装为一条可追踪、可恢复的决策流水线。</p>
+
+<div class="filetree">
+tradingagents/graph/
+├── __init__.py              ← 导出 6 个公开类
+├── trading_graph.py         ← 主入口类 TradingAgentsGraph（propagate / 双 LLM / 生命周期）
+├── setup.py                 ← GraphSetup：节点创建 + 边拓扑定义
+├── propagation.py           ← Propagator：初始状态构建 + 图运行参数
+├── conditional_logic.py     ← ConditionalLogic：7 个工具循环路由 + 2 个辩论轮次路由
+├── reflection.py            ← Reflector：延迟反射——用真实收益评估历史决策
+├── signal_processing.py     ← SignalProcessor：从 PM 决策文本提取 5 档评级
+└── checkpointer.py          ← SQLite 断点续跑：分 ticker 存储 + thread_id 路由
+</div>
+
+<p><strong>调用链：</strong><code>propagate(ticker, date)</code> 是唯一入口。内部委托 <code>_run_graph()</code>，先调 <code>prepare_graph_run()</code> 构建初始状态，再用 <code>graph.invoke()</code> 执行状态机，最后 <code>finalize_graph_run()</code> 落盘 + 清 checkpoint + 提取信号。</p>
+
+<div class="decision-box">
+  <strong>双 LLM 分配策略</strong>
+  <code>deep_thinking_llm</code>（深度模型）仅用于 Research Manager 和 Portfolio Manager——两个需要综合全局信息做最终研判的节点。<code>quick_thinking_llm</code>（快速模型）用于其余所有 Agent——7 个 Analyst、Bull/Bear Researcher、Trader、三个风险辩论者。一次完整分析约 30-50 次 LLM 调用，仅 2 次走深度模型，兼顾品质与成本。
+</div>
+
+<h2>2. 七阶段 Pipeline 节点拓扑</h2>
+
+<p><code>setup.py</code> 的 <code>GraphSetup.setup_graph()</code> 将 L0 课程中介绍的 7 阶段 pipeline 映射为 LangGraph 节点-边拓扑。核心特征是：<strong>Analyst 串行执行</strong>——每个分析师完成研报后清空消息历史，再传给下一个分析师，避免上下文膨胀。</p>
+
+<div class="diagram">
+<pre style="text-align:left; display:inline-block;">
+┌──────────┐   ┌──────────┐        ┌──────────┐   ┌────────────┐
+│  START   │──▶│ Market   │─▶ ... ─▶│ Lockup   │──▶│ Quality    │
+│          │   │ Analyst  │        │ Analyst  │   │ Gate       │
+└──────────┘   └────┬─────┘        └────┬─────┘   └─────┬──────┘
+                    │   ▲               │   ▲            │
+                    ▼   │               ▼   │            ▼
+               ┌─────────┐         ┌─────────┐    ┌────────────┐
+               │ tools_  │         │ tools_  │    │ Bull ⇄ Bear│
+               │ market  │         │ lockup  │    │  Researcher│
+               └─────────┘         └─────────┘    └─────┬──────┘
+                                                        ▼
+  ┌──────────┐   ┌──────────┐   ┌──────────────────────────────┐
+  │ Portfolio│◀──│Aggressive│◀──│ Trader ◀── Research Manager  │
+  │ Manager  │   │⇄Conservative                              │
+  │  → END   │   │ ⇄ Neutral  │                               │
+  └──────────┘   └──────────┘   └──────────────────────────────┘
+</pre>
+</div>
+
+<p>以下代码展示了 setup.py 中 Analyst 节点的核心拓扑逻辑——为每个选中的分析师创建节点、工具循环和消息清理器，然后串联成链：</p>
+
+<pre><code># setup.py — 节点创建与串联（核心片段）
+# 为每个选中分析师创建三个节点：分析师本身 + 工具 + 消息清理
+for analyst_type, node in analyst_nodes.items():
+    workflow.add_node(f"{analyst_type.capitalize()} Analyst", node)
+    workflow.add_node(f"tools_{analyst_type}", tool_nodes[analyst_type])
+    workflow.add_node(f"Msg Clear {analyst_type.capitalize()}", delete_nodes[analyst_type])
+
+# 分析师串联：当前 analyst →（条件路由）→ tools 或 msg_clear → 下一个 analyst
+for i, analyst_type in enumerate(selected_analysts):
+    current = f"{analyst_type.capitalize()} Analyst"
+    workflow.add_conditional_edges(current,
+        getattr(self.conditional_logic, f"should_continue_{analyst_type}"),
+        [f"tools_{analyst_type}", f"Msg Clear {analyst_type.capitalize()}"])
+    workflow.add_edge(f"tools_{analyst_type}", current)  # 工具→回分析师
+    if i < len(selected_analysts) - 1:
+        workflow.add_edge(f"Msg Clear {analyst_type.capitalize()}",
+                          f"{selected_analysts[i+1].capitalize()} Analyst")
+    else:
+        workflow.add_edge(f"Msg Clear {analyst_type.capitalize()}", "Quality Gate")</code></pre>
+
+<p><strong>关键设计决策：</strong>为什么 Analyst 不做并行？论文作者（arXiv:2412.20138）认为，分析师串联能逐层累积信息——市场研报先跑，为后续社交/新闻/基本面分析提供技术面锚点；Quality Gate 在 7 份报告齐全后再做质量裁决，而非跳着门控。</p>
+
+<h2>3. 状态流转：初始化与条件路由</h2>
+
+<p><strong>初始化。</strong> <code>Propagator.create_initial_state()</code> 构建 LangGraph 的初始 <code>AgentState</code> 字典，包含股票名称、交易日期、历史上下文（past_context）、以及两个嵌套的辩论状态 TypedDict：</p>
+
+<pre><code># propagation.py — create_initial_state 返回值结构
+{
+    "messages": [("human", company_name)],     # LangGraph 消息流起点
+    "company_of_interest": company_name,        # 股票名或代码
+    "trade_date": str(trade_date),              # 分析基准日期
+    "past_context": past_context,               # 历史交易反思文本（可为空）
+    "investment_debate_state": InvestDebateState({  # Bull/Bear 辩论状态
+        "bull_history": "", "bear_history": "", "history": "",
+        "current_response": "", "judge_decision": "", "count": 0,
+    }),
+    "risk_debate_state": RiskDebateState({      # 三方风险辩论状态
+        "aggressive_history": "", "conservative_history": "",
+        "neutral_history": "", "history": "",
+        "latest_speaker": "", "judge_decision": "", "count": 0,
+    }),
+    # 7 个 Analyst 报告占位（初始为空字符串）
+    "market_report": "", "fundamentals_report": "", # ... 其余 5 个
+}</code></pre>
+
+<p><strong>条件路由。</strong> <code>ConditionalLogic</code> 类提供两类路由函数：
+（1）<strong>工具循环路由</strong>——为每个 Analyst 提供 <code>should_continue_{analyst_type}()</code>，检查最后一条消息是否有 tool_calls：有则路由到 tools 节点执行工具调用，执行完回到 Analyst 继续推理；没有则路由到 Msg Clear，结束该 Analyst 的工作。
+（2）<strong>辩论轮次路由</strong>——<code>should_continue_debate()</code> 用计数器控制 Bull/Bear 辩论轮数（默认 1 轮 = 2 次发言），<code>should_continue_risk_analysis()</code> 控制三方风险辩论（默认 1 轮 = 3 次发言），达到上限后路由到 Manager。</p>
+
+<pre><code># conditional_logic.py — 工具循环路由（以 market 为例）
+def should_continue_market(self, state: AgentState):
+    messages = state["messages"]
+    last_message = messages[-1]
+    if last_message.tool_calls:
+        return "tools_market"       # 有工具调用→执行工具
+    return "Msg Clear Market"       # 无工具调用→分析完成，清消息
+
+# 辩论轮次路由
+def should_continue_debate(self, state: AgentState) -> str:
+    if state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds:
+        return "Research Manager"   # 辩论轮次已满→Manager 综合
+    if state["investment_debate_state"]["current_response"].startswith("Bull"):
+        return "Bear Researcher"    # Bull 说完→轮到 Bear
+    return "Bull Researcher"        # 否则→Bull 发言</code></pre>
+
+<h2>4. 断点续跑与交易反思</h2>
+
+<p><strong>断点续跑。</strong> <code>checkpointer.py</code> 基于 LangGraph 的 <code>SqliteSaver</code> 实现。用户开启 <code>checkpoint_enabled=True</code> 后，每个 ticker 对应一个独立的 SQLite 数据库文件（<code>{TICKER}.db</code>），存储在 <code>{data_cache_dir}/checkpoints/</code> 下。每次 graph 执行完一个节点，SqliteSaver 自动在数据库的 <code>checkpoints</code> 和 <code>writes</code> 表中记录当前状态。</p>
+
+<p>关键流程：<code>prepare_graph_run()</code> 先调用 <code>checkpoint_step()</code> 查询是否有同名 ticker+date 的断点。如果有，返回 <code>initial_state=None</code>——LangGraph 收到 None 时会从断点自动恢复，跳过已完成的节点。分析正常结束后，<code>finalize_graph_run()</code> 调用 <code>clear_checkpoint()</code> 删除该线程的行，避免下次运行时读到过期状态。</p>
+
+<p><strong>交易反思。</strong> <code>Reflector</code> 实现的是<strong>延迟反思</strong>机制。本次分析的最终决策存入 <code>TradingMemoryLog</code>（pending 状态）。下次同一 ticker 运行时，<code>_resolve_pending_entries()</code> 通过 yfinance 获取持有期真实收益，计算相对于沪深300的 alpha，然后调 <code>reflect_on_final_decision()</code> 让 LLM 自评决策方向是否正确、论据是否成立、下一轮应吸取什么教训。反思文本通过 <code>past_context</code> 字段注入到下一轮图执行的初始状态中，形成<strong>持续学习闭环</strong>。</p>
+
+<table>
+  <tr><th>组件</th><th>文件</th><th>核心方法</th><th>触发时机</th></tr>
+  <tr><td>传播器</td><td><code>propagation.py</code></td><td><code>create_initial_state()</code></td><td>每次 propagate() 调用</td></tr>
+  <tr><td>条件路由</td><td><code>conditional_logic.py</code></td><td><code>should_continue_*()</code> × 9</td><td>每个 Analyst 和辩论节点后</td></tr>
+  <tr><td>断点续跑</td><td><code>checkpointer.py</code></td><td><code>get_checkpointer()</code></td><td>checkpoint_enabled=True 时</td></tr>
+  <tr><td>交易反思</td><td><code>reflection.py</code></td><td><code>reflect_on_final_decision()</code></td><td>下次同 ticker 运行时（延迟）</td></tr>
+  <tr><td>信号提取</td><td><code>signal_processing.py</code></td><td><code>process_signal()</code></td><td>每次图执行完成后</td></tr>
+</table>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>setup.py 中每个 Analyst 对应哪三个 LangGraph 节点？它们之间的边是如何连接的？</li>
+    <li>ConditionalLogic 中两类条件路由分别是什么？各自控制哪个阶段？</li>
+    <li>断点续跑机制如何判断是"重跑"还是"恢复"？完成后如何清理？</li>
+    <li>交易反思为什么是"延迟"反思，而不是在当前运行中立即完成？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> 三个节点：{Analyst} Analyst（LLM 分析节点）、tools_{analyst}（ToolNode）、Msg Clear {Analyst}（消息清理节点）。边：Analyst →（条件路由）tools 或 Msg Clear；tools → Analyst（回环）；Msg Clear → 下一个 Analyst 或 Quality Gate。</p>
+      <p><strong>2.</strong> 工具循环路由（should_continue_* × 7）——检查 LLM 是否请求工具调用，控制分析师内部的 tool-LLM 循环。辩论轮次路由（should_continue_debate / should_continue_risk_analysis）——用计数器控制辩论轮数，达到上限后路由到 Manager。</p>
+      <p><strong>3.</strong> prepare_graph_run() 调 checkpoint_step() 查询 SQLite 中 ticker+date 的 thread_id 是否有断点。有断点→返回 None 初始状态→LangGraph 自动恢复。正常完成→finalize_graph_run() 调 clear_checkpoint() 删行。</p>
+      <p><strong>4.</strong> 刚做出决策时，持有期收益尚未发生——需要等 5 个交易日后跑 yfinance 获取实际价格才能计算真实收益和 alpha。因此当前运行只存 pending 决策，下次同 ticker 运行时批量回填反思。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>速查资料：</strong><a href="../reference/graph-overview.html">LangGraph 工作流引擎参考文档</a> —— 完整节点映射表、条件路由函数速查、双 LLM 决策表、checkpointer API 签名。<br>
+  <strong>关联课程：</strong><a href="../../00-overview/lessons/0001-project-map.html">0001 — 项目全景图</a>（L0）<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的节点、边或状态转换。
+</p>
+
+</div>
+</main>
+</body>
+</html>

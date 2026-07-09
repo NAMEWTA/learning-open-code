@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0002 核心追踪：loader 发现、injection 注入与 render 预算</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>核心追踪：loader 发现、injection 注入与 render 预算</h1>
+        <p class="meta">学习目标：15 分钟内掌握 loader 的 BFS 扫描 + YAML 解析修复、injection 的显式提及收集与 SKILL.md 全文读取、render 的 token 预算截断三条核心逻辑的源码细节。</p>
+
+        <div class="callout">
+          上一课：<a href="0001-flow-map.html">链路地图：从文件系统扫描到模型上下文注入</a>。
+        </div>
+
+        <h2>1. loader：BFS 扫描与容错解析</h2>
+        <p>
+          <code>discover_skills_under_root()</code> 对每个 root 做广度优先扫描。两个关键常量：<code>MAX_SCAN_DEPTH = 6</code>（防止深层遍历）、<code>MAX_SKILLS_DIRS_PER_ROOT = 2000</code>（防止目录膨胀）。对于每个目录条目，跳过 <code>.</code> 开头的隐藏文件，检测 <code>plugin.json</code> 等 manifest，收集 <code>SKILL.md</code> 文件。System scope 的 root 跳过符号链接。超限时发出 tracing warning。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// loader.rs - BFS 扫描核心循环
+while let Some((dir, depth)) = queue.pop_front() {
+    let entries = fs.read_directory(&dir, None).await?;
+    for (file_name, path) in entries {
+        if file_name.starts_with('.') { continue; }
+        let metadata = fs.get_metadata(&path, None).await?;
+        if metadata.is_symlink && !follow_symlinks { continue; }
+        if metadata.is_directory {
+            enqueue_dir(&mut queue, &mut visited_dirs,
+                &mut truncated_by_dir_limit, path, depth + 1);
+        } else if metadata.is_file && file_name == "SKILL.md" {
+            discovery.skill_files.push(path);
+        }
+    }
+}</code></pre>
+        </div>
+        <p>
+          <code>parse_skill_file()</code> 最大的设计智慧在于<b>容错</b>。YAML 解析失败后不是直接放弃，而是调 <code>repair_frontmatter_scalar_fields()</code> 做行级修复——把含冒号、<code>@</code>、反引号、花括号的裸标量值加引号包裹。这对处理第三方 Skill 的松散 frontmatter 至关重要。同时，<code>agents/openai.yaml</code> 元数据加载独立进行，失败不影响主流程。
+        </p>
+
+        <h2>2. injection：显式提及与全文注入</h2>
+        <p>
+          显式 Skill 激活有两种途径：<b>结构化 Skill 输入</b>（TUI 中选中）和<b>文本中的 $SkillName 提及</b>。两者由 <code>collect_explicit_skill_mentions()</code> 统一处理，按 UserInput 顺序迭代，先处理结构化输入（阻止同名纯文本匹配），再扫描文本中的 <code>$</code> 前缀 token。同时支持 Markdown 链接格式 <code>[$name](skill://path)</code>。最后用 <code>skill_name_counts</code> 做去歧义：只有在所有 Skill 中唯一且不与 connector slug 冲突的纯文本名才被匹配。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// injection.rs - 显式提及收集的匹配优先级
+fn select_skills_from_mentions(ctx, blocked, mentions, ...) {
+    // 第一遍：按 skill:// 路径精确匹配
+    for skill in ctx.skills {
+        if mention_skill_paths.contains(
+            skill.path_to_skills_md.to_string_lossy()) {
+            selected.push(skill.clone()); continue;
+        }
+    }
+    // 第二遍：按纯文本名匹配（仅在唯一且无冲突时）
+    for skill in ctx.skills {
+        if mentions.plain_names.contains(skill.name.as_str())
+            && skill_count == 1 && connector_count == 0 {
+            selected.push(skill.clone());
+        }
+    }
+}</code></pre>
+        </div>
+        <p>
+          <code>build_skill_injections()</code> 收到提及的 SkillMetadata 列表后，逐一读取 SKILL.md 全文（通过环境对应的 filesystem），包装为 <code>SkillInjection { name, path, contents }</code>。读取失败产生 warning 但不中断其他 Skill 的加载。同时记录 analytics 事件和 OTel 指标。
+        </p>
+
+        <h2>3. render：预算模型与截断策略</h2>
+        <p>
+          <code>build_available_skills()</code> 的预算模型是渲染层的核心。默认预算为上下文窗口的 2%（如 200k 窗口 → 4000 token），未知窗口回退到 8000 字符。Skill 按 scope 排序（System > Admin > Repo > User），在预算不足时低优先级 Skill 整行裁减。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// render.rs - 三级预算降级
+fn render_skill_lines_from_lines(skill_lines, total, budget) {
+    let full_cost = lines.sum_of(full_cost);
+    if full_cost <= budget.limit() {
+        return render_full();  // ① 全部完整渲染
+    }
+    let minimum_cost = lines.sum_of(minimum_cost);
+    if minimum_cost <= budget.limit() {
+        return render_with_description_budget();  // ② 描述截断
+    }
+    return render_minimum_until_budget();  // ③ 整行裁减
+}</code></pre>
+        </div>
+        <p>
+          描述截断采用<b>逐字符公平分配</b>：短描述 Skill 自然退出的预算不会浪费，而是流转给长描述 Skill。当平均截断字符数超过 100 时，触发截断警告。预算完全耗尽时，按 scope 优先级由低到高整行裁减。当绝对路径版本已有截断压力时，自动尝试<b>别名压缩</b>（用 <code>r0/</code>、<code>r1/</code> 代替长路径前缀），仅在别名版本更优时才切换。
+        </p>
+
+        <h2>4. 异常路径全景</h2>
+        <p>
+          本切片涉及 5 条关键异常路径：
+        </p>
+        <ol>
+          <li><b>Skill 根目录不存在</b> — <code>discover_skills_under_root</code> 检查 metadata 时 NotFound，返回空列表，该 root 被静默跳过。</li>
+          <li><b>SKILL.md 缺少 frontmatter 或 description</b> — <code>extract_frontmatter</code> 返回 None 或 <code>validate_len</code> 失败 → <code>SkillParseError</code>，非 System scope 写入 errors 列表。</li>
+          <li><b>SKILL.md YAML 含非法字符</b> — <code>serde_yaml</code> 失败 → <code>repair_frontmatter_scalar_fields</code> 尝试修复，修复失败保留原始错误。</li>
+          <li><b>显式提及的 Skill 文件读取失败</b> — <code>build_skill_injections</code> 中 read_file_text 返回 Err → warning 消息，跳过该 Skill，继续处理其余。</li>
+          <li><b>可用 Skill 列表超过预算</b> — 先截断描述（带警告），仍超出则裁减低优先级 Skill（带 omitted_count 警告）。</li>
+        </ol>
+
+        <div class="practice">
+          <p><strong>检索练习：</strong>用户在 <code>.codex/skills/build/SKILL.md</code> 中写了一个缺少 <code>description</code> 字段的 Skill，这个 Skill 在模型中可见吗？如果 Skill 根目录下有 2500 个子目录，Codex 会扫描多少？</p>
+          <div class="answer">
+            参考答案：<br>
+            description 缺失 → <code>validate_len</code> 返回 <code>MissingField("description")</code> → SkillParseError → 非 System scope 下记录为 SkillError → 该 Skill 不会出现在 outcome.skills 中 → 模型不可见。<br>
+            2500 个子目录 → BFS 扫描到第 2000 个目录时达到 <code>MAX_SKILLS_DIRS_PER_ROOT</code> 限制 → 触发 <code>truncated_by_dir_limit</code> → tracing warn → 停止入队新目录。实际扫描数 ≤ 2000。<br>
+            还有疑问时，向 agent 追问具体常量值和日志输出位置。
+          </div>
+        </div>
+
+        <p>
+          速查：<a href="../reference/skill-activation-flow-map.html">Skill 激活链路速查表</a>。
+          上一课：<a href="0001-flow-map.html">链路地图：从文件系统扫描到模型上下文注入</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

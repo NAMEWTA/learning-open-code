@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skill 预算模型参考手册</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:960px;margin:40px auto;padding:0 24px;color:#1f2937}
+    h1{font-size:28px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}
+    code,pre{background:#f6f8fa;border-radius:6px;font-family:"SF Mono",Consolas,monospace;font-size:0.9rem}
+    code{padding:2px 5px}
+    pre{padding:14px;overflow:auto;font-size:0.84rem;line-height:1.6}
+    table{border-collapse:collapse;width:100%;margin:12px 0}
+    th,td{border:1px solid #e5e7eb;padding:8px 12px;text-align:left;font-size:0.92rem}
+    th{background:#f9fafb;font-weight:600}
+    .where{font-family:"SF Mono",Consolas,monospace;font-size:0.82rem;color:#6b7280}
+    .note{border-left:4px solid #2563eb;padding:10px 14px;background:#eff6ff;margin:16px 0}
+  </style>
+</head>
+<body>
+<main>
+  <section class="reference">
+    <h1>Skill 预算模型参考手册</h1>
+    <p class="meta">用途：常量速查、API 接口清单、渲染流程概览。配套短课：<a href="../lessons/0001-problem-frame.html">0001 问题背景</a>、<a href="../lessons/0002-core-mechanism.html">0002 核心机制</a>。</p>
+
+    <h2>常量速查</h2>
+    <table>
+      <tr><th>常量</th><th>值</th><th>位置</th><th>作用</th></tr>
+      <tr><td><code>SKILL_METADATA_CONTEXT_WINDOW_PERCENT</code></td><td>2</td><td>render.rs:19</td><td>技能元数据占上下文窗口百分比</td></tr>
+      <tr><td><code>DEFAULT_SKILL_METADATA_CHAR_BUDGET</code></td><td>8000</td><td>render.rs:18</td><td>无上下文窗口信息时的字符预算回退值</td></tr>
+      <tr><td><code>MAX_DEFAULT_CONTEXT_SKILL_DESCRIPTION_CHARS</code></td><td>1024</td><td>render.rs:20</td><td>单个 skill 描述的最大字符数（超长则截断）</td></tr>
+      <tr><td><code>TRUNCATED_SKILL_DESCRIPTION_SUFFIX</code></td><td>"..."</td><td>render.rs:21</td><td>描述截断时的后缀</td></tr>
+      <tr><td><code>SKILL_DESCRIPTION_TRUNCATION_WARNING_THRESHOLD_CHARS</code></td><td>100</td><td>render.rs:22</td><td>平均截断超此值触发警告</td></tr>
+      <tr><td><code>APPROX_BYTES_PER_TOKEN</code></td><td>4</td><td>render.rs:23</td><td>字节→token 近似换算系数</td></tr>
+    </table>
+
+    <h2>核心类型</h2>
+    <table>
+      <tr><th>类型</th><th>位置</th><th>作用</th></tr>
+      <tr><td><code>SkillMetadataBudget</code></td><td>render.rs:82-107</td><td>预算枚举：<code>Tokens(usize)</code> 或 <code>Characters(usize)</code></td></tr>
+      <tr><td><code>SkillRenderReport</code></td><td>render.rs:114-120</td><td>渲染结果报告：total/included/omitted 计数 + 截断统计</td></tr>
+      <tr><td><code>AvailableSkills</code></td><td>render.rs:131-136</td><td>渲染输出：skill_root_lines + skill_lines + report + warning_message</td></tr>
+      <tr><td><code>SkillLine</code></td><td>render.rs:442-447</td><td>单个 skill 的渲染线：name + description + path</td></tr>
+      <tr><td><code>AliasPlan</code></td><td>render.rs:682-687</td><td>别名方案：别名表 + 路径映射 + 表开销</td></tr>
+      <tr><td><code>SkillMetadata</code></td><td>model.rs:15-26</td><td>Skill 完整元数据（来自 SKILL.md 解析）</td></tr>
+      <tr><td><code>SkillLoadOutcome</code></td><td>model.rs:92-101</td><td>加载结果：所有 skills + 错误列表 + 禁用路径 + skill roots</td></tr>
+      <tr><td><code>SkillInjections</code></td><td>injection.rs:20-23</td><td>显式 skill 注入：items（路径+内容）+ warnings</td></tr>
+    </table>
+
+    <h2>公共 API</h2>
+    <table>
+      <tr><th>函数</th><th>签名</th><th>作用</th></tr>
+      <tr>
+        <td><code>default_skill_metadata_budget</code></td>
+        <td><code>(context_window: Option&lt;i64&gt;) -> SkillMetadataBudget</code></td>
+        <td>根据上下文窗口计算预算：<code>window * 2%</code>（最小 1 token），无窗口则回退 8000 字符</td>
+      </tr>
+      <tr>
+        <td><code>build_available_skills</code></td>
+        <td><code>(outcome: &amp;SkillLoadOutcome, budget: SkillMetadataBudget, side_effects) -> Option&lt;AvailableSkills&gt;</code></td>
+        <td>主入口：从加载结果构建可用 skills 列表，含预算约束渲染 + 别名压缩择优</td>
+      </tr>
+      <tr>
+        <td><code>render_available_skills_body</code></td>
+        <td><code>(skill_root_lines: &amp;[String], skill_lines: &amp;[String]) -> String</code></td>
+        <td>将 skills 列表格式化为 "## Skills" 段落文本</td>
+      </tr>
+      <tr>
+        <td><code>build_skill_injections</code></td>
+        <td><code>async (mentioned_skills, loaded_skills, otel, analytics_client, tracking) -> SkillInjections</code></td>
+        <td>读取被显式提及的 skills 的完整 SKILL.md 内容并注入 turn input</td>
+      </tr>
+      <tr>
+        <td><code>collect_explicit_skill_mentions</code></td>
+        <td><code>(inputs, skills, disabled_paths, connector_slug_counts) -> Vec&lt;SkillMetadata&gt;</code></td>
+        <td>从用户输入中提取 $skill-name 和结构化 skill 选择</td>
+      </tr>
+    </table>
+
+    <h2>渲染流程概览</h2>
+    <pre>build_available_skills(outcome, budget, side_effects)
+  │
+  ├─ 1. outcome.allowed_skills_for_implicit_invocation()
+  │     过滤：已启用 + 允许隐式调用
+  │
+  ├─ 2. ordered_absolute_skill_lines(&amp;skills)
+  │     排序：System(0) > Admin(1) > Repo(2) > User(3)
+  │     同 scope 按 name 字母序
+  │
+  ├─ 3. build_available_skills_from_lines(absolute_lines, budget)
+  │     └─ render_skill_lines_from_lines()
+  │          ├─ [一级] full_cost ≤ budget → 完整渲染
+  │          ├─ [二级] minimum_cost ≤ budget → 描述按预算截断
+  │          └─ [三级] minimum_cost > budget → 仅部分 skill 保留
+  │
+  ├─ 4. 如果绝对路径有截断/丢弃 → 尝试别名压缩
+  │     └─ build_aliased_available_skills(outcome, skills, budget)
+  │          ├─ build_alias_plan() → 别名根表 + 路径映射
+  │          └─ build_available_skills_from_lines(aliased_lines, adjusted_budget)
+  │
+  └─ 5. aliased_render_is_better(aliased, absolute, budget) ?
+        YES → 返回别名方案
+        NO  → 返回绝对路径方案</pre>
+
+    <h2>预算公式</h2>
+    <pre>// Token 模式（有上下文窗口信息）
+budget_tokens = max(1, context_window × 2 / 100)
+
+// Character 模式（回退，无上下文窗口信息）
+budget_chars = 8000
+
+// 示例计算
+200,000 tokens 窗口 → budget = 200,000 × 0.02 = 4,000 tokens
+  99 tokens 窗口   → budget = max(1, 99 × 2 / 100) = 1 token
+  无窗口信息       → budget = 8,000 characters</pre>
+
+    <h2>Scope 优先级</h2>
+    <table>
+      <tr><th>Scope</th><th>优先级值</th><th>说明</th></tr>
+      <tr><td><code>System</code></td><td>0（最高）</td><td>Codex 内置系统 skill，如 skill-creator</td></tr>
+      <tr><td><code>Admin</code></td><td>1</td><td>管理员配置的组织级 skill</td></tr>
+      <tr><td><code>Repo</code></td><td>2</td><td>项目仓库中的 skill</td></tr>
+      <tr><td><code>User</code></td><td>3（最低）</td><td>用户个人 skill</td></tr>
+    </table>
+    <p>当三级降级需要丢弃 skills 时，User scope 的 skill 最先被丢弃。</p>
+
+    <h2>警告消息</h2>
+    <table>
+      <tr><th>条件</th><th>消息</th></tr>
+      <tr><td>有 skill 被完全丢弃</td><td>"Exceeded skills context budget. All skill descriptions were removed and N additional skills were not included..."</td></tr>
+      <tr><td>平均截断 > 100 字符（token 模式）</td><td>"Skill descriptions were shortened to fit the 2% skills context budget..."</td></tr>
+      <tr><td>平均截断 > 100 字符（character 模式）</td><td>"Skill descriptions were shortened to fit the skills context budget..."</td></tr>
+    </table>
+
+    <h2>遥测指标</h2>
+    <table>
+      <tr><th>指标名</th><th>类型</th><th>含义</th></tr>
+      <tr><td><code>codex.thread.skills_enabled_total</code></td><td>Histogram</td><td>启用的 skill 总数</td></tr>
+      <tr><td><code>codex.thread.skills_kept_total</code></td><td>Histogram</td><td>实际渲染的 skill 数</td></tr>
+      <tr><td><code>codex.thread.skills_truncated</code></td><td>Histogram</td><td>是否有 skill 被丢弃（0 或 1）</td></tr>
+      <tr><td><code>codex.thread.skills_description_truncated_chars</code></td><td>Histogram</td><td>被截断的字符总数</td></tr>
+      <tr><td><code>codex.skill.injected</code></td><td>Counter</td><td>显式 skill 注入计数（按 status + skill name 分组）</td></tr>
+    </table>
+
+    <h2>关键源码文件</h2>
+    <table>
+      <tr><th>文件</th><th>行数</th><th>职责</th></tr>
+      <tr><td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/render.rs</span></td><td>1574</td><td>预算模型、三级降级、别名压缩、测试</td></tr>
+      <tr><td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/model.rs</span></td><td>242</td><td>SkillMetadata、SkillLoadOutcome、HostSkillsSnapshot</td></tr>
+      <tr><td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/injection.rs</span></td><td>547</td><td>显式技能注入、mention 提取</td></tr>
+      <tr><td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/loader.rs</span></td><td>—</td><td>Skill 发现与解析</td></tr>
+      <tr><td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/service.rs</span></td><td>—</td><td>SkillsService 高层 API</td></tr>
+    </table>
+  </section>
+</main>
+</body>
+</html>

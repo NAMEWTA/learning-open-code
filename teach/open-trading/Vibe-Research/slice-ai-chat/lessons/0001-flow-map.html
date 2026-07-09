@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 AI 对话三条通道全景</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>AI 对话三条通道全景</h1>
+  <p class="meta">学习目标：15 分钟内能画出三条 AI 对话通道的端到端数据流向，说出各自的入口、核心模块和适用场景。</p>
+
+  <h2>1. 三条通道，一个入口</h2>
+  <p>用户在 Settings 页面配置好 AI 后，所有"问 AI"功能（持仓页问 AI、个股页问 AI、每日复盘等）走的是<strong>同一条 HTTP 路径</strong>——<code>POST /api/chat</code>。差别在于请求体中 <code>llm.provider</code> 字段的值，它决定了后端走哪条通道：</p>
+  <div class="diagram">前端发起请求 ─── POST /api/chat ─── 后端 app.py 第 102 行
+                     │
+    provider=deepseek/…       provider=cli-claude/…       (外部 agent)
+                     │                     │                     │
+             通道 1: API           通道 2: CLI            通道 3: MCP
+             chat.run_chat_stream   chat.run_chat_cli_stream   mcp_server.py
+                     │                     │                     │
+          OpenAI 兼容端点       本机 CLI 子进程          JSON-RPC over stdio
+       (function-calling 循环)  (纯文本应答, 免key)    (暴露数据工具给agent)</div>
+  <p><strong>关键判断点</strong>——<code>app.py:102</code>：<code>is_cli = req.llm.provider.startswith("cli-")</code>。一行代码完成了通道分发。</p>
+
+  <h2>2. 三通道对比速览</h2>
+  <table>
+    <tr><th>维度</th><th>通道 1: API 接入</th><th>通道 2: CLI 订阅接入</th><th>通道 3: MCP 服务</th></tr>
+    <tr><td><strong>入口</strong></td><td>前端 Settings 填 API key</td><td>前端 Settings 选订阅 CLI</td><td>Claude Code 配置文件</td></tr>
+    <tr><td><strong>触发方式</strong></td><td>用户在前端点"问 AI"</td><td>用户在前端点"问 AI"</td><td>agent 自动调用工具</td></tr>
+    <tr><td><strong>数据工具</strong></td><td>AI 自己调（function-calling 循环）</td><td>数据已在 context 里，AI 不调工具</td><td>agent 通过 JSON-RPC 调用</td></tr>
+    <tr><td><strong>费用</strong></td><td>按 API token 计费</td><td>走 CLI 订阅额度，免 key</td><td>agent 自己的订阅额度</td></tr>
+    <tr><td><strong>流式</strong></td><td>SSE NDJSON 逐块吐字 + 工具事件</td><td>CLI stdout 逐行推 delta</td><td>不适用（工具调用一次返回）</td></tr>
+    <tr><td><strong>后端核心</strong></td><td><code>run_chat_stream()</code></td><td><code>run_chat_cli_stream()</code></td><td><code>_handle()</code> + <code>_exec_tool()</code></td></tr>
+    <tr><td><strong>适用场景</strong></td><td>通用，任何环境可用</td><td>本机自托管，已有 CLI 订阅</td><td>agent 需要数据，但不聊天</td></tr>
+  </table>
+
+  <h2>3. 通道 1：API 接入（function-calling 循环）</h2>
+  <p>最通用的通道。<strong>用户填 API key → 前端发 POST /api/chat → 后端调 OpenAI 兼容端点</strong>。AI 可以自己决定何时调用数据工具（查行情/估值/研报/新闻），拿到客观数据后再作答。这是唯一一条能让 AI"自主查数据"的通道。</p>
+  <p>核心流程：</p>
+  <div class="diagram">前端 llm.ts:chatStream()
+ │  发送 {messages, context, llm}
+ ▼
+后端 chat.py:run_chat_stream()
+ │  构建 messages（SYSTEM_PROMPT + 用户历史）
+ │  for rnd in 1..6:
+ │    │  _call_llm_stream() → SSE 流
+ │    │  _iter_sse_deltas() → 逐 delta 解析
+ │    │  若有 tool_calls → _exec_tool() → 结果注入 messages
+ │    │  若无 → yield done，结束
+ ▼
+前端 llm.ts: 解析 NDJSON 行
+ │  delta → 逐字渲染
+ │  tool  → 显示"正在查 {工具名}"
+ │  done  → 取回 trace + rounds
+ ▼
+用户看到流式回答</div>
+  <p>上限 6 轮（<code>MAX_ROUNDS</code>），防止模型陷入无限调工具的循环。达到上限后不传 tools、直接收尾一次回答。</p>
+
+  <h2>4. 通道 2：CLI 订阅接入（纯文本应答）</h2>
+  <p>用户在 Settings 选"订阅接入"（如 Claude Code / Qwen / DeepSeek / Codex），后端 spawn 对应的本机 CLI 子进程。<strong>数据工具不能由 AI 自行调用</strong>——因为 CLI 不像 API 那条有 function-calling 机制。因此前端必须把页面已有数据塞进 <code>context</code> 参数，CLI 只负责基于 context 做文本分析。</p>
+  <p>适用场景：每日复盘总结、今日要点提炼、个股页已有行情数据的分析——这些场景中数据已经在前端页面上，不需要 AI 再去查。</p>
+  <p>详细 CLI 适配机制见 <a href="0003-cli-mcp.html">第 3 节 CLI 适配与 MCP 服务</a>。</p>
+
+  <h3>5. 通道 3：MCP 服务（工具暴露）</h3>
+  <p>与前两条不同，MCP 通道<strong>没有前端参与</strong>。它是独立进程，通过 stdin/stdout 与 Claude Code 等 agent 通信（JSON-RPC 2.0 协议）。agent 发起 <code>tools/list</code> 获取可用工具清单，然后用 <code>tools/call</code> 调用 chat._exec_tool 获取数据。</p>
+  <p>这条通道的定位是：让 agent 在分析投研问题时，能直接拿到 A 股/美港股的客观数据。agent 用自己的订阅额度做分析，Vibe-Research 只充当"数据工具箱"。</p>
+
+  <h3>6. 关键文件索引</h3>
+  <table>
+    <tr><th>文件</th><th>角色</th><th>关键行</th></tr>
+    <tr><td><code>frontend/src/pages/Settings.tsx</code></td><td>用户配置 AI 接入方式</td><td>14 (mode 切换)、102-108 (API/CLI 表单)</td></tr>
+    <tr><td><code>frontend/src/lib/llm.ts</code></td><td>前端流式客户端 + localStorage 持久化</td><td>59-113 (chatStream NDJSON 解析)</td></tr>
+    <tr><td><code>frontend/src/lib/ai-models.ts</code></td><td>9 个内置模型提供商 + 4 个 CLI 定义</td><td>33 (isCliProvider)、48-69 (模型清单)</td></tr>
+    <tr><td><code>backend/app.py:89-120</code></td><td>/api/chat 端点 + 通道分发</td><td>102 (is_cli 判断)、114 (分发)</td></tr>
+    <tr><td><code>backend/chat.py</code></td><td>function-calling 核心 + 工具定义</td><td>61-124 (TOOLS)、320-382 (流式循环)</td></tr>
+    <tr><td><code>backend/cli_runtime.py</code></td><td>4 种 CLI spawn + 流式管道</td><td>25-46 (CLI defs)、140-216 (流式)</td></tr>
+    <tr><td><code>backend/mcp_server.py</code></td><td>JSON-RPC MCP 服务</td><td>24-31 (MCP_TOOLS 转换)、47-87 (_handle)</td></tr>
+  </table>
+
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>用户在前端 Settings 页选了"Claude Code 订阅接入"，然后去持仓页点"问 AI"。这个请求在 <code>app.py:89</code> 收到后，会调 <code>run_chat_stream</code> 还是 <code>run_chat_cli_stream</code>？为什么？</p>
+    <p><strong>参考答案：</strong>调 <code>run_chat_cli_stream</code>。因为 <code>req.llm.provider</code> 的值为 <code>cli-claude</code>，以 <code>cli-</code> 开头，所以 <code>app.py:102</code> 的 <code>is_cli</code> 为 <code>True</code>。CLI 通道不做 function-calling，数据必须已在 context 里——持仓页的数据由前端在发请求时塞进 <code>context</code> 参数。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/app.py:89-120</code>（通道分发）、<code>backend/chat.py:320-393</code>（两条流式函数）、<code>frontend/src/lib/llm.ts:59-113</code>（NDJSON 解析）。完整三条通道的时序详解和配置速查见 <a href="../reference/ai-chat-flow-map.html">AI 对话全链路速查谱</a>。不清楚某条通道细节时，让 agent 沿着对应源码展开。</p>
+</main>
+</body>
+</html>

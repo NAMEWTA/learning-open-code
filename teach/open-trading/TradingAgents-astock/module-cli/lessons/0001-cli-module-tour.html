@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — CLI 命令行界面模块总览</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; text-align: center; margin: 18px 0; line-height: 2; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L1 模块总览 &middot; 第 1 节 &middot; 预计 12 分钟</p>
+
+<h1>0001 — CLI 命令行界面模块总览</h1>
+
+<p class="objective"><strong>学习目标：</strong>能说出 CLI 模块的 8 步交互式引导流程、Typer 命令注册方式、LLM provider 选择逻辑、save_report_to_disk 的 5 级目录结构，以及 CLI 与 trading_graph 的调用边界。</p>
+
+<h2>1. 模块定位与职责</h2>
+
+<p><code>cli/</code> 是整个 TradingAgents-Astock 的<strong>用户入口层</strong>。它位于架构最顶层——在 Graph 层和 Agent 层之上，负责将用户的命令行输入转化为配置参数，驱动 trading_graph 执行多 Agent 分析流程。模块本身不包含任何业务逻辑，仅做参数收集、流程编排和结果展示。</p>
+
+<div class="flow">
+┌──────────────────────────────────────┐
+│  <strong>cli/  ◀── 本节重点</strong>                  │
+├──────────────────────────────────────┤
+│  trading_graph (Graph 工作流)        │
+├──────────────────────────────────────┤
+│  agents / dataflows / llm_clients    │
+└──────────────────────────────────────┘
+</div>
+
+<div class="filetree">
+cli/
+├── __init__.py               ← 包初始化
+├── main.py                   ← 🔴 Typer 入口 + 8 步交互 + 流式展示
+├── utils.py                  ← 🔴 交互式选择逻辑（分析师/深度/LLM/思考）
+├── config.py                 ← 🟡 CLI 配置常量
+├── models.py                 ← 🟡 AnalystType 枚举定义
+├── announcements.py          ← 🟡 公告拉取与展示
+├── stats_handler.py          ← 🟡 LangChain 回调统计（LLM/Tool 计数）
+└── static/
+    └── welcome.txt           ← ASCII Art 欢迎界面
+</div>
+
+<p>入口路径：根目录 <code>main.py</code> 直接创建 <code>TradingAgentsGraph</code>（用于 IDE/脚本调试），Typer CLI 则通过 <code>cli/main.py</code> 的 <code>analyze</code> 命令启动完整交互流。CLI 依赖 Rich（终端美化）、Questionary（交互式问答）、Typer（命令框架）三个核心库。</p>
+
+<h2>2. 8 步交互式引导流程</h2>
+
+<p><code>get_user_selections()</code> 是 CLI 的核心函数，按顺序引导用户完成 8 步输入。每个步骤通过 <code>questionary</code> 库提供交互式选择（select / checkbox / text），步骤间无依赖——所有参数收集完毕后才组装 config。</p>
+
+<div class="filetree">
+Step 1: Ticker Symbol      → 输入股票代码（含安全校验 safe_ticker_component）
+Step 2: Analysis Date      → YYYY-MM-DD 格式，不允许未来日期
+Step 3: Output Language    → 12 种语言选择（支持自定义输入）
+Step 4: Analysts Team      → 多选：Market / Social / News / Fundamentals
+Step 5: Research Depth     → Shallow(1) / Medium(3) / Deep(5) — 控制辩论轮次
+Step 6: LLM Provider       → 10 种 provider：OpenAI/Google/Anthropic/xAI/
+                             DeepSeek/Qwen/GLM/OpenRouter/Azure/Ollama
+Step 7: Thinking Agents    → 分 shallow/deep 两个 LLM 引擎独立选择
+Step 8: Provider Config    → 根据 provider 显示不同选项：
+                             Google→thinking_level / OpenAI→reasoning_effort /
+                             Anthropic→effort_level
+</div>
+
+<p><strong>LLM Provider 选择逻辑：</strong><code>select_llm_provider()</code>（在 <code>cli/utils.py</code>）维护了一个 10 元素的 PROVIDERS 列表，每项包含显示名、provider_key 和默认 backend_url。选定后，步骤 7 从 <code>tradingagents.llm_clients.model_catalog</code> 的注册表中按 provider 拉取可选模型列表。最终所有参数（ticker、date、analysts、depth、llm_provider、shallow_thinker、deep_thinker、thinking 配置、output_language）汇入一个 dict 返回。</p>
+
+<h2>3. 流式分析与实时展示</h2>
+
+<p><code>run_analysis()</code> 拿到用户选择后，按以下顺序执行：</p>
+
+<ol>
+  <li><strong>组装 config</strong> — 将用户选择的 depth、llm 模型、provider、thinking 配置、output_language 合并到 <code>DEFAULT_CONFIG</code></li>
+  <li><strong>初始化 StatsCallbackHandler</strong> — 跟踪 LLM 调用次数、Tool 调用次数、token 消耗</li>
+  <li><strong>初始化 TradingAgentsGraph</strong> — 传入 selected_analysts、config、debug=True、callbacks</li>
+  <li><strong>初始化 MessageBuffer</strong> — 管理 agent_status、report_sections、消息日志和工具调用记录</li>
+  <li><strong>创建 Rich Layout</strong> — 四区域：header（欢迎）、progress（Agent 状态表）、messages（消息+工具日志）、footer（统计信息）</li>
+  <li><strong>流式执行 graph.stream()</strong> — 逐 chunk 处理：分类消息类型 → 更新 agent 状态 → 更新报告段落 → 刷新 Live 布局</li>
+</ol>
+
+<p>流式循环中的状态转换由 <code>update_analyst_statuses()</code> 驱动：检测 chunk 中的 report 字段 → 标记对应 Analyst 为 completed → 激活下一个 Analyst 为 in_progress → 所有 Analyst 完成后激活 Bull Researcher → 依次推进至 Portfolio Manager。整个过程通过 Rich Live 组件（4 fps 刷新）实时渲染终端。</p>
+
+<h2>4. 报告保存与展示</h2>
+
+<p>流式分析完成后，<code>save_report_to_disk(final_state, ticker, save_path)</code> 将最终状态写入 5 级子目录结构：</p>
+
+<div class="filetree">
+{save_path}/
+├── 1_analysts/
+│   ├── market.md           ← Market Analyst 报告
+│   ├── sentiment.md        ← Social Analyst 报告
+│   ├── news.md             ← News Analyst 报告
+│   └── fundamentals.md     ← Fundamentals Analyst 报告
+├── 2_research/
+│   ├── bull.md             ← Bull Researcher 辩论记录
+│   ├── bear.md             ← Bear Researcher 辩论记录
+│   └── manager.md          ← Research Manager 裁决
+├── 3_trading/
+│   └── trader.md           ← Trader 投资计划
+├── 4_risk/
+│   ├── aggressive.md       ← 激进风控分析
+│   ├── conservative.md     ← 保守风控分析
+│   └── neutral.md          ← 中性风控分析
+├── 5_portfolio/
+│   └── decision.md         ← Portfolio Manager 最终决策
+└── complete_report.md      ← 汇总版完整报告（含免责声明 header）
+</div>
+
+<p>保存后会依次提示：是否在终端展示完整报告（<code>display_complete_report()</code>，用 Rich Panel 分段渲染五大团队输出）。报告保存路径有安全校验——若用户输入的路径在项目目录之外，需二次确认后才执行写入。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>CLI 模块的 8 步交互引导流程中，哪一步的输出会影响后续步骤的选项列表？</li>
+    <li><code>save_report_to_disk</code> 保存了几级目录？每级目录的核心文件是什么？</li>
+    <li>流式分析中，Agent 状态的推进由哪个函数驱动？它的判断依据是什么？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> 步骤 6 LLM Provider 选择会影响步骤 7 的模型列表（从 model_catalog 按 provider 拉取）和步骤 8 的配置界面（Google 显示 thinking_level、OpenAI 显示 reasoning_effort、Anthropic 显示 effort_level）。</p>
+      <p><strong>2.</strong> 5 级子目录：1_analysts（四种分析师报告）、2_research（bull/bear/manager 辩论）、3_trading（trader 计划）、4_risk（三种风控视角）、5_portfolio（最终决策）。外加根目录 complete_report.md 汇总版。</p>
+      <p><strong>3.</strong> <code>update_analyst_statuses()</code> 函数驱动。它检测每个 chunk 中是否出现了对应 analyst 的 report 字段，已有报告的设为 completed，第一个没有报告的设为 in_progress。所有 analyst 完成后自动激活 Bull Researcher。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>速查资料：</strong><a href="../reference/cli-overview.html">CLI 模块参考文档</a> —— 命令参考、完整选项列表、config 配置项速查、源码文件索引。<br>
+  <strong>下一节预告：</strong>CLI 交互式输入的安全边界（L2）——从 safe_ticker_component 到路径穿越防护。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

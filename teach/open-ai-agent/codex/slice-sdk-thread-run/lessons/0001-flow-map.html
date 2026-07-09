@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 链路地图：SDK 调用到事件消费的完整时序</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>链路地图：SDK 调用到事件消费的完整时序</h1>
+        <p class="meta">学习目标：15 分钟内画出从 <code>codex.startThread()</code> 到用户消费 <code>turn.completed</code> 事件的完整时序图，理解 TypeScript 和 Python 两条 SDK 路径的共同模式。</p>
+
+        <div class="callout">
+          一句话定位：本切片追踪 Codex SDK 用户调用 <code>startThread() + run()</code> 到消费 Codex 事件的完整客户端链路。TypeScript SDK 走 <code>spawn + JSONL</code> 子进程路径，Python SDK 走 <code>subprocess + JSON-RPC</code> app-server 路径，两者共享相同的事件语义。
+          前置知识：<a href="../../module-sdk/lessons/0001-module-tour.html">L1 SDK 模块导览</a>、<a href="../../module-app-server/lessons/0001-app-server-overview.html">L1 app-server 协议概览</a>。
+        </div>
+
+        <h2>1. 时序总览</h2>
+        <p>
+          下面这张 mermaid 时序图覆盖了从用户代码创建 Codex 实例到消费最终事件的全部 5 层。建议先扫一遍全图建立心理模型，再逐层下钻（第 2 节课程中深入）。
+        </p>
+        <div class="diagram">
+          <pre class="mermaid">sequenceDiagram
+    participant U as 用户代码
+    participant CX as Codex 类
+    participant TH as Thread 类
+    participant EX as CodexExec
+    participant RS as Rust exec 二进制
+
+    U->>CX: new Codex(options)
+    CX->>EX: new CodexExec(codexPath, env, config)
+
+    U->>CX: startThread(options)
+    CX->>TH: new Thread(exec, options, threadOptions)
+    TH-->>U: Thread 实例 (id=null)
+
+    U->>TH: run("hello world")
+    TH->>TH: normalizeInput() + createOutputSchemaFile()
+    TH->>EX: exec.run({input, model, sandboxMode, ...})
+    EX->>EX: 组装 CLI 参数 + 注入环境变量
+    EX->>RS: spawn(codex-bin, [exec, --experimental-json, ...])
+    EX->>RS: stdin.write(input) + stdin.end()
+    RS-->>EX: JSONL: {"type":"thread.started","thread_id":"..."}
+    EX-->>TH: yield line (JSONL 事件行)
+    TH->>TH: JSON.parse(line) → 识别 ThreadEvent 类型
+    Note over TH: thread.started → 记录_id
+    Note over TH: item.completed → 收集items
+    Note over TH: turn.completed → 记录usage
+    Note over TH: turn.failed → 抛出异常
+    RS-->>EX: exit code (0=成功)
+    TH->>U: Turn {items, finalResponse, usage}</pre>
+        </div>
+
+        <h2>2. 两条 SDK 路径对比</h2>
+        <p>
+          Codex 提供两种 SDK，底层通信方式不同但上层 API 语义一致：
+        </p>
+        <table>
+          <thead>
+            <tr><th>维度</th><th>TypeScript SDK</th><th>Python SDK</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>通信协议</td><td>子进程 stdin/stdout JSONL</td><td>子进程 stdio JSON-RPC</td></tr>
+            <tr><td>命令行</td><td><code>codex exec --experimental-json</code></td><td><code>codex app-server --listen stdio://</code></td></tr>
+            <tr><td>事件流</td><td>AsyncGenerator&lt;string&gt; 逐行 yield</td><td>线程路由队列按 turn_id 分发</td></tr>
+            <tr><td>thread 创建</td><td><code>new Thread(exec, ...)</code> 本地对象</td><td>JSON-RPC <code>thread/start</code> 请求</td></tr>
+            <tr><td>thread ID</td><td>首个 <code>thread.started</code> 事件中获取</td><td><code>thread/start</code> 响应中直接返回</td></tr>
+            <tr><td>子进程管理</td><td><code>CodexExec</code> 类，每次 run 创建新进程</td><td><code>CodexClient</code> 类，长连接复用</td></tr>
+          </tbody>
+        </table>
+        <p>
+          核心差异：TypeScript SDK 每次 <code>run()</code> 启动一个短生命周期的 <code>codex exec</code> 子进程，进程退出即表示 turn 结束。Python SDK 启动一个长生命周期的 <code>codex app-server</code> 进程，通过 JSON-RPC 请求/通知在同一连接上管理多个 thread 和 turn。
+        </p>
+
+        <h2>3. 关键事件类型与消费时机</h2>
+        <p>
+          无论走哪条路径，SDK 最终暴露给用户的事件语义是一致的。以下 5 种事件覆盖了正常链路的核心节点：
+        </p>
+        <table>
+          <thead>
+            <tr><th>事件</th><th>含义</th><th>消费时机</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>thread.started</code></td><td>新 thread 已创建</td><td>记录 thread_id 用于后续 resume</td></tr>
+            <tr><td><code>turn.started</code></td><td>一次 turn 开始执行</td><td>可用于 UI loading 状态</td></tr>
+            <tr><td><code>item.completed</code></td><td>一个 item（消息/命令/文件变更）完成</td><td>增量更新对话历史</td></tr>
+            <tr><td><code>turn.completed</code></td><td>turn 正常结束，含 token 用量</td><td>获取 usage 统计、结束 loading</td></tr>
+            <tr><td><code>turn.failed</code></td><td>turn 执行失败</td><td>错误处理与重试逻辑</td></tr>
+          </tbody>
+        </table>
+
+        <h2>4. 异常路径概览</h2>
+        <p>三条关键异常路径，将在 0002 课程中展开分析：</p>
+        <ul>
+          <li><strong>子进程启动失败</strong>：<code>spawn()</code> 返回 error 事件（ENOENT / 权限不足）→ <code>CodexExec.run()</code> 中 <code>spawnError</code> 被捕获并抛出</li>
+          <li><strong>进程异常退出</strong>：子进程 exit code 非 0 → <code>CodexExec.run()</code> 合并 stderr 抛出 <code>Codex Exec exited with code N</code></li>
+          <li><strong>turn 执行失败</strong>：收到 <code>turn.failed</code> 事件 → <code>Thread.run()</code> 抛出 <code>Error(event.error.message)</code></li>
+        </ul>
+
+        <div class="practice">
+          <p><strong>判断题：</strong>以下说法正确的是？</p>
+          <ol>
+            <li>TypeScript SDK 的 Thread 类在构造函数中就会向 app-server 发送 thread/start 请求。</li>
+            <li>Python SDK 的 CodexClient 通过长连接复用同一个子进程处理多个 thread。</li>
+            <li>thread.started 事件在 TypeScript SDK 中由第一个 JSONL 行携带，在 Python SDK 中由 thread/start 响应携带。</li>
+          </ol>
+          <div class="answer">
+            参考答案：<br>
+            1. 错误 — TypeScript SDK 的 <code>new Thread(exec, ...)</code> 只是创建本地对象，不发送任何请求。thread_id 在首次 <code>run()</code> 收到 <code>thread.started</code> 事件后才填充。<br>
+            2. 正确 — Python SDK 启动 <code>codex app-server</code> 作为长生命周期子进程，通过 JSON-RPC 在同一连接上管理多个 thread。<br>
+            3. 正确 — 两种 SDK 获取 thread_id 的时机不同，但语义等价。<br>
+            还有疑问时，向 agent 追问具体代码行，让它带你定位。
+          </div>
+        </div>
+
+        <p>
+          下一课：<a href="0002-main-path.html">主路径深入：从 startThread 到事件消费</a>。<br>
+          速查表：<a href="../reference/sdk-thread-run-flow-map.html">SDK Thread/Run 调用链速查表</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

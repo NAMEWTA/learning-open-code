@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>thread/start 到 turn/start 的 JSON-RPC 链路地图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.78rem;
+      line-height: 1.6;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">L2 垂直切片 · slice-app-server-turn · 15 分钟短课</div>
+  <h1>链路地图：从 JSON-RPC 请求到 CodexThread 执行</h1>
+  <p class="lead">本课只训练一个判断：当 SDK 发出 thread/start + turn/start 时，请求穿过哪七层，每层的入口函数是什么。学完后你能画出完整时序图。</p>
+  <div class="meta">
+    <span class="pill">学习目标：复述 7 层调用链的入口函数</span>
+    <span class="pill">前置：<a href="../../module-app-server/lessons/0001-app-server-module-tour.html">L1 app-server 导览</a></span>
+    <span class="pill">前置：<a href="../../module-core-runtime/lessons/0001-core-runtime-module-tour.html">L1 core-runtime 导览</a></span>
+    <span class="pill">配套参考：<a href="../reference/app-server-turn-flow-map.html">链路速查表</a></span>
+  </div>
+
+  <section>
+    <h2>1. 链路全景：七层架构</h2>
+    <p>一次 thread/start 或 turn/start 请求依次穿过以下七层。记住这个递进顺序是本节的核心目标：</p>
+    <div class="diagram">[SDK/富客户端]
+    │  JSON-RPC over stdio / websocket / unix socket
+    ▼
+① transport 层 — transport.rs
+    │  JSONRPCMessage 解码 → ConnectionState
+    ▼
+② message_processor 层 — message_processor.rs
+    │  反序列化 ClientRequest → initialize 门禁 → 方法路由
+    ▼
+③ 协议层 — protocol/common.rs, v2/thread.rs, v2/turn.rs, rpc.rs
+    │  类型定义：ThreadStartParams（v2/thread.rs）、TurnStartParams（v2/turn.rs）、ClientRequest（common.rs）、JSONRPCRequest（rpc.rs）
+    ▼
+④ processor 层 — thread_processor.rs / turn_processor.rs
+    │  thread_start() / turn_start() — 业务逻辑编排
+    ▼
+⑤ thread_lifecycle 层 — thread_lifecycle.rs
+    │  ensure_conversation_listener() — 事件监听器注册
+    ▼
+⑥ CodexThread 层 — codex_thread.rs
+    │  submit() / submit_user_input() — 提交 Op 到 core session
+    ▼
+⑦ core 执行引擎
+    │  模型调用、工具执行、流式事件产出
+    ▼
+[通知流回 SDK] — thread/started, turn/started, item/*, turn/completed</div>
+    <p>前五层都在 app-server 内，后两层在 core crate。理解这个分层后，你应该能回答"一个 JSON-RPC 方法在哪个文件被匹配到"。<a href="../../module-app-server/lessons/0001-app-server-module-tour.html">L1 app-server 导览</a> 的第 3 节提供了更简化的四层视角，本节则展开了 processor 和 lifecycle 的细分。</p>
+  </section>
+
+  <section>
+    <h2>2. Mermaid 时序图</h2>
+    <p>下图覆盖 thread/start + turn/start 的主成功路径和一条异常路径（虚线）。需要加载 Mermaid 运行时渲染，但源码块本身可直接阅读。</p>
+    <div class="diagram">sequenceDiagram
+    participant SDK as SDK/富客户端
+    participant TP as Transport
+    participant MP as MessageProcessor
+    participant ThrP as ThreadRequestProcessor
+    participant TurP as TurnRequestProcessor
+    participant Life as ThreadLifecycle
+    participant CT as CodexThread
+    participant Core as Core Session
+
+    Note over SDK,Core: === thread/start ===
+
+    SDK->>TP: JSON-RPC {"method":"thread/start","params":{...}}
+    TP->>MP: process_request(JSONRPCRequest)
+    MP->>MP: deserialize_client_request() → ClientRequest::ThreadStart
+    MP->>MP: handle_client_request() → dispatch_initialized_client_request()
+    MP->>ThrP: thread_start(request_id, params, ...)
+    ThrP->>ThrP: thread_start_inner() → spawn background task
+    ThrP->>ThrP: thread_start_task() → 加载配置 → new_thread()
+    ThrP->>CT: ThreadManager.new_thread() → CodexThread
+    CT-->>ThrP: Arc&lt;CodexThread&gt;
+    ThrP->>Life: ensure_conversation_listener()
+    Life->>CT: next_event() 循环监听
+    ThrP-->>SDK: [通知] thread/started
+
+    Note over SDK,Core: === turn/start ===
+
+    SDK->>TP: JSON-RPC {"method":"turn/start","params":{"threadId":"...","input":[...]}}
+    TP->>MP: process_request()
+    MP->>TurP: turn_start(request_id, params, ...)
+    TurP->>TurP: load_thread() → get_thread(thread_id)
+    TurP->>TurP: validate_v2_input_limit() → 输入长度校验
+    TurP->>CT: submit_user_input_with_client_user_message_id()
+    CT->>Core: submit(Op::UserInput{...})
+    Core-->>CT: turn_id
+    CT-->>TurP: turn_id
+    TurP-->>SDK: {"turn":{"id":"...","status":"InProgress"}}
+    Core-->>SDK: [通知流] turn/started → item/* → turn/completed
+
+    Note over SDK,Core: === 异常路径：thread 不存在 ===
+
+    SDK->>TP: turn/start {"threadId":"nonexistent"}
+    TP->>MP: process_request()
+    MP->>TurP: turn_start()
+    TurP->>TurP: load_thread() → get_thread() 返回 Err
+    TurP-->>SDK: {"error":{"code":-32600,"message":"thread not found: ..."}}</div>
+  </section>
+
+  <section>
+    <h2>3. 关键入口函数速查</h2>
+    <table>
+      <tr><th>层</th><th>入口函数</th><th>源文件（行号）</th></tr>
+      <tr><td>Transport</td><td><code>process_request()</code></td><td><code>message_processor.rs:592</code></td></tr>
+      <tr><td>反序列化</td><td><code>deserialize_client_request()</code></td><td><code>message_processor.rs:101</code></td></tr>
+      <tr><td>路由分发</td><td><code>handle_initialized_client_request()</code></td><td><code>message_processor.rs:938</code></td></tr>
+      <tr><td>thread/start</td><td><code>thread_start()</code> → <code>thread_start_inner()</code></td><td><code>thread_processor.rs:422,902</code></td></tr>
+      <tr><td>turn/start</td><td><code>turn_start()</code> → <code>turn_start_inner()</code></td><td><code>turn_processor.rs:155,442</code></td></tr>
+      <tr><td>监听器注册</td><td><code>ensure_conversation_listener()</code></td><td><code>thread_lifecycle.rs:138</code></td></tr>
+      <tr><td>Core 提交</td><td><code>submit_user_input_with_client_user_message_id()</code></td><td><code>codex_thread.rs:261</code></td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>4. 一条异常路径：thread 不存在</h2>
+    <p>当时序图中虚线所示，当客户端用一个不存在的 thread_id 调用 turn/start 时：</p>
+    <ol>
+      <li><code>turn_start_inner()</code> 调用 <code>self.load_thread(&params.thread_id)</code>（<code>turn_processor.rs:450</code>）</li>
+      <li><code>load_thread()</code>（<code>turn_processor.rs:300</code>）内部调用 <code>self.thread_manager.get_thread(thread_id)</code></li>
+      <li><code>get_thread()</code> 返回 <code>Err</code>，<code>load_thread()</code> 将其映射为 <code>invalid_request("thread not found: {thread_id}")</code></li>
+      <li>错误一路返回到 <code>handle_initialized_client_request()</code>（<code>message_processor.rs:1517</code>），通过 <code>outgoing.send_error()</code> 发回 JSON-RPC Error</li>
+    </ol>
+    <p>错误码为 <code>-32600</code>（Invalid Request），这是 JSON-RPC 标准错误码。如果你在调试线上问题时看到这个消息，排查入口就是 <code>thread_manager.get_thread()</code> —— thread 可能已被卸载、归档或从未创建。</p>
+  </section>
+
+  <section class="panel">
+    <h3>检索练习</h3>
+    <p>不要回看上文，回答以下三个问题：</p>
+    <ol>
+      <li>thread/start 和 turn/start 在 message_processor.rs 中分别匹配为哪个 ClientRequest 变体？</li>
+      <li>turn/start 的输入长度校验发生在哪个函数中？</li>
+      <li>thread/start 的响应是同步返回还是异步通知？</li>
+    </ol>
+    <p class="answer"><strong>参考答案：</strong>
+      ① <code>ClientRequest::ThreadStart</code>（<code>message_processor.rs:1094</code>）和 <code>ClientRequest::TurnStart</code>（<code>message_processor.rs:1324</code>）；
+      ② <code>validate_v2_input_limit()</code>（<code>turn_processor.rs:458</code>），限制为 <code>MAX_USER_INPUT_TEXT_CHARS</code>；
+      ③ thread/start 是异步的——<code>thread_start_inner()</code> 将实际工作 spawn 为 background task（<code>thread_processor.rs:1004</code>），立即返回 <code>Ok(None)</code>（无同步响应体），thread 创建成功后通过 <code>thread/started</code> 通知告知客户端。
+    </p>
+    <p>如果你对任何阶段不确定，追问 agent：“请带我读 <code>thread_start_task</code> 的完整实现”或“请对比 thread/start 和 turn/start 的同步/异步差异”。</p>
+  </section>
+</main>
+</body>
+</html>

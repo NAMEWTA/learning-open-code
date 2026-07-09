@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>状态、模型提供商与后端通信参考</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>状态、模型提供商与后端通信参考</h1>
+    <p class="meta">用途：作为 L1 源码阅读地图。短课见 <a href="../lessons/0001-state-model-backend-module-tour.html">0001 状态与后端通信模块导览</a>；上层架构见 L0 <a href="../../00-overview/reference/00-overview.html">项目总览参考</a>。</p>
+  </header>
+
+  <section>
+    <h2>模块定位</h2>
+    <p>这 10 个 crate 构成 Codex 连接外部世界的底层基础设施。它们位于 core 之下、网络/文件系统之上，按职责分为四层：<strong>状态持久化层</strong>把 session 数据写入 JSONL rollout 文件和 SQLite；<strong>认证密钥层</strong>完成 OAuth 登录并将令牌安全存入平台密钥链；<strong>模型 API 层</strong>抽象 provider 差异并封装 HTTP 通信；<strong>配置遥测层</strong>从云端拉取配置并记录 trace bundle 供分析。</p>
+  </section>
+
+  <section>
+    <h2>Crate 职责与依赖速查</h2>
+    <table>
+      <thead>
+        <tr><th>Crate</th><th>Rust 包名</th><th>职责</th><th>关键依赖</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>state</td><td><code>codex-state</code></td><td>SQLite 状态持久化：4 个 db、migration、backfill 提取、thread/goal/memory/agent_job CRUD</td><td>sqlx、libsqlite3-sys、codex-protocol</td></tr>
+        <tr><td>thread-store</td><td><code>codex-thread-store</code></td><td>Thread 存储抽象：create/resume/append/flush/shutdown/read/list/search/archive/delete + LiveThread 管理</td><td>codex-state、codex-rollout、codex-protocol</td></tr>
+        <tr><td>rollout</td><td><code>codex-rollout</code></td><td>Rollout 文件持久化与发现：Recorder 写入、Thread 列表游标分页、全文搜索、压缩、session index</td><td>codex-state、codex-protocol、zstd</td></tr>
+        <tr><td>rollout-trace</td><td><code>codex-rollout-trace</code></td><td>Trace bundle 记录与回放：TraceWriter、RawTraceEvent、reducer 归约、inference/compaction/tool 追踪</td><td>codex-protocol、codex-code-mode</td></tr>
+        <tr><td>model-provider</td><td><code>codex-model-provider</code></td><td>模型提供商运行时抽象：ModelProvider trait、ConfiguredModelProvider、AmazonBedrockModelProvider、认证解析、models manager 创建</td><td>codex-api、codex-login、codex-model-provider-info</td></tr>
+        <tr><td>model-provider-info</td><td><code>codex-model-provider-info</code></td><td>提供商配置元数据：ModelProviderInfo 定义、内置 provider 合并、base_url/env_key/auth/wire_api 验证</td><td>codex-api、codex-protocol</td></tr>
+        <tr><td>backend-client</td><td><code>codex-backend-client</code></td><td>后端 REST API 客户端：accounts、config bundle、rate limits、tasks、token usage、workspace messages</td><td>reqwest、codex-backend-openapi-models、codex-login</td></tr>
+        <tr><td>login</td><td><code>codex-login</code></td><td>OAuth 登录与认证管理：DeviceCode 流程、AuthManager 状态机、令牌缓存/刷新/过期、多认证方式路由</td><td>codex-keyring-store、tiny_http、webbrowser、sha2</td></tr>
+        <tr><td>keyring-store</td><td><code>codex-keyring-store</code></td><td>平台密钥链抽象：KeyringStore trait + DefaultKeyringStore + MockKeyringStore。macOS Keychain / Windows Credential Manager / Linux secret-service</td><td>keyring（按平台 feature 编译）</td></tr>
+        <tr><td>cloud-config</td><td><code>codex-cloud-config</code></td><td>云端配置拉取与缓存：CloudConfigService、本地缓存、bundle loader、HMAC 验证</td><td>codex-backend-client、codex-core、codex-login</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>关键接口速查</h2>
+    <table>
+      <thead>
+        <tr><th>接口/类型</th><th>位置</th><th>阅读要点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>StateRuntime</code></td><td><code>codex-rs/state/src/runtime.rs</code></td><td>统一的 SQLite 状态入口，封装 threads/goals/memories/logs 四个子模块</td></tr>
+        <tr><td><code>ThreadStore</code> trait</td><td><code>codex-rs/thread-store/src/store.rs</code></td><td>20 个方法的存储抽象：as_any、default_history_mode、create_thread、resume_thread、append_items、persist_thread、flush_thread、shutdown_thread、discard_thread、load_history、read_thread、read_thread_by_rollout_path、list_threads、search_threads、list_turns、list_items、update_thread_metadata、archive_thread、unarchive_thread、delete_thread</td></tr>
+        <tr><td><code>LocalThreadStore</code></td><td><code>codex-rs/thread-store/src/local/mod.rs</code></td><td>ThreadStore 的本地文件系统实现，管理 LiveThread 生命周期和 rollout 路径映射</td></tr>
+        <tr><td><code>LiveThread</code></td><td><code>codex-rs/thread-store/src/live_thread.rs</code></td><td>活跃 thread 的写入句柄，管理 live writer、pending items 队列和 flush/shutdown 语义</td></tr>
+        <tr><td><code>RolloutRecorder</code></td><td><code>codex-rs/rollout/src/recorder.rs</code></td><td>将 rollout item 序列化为 JSONL 并追加到文件，支持压缩 worker</td></tr>
+        <tr><td><code>RolloutConfig</code></td><td><code>codex-rs/rollout/src/config.rs</code></td><td>codex_home、sqlite_home、cwd、model_provider_id、generate_memories——rollout 路径计算的基础配置</td></tr>
+        <tr><td><code>ModelProvider</code> trait</td><td><code>codex-rs/model-provider/src/provider.rs</code></td><td>6 个核心方法：info()、auth()、account_state()、api_provider()、api_auth()、models_manager()。capabilities()、approval_review_preferred_model() 等提供辅助能力</td></tr>
+        <tr><td><code>ModelProviderInfo</code></td><td><code>codex-rs/model-provider-info/src/lib.rs</code></td><td>name、base_url、env_key、auth、aws、wire_api、重试配置、requires_openai_auth、supports_websockets——完整的 provider 配置描述</td></tr>
+        <tr><td><code>AuthManager</code></td><td><code>codex-rs/login/src/auth/manager.rs</code></td><td>认证状态机：令牌缓存、refresh 调度、过期检测、多认证方式（ApiKey/ChatGPT/AgentIdentity/BedrockApiKey/PersonalAccessToken）路由；ExternalAuth 令牌由 BearerTokenRefresher 独立管理</td></tr>
+        <tr><td><code>KeyringStore</code> trait</td><td><code>codex-rs/keyring-store/src/lib.rs</code></td><td>load(service, account)、save(service, account, value)、delete(service, account)——平台密钥链的最小抽象</td></tr>
+        <tr><td><code>Client</code></td><td><code>codex-rs/backend-client/src/client.rs</code></td><td>HTTP 客户端封装：get_accounts、check_accounts、get_config_bundle、consume_rate_limit_reset_credit、list_tasks、get_task_details、get_token_usage、get_workspace_messages 等</td></tr>
+        <tr><td><code>TraceWriter</code></td><td><code>codex-rs/rollout-trace/src/writer.rs</code></td><td>热路径 trace 追加写入，生成 bundle 格式的 trace.jsonl 文件</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>StateRuntime 的 4 个数据库</h2>
+    <table>
+      <thead>
+        <tr><th>数据库文件</th><th>常量</th><th>子模块</th><th>存储内容</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>logs_2.sqlite</td><td><code>LOGS_DB_FILENAME</code></td><td><code>runtime/logs.rs</code></td><td>Rollout 日志条目索引、查询过滤</td></tr>
+        <tr><td>goals_1.sqlite</td><td><code>GOALS_DB_FILENAME</code></td><td><code>runtime/goals.rs</code></td><td>ThreadGoal CRUD、GoalStore、goal 状态追踪</td></tr>
+        <tr><td>memories_1.sqlite</td><td><code>MEMORIES_DB_FILENAME</code></td><td><code>runtime/memories.rs</code></td><td>Memory 提取和检索</td></tr>
+        <tr><td>state_5.sqlite</td><td><code>STATE_DB_FILENAME</code></td><td><code>runtime/threads.rs</code></td><td>ThreadMetadata、AgentJob、BackfillState、ExternalAgentConfig 等</td></tr>
+      </tbody>
+    </table>
+    <p>所有数据库路径可通过 <code>CODEX_SQLITE_HOME</code> 环境变量覆盖，默认位于 codex_home 下。</p>
+  </section>
+
+  <section>
+    <h2>ModelProvider trait 方法详解</h2>
+    <table>
+      <thead>
+        <tr><th>方法</th><th>返回类型</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>info()</code></td><td><code>&amp;ModelProviderInfo</code></td><td>返回配置的 provider 元数据（同步）</td></tr>
+        <tr><td><code>capabilities()</code></td><td><code>ProviderCapabilities</code></td><td>namespace_tools、image_generation、web_search——provider 能力上限</td></tr>
+        <tr><td><code>auth()</code></td><td><code>ModelProviderFuture&lt;Option&lt;CodexAuth&gt;&gt;</code></td><td>从 AuthManager 异步获取当前有效认证</td></tr>
+        <tr><td><code>account_state()</code></td><td><code>ProviderAccountResult</code></td><td>同步返回当前账号状态（ApiKey/ChatGPT/AmazonBedrock）</td></tr>
+        <tr><td><code>api_provider()</code></td><td><code>ModelProviderFuture&lt;Result&lt;Provider&gt;&gt;</code></td><td>组装 codex-api 可用的 Provider 配置（含 base_url、headers、retry）</td></tr>
+        <tr><td><code>api_auth()</code></td><td><code>ModelProviderFuture&lt;Result&lt;SharedAuthProvider&gt;&gt;</code></td><td>解析请求认证凭据</td></tr>
+        <tr><td><code>api_auth_for_scope()</code></td><td><code>ModelProviderFuture&lt;Result&lt;ResolvedProviderAuth&gt;&gt;</code></td><td>按 ProviderAuthScope 解析认证（first-party 路径会附加 agent identity 逻辑）</td></tr>
+        <tr><td><code>models_manager()</code></td><td><code>SharedModelsManager</code></td><td>创建模型目录管理器（StaticModelsManager 或 OpenAiModelsManager）</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>认证方式枚举</h2>
+    <table>
+      <thead>
+        <tr><th>认证方式</th><th><code>CodexAuth</code> 变体</th><th>来源</th><th>适用场景</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>API Key</td><td><code>ApiKey(ApiKeyAuth)</code></td><td>环境变量 <code>OPENAI_API_KEY</code> 或交互式输入</td><td>标准 OpenAI API 访问</td></tr>
+        <tr><td>ChatGPT 登录</td><td><code>Chatgpt(ChatgptAuth)</code></td><td>OAuth 设备码流程 → codex access token</td><td>ChatGPT 订阅用户</td></tr>
+        <tr><td>ChatGPT Auth Tokens</td><td><code>ChatgptAuthTokens(...)</code></td><td>浏览器提取的 session token</td><td>高级用户手动导入</td></tr>
+        <tr><td>Agent Identity</td><td><code>AgentIdentity(AgentIdentityAuth)</code></td><td>ChatGPT 环境 agent identity JWT</td><td>托管 Codex agent 身份</td></tr>
+        <tr><td>Personal Access Token</td><td><code>PersonalAccessToken(...)</code></td><td>用户生成的 PAT</td><td>CI/CD 非交互环境</td></tr>
+        <tr><td>Bedrock API Key</td><td><code>BedrockApiKey(BedrockApiKeyAuth)</code></td><td>交互式输入</td><td>Amazon Bedrock 托管模型</td></tr>
+      </tbody>
+    </table>
+    <p>以上 6 个变体即为 <code>CodexAuth</code> 枚举的全部成员。<strong>ExternalAuth</strong> 不属于 <code>CodexAuth</code> 枚举，而是通过 <code>config.toml</code> 中 <code>auth.command</code> 提供的外部令牌机制，由 <code>BearerTokenRefresher</code> 独立管理，走单独的令牌刷新与注入路径。</p>
+  </section>
+
+  <section>
+    <h2>认证令牌生命周期</h2>
+    <div class="diagram">┌─ 登录阶段 ─────────────────────────────────────────────┐
+│ codex login                                              │
+│   → LoginServer::bind (随机端口，接收 OAuth 回调)         │
+│   → request_device_code (向 /oauth/device_authorization)  │
+│   → webbrowser::open (打开浏览器授权页面)                  │
+│   → poll token endpoint (轮询直到用户授权或超时)           │
+│   → save_auth → KeyringStore::save → 平台密钥链           │
+└──────────────────────────────────────────────────────────┘
+┌─ 使用阶段 ─────────────────────────────────────────────┐
+│ AuthManager::auth()                                       │
+│   → 检查内存缓存 (仍然有效?)                               │
+│   → KeyringStore::load → 从平台密钥链读取                  │
+│   → 检查过期时间 (需要刷新?)                               │
+│   → refresh token → 更新 KeyringStore::save                │
+│   → 返回 CodexAuth                                        │
+│                                                           │
+│ ModelProvider::auth()                                     │
+│   → AuthManager::auth()                                   │
+│   → resolve_provider_auth()                               │
+│   → BearerAuthProvider → Authorization: Bearer &lt;token&gt;    │
+└──────────────────────────────────────────────────────────┘
+┌─ 登出阶段 ─────────────────────────────────────────────┐
+│ codex logout                                              │
+│   → logout_with_revoke (向 /oauth/revoke 撤销令牌)        │
+│   → KeyringStore::delete → 从平台密钥链删除               │
+│   → 清除内存缓存                                          │
+└──────────────────────────────────────────────────────────┘</div>
+  </section>
+
+  <section>
+    <h2>Thread 持久化读写路径</h2>
+    <div class="diagram">┌─ 写入路径 ─────────────────────────────────────────────┐
+│ Thread 创建:                                              │
+│   ThreadStore::create_thread                              │
+│     → LocalThreadStore::create_thread                     │
+│     → LiveThread::start (创建 live writer)                │
+│     → RolloutRecorder::new (初始化压缩 worker)            │
+│                                                           │
+│ Turn 事件追加:                                            │
+│   ThreadStore::append_items                               │
+│     → policy::persisted_rollout_items (过滤需持久化事件)   │
+│     → RolloutRecorder::append (序列化为 JSONL)            │
+│     → 写入 rollout 文件                                   │
+│                                                           │
+│ Flush / Shutdown:                                         │
+│   ThreadStore::flush_thread                               │
+│     → LiveWriter::flush (确保数据落盘)                     │
+│   ThreadStore::shutdown_thread                            │
+│     → LiveWriter::close (关闭文件、停止压缩 worker)        │
+└──────────────────────────────────────────────────────────┘
+┌─ 读取路径 ─────────────────────────────────────────────┐
+│ 列表查询:                                                 │
+│   ThreadStore::list_threads                               │
+│     → LocalThreadStore::list_threads                      │
+│     → rollout::get_threads (文件系统扫描)                  │
+│     → 按 RolloutConfig 过滤 (cwd/provider/source)         │
+│     → 返回 ThreadsPage (含 cursor 分页)                   │
+│                                                           │
+│ 详情读取:                                                 │
+│   ThreadStore::read_thread                                │
+│     → LocalThreadStore::read_thread                       │
+│     → rollout::read_head_for_summary (读 header)          │
+│     → 可选: 读取完整历史 items                            │
+│                                                           │
+│ 历史加载 (resume):                                        │
+│   ThreadStore::load_history                               │
+│     → LiveThread::start (重新打开 rollout 文件)           │
+│     → 流式读取已有 items                                  │
+│     → 返回 StoredThreadHistory 供 core 重建会话            │
+│                                                           │
+│ 搜索:                                                     │
+│   ThreadStore::search_threads                             │
+│     → rollout::search_rollout_matches (全文搜索)          │
+│     → rollout::first_rollout_content_match_snippet        │
+│     → 返回 ThreadSearchPage                               │
+└──────────────────────────────────────────────────────────┘</div>
+  </section>
+
+  <section>
+    <h2>源码阅读顺序总表</h2>
+    <ol>
+      <li><code>codex-rs/keyring-store/src/lib.rs</code>：先理解最底层的安全存储抽象（只有 227 行，含测试 mock）。</li>
+      <li><code>codex-rs/login/src/device_code_auth.rs</code>：看 OAuth 设备码流程的完整实现。</li>
+      <li><code>codex-rs/login/src/auth/manager.rs</code>：看 AuthManager 状态机如何管理令牌生命周期。</li>
+      <li><code>codex-rs/model-provider-info/src/lib.rs</code>：看 ModelProviderInfo 配置结构和内置 provider 定义。</li>
+      <li><code>codex-rs/model-provider/src/provider.rs</code>：看 ModelProvider trait 和 ConfiguredModelProvider 如何组合 info + auth_manager。</li>
+      <li><code>codex-rs/model-provider/src/auth.rs</code>：看认证从 AuthManager 到 HTTP header 的解析路径。</li>
+      <li><code>codex-rs/rollout/src/recorder.rs</code>：看 RolloutRecorder 如何写 JSONL 文件。</li>
+      <li><code>codex-rs/rollout/src/list.rs</code>：看 Thread 列表查询和游标分页。</li>
+      <li><code>codex-rs/state/src/log_db.rs</code>：看 SQLite schema 和日志查询。</li>
+      <li><code>codex-rs/state/src/runtime/threads.rs</code>：看 ThreadMetadata 的 SQLite CRUD。</li>
+      <li><code>codex-rs/thread-store/src/store.rs</code>：看 ThreadStore trait 的完整接口定义。</li>
+      <li><code>codex-rs/thread-store/src/local/mod.rs</code>：看 LocalThreadStore 如何把 trait 映射到文件系统。</li>
+      <li><code>codex-rs/backend-client/src/client.rs</code>：看后端 REST API 客户端封装。</li>
+      <li><code>codex-rs/cloud-config/src/service.rs</code>：看云端配置拉取、缓存和刷新。</li>
+      <li><code>codex-rs/rollout-trace/src/writer.rs</code>：看 trace bundle 的热路径写入（进阶阅读）。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>backend-client API 方法清单</h2>
+    <table>
+      <thead>
+        <tr><th>方法</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>get_accounts()</code></td><td>获取用户账号列表</td></tr>
+        <tr><td><code>check_accounts()</code></td><td>验证账号状态</td></tr>
+        <tr><td><code>get_config_bundle()</code></td><td>获取云端配置包（config.toml、requirements.toml 等）</td></tr>
+        <tr><td><code>get_rate_limits_with_reset_credits()</code></td><td>获取速率限制和重置积分信息</td></tr>
+        <tr><td><code>consume_rate_limit_reset_credit()</code></td><td>消费速率限制重置积分</td></tr>
+        <tr><td><code>list_tasks()</code></td><td>列出 Codex 任务（分页）</td></tr>
+        <tr><td><code>get_task_details()</code></td><td>获取单个任务详情</td></tr>
+        <tr><td><code>get_token_usage()</code></td><td>获取令牌使用量统计</td></tr>
+        <tr><td><code>get_turn_attempts_sibling_turns()</code></td><td>获取 turn attempt 的兄弟 turn</td></tr>
+        <tr><td><code>get_workspace_messages()</code></td><td>获取工作区消息</td></tr>
+        <tr><td><code>list_add_credits_nudge_credit_types()</code></td><td>列出可添加的积分类型</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

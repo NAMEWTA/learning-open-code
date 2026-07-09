@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考 — Web 模块组件与 API 速查</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .toc {
+    background: #f9fafc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .toc ol { margin: 4px 0; padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">参考文档 · L1 web 模块 · 速查用</p>
+
+<h1>Web 模块组件与 API 速查</h1>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li><a href="#sec-files">源码文件索引</a></li>
+  <li><a href="#sec-states">UI 五状态机</a></li>
+  <li><a href="#sec-pipeline">12 阶段 Pipeline 映射</a></li>
+  <li><a href="#sec-tracker">ProgressTracker API</a></li>
+  <li><a href="#sec-components">组件三层架构</a></li>
+  <li><a href="#sec-history">历史记录 API</a></li>
+  <li><a href="#sec-pdf">PDF 导出 API</a></li>
+  <li><a href="#sec-stock">股票名展示 API</a></li>
+  <li><a href="#sec-config">LLM 配置供应商</a></li>
+</ol>
+</div>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-files">1. 源码文件索引</h2>
+
+<table>
+<tr><th>文件</th><th>行数</th><th>职责</th><th>关键度</th></tr>
+<tr><td><code>web/app.py</code></td><td>~310</td><td>主页面：5 状态机 + 自定义 CSS + 配置构建</td><td>核心</td></tr>
+<tr><td><code>web/runner.py</code></td><td>~210</td><td>后台线程：Thread 启动 + Stage 检测 + 暂停/停止控制</td><td>核心</td></tr>
+<tr><td><code>web/progress.py</code></td><td>~185</td><td>进度追踪器：Event + Lock + 12 阶段状态管理</td><td>核心</td></tr>
+<tr><td><code>web/history.py</code></td><td>~205</td><td>历史管理：扫描/记录/恢复/清理</td><td>重要</td></tr>
+<tr><td><code>web/pdf_export.py</code></td><td>~655</td><td>PDF 生成：fpdf2 + 字体探测 + Markdown 降级</td><td>重要</td></tr>
+<tr><td><code>web/stock_display.py</code></td><td>~265</td><td>股票展示：代码↔名称解析 + 报告文本归一化</td><td>辅助</td></tr>
+<tr><td><code>web/launch.py</code></td><td>~17</td><td>CLI 入口：<code>streamlit run</code> 封装</td><td>辅助</td></tr>
+<tr><td><code>web/components/sidebar.py</code></td><td>~300</td><td>侧边栏：股票输入 + LLM 配置 + 历史列表</td><td>重要</td></tr>
+<tr><td><code>web/components/progress_panel.py</code></td><td>~120</td><td>进度面板：阶段图标 + 进度条 + 统计指标 + 报告预览</td><td>重要</td></tr>
+<tr><td><code>web/components/report_viewer.py</code></td><td>~170</td><td>报告展示：信号卡片 + 可折叠分区 + 下载按钮</td><td>重要</td></tr>
+</table>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-states">2. UI 五状态机</h2>
+
+<table>
+<tr><th>状态</th><th>条件</th><th>渲染函数</th><th>额外行为</th></tr>
+<tr><td>0 空闲</td><td><code>tracker is None</code></td><td>内联 HTML 欢迎页</td><td>—</td></tr>
+<tr><td>1 查看历史</td><td><code>viewing_history</code> 不为空</td><td><code>render_report()</code></td><td>load_analysis() 加载 JSON → extract_signal()</td></tr>
+<tr><td>2 分析中</td><td><code>tracker.is_running</code></td><td><code>render_progress()</code></td><td>每 2s st.rerun() 刷新</td></tr>
+<tr><td>3 完成</td><td><code>tracker.is_complete</code></td><td><code>render_report()</code></td><td>传入 final_state + signal + elapsed</td></tr>
+<tr><td>4 出错</td><td><code>tracker.error</code></td><td>st.error() + 继续按钮</td><td>按钮设置 start_analysis → rerun</td></tr>
+</table>
+
+<p>状态切换通过 <code>st.session_state</code> 驱动：侧边栏按钮写入 <code>start_analysis</code> 字典 → app.py 检测到后创建 tracker + 启动线程 → 下一轮渲染匹配对应状态。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-pipeline">3. 12 阶段 Pipeline 映射</h2>
+
+<table>
+<tr><th>序号</th><th>阶段 ID</th><th>展示名</th><th>图标</th><th>对应 state 字段</th><th>分类</th></tr>
+<tr><td>1</td><td><code>market</code></td><td>技术分析</td><td>📊</td><td><code>market_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>2</td><td><code>social</code></td><td>情绪分析</td><td>💬</td><td><code>sentiment_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>3</td><td><code>news</code></td><td>新闻舆情</td><td>📰</td><td><code>news_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>4</td><td><code>fundamentals</code></td><td>基本面</td><td>📋</td><td><code>fundamentals_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>5</td><td><code>policy</code></td><td>政策分析</td><td>🏛️</td><td><code>policy_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>6</td><td><code>hot_money</code></td><td>游资追踪</td><td>🔥</td><td><code>hot_money_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>7</td><td><code>lockup</code></td><td>解禁监控</td><td>🔒</td><td><code>lockup_report</code></td><td>ANALYSTS</td></tr>
+<tr><td>8</td><td><code>quality_gate</code></td><td>质量门控</td><td>✅</td><td><code>data_quality_summary</code></td><td>PIPELINE</td></tr>
+<tr><td>9</td><td><code>debate</code></td><td>多空辩论</td><td>⚔️</td><td><code>investment_debate_state</code></td><td>PIPELINE</td></tr>
+<tr><td>10</td><td><code>trader</code></td><td>交易决策</td><td>💹</td><td><code>trader_investment_plan</code></td><td>PIPELINE</td></tr>
+<tr><td>11</td><td><code>risk</code></td><td>风控评估</td><td>🛡️</td><td><code>risk_debate_state</code></td><td>PIPELINE</td></tr>
+<tr><td>12</td><td><code>pm</code></td><td>最终决策</td><td>👔</td><td><code>final_trade_decision</code></td><td>PIPELINE</td></tr>
+</table>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-tracker">4. ProgressTracker API</h2>
+
+<table>
+<tr><th>方法</th><th>线程</th><th>作用</th></tr>
+<tr><td><code>mark_stage_active(stage_id)</code></td><td>后台</td><td>设置当前活跃阶段</td></tr>
+<tr><td><code>mark_stage_done(stage_id, report)</code></td><td>后台</td><td>标记阶段完成，存储报告文本</td></tr>
+<tr><td><code>mark_complete(final_state, signal)</code></td><td>后台</td><td>设置 is_complete=True，存储最终结果</td></tr>
+<tr><td><code>mark_error(err)</code></td><td>后台</td><td>设置 error 字段，停止运行</td></tr>
+<tr><td><code>update_stats(llm, tool, tok_in, tok_out)</code></td><td>后台</td><td>更新统计指标</td></tr>
+<tr><td><code>pause() -> bool</code></td><td>UI</td><td>暂停流水线，clear _pause_gate Event</td></tr>
+<tr><td><code>resume() -> bool</code></td><td>UI</td><td>恢复流水线，set _pause_gate Event</td></tr>
+<tr><td><code>request_stop() -> bool</code></td><td>UI</td><td>请求停止并立即清空 UI 状态</td></tr>
+<tr><td><code>wait_if_paused()</code></td><td>后台</td><td>阻塞等待直到 resume() 或 stop</td></tr>
+<tr><td><code>mark_stopped()</code></td><td>后台</td><td>完全重置至初始状态</td></tr>
+<tr><td><code>stage_status(stage_id) -> str</code></td><td>UI</td><td>返回 "done"/"active"/"pending"</td></tr>
+<tr><td><code>elapsed -> float</code></td><td>UI</td><td>只读属性：距 start_time 的秒数</td></tr>
+</table>
+
+<p><strong>关键字段：</strong><code>is_running</code>、<code>is_complete</code>、<code>is_paused</code>、<code>stop_requested</code>、<code>error</code>、<code>current_stage</code>、<code>completed_stages</code>、<code>stage_reports</code>、<code>final_state</code>、<code>signal</code>。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-components">5. 组件三层架构</h2>
+
+<h3>sidebar.py — 侧边栏组件</h3>
+
+<table>
+<tr><th>函数</th><th>职责</th></tr>
+<tr><td><code>render_sidebar()</code></td><td>侧边栏入口：品牌标题 + 输入区 + 配置区 + 历史列表</td></tr>
+<tr><td><code>_resolve_user_input(raw) -> (code, error)</code></td><td>将用户输入解析为 6 位代码（支持中文名）</td></tr>
+<tr><td><code>_render_llm_config()</code></td><td>LLM 供应商选择 + 快/慢模型选择 + 代理地址</td></tr>
+<tr><td><code>_render_analysis_controls()</code></td><td>暂停/恢复/停止三个按钮的控制逻辑</td></tr>
+</table>
+
+<p>10 个 LLM 供应商：MiniMax（推荐）、DeepSeek、Qwen、GLM、OpenAI、Anthropic、Google、xAI、OpenRouter、Ollama。模型选项从 <code>MODEL_OPTIONS</code> 动态读取。</p>
+
+<h3>progress_panel.py — 进度面板组件</h3>
+
+<table>
+<tr><th>函数</th><th>职责</th></tr>
+<tr><td><code>render_progress(tracker)</code></td><td>渲染全幅进度面板：阶段图标网格 + 进度条 + 4 项统计指标 + 已完成报告折叠预览</td></tr>
+<tr><td><code>_status_badge(status)</code></td><td>阶段状态图标：●(done/绿) / ◉(active/橙) / ○(pending/灰)</td></tr>
+<tr><td><code>_format_time(seconds)</code></td><td>秒数 → m:ss 格式</td></tr>
+</table>
+
+<p>分为上下两排：ANALYSTS 7 列 + PIPELINE 5 列。已完成阶段显示为绿色圆点，活跃阶段为橙色带脉冲感圆点，等待阶段为灰色空心圆。下方用 4 个 st.metric 显示 LLM 调用数、工具调用数、输入/输出 token 数。</p>
+
+<h3>report_viewer.py — 报告展示组件</h3>
+
+<table>
+<tr><th>函数</th><th>职责</th></tr>
+<tr><td><code>render_report(final_state, ticker, trade_date, signal, elapsed)</code></td><td>全幅报告渲染：信号大卡片 + 投资建议 + 7 个分析师折叠区 + 辩论 tabs + 风控 tabs + 下载按钮</td></tr>
+<tr><td><code>_signal_style(signal)</code></td><td>根据 BUY/SELL/HOLD 返回颜色和中文名</td></tr>
+<tr><td><code>_display_report_text(text, ticker, state)</code></td><td>去除 think 标签 + 归一化股票名后渲染</td></tr>
+</table>
+
+<p>下载区提供两种格式：<strong>Markdown</strong>（总是可用，无字体依赖）和 <strong>PDF</strong>（需要 CJK 字体，失败时不崩溃而是禁用按钮并提示原因）。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-history">6. 历史记录 API</h2>
+
+<table>
+<tr><th>函数</th><th>返回值</th><th>说明</th></tr>
+<tr><td><code>get_history()</code></td><td><code>list[dict]</code></td><td>扫描 <code>~/.tradingagents/logs/</code> 下所有 <code>full_states_log_*.json</code>，按日期倒序</td></tr>
+<tr><td><code>get_incomplete_history()</code></td><td><code>list[dict]</code></td><td>返回未完成任务列表，自动过滤已完成任务，附加 checkpoint_step</td></tr>
+<tr><td><code>record_incomplete_task(ticker, date, status, error, completed_stages)</code></td><td><code>None</code></td><td>写入/更新 <code>~/.tradingagents/incomplete_tasks.json</code></td></tr>
+<tr><td><code>clear_incomplete_task(ticker, date)</code></td><td><code>None</code></td><td>从 <code>incomplete_tasks.json</code> 中删除指定条目</td></tr>
+<tr><td><code>load_analysis(path) -> dict</code></td><td><code>dict</code></td><td>加载完整分析 JSON 文件</td></tr>
+<tr><td><code>extract_signal(state) -> str</code></td><td><code>"Buy"/"Sell"/"Hold"/"N/A"</code></td><td>从 state 字典中提取交易信号（去 think 标签后匹配关键词）</td></tr>
+</table>
+
+<p>存储位置：已完成 → <code>~/.tradingagents/logs/{ticker}/{date}/full_states_log_{date}.json</code>；未完成 → <code>~/.tradingagents/incomplete_tasks.json</code>。所有写操作使用 <code>tempfile + replace</code> 保证原子性。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-pdf">7. PDF 导出 API</h2>
+
+<table>
+<tr><th>函数</th><th>返回值</th><th>说明</th></tr>
+<tr><td><code>generate_pdf(final_state, ticker, trade_date, signal) -> bytes</code></td><td><code>bytes</code></td><td>生成 PDF 字节流（封面 + 全部分区 + 页眉页脚）</td></tr>
+<tr><td><code>generate_markdown(final_state, ticker, trade_date, signal) -> str</code></td><td><code>str</code></td><td>生成 Markdown 文本（无字体依赖的安全导出）</td></tr>
+<tr><td><code>_find_cjk_fonts() -> (Path, Path)</code></td><td><code>tuple</code></td><td>按环境变量 → 预置路径 → 文件系统搜索 → fontconfig 的顺序探测中文字体</td></tr>
+<tr><td><code>_collect_sections(final_state, ticker)</code></td><td><code>list[tuple]</code></td><td>组装 (标题, 内容) 分区列表，PDF 和 Markdown 共享同一来源</td></tr>
+<tr><td><code>_ensure_fpdf2()</code></td><td><code>None</code></td><td>检测 fpdf2 >= 2.0（排除旧版 pyfpdf），不符合则抛 RuntimeError</td></tr>
+</table>
+
+<p>字体探测优先级：<code>TRADINGAGENTS_PDF_FONT</code> 环境变量 → 预置 11 组候选路径（覆盖 Linux/macOS/Windows）→ <code>_discover_cjk_fonts()</code> 文件系统搜索 → <code>fc-match</code> fontconfig 查询。TTC 字体集合使用 <code>collection_font_number</code> 参数选择简体中文 face（索引 2）。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-stock">8. 股票名展示 API</h2>
+
+<table>
+<tr><th>函数</th><th>返回值</th><th>说明</th></tr>
+<tr><td><code>stock_display_label(ticker, final_state)</code></td><td><code>str</code></td><td>返回 "代码 名称" 格式，无法解析则只返回代码</td></tr>
+<tr><td><code>stock_display_parts(ticker, final_state)</code></td><td><code>(code, name)</code></td><td>返回代码和名称的元组</td></tr>
+<tr><td><code>normalize_stock_mentions(text, ticker, state)</code></td><td><code>str</code></td><td>将报告中的代码/名称统一为 "代码 名称" 格式，避免重复显示</td></tr>
+<tr><td><code>normalize_report_state_mentions(state, ticker)</code></td><td><code>dict</code></td><td>对整个 final_state 中所有报告字段做名称归一化（在落盘前调用）</td></tr>
+<tr><td><code>resolve_stock_name(ticker)</code></td><td><code>str | None</code></td><td>通过本地市场数据查询代码对应的 A 股名称</td></tr>
+</table>
+
+<p>名称解析链路：LB 缓存（<code>lru_cache</code>）→ 正则验证 6 位代码 → <code>_build_name_code_map()</code>（mootdx 全市场映射）。如果本地数据不可用，从 final_state 的文本字段中通过正则提取（支持 "代码(名称)"、"标的：代码 名称" 等 3 种模式）。</p>
+
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-config">9. LLM 配置供应商</h2>
+
+<table>
+<tr><th>供应商 Key</th><th>展示名</th><th>环境变量</th><th>备注</th></tr>
+<tr><td><code>minimax</code></td><td>MiniMax（推荐·国内直连）</td><td><code>MINIMAX_API_KEY</code></td><td>默认</td></tr>
+<tr><td><code>deepseek</code></td><td>DeepSeek</td><td><code>DEEPSEEK_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>qwen</code></td><td>通义千问 Qwen</td><td><code>DASHSCOPE_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>glm</code></td><td>智谱 GLM</td><td><code>ZHIPU_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>openai</code></td><td>OpenAI</td><td><code>OPENAI_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>anthropic</code></td><td>Anthropic</td><td><code>ANTHROPIC_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>google</code></td><td>Google Gemini</td><td><code>GOOGLE_API_KEY</code></td><td>可选依赖</td></tr>
+<tr><td><code>xai</code></td><td>xAI Grok</td><td><code>XAI_API_KEY</code></td><td>—</td></tr>
+<tr><td><code>openrouter</code></td><td>OpenRouter（聚合）</td><td><code>OPENROUTER_API_KEY</code></td><td>需填 vendor/model ID</td></tr>
+<tr><td><code>ollama</code></td><td>Ollama（本地）</td><td>—</td><td>本地模型</td></tr>
+</table>
+
+<p>此外可通过 <code>BACKEND_URL</code> 环境变量或 UI 输入框设置第三方代理地址。每个供应商的快模型和慢模型列表定义在 <code>tradingagents/llm_clients/model_catalog.py</code> 的 <code>MODEL_OPTIONS</code> 字典中。</p>
+
+<p style="margin-top:32px; color:#607086; font-size:0.9rem;">
+关联课程：<a href="../lessons/0001-web-module-tour.html">0001 — Streamlit Web UI 模块总览</a>
+</p>
+
+</div>
+</main>
+</body>
+</html>

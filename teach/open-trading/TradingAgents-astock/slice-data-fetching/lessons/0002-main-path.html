@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 — K线/财务/新闻主成功路径</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .flow { text-align: center; margin: 18px 0; }
+  .flow pre { display: inline-block; text-align: left; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 2 节 &middot; 预计 14 分钟</p>
+
+<h1>0002 — K线/财务/新闻主成功路径</h1>
+
+<p class="objective"><strong>学习目标：</strong>能追踪 <code>get_stock_data</code>、<code>get_fundamentals</code>、<code>get_news</code> 三个核心方法的完整调用链路——从参数校验、数据源选择、HTTP/TCP 请求、到格式化返回。</p>
+
+<h2>1. get_stock_data — K线数据：mootdx TCP 为主，新浪 HTTP 为备</h2>
+
+<p>OHLCV K线是投研分析的"原材料"。<code>get_stock_data</code> 的链路是数据层最长的单个方法（约 80 行），包含三级容错：</p>
+
+<div class="flow">
+<pre>
+get_stock_data(symbol, start_date, end_date)
+│
+├─ _normalize_ticker(symbol)          ← 去前缀后缀 → 6位纯代码
+├─ _get_mootdx_client()               ← TCP :7709 连接（含服务探测）
+│   └─ client.bars(symbol=code, category=4, offset=800)
+│      → 返回 ~3年日K线 DataFrame
+│
+├─ 异常? → _sina_kline_fallback()     ← HTTP 新浪 K线 API
+│   └─ money.finance.sina.com.cn/.../getKLineData
+│
+├─ _supplement_stale_ohlcv_with_sina()← 检测数据时效性，用新浪补缺
+│   └─ _needs_sina_supplement() → target_date 晚于最新K线日期?
+│      → 是: 新浪拉取补充 → _merge_ohlcv(去重, keep='last')
+│
+├─ 按 start_date ~ end_date 过滤
+├─ 价格列四舍五入到2位小数
+└─ 返回: "# Stock data for {code} ...\n" + CSV
+</pre>
+</div>
+
+<p><strong>关键设计：cache 优先 + 新浪补缺。</strong><code>_load_ohlcv_astock</code>（内部使用的批量加载函数）会先检查本地 CSV 缓存：当天已缓存则直接用，否则走 mootdx。但缓存的最后日期可能距"今天"有几小时延迟（mootdx 数据 T+1 更新），所以 <code>_supplement_stale_ohlcv_with_sina</code> 额外检查是否需要用新浪的实时 K 线补充最新日期——确保 Analyst 拿到的是包含最新交易日的数据。</p>
+
+<pre># a_stock.py:437-454 — 新浪补缺判断逻辑
+def _supplement_stale_ohlcv_with_sina(code, df, target_date, ...):
+    if not _needs_sina_supplement(df, target_date):
+        return df, False          # 缓存数据已覆盖目标日期，无需补充
+    try:
+        sina_df = _sina_kline_fallback(code, ...)
+    except Exception:
+        return df, False          # 新浪也失败 → 降级返回缓存数据
+    merged = _merge_ohlcv(df, sina_df)   # 合并去重，sina 行优先
+    return merged, True</pre>
+
+<h2>2. get_fundamentals — 四源聚合：腾讯+通达信+东财+同花顺</h2>
+
+<p>基本面数据没有单一"权威"免费源，<code>get_fundamentals</code> 采用<strong>多源并行聚合</strong>策略——4 个 try/except 各自独立，一个源失败不影响其他：</p>
+
+<pre># a_stock.py:704-871 — 四源聚合结构（节选）
+def get_fundamentals(ticker, curr_date=None):
+    code = _normalize_ticker(ticker)
+    lines = []
+    try:  # 源1: 腾讯实时估值
+        tq = _tencent_quote([code])
+        lines += [f"PE(TTM): {q['pe_ttm']}", f"PB: {q['pb']}", ...]
+    except Exception: pass
+
+    try:  # 源2: mootdx 财务快照
+        fin = client.finance(symbol=code)
+        lines += [f"EPS: {row['eps']}", f"ROE: {row['roe']}", ...]
+    except Exception: pass
+
+    try:  # 源3: 东财 push2 个股信息
+        r = _em_get(push2_url, params=...)   # 走限流入口
+        lines += [f"行业: {d['f127']}", f"总市值: {d['f116']}", ...]
+    except Exception: pass
+
+    try:  # 源4: 同花顺 EPS 一致预期 + Forward PE/PEG
+        forecast_df = _ths_eps_forecast(code)
+        lines += [f"FY{year}: EPS={mean_eps}", f"PEG: {peg:.2f}", ...]
+    except Exception: pass
+    return header + "\n".join(lines)</pre>
+
+<p><strong>聚合结果示例：</strong>一次 <code>get_fundamentals("688017")</code> 调用会同时返回腾讯的实时 PE/PB、mootdx 的季度 EPS/ROE、东财的行业分类/总市值、同花顺的分析师一致预期和前向估值（Forward PE、PEG、PE消化年限）。最后汇总成一段 Markdown 文本返回给 Analyst。</p>
+
+<h2>3. get_news — 东财搜索为主，新浪为 fallback</h2>
+
+<p>个股新闻链路的容错设计最直接——但多了一层日期过滤：</p>
+
+<pre># a_stock.py:1115-1179 — 新闻双源 + 日期过滤
+def get_news(ticker, start_date, end_date):
+    articles = []
+    try:
+        articles = _fetch_news_eastmoney(code)   # 东财 search-api
+    except Exception:
+        articles = _fetch_news_sina(code)        # 新浪个股新闻
+    # 日期过滤：只保留 start_date ~ end_date 区间
+    for art in articles:
+        pub_dt = parse(art["time"][:10])
+        if start_dt <= pub_dt <= end_dt:         # ← 关键过滤
+            news_str += f"### {title}\n{snippet}\n"
+    return news_str</pre>
+
+<p><strong>注意：</strong>东财搜索 API <code>_fetch_news_eastmoney</code> 不支持日期参数（只能按关键字搜），所以新闻在拉回后由调用方做客户端日期过滤。这意味着如果一只股票新闻很多，可能需要拉取大量数据再做筛选——虽然东财 search-api 默认只返回 20 条。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li><code>get_stock_data</code> 的三级容错路径是什么？（按优先级）</li>
+    <li><code>get_fundamentals</code> 聚合了哪 4 个数据源？哪个源提供了前向估值（Forward PE/PEG）？</li>
+    <li><code>get_news</code> 的日期过滤是在 API 请求时完成的还是在客户端完成的？为什么？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> mootdx TCP bars → 新浪 HTTP K线 fallback → 缓存数据降级返回（mootdx 和新浪均失败时）。另外还有 <code>_supplement_stale_ohlcv_with_sina</code> 做时效性补缺。</p>
+      <p><strong>2.</strong> 腾讯财经（实时估值）、mootdx（财务快照）、东方财富 push2（个股信息）、同花顺（EPS 一致预期 + Forward PE/PEG/PE消化年限）。同花顺提供前向估值。</p>
+      <p><strong>3.</strong> 在客户端完成的。东财 search-api 不支持日期参数，只能按关键字搜索，返回结果后在内存中做日期过滤。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>上一节：</strong><a href="0001-flow-map.html">7 数据源路由地图</a> — VENDOR_METHODS 全景与 fallback 降级链。<br>
+  <strong>下一节：</strong><a href="0003-error-path.html">异常与边界路径</a> — 东财封 IP、mootdx TCP 不可达、中文 ticker 解析失败。<br>
+  <strong>速查资料：</strong><a href="../reference/data-fetching-flow-map.html">数据获取完整链路速查图谱</a>。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

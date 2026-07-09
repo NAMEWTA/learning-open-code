@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex SDK 模块导览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <div class="eyebrow">L1 · module-sdk · 15 分钟短课</div>
+  <h1>Python 与 TypeScript SDK 都是在给 Codex CLI 套稳定入口</h1>
+  <p class="lead">本课只训练一个判断：看到 SDK 调用时，你能分辨它走的是 Python 的 app-server JSON-RPC 长连接，还是 TypeScript 的 exec JSONL 子进程流。</p>
+  <div class="meta">
+    <span class="pill">学习目标：识别 SDK 的两条运行时路径</span>
+    <span class="pill">主要来源：sdk/python/README.md 与 sdk/typescript/README.md</span>
+    <span class="pill">配套参考：<a href="../reference/sdk-overview.html">sdk-overview</a></span>
+  </div>
+
+  <section>
+    <h2>1. 模块职责</h2>
+    <p><code>sdk/python</code> 和 <code>sdk/typescript</code> 的共同职责，是把 Codex agent 嵌入应用和工作流：创建 thread、运行 turn、读取 final response、消费流式事件，并传入模型、sandbox、工作目录、结构化输出等选项。它们不是模型执行核心，也不直接实现文件编辑、工具调用或推理循环；这些仍由 Codex CLI / Rust 运行时完成。</p>
+    <p>差异在运行时边界。Python SDK 依赖 <code>openai-codex-cli-bin</code>，启动 <code>codex app-server --listen stdio://</code>，再通过 typed JSON-RPC 请求和通知队列维持长连接。TypeScript SDK 依赖 npm 侧的 <code>@openai/codex</code> CLI binary，每次 turn spawn <code>codex exec --experimental-json</code>，从 stdout 逐行读取 JSONL 事件。</p>
+  </section>
+
+  <section>
+    <h2>2. 架构位置</h2>
+    <div class="diagram">应用代码
+  ↓ SDK public API
+Python: CodexClient + MessageRouter + app-server JSON-RPC
+TypeScript: CodexExec + codex exec JSONL
+  ↓ Codex CLI / app-server / exec
+Rust core、模型、工具、文件系统、MCP、sandbox</div>
+    <p>放回 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 或 <a href="../../00-overview/reference/00-overview.html">00-overview 参考</a>，SDK 位于“外部应用 / 自动化脚本”和 Codex CLI 之间。它的价值是给宿主语言一个小而稳定的门面：Python 偏完整会话控制和账户登录；TypeScript 偏轻量封装 exec、事件 union 和 Node 环境控制。</p>
+  </section>
+
+  <section>
+    <h2>3. 最小调用序列</h2>
+    <p>Python 的同步写法先构造客户端，再显式 start thread，最后从 turn handle 拉事件：</p>
+<pre><code class="language-python">from openai_codex import Codex
+from openai_codex.generated.v2_all import AgentMessageDeltaNotification
+
+with Codex() as codex:
+    thread = codex.thread_start()
+    turn = thread.turn("Explain this repository in three bullets.")
+    for event in turn.stream():
+        if isinstance(event.payload, AgentMessageDeltaNotification):
+            print(event.payload.delta, end="")
+    result = thread.run("Now summarize the risks.")
+    print(result.final_response)</code></pre>
+    <p>TypeScript 的同一心智模型是 startThread，然后选择 <code>run()</code> 缓冲结果或 <code>runStreamed()</code> 消费事件：</p>
+<pre><code class="language-typescript">import { Codex } from "@openai/codex-sdk";
+
+const codex = new Codex();
+const thread = codex.startThread();
+const streamed = await thread.runStreamed("Explain this repository in three bullets.");
+
+for await (const event of streamed.events) {
+  if (event.type === "item.completed") console.log(event.item);
+}
+
+const result = await thread.run("Now summarize the risks.");
+console.log(result.finalResponse);</code></pre>
+  </section>
+
+  <section>
+    <h2>4. 源码抓手</h2>
+    <div class="filetree">sdk/
+├── python/
+│   ├── README.md                  ← 用户可见 quickstart
+│   ├── pyproject.toml             ← openai-codex-cli-bin 依赖
+│   └── src/openai_codex/
+│       ├── api.py                 ← Codex、Thread、TurnHandle
+│       ├── client.py              ← app-server 子进程与 JSON-RPC
+│       └── _message_router.py     ← response / turn / login 通知分流
+└── typescript/
+    ├── README.md                  ← Node 侧 quickstart
+    ├── package.json               ← @openai/codex-sdk 包定义
+    └── src/
+        ├── codex.ts               ← Codex.startThread / resumeThread
+        ├── thread.ts              ← run / runStreamed
+        └── exec.ts                ← spawn codex exec 并读 JSONL</div>
+    <p>阅读时先看 <a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/api.py"><code>sdk/python/src/openai_codex/api.py</code></a> 和 <a href="../../../../../open-ai-agent/codex/sdk/typescript/src/thread.ts"><code>sdk/typescript/src/thread.ts</code></a>，再下钻到 <a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/client.py"><code>client.py</code></a> 或 <a href="../../../../../open-ai-agent/codex/sdk/typescript/src/exec.ts"><code>exec.ts</code></a>。完整 API 表和阅读顺序在 <a href="../reference/sdk-overview.html">reference</a>。</p>
+  </section>
+
+  <section class="panel">
+    <h3>暂停回忆</h3>
+    <p>不回看上文，回答两个问题：第一，Python SDK 为什么需要 <code>MessageRouter</code>？第二，TypeScript SDK 的 <code>runStreamed()</code> 事件从哪里来？</p>
+    <p class="answer"><strong>参考答案：</strong>Python 只有一个 app-server stdout 读线程，JSON-RPC response、login 通知、turn 通知会交错出现，<code>MessageRouter</code> 按 request id、login id、turn id 分发到等待者。TypeScript 的事件来自 <code>CodexExec.run()</code> spawn 的 <code>codex exec --experimental-json</code>，<code>Thread.runStreamedInternal()</code> 逐行解析 stdout JSONL 并 yield <code>ThreadEvent</code>。</p>
+    <p>如果某个概念还模糊，下一次可以直接追问 agent：“带我沿着 Python <code>thread.run()</code> 或 TypeScript <code>runStreamed()</code> 逐行读源码”。</p>
+  </section>
+</main>
+</body>
+</html>

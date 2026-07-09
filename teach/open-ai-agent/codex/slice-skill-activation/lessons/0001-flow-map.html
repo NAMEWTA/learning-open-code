@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 链路地图：从文件系统扫描到模型上下文注入</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>链路地图：从文件系统扫描到模型上下文注入</h1>
+        <p class="meta">学习目标：15 分钟内画出 Skill 从 .codex/skills/ 目录被发现到成为系统提示词 `<skill-instructions>` 片段的完整时序图。</p>
+
+        <div class="callout">
+          一句话定位：本切片沿 文件系统扫描 → loader 解析 → SkillsService 快照 → injection/render 组装 → 系统提示词注入 逐层追踪。前置知识：<a href="../../module-extensions-skills-mcp/lessons/0001-extensions-skills-mcp-module-tour.html">L1 扩展机制模块导览</a>。
+        </div>
+
+        <h2>1. 时序总览</h2>
+        <p>
+          下面这张 mermaid 时序图覆盖了 Skill 激活的 7 个阶段。建议先扫一遍全图，建立心理模型后再逐层下钻。
+        </p>
+        <div class="diagram">
+          <pre class="mermaid">sequenceDiagram
+    participant FS as 文件系统
+    participant ROOT as skill_roots()
+    participant DISCOVER as discover_skills_under_root
+    participant PARSE as parse_skill_file
+    participant SVC as SkillsService
+    participant RENDER as build_available_skills
+    participant CTX as Session 系统提示词
+    ROOT->>ROOT: 收集 5 种 root 来源 + dedupe 去重
+    loop 每个 SkillRoot
+        ROOT->>DISCOVER: load_skills_under_root(root)
+        DISCOVER->>FS: BFS 扫描目录 (深度≤6, 目录≤2000)
+        FS-->>DISCOVER: 发现 SKILL.md 文件列表
+        loop 每个 SKILL.md
+            DISCOVER->>PARSE: parse_skill_file(path)
+            PARSE->>FS: 读取文件内容
+            PARSE->>PARSE: extract_frontmatter + serde_yaml
+            alt 解析成功
+                PARSE-->>DISCOVER: SkillMetadata
+            else 解析失败 (scope != System)
+                PARSE-->>DISCOVER: SkillError (记录但不阻断)
+            end
+        end
+        DISCOVER-->>ROOT: SkillLoadOutcome {skills, errors}
+    end
+    ROOT-->>SVC: SkillLoadOutcome 汇总
+    SVC->>SVC: filter + disabled_paths 过滤 + 写入缓存
+    SVC-->>RENDER: HostSkillsSnapshot
+    RENDER->>RENDER: 按 scope 排序、预算计算、描述截断或裁减
+    RENDER-->>CTX: AvailableSkills {skill_root_lines, skill_lines}
+    CTX->>CTX: AvailableSkillsInstructions::from_available_skills
+    CTX->>CTX: developer_sections.push(render())
+    Note over FS,CTX: SkillsWatcher 监听文件变化 → 缓存清空 → SkillsChanged 通知</pre>
+        </div>
+
+        <h2>2. 第 1-2 层：Skill Root 收集与目录扫描</h2>
+        <p>
+          <code>skill_roots()</code> 函数（loader.rs L237-254）从 5 种来源收集 Skill 搜索根目录：<b>Project</b> 层（<code>.codex/skills/</code>）、<b>User</b> 层（<code>$CODEX_HOME/skills/</code> 和 <code>$HOME/.agents/skills/</code>）、<b>System</b> 层（<code>$CODEX_HOME/skills/.system</code>）、<b>Admin</b> 层（<code>/etc/codex/skills/</code>），再加上 Plugin 和 extra_roots。最后 <code>dedupe_skill_roots_by_path</code> 去重。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// loader.rs - skill_roots() 的核心结构
+for layer in config_layer_stack.get_layers(..) {
+    match &layer.name {
+        ConfigLayerSource::Project { .. } => {
+            roots.push(SkillRoot { path: config_folder.join("skills"),
+                scope: SkillScope::Repo, .. }); }
+        ConfigLayerSource::User { .. } => {
+            roots.push(SkillRoot { path: config_folder.join("skills"),
+                scope: SkillScope::User, .. });
+            roots.push(SkillRoot { path: home_dir
+                .join(".agents").join("skills"),
+                scope: SkillScope::User, .. });
+            roots.push(SkillRoot { path: system_cache_root_dir(..),
+                scope: SkillScope::System, .. }); }
+        ConfigLayerSource::System { .. } => {
+            roots.push(SkillRoot { path: config_folder.join("skills"),
+                scope: SkillScope::Admin, .. }); }
+        _ => {}
+    }
+}</code></pre>
+        </div>
+        <p>
+          <code>discover_skills_under_root()</code> 对每个 root 做 BFS 扫描：跳过隐藏文件（<code>.</code> 开头）、跳过符号链接（System scope）、支持插件 manifest 检测。深度限制 6 层，目录上限 2000 个。只收集文件名为 <code>SKILL.md</code> 的文件。
+        </p>
+
+        <h2>3. 第 3 层：SKILL.md 解析与异常路径</h2>
+        <p>
+          <code>parse_skill_file()</code> 读文件后，先调 <code>extract_frontmatter()</code> 找 YAML 分隔符 <code>---</code>，再用 <code>serde_yaml</code> 反序列化为 <code>SkillFrontmatter { name, description, .. }</code>。解析失败时回退到 <code>repair_frontmatter_scalar_fields</code> 尝试修复（如给含冒号的字段加单引号）。同时加载可选的 <code>agents/openai.yaml</code> 元数据文件。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// loader.rs - parse_skill_file 核心流程 (精简)
+let contents = fs.read_file_text(&path_uri, None).await?;
+let ParsedSkillFrontmatter { name, description, .. }
+    = parse_skill_frontmatter_metadata_inner(&contents,
+        || default_skill_name(path))?;
+let name = namespaced_skill_name(fs, path, &base_name, ..).await;
+let LoadedSkillMetadata { interface, dependencies, policy }
+    = load_skill_metadata(fs, path, plugin_root).await;
+// 验证长度、构建 SkillMetadata</code></pre>
+        </div>
+        <p>
+          <strong>异常路径：</strong>Skill 解析失败时不阻断整个加载流程。Scope 为 System 的 Skill 错误被静默忽略（不写入 <code>outcome.errors</code>），非 System 的 Skill 错误记录为 <code>SkillError</code> 供上层消费。如果 skills 根目录不存在，<code>discover_skills_under_root</code> 返回空的 skill_files 列表，整个 root 被跳过。
+        </p>
+
+        <h2>4. 第 4-5 层：快照、渲染与系统提示词注入</h2>
+        <p>
+          <code>SkillsService</code> 对 SkillLoadOutcome 做 product 过滤和 <code>disabled_paths</code> 解析后写入缓存。当 Session 组装系统提示词时（<code>session/mod.rs</code> L3266-3291），调用 <code>build_available_skills()</code> → <code>AvailableSkillsInstructions::from_available_skills()</code> → <code>developer_sections.push()</code>。最终以 <code>&lt;skill-instructions&gt;</code> 标签注入模型上下文。SkillsWatcher 监听文件变化，触发缓存清空和 <code>SkillsChanged</code> 通知。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// session/mod.rs - 系统提示词组装点 (精简)
+if turn_context.config.include_skill_instructions {
+    let available_skills = build_available_skills(
+        turn_context.turn_skills.snapshot.outcome(),
+        default_skill_metadata_budget(turn_context.model_info.context_window),
+        SkillRenderSideEffects::ThreadStart { .. },
+    );
+    if let Some(available_skills) = available_skills {
+        let skills_instructions = AvailableSkillsInstructions::from_available_skills(
+            &available_skills,
+            turn_context.model_info.include_skills_usage_instructions,
+        );
+        developer_sections.push(skills_instructions.render());
+    }
+}</code></pre>
+        </div>
+
+        <div class="practice">
+          <p><strong>检索练习：</strong>如果用户的 <code>$HOME/.codex/skills/my-skill/SKILL.md</code> 文件存在但未被模型识别，请按本链路从后往前反推可能的问题层。如果 <code>.codex/skills/</code> 目录存在但为空，Skill 加载是否会报错？</p>
+          <div class="answer">
+            参考答案：<br>
+            反推链路：模型没有 skill → developer_sections 为空 → build_available_skills 返回 None（allowed_skills 为空）→ outcome.skills 中无此 skill → parse_skill_file 返回 Err 且 scope 为 System 被静默吞掉 OR skill 被 disabled_paths 过滤 → SKILL.md 解析失败（MissingFrontmatter / InvalidYaml / MissingField description）。<br>
+            .codex/skills/ 为空目录：不会报错。discover_skills_under_root 扫描结果为 0 个 SKILL.md，load_skills_under_root 正常返回空 outcome，只是模型不会有任何可用 Skill。<br>
+            还有疑问时，向 agent 追问具体日志行，让它带你定位到 loader.rs 的精确阶段。
+          </div>
+        </div>
+
+        <p>
+          速查：<a href="../reference/skill-activation-flow-map.html">Skill 激活链路速查表</a>，包含接口清单、源码索引、关键类型枚举和异常处理一览。
+          下一课：<a href="0002-main-path.html">核心追踪：loader 与 injection 的源码下钻</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex 扩展系统参考：Skills、Plugins、MCP、Hooks</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <section class="reference">
+        <h1>Codex 扩展系统参考</h1>
+        <p class="meta">用途：L1 完整清单、边界对照和源码阅读顺序。配套短课：<a href="../lessons/0001-extensions-skills-mcp-module-tour.html">0001 扩展系统导览</a>；整体架构：<a href="../../00-overview/reference/00-overview.html">L0 项目总览参考</a>。</p>
+
+        <h2>一页边界表</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>扩展面</th>
+              <th>外部接口/清单</th>
+              <th>运行时职责</th>
+              <th>核心源码</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Skills</td>
+              <td><code>SKILL.md</code>、<code>agents/openai.yaml</code>、repo/user/system/plugin roots</td>
+              <td>发现 skill、解析 frontmatter、呈现可用列表、按显式选择读取主提示并注入 turn input。</td>
+              <td><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/loader.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/core-skills/src/injection.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/ext/skills/src/extension.rs</span></td>
+            </tr>
+            <tr>
+              <td>Plugins</td>
+              <td><code>plugin.json</code>、marketplace、installed store、remote installed plugins</td>
+              <td>把一个包解析成 skills、MCP servers、apps、hooks、UI metadata 和策略，不直接执行模型工具。</td>
+              <td><span class="where">open-ai-agent/codex/codex-rs/plugin/src/manifest.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/core-plugins/src/loader.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/core-plugins/src/manager.rs</span></td>
+            </tr>
+            <tr>
+              <td>MCP</td>
+              <td><code>.mcp.json</code>、plugin MCP servers、hosted apps runtime、stdio/streamable HTTP server config</td>
+              <td>合成 effective servers、启动 client、列工具和资源、规范化模型可见工具名、路由 tools/call。</td>
+              <td><span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/mcp/mod.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/connection_manager.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/rmcp-client/src/rmcp_client.rs</span></td>
+            </tr>
+            <tr>
+              <td>Hooks</td>
+              <td><code>hooks/hooks.json</code>、config TOML hooks、managed requirements、plugin hooks</td>
+              <td>发现可信 hook handler，在生命周期事件上匹配 matcher、执行命令、解析阻断/追加上下文/改写输入等结果。</td>
+              <td><span class="where">open-ai-agent/codex/codex-rs/hooks/src/registry.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/hooks/src/engine/discovery.rs</span><br><span class="where">open-ai-agent/codex/codex-rs/hooks/src/events/pre_tool_use.rs</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>源码地图</h2>
+        <div class="filetree">open-ai-agent/codex/
+├── docs/
+│   └── skills.md                    ← 仓库内 Skills 文档跳转入口
+└── codex-rs/
+    ├── skills/                      ← bundled sample skills 资产
+    ├── core-skills/                 ← host skill 发现、解析、快照、注入
+    ├── plugin/                      ← 通用 plugin 模型、manifest、provider
+    ├── core-plugins/                ← Codex plugin 加载、市场、store、能力装配
+    ├── codex-mcp/                   ← Codex 内部 MCP catalog 与连接管理
+    ├── rmcp-client/                 ← RMCP client、stdio/HTTP/OAuth transport
+    ├── mcp-server/                  ← Codex 作为 MCP server 暴露给外部 client
+    ├── hooks/                       ← hook 事件、schema、发现、执行
+    └── ext/
+        ├── extension-api/           ← contributor registry
+        ├── skills/                  ← skills extension
+        ├── mcp/                     ← hosted apps 与 executor plugin MCP
+        ├── connectors/              ← executor plugin app connector
+        ├── guardian/                ← extension 业务 crate；机制仍由 extension-api/contributors 管理
+        ├── image-generation/        ← extension 业务 crate；机制仍由 extension-api/contributors 管理
+        ├── goal/                    ← 内置 goal extension 示例
+        ├── memories/                ← 内置 memories extension
+        └── web-search/              ← 内置 web search extension</div>
+
+        <h2>关键接口与依赖</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>接口</th>
+              <th>作用</th>
+              <th>读法</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ExtensionRegistryBuilder</code></td>
+              <td>注册 thread lifecycle、turn lifecycle、config、token usage、context、MCP、tool、turn input、tool lifecycle、turn item、approval review 等 contributor。</td>
+              <td>先读 <span class="where">open-ai-agent/codex/codex-rs/ext/extension-api/src/registry.rs</span>，再读 <span class="where">open-ai-agent/codex/codex-rs/ext/extension-api/src/contributors.rs</span>。</td>
+            </tr>
+            <tr>
+              <td><code>SkillsService</code></td>
+              <td>持有 host skill discovery、cache、extra roots 和 system skill 安装开关。</td>
+              <td>从 <span class="where">open-ai-agent/codex/codex-rs/core-skills/src/service.rs</span> 追到 <span class="where">open-ai-agent/codex/codex-rs/core-skills/src/loader.rs</span>。</td>
+            </tr>
+            <tr>
+              <td><code>PluginManifest</code></td>
+              <td>定义 plugin package 能声明哪些路径型资源：skills、MCP servers、apps、hooks、interface。</td>
+              <td>读 <span class="where">open-ai-agent/codex/codex-rs/plugin/src/manifest.rs</span> 和 core-plugins loader 的能力装配函数。</td>
+            </tr>
+            <tr>
+              <td><code>McpConnectionManager</code></td>
+              <td>管理一组 MCP client，聚合工具/资源，处理 startup 事件、tool routing、auth elicitation。</td>
+              <td>先读 <span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/connection_manager.rs</span>，再看 <span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/tools.rs</span>。</td>
+            </tr>
+            <tr>
+              <td><code>Hooks</code></td>
+              <td>对外暴露 run/preview 方法；内部交给 ClaudeHooksEngine 发现和执行 handler。</td>
+              <td>从 <span class="where">open-ai-agent/codex/codex-rs/hooks/src/registry.rs</span> 追到 <span class="where">open-ai-agent/codex/codex-rs/hooks/src/engine/dispatcher.rs</span>。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>完整 contributor 清单</h2>
+        <p>
+          下面的清单来自 <span class="where">open-ai-agent/codex/codex-rs/ext/extension-api/src/registry.rs</span>。读业务 extension crate 时，先判断它注册到哪一个 contributor 面，再追对应调用点。
+        </p>
+        <table>
+          <thead>
+            <tr>
+              <th>registry 字段 / getter</th>
+              <th>注册方法</th>
+              <th>运行面</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>thread_lifecycle_contributors</code></td>
+              <td><code>thread_lifecycle_contributor</code></td>
+              <td>线程创建、恢复、结束等 thread 生命周期。</td>
+            </tr>
+            <tr>
+              <td><code>turn_lifecycle_contributors</code></td>
+              <td><code>turn_lifecycle_contributor</code></td>
+              <td>单轮 turn 的开始、结束和中间阶段。</td>
+            </tr>
+            <tr>
+              <td><code>config_contributors</code></td>
+              <td><code>config_contributor</code></td>
+              <td>基于 host config 补充 extension 配置或派生状态。</td>
+            </tr>
+            <tr>
+              <td><code>token_usage_contributors</code></td>
+              <td><code>token_usage_contributor</code></td>
+              <td>把扩展相关的 token 使用量纳入统计或展示。</td>
+            </tr>
+            <tr>
+              <td><code>context_contributors</code></td>
+              <td><code>prompt_contributor</code></td>
+              <td>向模型上下文贡献 prompt/context 片段。</td>
+            </tr>
+            <tr>
+              <td><code>mcp_server_contributors</code></td>
+              <td><code>mcp_server_contributor</code></td>
+              <td>贡献运行时 MCP server，再交给 MCP connection manager。</td>
+            </tr>
+            <tr>
+              <td><code>turn_input_contributors</code></td>
+              <td><code>turn_input_contributor</code></td>
+              <td>在 turn input 组装阶段注入内容，例如被选中的 skill。</td>
+            </tr>
+            <tr>
+              <td><code>tool_contributors</code></td>
+              <td><code>tool_contributor</code></td>
+              <td>贡献 native/model-visible tool 定义与处理逻辑。</td>
+            </tr>
+            <tr>
+              <td><code>tool_lifecycle_contributors</code></td>
+              <td><code>tool_lifecycle_contributor</code></td>
+              <td>工具调用前后生命周期，可用于观察、改写或联动。</td>
+            </tr>
+            <tr>
+              <td><code>turn_item_contributors</code></td>
+              <td><code>turn_item_contributor</code></td>
+              <td>按顺序贡献 turn item，影响会话事件流中的可见条目。</td>
+            </tr>
+            <tr>
+              <td><code>approval_review_contributors</code></td>
+              <td><code>approval_review_contributor</code></td>
+              <td>在审批 review prompt 上给出扩展侧决策。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>源码阅读顺序</h2>
+        <ol>
+          <li>先读 <span class="where">open-ai-agent/codex/codex-rs/ext/extension-api/src/lib.rs</span>、<span class="where">open-ai-agent/codex/codex-rs/ext/extension-api/src/registry.rs</span>，建立 contributor 概念。</li>
+          <li>读 Skills：<span class="where">open-ai-agent/codex/codex-rs/core-skills/src/model.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/core-skills/src/loader.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/ext/skills/src/extension.rs</span>。</li>
+          <li>读 Plugins：<span class="where">open-ai-agent/codex/codex-rs/plugin/src/manifest.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/core-plugins/src/loader.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/core-plugins/src/manager.rs</span>。</li>
+          <li>读 MCP：<span class="where">open-ai-agent/codex/codex-rs/core/src/mcp.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/mcp/mod.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/codex-mcp/src/connection_manager.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/rmcp-client/src/stdio_server_launcher.rs</span>。</li>
+          <li>读 Hooks：<span class="where">open-ai-agent/codex/codex-rs/hooks/src/lib.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/hooks/src/engine/discovery.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/hooks/src/events/pre_tool_use.rs</span> → <span class="where">open-ai-agent/codex/codex-rs/core/src/hook_runtime.rs</span>。</li>
+          <li>最后把四条线汇合到 session：<span class="where">open-ai-agent/codex/codex-rs/core/src/session/turn_context.rs</span>、<span class="where">open-ai-agent/codex/codex-rs/core/src/session/turn.rs</span>、<span class="where">open-ai-agent/codex/codex-rs/core/src/session/mcp.rs</span>。</li>
+        </ol>
+
+        <h2>最小序列图</h2>
+        <pre>配置层 / capability root / plugin store
+        │
+        ├─ SkillsService → SkillLoadOutcome → ext/skills catalog
+        │                         │
+        │                         └─ 显式 mention → read SKILL.md → turn input
+        │
+        ├─ core-plugins loader → plugin skills / MCP / apps / hooks
+        │                         │
+        │                         ├─ plugin skill roots 进入 SkillsService
+        │                         ├─ plugin MCP servers 进入 effective MCP servers
+        │                         └─ plugin hook sources 进入 HooksConfig
+        │
+        ├─ core/mcp + ext/mcp → McpServerContribution → McpConnectionManager
+        │                         └─ tools/list → model-visible tool → tools/call
+        │
+        └─ HooksConfig → ClaudeHooksEngine → lifecycle event
+                                  └─ matcher → command → block / context / rewrite</pre>
+
+        <h2>短触发示例</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>触发</th>
+              <th>最小形态</th>
+              <th>读源码时看哪里</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Skill mention</td>
+              <td><code>@review-python</code> 被显式选择后，host 读取对应 <code>SKILL.md</code> 并通过 turn input contributor 注入。</td>
+              <td><span class="where">core-skills/src/injection.rs</span> 与 <span class="where">ext/skills/src/extension.rs</span>。</td>
+            </tr>
+            <tr>
+              <td>Plugin MCP</td>
+              <td><code>{"mcp_servers": {"repo": {"command": "repo-mcp"}}}</code> 进入 plugin manifest 后，被合成到 effective MCP servers。</td>
+              <td><span class="where">plugin/src/manifest.rs</span>、<span class="where">core-plugins/src/loader.rs</span>、<span class="where">codex-mcp/src/connection_manager.rs</span>。</td>
+            </tr>
+            <tr>
+              <td>PreToolUse hook</td>
+              <td><code>PreToolUse</code> 匹配某个 tool name 后运行 handler，可返回 block、context 或 rewrite。</td>
+              <td><span class="where">hooks/src/events/pre_tool_use.rs</span> 与 <span class="where">core/src/hook_runtime.rs</span>。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>审计提示</h2>
+        <p>
+          排查扩展未生效时，按“清单是否被发现、配置是否启用、运行面是否贡献、turn 中是否触发”四步定位。Skills 看 catalog 和 selected entries；Plugins 看 loaded plugin 的 capability summary；MCP 看 effective server 与 startup status；Hooks 看 list_hooks、trust status、matcher 和 command output。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

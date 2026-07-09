@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox 权限决策流程速查图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .decision-tree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.75;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Sandbox 权限决策流程速查图</h1>
+    <p class="meta">速查参考 | 关联课程：<a href="../lessons/0001-flow-map.html">链路地图</a> | <a href="../lessons/0002-main-path.html">主路径详解</a></p>
+  </header>
+
+  <section>
+    <h2>1. 沙箱类型选择决策树</h2>
+    <div class="decision-tree">SandboxablePreference?
+  ├── Forbid ──────────────────────────► SandboxType::None
+  ├── Require ─────────────────────────► get_platform_sandbox()
+  │                                         ├── macOS  ──► MacosSeatbelt
+  │                                         ├── Linux  ──► LinuxSeccomp
+  │                                         ├── Windows ──► WindowsRestrictedToken (enabled)
+  │                                         └── Windows ──► None (disabled)
+  └── Auto ──► should_require_platform_sandbox()?
+                ├── true ──────────────► (同上 get_platform_sandbox)
+                └── false ─────────────► SandboxType::None
+
+should_require_platform_sandbox() 决策表:
+  has_managed_network_requirements == true  ──► true
+  network_policy.is_enabled() == false:
+    FileSystemSandboxKind::ExternalSandbox ──► false
+    _ (Restricted / Unrestricted)          ──► true
+  network_policy.is_enabled() == true:
+    FileSystemSandboxKind::Restricted:
+      has_full_disk_write_access() == true ──► false
+      has_full_disk_write_access() == false──► true
+    FileSystemSandboxKind::Unrestricted    ──► false
+    FileSystemSandboxKind::ExternalSandbox ──► false</div>
+  </section>
+
+  <section>
+    <h2>2. 权限 Profile 三层模型</h2>
+    <table>
+      <thead>
+        <tr><th>层级</th><th>Profile 名称</th><th>文件系统</th><th>网络</th><th>典型场景</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>内置 :read-only</td><td><code>:read-only</code></td><td>:root = Read</td><td>Restricted</td><td>纯代码审查</td></tr>
+        <tr><td>内置 :workspace</td><td><code>:workspace</code></td><td>:root=Read, :workspace_roots=Write, :tmpdir=Write</td><td>Restricted</td><td>日常开发（默认）</td></tr>
+        <tr><td>内置 :danger</td><td><code>:danger-full-access</code></td><td>Unrestricted</td><td>Enabled</td><td>信任项目/系统管理</td></tr>
+        <tr><td>用户自定义</td><td>任意名称</td><td>TOML extends 继承链</td><td>TOML network.enabled</td><td>团队共享安全策略</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. execpolicy 决策矩阵</h2>
+    <table>
+      <thead>
+        <tr><th>Decision</th><th>含义</th><th>优先级</th><th>典型规则示例</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>Allow</code></td><td>直接执行</td><td>低</td><td>allow git *</td></tr>
+        <tr><td><code>Prompt</code></td><td>用户审批</td><td>中</td><td>prompt npm publish *</td></tr>
+        <tr><td><code>Forbidden</code></td><td>完全阻塞</td><td>高</td><td>forbidden rm -rf /</td></tr>
+      </tbody>
+    </table>
+    <p>匹配规则：多个规则命中时取最高 Decision（Forbidden > Prompt > Allow）。无规则命中时由 <code>heuristics_fallback</code> 决定。</p>
+  </section>
+
+  <section>
+    <h2>4. 关键数据结构速查</h2>
+    <table>
+      <thead>
+        <tr><th>类型</th><th>定义位置</th><th>关键字段</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>SandboxType</code></td><td>sandboxing/src/manager.rs</td><td>None, MacosSeatbelt, LinuxSeccomp, WindowsRestrictedToken</td></tr>
+        <tr><td><code>FileSystemSandboxPolicy</code></td><td>protocol/src/permissions.rs</td><td>kind, glob_scan_max_depth, entries: Vec&ltFileSystemSandboxEntry&gt</td></tr>
+        <tr><td><code>FileSystemSandboxKind</code></td><td>protocol/src/permissions.rs</td><td>Restricted, Unrestricted, ExternalSandbox</td></tr>
+        <tr><td><code>NetworkSandboxPolicy</code></td><td>protocol/src/permissions.rs</td><td>Restricted, Enabled</td></tr>
+        <tr><td><code>PermissionProfile</code></td><td>protocol/src/models.rs</td><td>enforcement, filesystem, network</td></tr>
+        <tr><td><code>SandboxExecRequest</code></td><td>sandboxing/src/manager.rs</td><td>command, cwd, env, sandbox, permission_profile, policies</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>5. 异常路径对照表</h2>
+    <table>
+      <thead>
+        <tr><th>异常场景</th><th>触发条件</th><th>链路终止点</th><th>下游影响</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>execpolicy 拒绝</td><td>Policy::check() → Forbidden</td><td>阶段 [1]</td><td>命令被阻塞，不创建沙箱</td></tr>
+        <tr><td>权限 profile 不匹配</td><td>未找到指定 profile</td><td>阶段 [2]</td><td>启动时报错，无法继续</td></tr>
+        <tr><td>沙箱降级</td><td>should_sandbox() → false</td><td>阶段 [4]</td><td>SandboxType::None，无沙箱包装</td></tr>
+        <tr><td>平台沙箱不可用</td><td>WSL1 + bubblewrap 要求</td><td>阶段 [5]</td><td>Wsl1UnsupportedForBubblewrap 错误</td></tr>
+        <tr><td>Seatbelt 不适用</td><td>非 macOS 请求 Seatbelt</td><td>阶段 [5]</td><td>SeatbeltUnavailable 错误</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <p style="margin-top: 28px; color: var(--muted);">
+    关联课程：<a href="../lessons/0001-flow-map.html">第 1 节 — 链路地图</a> | <a href="../lessons/0002-main-path.html">第 2 节 — 主路径详解</a><br>
+    关联模块：<a href="../../module-sandbox-config/lessons/0001-sandbox-config-module-tour.html">L1 Sandbox 配置模块导览</a>
+  </p>
+</main>
+</body>
+</html>

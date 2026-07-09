@@ -25,6 +25,7 @@ CATEGORY_INFO = {
     "open-knowledge":    ("📝 知识管理与编辑器", "笔记应用、知识库、Markdown/富文本编辑器"),
     "open-productivity": ("✅ 效率工具", "个人生产力、任务管理、时间追踪"),
     "open-java":         ("☕ Java 企业开发", "Java 后端框架、企业级管理系统"),
+    "open-trading":      ("📈 量化交易与金融数据", "量化交易策略、回测框架、A股数据工具"),
 }
 
 def parse_gitmodules():

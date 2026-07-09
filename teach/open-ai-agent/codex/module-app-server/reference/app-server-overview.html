@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App-server 模块速查</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <div class="eyebrow">Reference · App-server JSON-RPC 服务</div>
+  <h1>App-server 模块速查</h1>
+  <p class="lead">这份参考文档承接 L1 短课没有展开的 API 分类、源码入口和后续学习候选。需要学习路径时先看 <a href="../lessons/0001-app-server-module-tour.html">0001-app-server-module-tour</a>；需要回到项目全局位置时看 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 或 <a href="../../00-overview/reference/00-overview.html">00-overview 参考</a>。</p>
+
+  <section>
+    <h2>模块职责边界</h2>
+    <table>
+      <thead>
+      <tr><th>层</th><th>负责</th><th>不负责</th><th>关键文件 / crate</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>protocol</td>
+        <td>定义 JSON-RPC 对象、typed request/response、notification、schema 导出；对应 L0 图里富客户端 / SDK 能依赖的 wire contract。</td>
+        <td>不执行业务逻辑，不管理连接。</td>
+        <td><a href="../../../../../open-ai-agent/codex/codex-rs/app-server-protocol/src/rpc.rs">rpc.rs</a>、<a href="../../../../../open-ai-agent/codex/codex-rs/app-server-protocol/src/protocol/common.rs">common.rs</a>、<a href="../../../../../open-ai-agent/codex/codex-rs/app-server-protocol/src/protocol/v1.rs">v1.rs</a>、<code>protocol/v2/*</code></td>
+      </tr>
+      <tr>
+        <td>transport</td>
+        <td>stdio、WebSocket、unix socket、连接生命周期、入站消息与出站 writer 队列。</td>
+        <td>不理解 Thread/Turn 语义。</td>
+        <td><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/transport.rs">app-server/src/transport.rs</a>、<code>codex-app-server-transport</code></td>
+      </tr>
+      <tr>
+        <td>runtime</td>
+        <td>加载配置、启动 acceptor、启动 outbound router、启动 processor loop、处理初始化后通知和优雅关闭。</td>
+        <td>不逐个实现 API 业务。</td>
+        <td><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/lib.rs">lib.rs</a></td>
+      </tr>
+      <tr>
+        <td>dispatch</td>
+        <td>反序列化 <code>ClientRequest</code>、检查 initialize、experimental API、请求序列化队列，并分发到 processor。</td>
+        <td>不直接渲染客户端 UI。</td>
+        <td><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/message_processor.rs">message_processor.rs</a></td>
+      </tr>
+      <tr>
+        <td>processors</td>
+        <td>实现 Thread、Turn、FS、Config、MCP、Plugin、Account 等领域方法。</td>
+        <td>不重新定义 wire protocol。</td>
+        <td><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/request_processors/">request_processors/</a></td>
+      </tr>
+      <tr>
+        <td>core/runtime dependencies</td>
+        <td>真实 agent 执行、配置解析、thread store、MCP、插件、命令执行、模型目录和遥测。</td>
+        <td>不暴露 app-server wire 方法名。</td>
+        <td><code>codex-core</code>、<code>codex-thread-store</code>、<code>codex-mcp</code>、<code>codex-plugin</code>、<code>codex-exec-server</code></td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Transport 与生命周期</h2>
+    <table>
+      <thead>
+      <tr><th>阶段</th><th>客户端行为</th><th>服务端行为</th><th>常见源码入口</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>启动</td>
+        <td>选择 <code>--listen stdio://</code>、<code>ws://IP:PORT</code>、<code>unix://PATH</code> 或 <code>off</code>。</td>
+        <td><code>main.rs</code> 解析 CLI，调用 <code>run_main_with_transport_options</code>。</td>
+        <td><code>main.rs</code>、<code>lib.rs</code></td>
+      </tr>
+      <tr>
+        <td>连接</td>
+        <td>打开 stdio、WebSocket 或 unix-socket 代理流。</td>
+        <td>transport 发送 <code>ConnectionOpened</code>，runtime 建立 connection state 与 outbound writer。</td>
+        <td><code>transport.rs</code>、<code>lib.rs</code></td>
+      </tr>
+      <tr>
+        <td>初始化</td>
+        <td>发送 <code>initialize</code> request，再发送 <code>initialized</code> notification。</td>
+        <td><code>initialize</code> request 写入 server-side initialized 状态，记录 client metadata、capabilities、notification opt-out，并触发初始化后服务端动作；<code>initialized</code> notification 当前主要进入日志路径，不作为 initialized gate。</td>
+        <td><code>initialize_processor.rs</code>、<code>message_processor.rs</code></td>
+      </tr>
+      <tr>
+        <td>请求执行</td>
+        <td>发送 <code>thread/start</code>、<code>turn/start</code> 等请求。</td>
+        <td>按 request serialization scope 排队或并发执行，然后发 response。</td>
+        <td><code>message_processor.rs</code>、<code>request_serialization.rs</code></td>
+      </tr>
+      <tr>
+        <td>事件流</td>
+        <td>持续读取 notification。</td>
+        <td>通过 outgoing sender 单连接发送或广播，按 experimental/opt-out 过滤。</td>
+        <td><code>outgoing_message.rs</code>、<code>transport.rs</code></td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>方法族 / 接口全集速查</h2>
+    <p>下表按 <code>ClientRequest</code> 与 <code>MessageProcessor::handle_initialized_client_request</code> 汇总方法族边界。L1 不逐字段解释 params/response；“稳定性”标注来自协议宏中的 experimental / deprecated 声明，未标 experimental 或 deprecated 的方法按 stable 阅读。</p>
+    <table>
+      <thead>
+      <tr><th>方法族</th><th>接口边界</th><th>稳定性</th><th>processor</th><th>学习重点</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>初始化</td>
+        <td><code>initialize</code> request；<code>initialized</code> 是 client notification，不是 <code>ClientRequest</code> 分发项。</td>
+        <td>stable</td>
+        <td><code>InitializeRequestProcessor</code>；notification 走 <code>MessageProcessor::process_notification</code></td>
+        <td><code>initialize</code> 决定 server-side initialized 状态；capabilities 控制实验 API 与通知 opt-out。</td>
+      </tr>
+      <tr>
+        <td>Thread 生命周期</td>
+        <td><code>thread/start</code>、<code>thread/resume</code>、<code>thread/fork</code>、<code>thread/archive</code>、<code>thread/unarchive</code>、<code>thread/delete</code>、<code>thread/unsubscribe</code>、<code>thread/name/set</code>、<code>thread/metadata/update</code>、<code>thread/rollback</code>、<code>thread/read</code>、<code>thread/list</code>、<code>thread/loaded/list</code></td>
+        <td>stable；<code>thread/search</code>、<code>thread/turns/list</code>、<code>thread/items/list</code> 单列见下</td>
+        <td><code>ThreadRequestProcessor</code></td>
+        <td>创建、恢复、分叉、分页读取、归档和状态订阅。</td>
+      </tr>
+      <tr>
+        <td>Thread 目标 / 记忆 / 设置</td>
+        <td><code>thread/goal/set</code>、<code>thread/goal/get</code>、<code>thread/goal/clear</code>；<code>thread/settings/update</code>、<code>thread/memoryMode/set</code>、<code>memory/reset</code>；<code>thread/increment_elicitation</code>、<code>thread/decrement_elicitation</code></td>
+        <td><code>thread/goal/*</code> stable；其余列出项 experimental</td>
+        <td><code>ThreadGoalProcessor</code>、<code>TurnRequestProcessor</code>、<code>ThreadRequestProcessor</code></td>
+        <td>目标状态由独立 processor 处理；设置和记忆模式影响后续 turn。</td>
+      </tr>
+      <tr>
+        <td>Thread 查询 / 历史 / 后台终端</td>
+        <td><code>thread/search</code>、<code>thread/turns/list</code>、<code>thread/items/list</code>；<code>thread/backgroundTerminals/clean</code>、<code>thread/backgroundTerminals/list</code>、<code>thread/backgroundTerminals/terminate</code>；<code>thread/shellCommand</code>、<code>thread/approveGuardianDeniedAction</code>、<code>thread/compact/start</code></td>
+        <td><code>thread/search</code>、turns/items list、backgroundTerminals 为 experimental；其余 stable</td>
+        <td><code>ThreadRequestProcessor</code></td>
+        <td>把会话检索、历史读取、压缩和后台终端管理收在 Thread 领域。</td>
+      </tr>
+      <tr>
+        <td>Turn 与实时生成</td>
+        <td><code>turn/start</code>、<code>turn/steer</code>、<code>turn/interrupt</code>、<code>review/start</code>、<code>thread/inject_items</code>；<code>thread/realtime/start</code>、<code>thread/realtime/appendAudio</code>、<code>thread/realtime/appendText</code>、<code>thread/realtime/appendSpeech</code>、<code>thread/realtime/stop</code>、<code>thread/realtime/listVoices</code></td>
+        <td>turn/review/inject stable；realtime experimental</td>
+        <td><code>TurnRequestProcessor</code></td>
+        <td>一次用户输入如何进入 core，如何流式产生 item 和 turn 状态。</td>
+      </tr>
+      <tr>
+        <td>文件系统</td>
+        <td><code>fs/readFile</code>、<code>fs/writeFile</code>、<code>fs/createDirectory</code>、<code>fs/getMetadata</code>、<code>fs/readDirectory</code>、<code>fs/remove</code>、<code>fs/copy</code>、<code>fs/watch</code>、<code>fs/unwatch</code></td>
+        <td>stable</td>
+        <td><code>FsRequestProcessor</code></td>
+        <td>富客户端远程读写和监听文件；FS 请求被设计为可并发。</td>
+      </tr>
+      <tr>
+        <td>配置与模型目录</td>
+        <td><code>config/read</code>、<code>config/value/write</code>、<code>config/batchWrite</code>、<code>configRequirements/read</code>、<code>model/list</code>、<code>modelProvider/capabilities/read</code>、<code>permissionProfile/list</code>、<code>experimentalFeature/list</code>、<code>experimentalFeature/enablement/set</code>、<code>collaborationMode/list</code></td>
+        <td>stable；<code>collaborationMode/list</code> experimental</td>
+        <td><code>ConfigRequestProcessor</code>、<code>CatalogRequestProcessor</code></td>
+        <td>读取有效配置、写配置、读取配置要求、列模型和权限配置。</td>
+      </tr>
+      <tr>
+        <td>外部 agent 配置导入</td>
+        <td><code>externalAgentConfig/detect</code>、<code>externalAgentConfig/import</code>、<code>externalAgentConfig/import/readHistories</code></td>
+        <td>stable</td>
+        <td><code>ExternalAgentConfigProcessor</code></td>
+        <td>检测和导入外部 agent 配置；import 通过通知报告进度和完成。</td>
+      </tr>
+      <tr>
+        <td>MCP</td>
+        <td><code>mcpServer/oauth/login</code>、<code>config/mcpServer/reload</code>、<code>mcpServerStatus/list</code>、<code>mcpServer/resource/read</code>、<code>mcpServer/tool/call</code></td>
+        <td>stable</td>
+        <td><code>McpRequestProcessor</code></td>
+        <td>把 MCP 服务器状态、资源和工具调用暴露给客户端。</td>
+      </tr>
+      <tr>
+        <td>插件 / Skills / Apps</td>
+        <td><code>skills/list</code>、<code>skills/extraRoots/set</code>、<code>skills/config/write</code>、<code>hooks/list</code>、<code>marketplace/add</code>、<code>marketplace/remove</code>、<code>marketplace/upgrade</code>、<code>plugin/list</code>、<code>plugin/installed</code>、<code>plugin/read</code>、<code>plugin/skill/read</code>、<code>plugin/install</code>、<code>plugin/uninstall</code>、<code>plugin/share/*</code>、<code>app/list</code></td>
+        <td>stable</td>
+        <td><code>CatalogRequestProcessor</code>、<code>PluginRequestProcessor</code>、<code>MarketplaceRequestProcessor</code>、<code>AppsRequestProcessor</code></td>
+        <td>发现和管理扩展能力；<code>plugin/share/*</code> 覆盖 save、updateTargets、list、checkout、delete。</td>
+      </tr>
+      <tr>
+        <td>账户与认证</td>
+        <td><code>account/login/start</code>、<code>account/login/cancel</code>、<code>account/logout</code>、<code>account/read</code>、<code>account/rateLimits/read</code>、<code>account/rateLimitResetCredit/consume</code>、<code>account/usage/read</code>、<code>account/workspaceMessages/read</code>、<code>account/sendAddCreditsNudgeEmail</code>；deprecated <code>GetAuthStatus</code></td>
+        <td>stable；<code>GetAuthStatus</code> deprecated</td>
+        <td><code>AccountRequestProcessor</code></td>
+        <td>登录、登出、账户状态、限额和用量。</td>
+      </tr>
+      <tr>
+        <td>命令 / 进程</td>
+        <td><code>command/exec</code>、<code>command/exec/write</code>、<code>command/exec/terminate</code>、<code>command/exec/resize</code>；<code>process/spawn</code>、<code>process/writeStdin</code>、<code>process/kill</code>、<code>process/resizePty</code></td>
+        <td>command stable；process experimental</td>
+        <td><code>CommandExecRequestProcessor</code>、<code>ProcessExecRequestProcessor</code></td>
+        <td><code>command/exec</code> 走服务器 sandbox；<code>process/spawn</code> 是实验性裸进程接口。</td>
+      </tr>
+      <tr>
+        <td>远程控制 / 环境 / Windows sandbox</td>
+        <td><code>remoteControl/enable</code>、<code>remoteControl/disable</code>、<code>remoteControl/status/read</code>、<code>remoteControl/pairing/start</code>、<code>remoteControl/pairing/status</code>、<code>remoteControl/client/list</code>、<code>remoteControl/client/revoke</code>；<code>environment/add</code>、<code>environment/info</code>；<code>windowsSandbox/setupStart</code>、<code>windowsSandbox/readiness</code></td>
+        <td>remoteControl/environment experimental；Windows sandbox stable</td>
+        <td><code>RemoteControlRequestProcessor</code>、<code>EnvironmentRequestProcessor</code>、<code>WindowsSandboxRequestProcessor</code></td>
+        <td>多环境、远程控制和 Windows sandbox 设置，多数为实验能力。</td>
+      </tr>
+      <tr>
+        <td>搜索 / 反馈 / legacy</td>
+        <td><code>fuzzyFileSearch</code>；<code>fuzzyFileSearch/sessionStart</code>、<code>fuzzyFileSearch/sessionUpdate</code>、<code>fuzzyFileSearch/sessionStop</code>；<code>feedback/upload</code>；deprecated <code>GitDiffToRemote</code>、<code>GetConversationSummary</code>；test-only <code>mock/experimentalMethod</code></td>
+        <td><code>fuzzyFileSearch</code> legacy stable；session API experimental；<code>feedback/upload</code> stable；GitDiffToRemote / GetConversationSummary deprecated；mock experimental</td>
+        <td><code>SearchRequestProcessor</code>、<code>FeedbackRequestProcessor</code>、<code>GitRequestProcessor</code>、<code>ThreadRequestProcessor</code>、<code>CatalogRequestProcessor</code></td>
+        <td>搜索能力分新旧两套；反馈上传独立；旧 git diff 和摘要接口仍由 processor 接住以兼容客户端；mock 方法只用于验证 experimental gate。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>核心通知类别</h2>
+    <table>
+      <thead>
+      <tr><th>通知族</th><th>代表通知</th><th>客户端用途</th></tr>
+      </thead>
+      <tbody>
+      <tr><td>Thread</td><td><code>thread/started</code>、<code>thread/status/changed</code>、<code>thread/closed</code></td><td>更新会话列表和当前会话状态。</td></tr>
+      <tr><td>Turn</td><td><code>turn/started</code>、<code>turn/completed</code>、<code>turn/plan/updated</code>、<code>turn/diff/updated</code></td><td>驱动一次生成的生命周期 UI。</td></tr>
+      <tr><td>Item</td><td><code>item/started</code>、<code>item/completed</code>、<code>item/agentMessage/delta</code>、<code>item/reasoning/textDelta</code></td><td>渲染消息、推理、工具、命令和文件变更的流式内容。</td></tr>
+      <tr><td>工具与系统</td><td><code>command/exec/outputDelta</code>、<code>fs/changed</code>、<code>mcpServer/startupStatus/updated</code>、<code>configWarning</code></td><td>显示命令输出、文件变化、MCP 状态和配置问题。</td></tr>
+      <tr><td>账户与应用</td><td><code>account/updated</code>、<code>account/rateLimits/updated</code>、<code>app/list/updated</code></td><td>刷新登录状态、限额和可用应用。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>源码阅读顺序</h2>
+    <ol>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/README.md">README.md</a>：先读 Protocol、Core Primitives、Lifecycle Overview、Initialization。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/main.rs">main.rs</a>：确认 CLI 入口、transport 选项和 session source。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/lib.rs">lib.rs</a>：关注 <code>run_main_with_transport_options</code> 中的 transport acceptor、outbound router、processor loop。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/message_processor.rs">message_processor.rs</a>：读 <code>process_request</code>、<code>dispatch_initialized_client_request</code>、<code>handle_initialized_client_request</code>。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server-protocol/src/protocol/common.rs">protocol/common.rs</a>：查 <code>ClientRequest</code> 和 <code>ServerNotification</code> 的 wire method。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/src/request_processors/">request_processors/</a>：按目标方法前缀进入具体 processor。</li>
+      <li><a href="../../../../../open-ai-agent/codex/codex-rs/app-server/tests/suite/v2/">tests/suite/v2/</a>：用集成测试验证真实请求样例。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>后续 L2 / L3 候选</h2>
+    <table>
+      <thead>
+      <tr><th>候选</th><th>层级</th><th>建议标题</th><th>覆盖重点</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>L2-slice-app-server-turn</td>
+        <td>L2 垂直切片</td>
+        <td><code>turn/start</code> 从 JSON-RPC 到 <code>turn/completed</code></td>
+        <td>入站 request、初始化 gate、serialization scope、<code>TurnRequestProcessor</code>、core event 映射、通知回写。</td>
+      </tr>
+      <tr>
+        <td>L2-slice-sdk-thread-run</td>
+        <td>L2 垂直切片</td>
+        <td>SDK 如何组合 Thread 与 Turn</td>
+        <td>客户端调用顺序、thread 创建/恢复、turn 输入、流式消费 notification。</td>
+      </tr>
+      <tr>
+        <td>L3-app-server-api-reference</td>
+        <td>L3 API 参考</td>
+        <td>App-server JSON-RPC 方法全集</td>
+        <td>所有 stable/experimental 方法、params/response 类型、序列化 scope、通知关系。</td>
+      </tr>
+      <tr>
+        <td>L3-app-server-transport-reference</td>
+        <td>L3 API 参考</td>
+        <td>Transport、backpressure 与连接状态</td>
+        <td>stdio JSONL、WebSocket、unix socket proxy、bounded queues、慢连接断开、health probe。</td>
+      </tr>
+      <tr>
+        <td>L4-message-processor-deep-dive</td>
+        <td>L4 深度剖析</td>
+        <td><code>MessageProcessor</code> 分发、门禁与并发模型</td>
+        <td>初始化状态、experimental gate、request serialization、background tasks、connection cleanup。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>

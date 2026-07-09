@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — 分析决策全链路地图：从股票代码到 Buy/Hold/Sell</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .diagram { text-align: center; margin: 24px 0; }
+  .diagram pre { text-align: left; display: inline-block; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .stage-list { margin: 12px 0; }
+  .stage-list li { margin-bottom: 10px; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .callout { border-left: 3px solid #e6a817; background: #fefdf5; padding: 10px 14px; margin: 16px 0; border-radius: 0 6px 6px 0; font-size: 0.94rem; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 1/3 节 &middot; 预计 14 分钟</p>
+
+<h1>0001 — 分析决策全链路地图</h1>
+
+<p class="objective"><strong>目标任务：</strong>不看源码，凭记忆画出 TradingAgents-Astock 从 <code>propagate("600519", date)</code> 到最终 <code>Buy/Hold/Sell</code> 的 7 阶段节点拓扑图，并说出每阶段的核心职责。</p>
+
+<h2>1. 入口：一条主方法承载全链路</h2>
+
+<p>一切始于 <code>TradingAgentsGraph.propagate(company_name, trade_date)</code>（<code>trading_graph.py:301</code>）。它调用 <code>_run_graph()</code>，后者执行三段式生命周期：</p>
+
+<ol>
+  <li><strong>prepare_graph_run()</strong> — 解析待处理日志 → 创建初始状态 → 注入 thread_id</li>
+  <li><strong>graph.invoke(init_state)</strong> — LangGraph 执行整个状态图（7 阶段串联）</li>
+  <li><strong>finalize_graph_run()</strong> — 写结果日志 → 丢进 memory_log → 清 checkpoint → <code>process_signal()</code> 提取评级</li>
+</ol>
+
+<div class="callout"><strong>关键点：</strong><code>propagate()</code> 本身只是一个委托方法。真正的链路编排在 <code>GraphSetup.setup_graph()</code> 中定义的 LangGraph StateGraph，LangGraph 负责按边和条件路由依次调用节点。</div>
+
+<h2>2. 7 阶段全景图</h2>
+
+<div class="diagram">
+<pre><code>propagate("600519","2026-07-08")
+  │
+  ▼ 阶段1 状态初始化 — 7空报告 + 2辩论状态
+  │
+  ▼ 阶段2 7 Analyst — M→So→N→F→P→H→L (每个 tool_calls 循环)
+  │
+  ▼ 阶段3 质量门控 — 硬检查 + LLM复审 → quality_summary
+  │
+  ▼ 阶段4 Bull/Bear 辩论 — 最多 max_debate_rounds 轮
+  │
+  ▼ 阶段5 Research Manager — deep LLM → ResearchPlan
+  │
+  ▼ 阶段6 Trader — quick LLM → TraderProposal (价位+止损)
+  │
+  ▼ 阶段7 风险辩论+PM — A/C/N三方→PortfolioDecision
+  │
+  ▼
+signal_processor → "Buy"/"Overweight"/"Hold"/"Underweight"/"Sell"
+</code></pre>
+</div>
+
+<h2>3. 数据如何在各阶段之间流转</h2>
+
+<p>所有状态存储在 <code>AgentState</code>（一个 <code>TypedDict</code>，定义在 <code>agent_states.py</code>）中，LangGraph 的每个节点返回一个 <code>dict</code> 局部更新，框架自动合并。核心字段表见 <a href="../reference/analysis-pipeline-flow-map.html">长链路速查</a>，这里关注三条主线：</p>
+
+<ul class="stage-list">
+  <li><strong>报告流：</strong>阶段 2 的每个 Analyst 将其研报写入 <code>market_report</code> / <code>sentiment_report</code> / ... / <code>lockup_report</code>。阶段 3 的质量门控读取这 7 个字段，阶段 4-7 的辩论/决策代理通过 <code>state["market_report"]</code> 等方式引用它们。</li>
+  <li><strong>辩论流：</strong>阶段 4 的 Bull/Bear 轮次写入 <code>investment_debate_state["history"]</code>，阶段 7 的三方风险辩论写入 <code>risk_debate_state["history"]</code>。Manager 代理读取这些历史作为决策依据。</li>
+  <li><strong>决策流：</strong>阶段 5→6→7 的决策层层递进——Research Plan → Trader Proposal → Portfolio Decision，每个下游节点读取上游的结构化输出。</li>
+</ul>
+
+<h2>4. 条件路由：链路在哪里分叉</h2>
+
+<p>三个条件路由点决定了链路走向（定义在 <code>conditional_logic.py</code> 和 <code>setup.py</code>）：</p>
+
+<table>
+  <tr><th>路由点</th><th>条件判断</th><th>分支</th></tr>
+  <tr>
+    <td>每个 Analyst 后</td>
+    <td><code>last_message.tool_calls</code> 是否有 tool_call？</td>
+    <td>有 → tools_analyst（取数据再回到 analyst）；无 → Msg Clear（进入下一个 analyst）</td>
+  </tr>
+  <tr>
+    <td>Bull/Bear 辩论</td>
+    <td><code>debate_state["count"] >= 2*max_debate_rounds</code>？</td>
+    <td>是 → Research Manager；否 → 继续辩论（轮流发言）</td>
+  </tr>
+  <tr>
+    <td>风险三方辩论</td>
+    <td><code>risk_debate_state["count"] >= 3*max_risk_discuss_rounds</code>？</td>
+    <td>是 → Portfolio Manager；否 → 继续轮转（A/C/N 循环）</td>
+  </tr>
+</table>
+
+<div class="quiz">
+<h3>检索练习</h3>
+<p>不看上文，回答以下问题：</p>
+<ol>
+  <li>阶段 2 的 7 个 Analyst 是按什么顺序执行的？</li>
+  <li>如果最后一次 tool_call 返回数据后 Analyst 还要继续调工具，LangGraph 会走哪个节点？</li>
+  <li>Bull/Bear 辩论的结束条件是什么？</li>
+</ol>
+<div class="answer">
+<p><strong>参考答案：</strong>(1) 按 <code>selected_analysts</code> 列表顺序，默认 market→social→news→fundamentals→policy→hot_money→lockup。(2) 先走 <code>tools_X</code> 节点，取回数据后又回到 <code>X Analyst</code> 节点；只有 Analyst 不再发 tool_call 时才走 <code>Msg Clear X</code>。(3) <code>investment_debate_state["count"] >= 2 * max_debate_rounds</code>（默认 max_debate_rounds=1，所以 2 轮后结束）。</p>
+</div>
+</div>
+
+<p style="margin-top: 24px;">下一节将沿主成功路径逐节点追踪：<a href="0002-main-path.html">0002 — 主成功路径：一条 ticker 的完整旅程</a>。完整节点表与数据类型速查见 <a href="../reference/analysis-pipeline-flow-map.html">analysis-pipeline-flow-map.html</a>。父模块课程见 <a href="../../module-graph/lessons/0001-graph-module-tour.html">L1 Graph 模块总览</a>。</p>
+
+</div>
+</main>
+</body>
+</html>

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>三级 fallback：TCP 探测 → bestip 测速 → 裸 factory</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: #f8f9fb; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.9rem 1.1rem; font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 1rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.86rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; }
+  th { background: #f5f7fa; font-weight: 600; font-size: 0.82rem; }
+  tr:nth-child(even) { background: #fafbfc; }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .warn { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .warn strong { color: #991b1b; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+  .mechanism { background: #f0f7ff; border-left: 3px solid #5b9bd5; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+  .mechanism strong { color: #2c5282; }
+</style>
+</head>
+<body>
+
+<h1>三级 fallback：TCP 探测 → bestip 测速 → 裸 factory</h1>
+<p class="meta">
+  <span class="badge">L4 深度剖析</span>
+  <span class="badge">mootdx fallback</span>
+  <span class="badge">第 2/2 节</span>
+  估计时长：15 分钟
+</p>
+
+<h2>1. 三级 fallback 的总体设计</h2>
+
+<p>tdx_client() 的三级兜底策略按"可靠性从高到低"排列：</p>
+
+<div class="mechanism">
+  <strong>第一级（首选）：</strong>遍历 _TDX_SERVERS 列表，TCP 探测每台服务器是否可达，用第一台可达的。<br>
+  <strong>第二级（fallback 1）：</strong>调用 Quotes.factory(bestip=True)，让 mootdx 自己测速选最优 IP。<br>
+  <strong>第三级（fallback 2）：</strong>调用 Quotes.factory() 裸创建，依赖老用户 config.json 中已有的 IP。<br>
+  <strong>兜底：</strong>以上全部失败 → RuntimeError，明确报错而非死等。
+</div>
+
+<p>顺序不能颠倒——每一级都是对前一级失效场景的"降级兼容"。以下是完整的源码结构：</p>
+
+<pre>def tdx_client(market='std'):
+    for ip, port in _TDX_SERVERS:
+        if _probe(ip, port):
+            return Quotes.factory(market=market, server=(ip, port))  # 第一级
+    try:
+        return Quotes.factory(market=market, bestip=True)            # 第二级
+    except Exception:
+        pass
+    try:
+        return Quotes.factory(market=market)                         # 第三级
+    except Exception as e:
+        raise RuntimeError("所有 mootdx 服务器均不可达...")          # 兜底</pre>
+
+<h2>2. 第一级：TCP 探测 + 内置服务器列表</h2>
+
+<p>_TDX_SERVERS 是 a-stock-data 维护的 10 个实测可用通达信服务器地址（2026-06 验证）：</p>
+
+<pre>_TDX_SERVERS = [
+    ('119.97.185.59', 7709), ('124.70.133.119', 7709), ('116.205.183.150', 7709),
+    ('123.60.73.44', 7709),  ('116.205.163.254', 7709), ('121.36.225.169', 7709),
+    ('123.60.70.228', 7709), ('124.71.9.153', 7709),    ('110.41.147.114', 7709),
+    ('124.71.187.122', 7709),
+]</pre>
+
+<p>_probe() 用 Python 标准库 socket 做 TCP 握手探测：</p>
+
+<pre>def _probe(ip, port, timeout=2.0):
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except Exception:
+        return False</pre>
+
+<div class="principle">
+  <strong>为什么 timeout=2.0s？</strong> 10 台服务器在 2s 超时下，最坏情况 20s 完成全部探测。实际大部分服务器在 50-100ms 内即可握手成功，第一台可达的就直接返回。2s 是可靠性与速度的平衡——太短（0.5s）可能因网络抖动误判不可达，太长（5s）则海外用户等待过久。
+</div>
+
+<p><strong>为什么需手动维护服务器列表？</strong>通达信不公开其服务器基础设施，IP 可能变更、退役或被 DDoS 防护封锁。10 个 IP 提供了冗余——单个 IP 故障不会影响连接，多个 IP 同时出现在不同网段也分散了运营商级别的风险。</p>
+
+<h2>3. 第二、三级：bestip 测速与裸 factory 兜底</h2>
+
+<p>当第一级全部探测失败时，进入第二级：回退到 mootdx 内置的 <code>bestip=True</code> 测速机制。bestip 是 mootdx 内部维护的通达信服务器列表 + 测速逻辑——它比 _TDX_SERVERS 覆盖范围更广，但依赖 config.json 和内部数据文件，这正是 BESTIP 空串 bug 的来源。第二级的作用是覆盖那些"服务器 IP 列表过期但 mootdx 内部列表更全"的场景。</p>
+
+<p>如果 bestip 也失败（例如 config.json 损坏），进入第三级：裸 <code>Quotes.factory(market=market)</code>——它依赖老用户 config.json 中已有的可用 IP。两级兜底确保不同环境都有路径可达。</p>
+
+<p>如果连裸 factory 都失败了（典型场景：海外 IP，所有国内通达信服务器不通），tdx_client() 抛出明确的 RuntimeError：</p>
+
+<pre>raise RuntimeError(
+    "所有 mootdx 服务器均不可达。海外网络通常全部超时（TCP 7709），"
+    "请走国内代理或更新 _TDX_SERVERS 列表。原始错误：%s" % e
+)</pre>
+
+<div class="principle">
+  <strong>设计原则：快速失败优于静默死等。</strong>裸 Quotes.factory() 在海外环境下可能因为等待 TCP 超时而卡住数分钟。tdx_client() 通过第一级的 2s 超时探测快速识别"全部不可达"，然后在 ~20s 内给出明确报错和解决方案建议。
+</div>
+
+<h2>4. 性能特征与已知局限</h2>
+
+<table>
+  <tr><th>场景</th><th>耗时</th><th>结果</th></tr>
+  <tr><td>国内，至少一台可达</td><td>~50-200ms</td><td>第一级直接返回</td></tr>
+  <tr><td>国内，_TDX_SERVERS 全部不可达</td><td>~20s（10 台 × 2s）+ bestip 耗时</td><td>第二/三级兜底</td></tr>
+  <tr><td>海外，全部不通</td><td>~20s + 少量兜底尝试</td><td>RuntimeError 快速失败</td></tr>
+</table>
+
+<div class="warn">
+  <strong>已知局限 — 海外服务器需国内 IP：</strong>mootdx 走通达信 TCP 7709，海外环境通常全部超时。tdx_client() 只能快速失败并给出报错——它无法解决网络层的物理不可达。海外用户需要走国内代理或 VPN。这也是为什么 a-stock-data 把 mootdx 列为"首选但不排他"——行情数据还可以走腾讯财经（HTTP，海外可用）。
+</div>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p><strong>问题：</strong>你在国内服务器上运行 tdx_client()，发现 _TDX_SERVERS 中前 2 台超时、第 3 台可达。以下哪项描述是正确的？</p>
+  <ol type="A">
+    <li>tdx_client() 会返回第 3 台服务器创建的客户端，耗时约 4s</li>
+    <li>tdx_client() 会先探测全部 10 台，选延迟最低的那台</li>
+    <li>前 2 台超时后会跳过第一级，直接进入 bestip 测速</li>
+    <li>tdx_client() 会在找到第一台可达服务器后立即返回</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('ex2-answer').classList.toggle('show')">显示答案</button>
+  <div class="answer" id="ex2-answer">
+    <strong>答案：D。</strong>关键代码 <code>if _probe(ip, port): return Quotes.factory(...)</code> —— 找到第一台可达的就立即返回，不会继续探测剩余服务器（A 错）。这与"探测全部选最优"（B 错）是两种不同策略——这里选的是"最快可用"而非"最优延迟"。前 2 台超时是正常的 fallback 流程，不会跳过第一级（C 错）。第一级中每台服务器超时 2s，所以前 2 台超时 + 第 3 台成功 ≈ 4s 总延迟。
+  </div>
+</div>
+
+<div class="ref-links">
+  <p><strong>交叉链接：</strong></p>
+  <ul>
+    <li>上一节：<a href="./0001-problem-frame.html">问题背景：BESTIP.HQ 空串的根因分析</a></li>
+    <li>前置课程：<a href="../../module-infrastructure/lessons/0001-infrastructure-module-tour.html">L1 基础设施层总览</a></li>
+    <li>参考资料：<a href="../RESOURCES.md">RESOURCES.md — mootdx 仓库 / socket 文档</a></li>
+  </ul>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>_TDX_SERVERS 列表想自己扩展？在脚本中追加你实测可用的 IP:7709 地址即可——tdx_client() 探测逻辑完全不关心 IP 来源。有疑问向 agent 追问。
+</div>
+
+</body>
+</html>

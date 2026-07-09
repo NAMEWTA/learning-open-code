@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>核心机制：串行锁 + 随机抖动 + 会话复用 + 连接重试</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 17px; line-height: 1.8; color: #1a1a1a;
+    max-width: 780px; margin: 0 auto; padding: 2rem 1.5rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; margin-bottom: 0.6rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  p { margin-bottom: 1rem; }
+  .meta { color: #888; font-size: 0.88rem; margin-bottom: 1.8rem; }
+  .badge { display: inline-block; background: #f0f4ff; color: #3b6cb4; padding: 0.15rem 0.55rem; border-radius: 4px; font-size: 0.8rem; margin-right: 0.3rem; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: #f8f9fb; border: 1px solid #ebebeb; border-radius: 8px; padding: 0.9rem 1.1rem; font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 1rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.86rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.7rem; text-align: left; }
+  th { background: #f5f7fa; font-weight: 600; font-size: 0.82rem; }
+  tr:nth-child(even) { background: #fafbfc; }
+  .principle { background: #f8faf9; border-left: 3px solid #3b82a4; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .principle strong { color: #2c5282; }
+  .warn { background: #fef2f2; border-left: 3px solid #dc2626; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.95rem; }
+  .warn strong { color: #991b1b; }
+  .exercise { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 1.2rem 1.4rem; margin-top: 2.5rem; }
+  .exercise h3 { font-size: 1rem; margin-bottom: 0.6rem; color: #92400e; }
+  .exercise ol { margin-left: 1.3rem; margin-bottom: 0.5rem; }
+  .exercise li { margin-bottom: 0.4rem; }
+  .answer { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 0.6rem 1rem; margin-top: 0.8rem; font-size: 0.9rem; color: #065f46; display: none; }
+  .answer.show { display: block; }
+  .show-btn { background: #3b6cb4; color: #fff; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-top: 0.5rem; }
+  .show-btn:hover { background: #2c5282; }
+  .ref-links { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .ref-links a { color: #3b6cb4; text-decoration: none; }
+  .ref-links a:hover { text-decoration: underline; }
+  .reminder { background: #f0f8ff; border-radius: 8px; padding: 0.8rem 1rem; margin-top: 1.5rem; font-size: 0.9rem; color: #2c5282; }
+  .mechanism { background: #f0f7ff; border-left: 3px solid #5b9bd5; padding: 0.5rem 0.9rem; margin: 0.55rem 0; border-radius: 0 6px 6px 0; font-size: 0.9rem; }
+  .mechanism strong { color: #2c5282; }
+</style>
+</head>
+<body>
+
+<h1>核心机制：串行锁 + 随机抖动 + 会话复用 + 连接重试</h1>
+<p class="meta">
+  <span class="badge">L4 深度剖析</span>
+  <span class="badge">东财防封限流</span>
+  <span class="badge">第 2/2 节</span>
+  估计时长：15 分钟
+</p>
+
+<h2>1. 设计方案对比：为什么是串行限流</h2>
+
+<p>在设计 em_get() 之初，有三种常见的限流方案可选：</p>
+
+<table>
+  <tr><th>方案</th><th>思路</th><th>为什么不用</th></tr>
+  <tr>
+    <td><strong>令牌桶</strong></td>
+    <td>恒定速率放行请求，允许短时突发</td>
+    <td>实现复杂（需要后台线程续令牌）；突发恰是东财敏感的——批量场景下容易触发风控</td>
+  </tr>
+  <tr>
+    <td><strong>并发池 + 信号量</strong></td>
+    <td>N 个并发槽位同时请求</td>
+    <td>并发 ≥10 是东财的高风险行为；并发请求的请求间间隔不可控，容易踩中"1 分钟 200 次"阈值</td>
+  </tr>
+  <tr>
+    <td><strong>串行限流（选中）</strong></td>
+    <td>全局时间戳 + sleep + 抖动</td>
+    <td>代码不到 20 行、零外部依赖、行为完全可预测、对风控最友好</td>
+  </tr>
+</table>
+
+<div class="principle">
+  <strong>设计哲学：</strong>面对不确定的风控规则，最简单的方案往往最可靠。串行限流不会给你"最优吞吐量"，但能给你"最强稳定性"——而这正是量化脚本长期无人值守运行的核心需求。
+</div>
+
+<h2>2. 逐步拆解 em_get() 的四层防护</h2>
+
+<p>em_get() 的限流机制由四层组成，每层解决一个问题。以下逐一拆解（完整源码见 a-stock-data SKILL.md:290-354）：</p>
+
+<h3>第一层：串行锁 — 全局时间戳 + time.sleep</h3>
+
+<div class="mechanism">
+  <strong>机制：</strong><code>_em_last_call</code> 是模块级变量（列表包装以支持闭包内修改），记录上次请求结束的时间戳。每次 em_get() 调用前计算 <code>wait = EM_MIN_INTERVAL - (now - _em_last_call)</code>，若 wait > 0 则 sleep。请求结束后在 finally 块中更新时间戳。
+</div>
+
+<pre>EM_MIN_INTERVAL = 1.0          # 两次东财请求最小间隔(秒)
+_em_last_call = [0.0]          # 模块级上次请求时间戳
+
+def em_get(url, ...):
+    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.5))
+    try:
+        return EM_SESSION.get(url, ...)
+    finally:
+        _em_last_call[0] = time.time()</pre>
+
+<p><strong>为什么用列表包装而非 global？</strong>在模块作用域中用列表 <code>[0.0]</code> 包装，可以避免在函数内部写 <code>global _em_last_call</code>，代码更简洁且不易因未来重构引入作用域 bug。</p>
+
+<p><strong>为什么 EM_MIN_INTERVAL 默认 1.0s？</strong>东财风控对"每秒 > 5 次"是高危，设 1s 间隔意味着 QPS &le; 1，留足安全余量。批量筛选场景建议调大到 1.5~2s，牺牲一点点速度换稳定。</p>
+
+<h3>第二层：随机抖动 — random.uniform(0.1, 0.5)</h3>
+
+<div class="mechanism">
+  <strong>机制：</strong>在固定间隔之上叠加 100~500ms 的随机延迟。这打破了请求时间戳的规律性——东财风控可能检测"精确每 1.0s 一个请求"这种机械模式。
+</div>
+
+<div class="principle">
+  <strong>为什么不是更大范围（如 0.1~2.0s）？</strong>抖动过大意味着方差高——偶尔两个请求间隔 0.3s（1.0s 等待中抖动碰巧很小），偶尔间隔 2.5s。0.1~0.5s 的窄范围保证：实际间隔始终在 1.1~1.5s 之间，既破坏规律性又不引入不可预测的超长等待。
+</div>
+
+<h3>第三层：会话复用 — requests.Session + Keep-Alive</h3>
+
+<div class="mechanism">
+  <strong>机制：</strong><code>EM_SESSION = requests.Session()</code> 在所有 em_get() 调用间共享同一个 TCP 连接池。相比每次 <code>requests.get()</code> 新建连接，Session 复用省去了三次握手 + TLS 协商的开销，且"复用连接"更像正常浏览器的行为模式。
+</div>
+
+<p>第三方请求不会走 EM_SESSION——只有通过 em_get() 发出的东财请求才复用会话。这是一个隐式的"正常用户行为模拟"：同一个浏览器标签页在短时间内访问同一网站，天然复用 Keep-Alive 连接。</p>
+
+<h3>第四层：连接重试 — HTTPAdapter + Retry（指数退避）</h3>
+
+<pre>from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+_em_adapter = HTTPAdapter(max_retries=Retry(
+    total=3, connect=3, backoff_factor=0.6,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"]))
+EM_SESSION.mount("https://", _em_adapter)
+EM_SESSION.mount("http://", _em_adapter)</pre>
+
+<p>关键设计细节：</p>
+<ul>
+  <li><strong>429 重试、403 不重试。</strong> 429（Too Many Requests）是临时限流，间隔一会可恢复；403（Forbidden）是风控信号，重试只会加重问题。</li>
+  <li><strong>5xx 重试。</strong> 500/502/503/504 是服务器端临时故障，指数退避重试合理。</li>
+  <li><strong>backoff_factor=0.6。</strong> 第一次重试等 0.6s，第二次等 1.2s，第三次等 2.4s。3 次重试最多增加约 4.2s 延迟。</li>
+  <li><strong>老版本兼容。</strong> try/except 包裹 mount——老版本 urllib3 可能缺少 allowed_methods 参数，降级为无重试但不影响主流程。</li>
+</ul>
+
+<h2>3. 性能特征与已知局限</h2>
+
+<table>
+  <tr><th>场景</th><th>吞吐量</th><th>建议</th></tr>
+  <tr><td>默认（EM_MIN_INTERVAL=1.0s）</td><td>~60 req/min</td><td>日常查询足够</td></tr>
+  <tr><td>批量筛选（调大到 2.0s）</td><td>~30 req/min</td><td>100 只股票约 3.3 分钟</td></tr>
+</table>
+
+<div class="warn">
+  <strong>已知局限 — 大陆住宅 IP 间歇风控：</strong>即便严格按 em_get() 限流，部分大陆住宅宽带 IP 仍可能遇到 HTTP 000。这不是代码 bug——是运营商层面的连接级封锁。遇到时只能：隔几分钟重试、换网络环境、或调大 EM_MIN_INTERVAL 到 2~3s。
+</div>
+
+<div class="exercise">
+  <h3>检索练习</h3>
+  <p><strong>问题：</strong>你在运行一个需要拉 200 只股票东财数据的脚本，为了加快速度，你把 EM_MIN_INTERVAL 从 1.0 改成了 0.2。运行到第 50 只时开始返回 403。以下哪项是正确的应对措施？</p>
+  <ol type="A">
+    <li>把 EM_MIN_INTERVAL 改回 1.0 或更大，重启脚本从头跑</li>
+    <li>在 403 之后立即重试 10 次直到成功</li>
+    <li>改用并发多线程，每线程 0.2s 间隔，分散到不同 IP</li>
+    <li>去掉 random.uniform 抖动，减少不必要的延迟</li>
+  </ol>
+  <button class="show-btn" onclick="document.getElementById('ex2-answer').classList.toggle('show')">显示答案</button>
+  <div class="answer" id="ex2-answer">
+    <strong>答案：A。</strong>0.2s 间隔 = QPS 5，恰好踩中东财"每秒 >5 次 = 高危"的阈值。403 是风控信号，立即重试只会加重问题（B 错，且 Retry 配置已排除 403 不重试）。并发多线程会提高并发连接数（C 错，触发"并发 ≥10 = 高危"）。去掉抖动让请求更机械规整（D 错，更容易被风控检测）。正确做法：恢复安全间隔、等待封禁期过去后重试。
+  </div>
+</div>
+
+<div class="ref-links">
+  <p><strong>交叉链接：</strong></p>
+  <ul>
+    <li>上一节：<a href="./0001-problem-frame.html">问题背景：为什么需要限流？</a></li>
+    <li>前置课程：<a href="../../module-infrastructure/lessons/0001-infrastructure-module-tour.html">L1 基础设施层总览</a></li>
+    <li>参考资料：<a href="../RESOURCES.md">RESOURCES.md — requests Session / urllib3 Retry 文档</a></li>
+  </ul>
+</div>
+
+<div class="reminder">
+  <strong>提示：</strong>想在自己的脚本中使用 em_get() 的限流模式？复制 _em_last_call + EM_MIN_INTERVAL + random.uniform 三段即可——这是 20 行内能写完的最小可工作限流器。有疑问随时向 agent 追问。
+</div>
+
+</body>
+</html>

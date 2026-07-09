@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP Server 管理链路地图与 mermaid 时序图</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .mermaid {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.84rem;
+      line-height: 1.7;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>MCP Server 管理链路地图</h1>
+    <p class="meta">学习目标：画出从 CLI mcp add 到 MCP 工具在 turn 中可用的完整 6 层链路，说出每层的职责边界和关键决策点。</p>
+    <p class="meta">前置：<a href="../../module-extensions-skills-mcp/lessons/0001-extensions-skills-mcp-module-tour.html">L1 扩展系统与 MCP 模块导览</a> | <a href="../../module-cli-packaging/lessons/0001-cli-packaging-module-tour.html">L1 CLI 打包模块导览</a></p>
+  </header>
+
+  <section>
+    <h2>1. 链路全景：6 层闭环</h2>
+    <p>一条 <code>codex mcp add my-server -- node server.js</code> 命令，从 CLI 参数到最终模型可见的工具，穿过 6 层。每一层有独立的职责和错误处理边界：</p>
+
+    <div class="diagram">用户 CLI 输入：codex mcp add my-server -- node server.js
+  │
+  ▼
+[1] CLI 层：mcp_cmd.rs — run_add()
+    解析参数 → 验证 server name → 构造 McpServerConfig
+    所属：codex-rs/cli/src/mcp_cmd.rs
+  │
+  ▼
+[2] 配置层：mcp_edit.rs — ConfigEditsBuilder
+    load_global_mcp_servers() 读取现有配置
+    → replace_mcp_servers() 序列化 toml_edit
+    → apply() 写入 ~/.codex/config.toml
+    所属：codex-rs/config/src/mcp_edit.rs
+  │
+  ▼
+[3] 编目层：mcp/mod.rs — effective_mcp_servers()
+    从 McpConfig 提取配置 → 应用 auth 规则
+    → 移除不可用的 Codex Apps 服务器
+    所属：codex-rs/codex-mcp/src/mcp/mod.rs
+  │
+  ▼
+[4] 连接管理层：connection_manager.rs — McpConnectionManager::new()
+    遍历 enabled servers → 创建 AsyncManagedClient
+    → JoinSet 并发启动 → 发出 McpStartupUpdate 事件
+    → 等待所有完成 → 发出 McpStartupComplete 事件
+    所属：codex-rs/codex-mcp/src/connection_manager.rs
+  │
+  ▼
+[5] 客户端层：rmcp_client.rs — AsyncManagedClient → RmcpClient
+    make_rmcp_client() 创建 transport（stdio/streamable_http）
+    → initialize() 握手 → tools/list 获取工具
+    → tool_filter 过滤 → 缓存工具列表
+    所属：codex-rs/codex-mcp/src/rmcp_client.rs
+      + codex-rs/rmcp-client/src/rmcp_client.rs
+  │
+  ▼
+[6] 模型可见层：connection_manager.rs — list_all_tools()
+    聚合所有 server 工具 → with_server_metadata()
+    → normalize_tools_for_model_with_prefix()
+    → 返回 ToolInfo[] 供 turn 使用
+    所属：codex-rs/codex-mcp/src/connection_manager.rs</div>
+  </section>
+
+  <section>
+    <h2>2. 两种 Transport 的分叉点</h2>
+    <p>MCP 服务器通过两种 transport 连接 Codex。从 CLI 参数到连接建立，两种路径在第 1 层分叉，在第 5 层汇合：</p>
+
+    <table>
+      <tr><th>特性</th><th>Stdio</th><th>Streamable HTTP</th></tr>
+      <tr>
+        <td>CLI 参数</td>
+        <td><code>-- command args...</code></td>
+        <td><code>--url https://...</code></td>
+      </tr>
+      <tr>
+        <td>配置字段</td>
+        <td><code>command + args + env + cwd</code></td>
+        <td><code>url + bearer_token_env_var + http_headers</code></td>
+      </tr>
+      <tr>
+        <td>连接方式</td>
+        <td><code>StdioServerLauncher</code> 启动子进程，通过 stdin/stdout JSON-RPC</td>
+        <td><code>StreamableHttpClientTransport</code> 通过 HTTP POST + SSE 通信</td>
+      </tr>
+      <tr>
+        <td>OAuth 支持</td>
+        <td>不支持</td>
+        <td>支持 OAuth 2.0 登录和 bearer token</td>
+      </tr>
+      <tr>
+        <td>环境要求</td>
+        <td>需要 local environment</td>
+        <td>本地可直接使用 ambient HTTP client</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>3. Mermaid 时序图</h2>
+    <p>以下时序图展示一次完整链路：用户执行 mcp add（stdio 服务器），然后启动 codex 会话时的连接建立与工具发现：</p>
+
+    <div class="mermaid">sequenceDiagram
+    participant User as 用户
+    participant CLI as mcp_cmd::run_add
+    participant Config as ConfigEditsBuilder
+    participant FS as config.toml
+    participant McpConfig as McpConfig
+    participant CM as McpConnectionManager
+    participant AMC as AsyncManagedClient
+    participant RC as RmcpClient
+    participant Server as MCP Server 进程
+    participant Turn as Turn Context
+
+    Note over User,FS: === 阶段 A：添加服务器（一次性操作） ===
+    User->>CLI: codex mcp add my-tool -- node server.js
+    CLI->>CLI: validate_server_name("my-tool")
+    CLI->>CLI: 解析 transport_args → McpServerTransportConfig::Stdio
+    CLI->>CLI: 构造 McpServerConfig { enabled: true, ... }
+    CLI->>Config: load_global_mcp_servers(codex_home)
+    Config->>FS: 读取现有 [mcp_servers]
+    FS-->>Config: BTreeMap (可能已有其他 server)
+    CLI->>Config: replace_mcp_servers(servers)
+    Config->>Config: serialize_mcp_server() → toml_edit
+    Config->>FS: write(config.toml)
+    FS-->>CLI: 写入成功
+    CLI-->>User: "Added global MCP server 'my-tool'."
+
+    Note over User,Turn: === 阶段 B：Codex 启动连接（每次会话） ===
+    User->>McpConfig: 启动 codex exec / TUI
+    McpConfig->>McpConfig: configured_mcp_servers() 读取所有配置
+    McpConfig->>McpConfig: effective_mcp_servers() 应用 auth 规则
+
+    McpConfig->>CM: McpConnectionManager::new(mcp_servers, auth, ...)
+    loop 每个 enabled server
+        CM->>AMC: AsyncManagedClient::new(server_name, server, ...)
+        AMC->>AMC: ManagedClientStartup::start()
+        AMC->>RC: make_rmcp_client() 创建 transport
+        alt Stdio
+            RC->>RC: new_stdio_client(program, args, env)
+            RC->>Server: 启动子进程
+        else Streamable HTTP
+            RC->>RC: new_streamable_http_client(server_name, url)
+            RC->>Server: HTTP 连接准备
+        end
+        RC->>Server: initialize(InitParams) 握手
+        Server-->>RC: InitializeResult { capabilities, serverInfo }
+        RC->>Server: tools/list
+        Server-->>RC: ListToolsResult { tools[] }
+        RC-->>AMC: ManagedClient { client, tools, server_info }
+        AMC->>AMC: tool_filter 过滤 + 缓存
+        CM-->>CM: 发出 McpStartupUpdate { status: Ready }
+    end
+    CM->>CM: 发出 McpStartupComplete { ready[], failed[] }
+
+    Note over User,Turn: === 阶段 C：Turn 中使用工具 ===
+    Turn->>CM: list_all_tools()
+    CM->>AMC: managed_client.listed_tools()
+    AMC-->>CM: ToolInfo[] (可能命中缓存)
+    CM->>CM: with_server_metadata() 附加来源信息
+    CM->>CM: normalize_tools_for_model_with_prefix()
+    CM-->>Turn: ToolInfo[] → 模型可见工具列表</div>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>从 CLI mcp add 到 MCP 工具可用，经过哪 6 层？每层的核心模块是什么？</li>
+        <li>stdio 和 streamable_http 两种 transport 在配置写入时有什么区别？在连接建立时有什么区别？</li>
+        <li>工具列表被缓存在哪一层？什么时候会命中缓存？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. CLI 层（mcp_cmd.rs）→ 配置层（mcp_edit.rs）→ 编目层（mcp/mod.rs）→ 连接管理层（connection_manager.rs）→ 客户端层（rmcp_client.rs + rmcp-client）→ 模型可见层（list_all_tools）。2. 配置写入时，stdio 写 command/args/env/cwd 字段，streamable_http 写 url/bearer_token_env_var/http_headers 字段；连接建立时，stdio 通过 StdioServerLauncher 启动子进程用 stdin/stdout JSON-RPC 通信，streamable_http 通过 HTTP POST + SSE 通信并支持 OAuth bearer token。3. Codex Apps MCP 服务器在 CodexAppsToolsCache 中缓存，普通 MCP 服务器在 ManagedClient.tools 中按启动时获取的结果缓存（不主动刷新）。</p>
+    </div>
+    <p>下一步：<a href="0002-main-path.html">主路径详解——mcp add 从 CLI 到连接建立的逐层追踪</a>。如有疑问，追问 agent 让它带你单步跟踪某一次具体的 mcp add 操作。</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 Vibe-Research 后端 FastAPI 模块总览</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Vibe-Research 后端 FastAPI 模块总览</h1>
+  <p class="meta">学习目标：15 分钟内能说出后端 10 个模块的职责边界、30+ API 端点的分组逻辑，以及请求从 HTTP 入口到数据源的完整流向。</p>
+
+  <h2>1. 模块职责与架构位置</h2>
+  <p>Vibe-Research 后端是一个<strong>以 FastAPI 驱动的 A 股/美港股数据聚合中枢</strong>，同时承担 AI 对话引擎和本地持久化职责。它监听 <code>:8900</code> 端口，前端 Vite 开发服务器通过代理将 <code>/api/*</code> 请求全部转发过来。一句话概括：<strong>接收前端请求 → 路由到对应数据模块 → 多数据源聚合 → 缓存后返回 JSON</strong>。</p>
+  <p>在 L0 项目地图中，后端位于架构的中间层：</p>
+  <div class="diagram">浏览器 :5899 ──Vite代理 /api──▶ FastAPI :8900 ──HTTP/TCP──▶ 腾讯/东财/同花顺/mootdx/akshare</div>
+  <p>后端不直接面向用户，它只暴露 REST API。前端是它唯一的"用户"；MCP Server 则是面向 Claude Code agent 的另一条通道。</p>
+
+  <h2>2. 内部分层结构</h2>
+  <p>后端内部按"路由层 → 数据模块层 → 外部数据源"三层划分：</p>
+  <div class="filetree">backend/
+├── app.py              ← 路由层：FastAPI 应用定义 + 30+ 端点 + 中间件链
+│                         + 全站共享缓存（行情5分钟/公告15分钟/估值30分钟）
+├── astock.py           ← 数据模块：A股行情/估值/研报/财务/资金面
+├── gstock.py           ← 数据模块：美股/港股行情 + 关键财务
+├── market.py           ← 数据模块：市场情绪 + 板块资金流 + 全球指数
+├── newsradar.py        ← 数据模块：12赛道108 RSS 源聚合
+├── portfolio.py        ← 数据模块：持仓增删改查 + 实时盈亏
+├── chat.py             ← 数据模块：AI 对话 (function-calling 流式)
+├── cli_runtime.py      ← 数据模块：订阅CLI 检测与 spawn
+├── mcp_server.py       ← 独立进程：MCP JSON-RPC over stdio
+└── myreports.py        ← 数据模块：研报上传/下载/行业归档</div>
+  <p><strong>请求流向</strong>：每个 <code>/api/*</code> 请求先过中间件链（CORS 放行 → 可选 API Key 鉴权），再由 <code>app.py</code> 中对应的路由函数处理。路由函数调用下方的数据模块获取原始数据，模块内部通过 <code>urllib</code>/<code>requests</code>/<code>mootdx</code> 直连外部数据源，最后将结果包装为 <code>{"data": ...}</code> 返回。</p>
+
+  <h2>3. 十模块职责速览</h2>
+  <table>
+    <tr><th>模块</th><th>角色</th><th>关键特征</th></tr>
+    <tr><td><code>app.py</code></td><td>应用入口 + 路由注册</td><td>30+ 端点、CORS 中间件、可选 Bearer 鉴权、三级缓存（5/15/30 分钟）</td></tr>
+    <tr><td><code>astock.py</code></td><td>A 股数据层</td><td>五层数据源（腾讯/东财/同花顺/mootdx/akshare），惰性导入，501 优雅降级</td></tr>
+    <tr><td><code>gstock.py</code></td><td>美股/港股数据层</td><td>push2 优先、push2delay 降级，主机 latch 复用</td></tr>
+    <tr><td><code>market.py</code></td><td>市场情绪</td><td>全站共享 5 分钟 TTL，涨跌家数/连板梯队/炸板率/成交额榜</td></tr>
+    <tr><td><code>newsradar.py</code></td><td>资讯雷达</td><td>纯标准库 + 线程池并发抓取，合规过滤，JSON 文件缓存</td></tr>
+    <tr><td><code>portfolio.py</code></td><td>持仓管理</td><td>本地 JSON 存储、加权平均成本合并、原子写入、后台定时刷新</td></tr>
+    <tr><td><code>chat.py</code></td><td>AI 对话</td><td>OpenAI 兼容 function-calling，投研五维框架，SSRF 防护，最大 6 轮</td></tr>
+    <tr><td><code>cli_runtime.py</code></td><td>CLI 订阅接入</td><td>四种 CLI 三种投递方式，临时目录隔离，300s 超时兜底</td></tr>
+    <tr><td><code>mcp_server.py</code></td><td>MCP 服务</td><td>纯标准库 JSON-RPC，复用 chat.TOOLS，暴露给 Claude Code agent</td></tr>
+    <tr><td><code>myreports.py</code></td><td>研报管理</td><td>Base64 上传，白名单扩展名，文件名关键词自动行业分类</td></tr>
+  </table>
+
+  <h2>4. 关键依赖与启动</h2>
+  <p>后端依赖分两层——核心层秒装可用，全栈数据源按需安装：</p>
+  <table>
+    <tr><th>层</th><th>依赖</th><th>用途</th><th>缺失时行为</th></tr>
+    <tr><td>核心</td><td>fastapi, uvicorn, requests</td><td>Web 框架 + HTTP 客户端</td><td>服务无法启动</td></tr>
+    <tr><td>全栈</td><td>akshare, mootdx, pandas</td><td>新闻/公告/K线/财务</td><td>对应端点返回 501 + pip install 提示</td></tr>
+  </table>
+  <p>启动命令：</p>
+  <pre style="font-family:SF Mono,Consolas,monospace;font-size:0.88rem;background:#fafbfc;border:1px solid #ebebeb;border-radius:8px;padding:0.8rem 1.2rem;margin:0.5rem 0;">uvicorn app:app --host 127.0.0.1 --port 8900</pre>
+  <p>启动后 <code>portfolio.py</code> 会立即注册一个后台线程，每 30 分钟自动刷新一次持仓盈亏。</p>
+
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>Vibe-Research 后端的三个缓存 TTL 值（5分钟/15分钟/30分钟）分别对应什么类型的数据？为什么这样设计？</p>
+    <p><strong>参考答案：</strong>5 分钟用于行情/市场情绪等实时数据（盘中变化快，但 5 分钟内的抖动对投研无意义）；15 分钟用于公告/资金流等日级数据（变化慢，但盘中可能有新公告）；30 分钟用于估值分位/财务/股东户数等季级静态数据（几乎不变，减少对东财限流接口的请求）。这样分级既保证了数据的时效性，又最大限度地降低了对上游数据源的请求压力和被封 IP 的风险。</p>
+  </div>
+
+  <p class="source">主要来源：<code>backend/app.py</code>（全部端点注册与中间件链）、<code>backend/requirements.txt</code>（依赖分层声明）、<code>backend/astock.py</code>（惰性导入模式）。完整 API 端点清单和模块详解见 <a href="../reference/backend-overview.html">backend-overview 参考图谱</a>。不清楚某个端点或模块时，可以让 agent 顺着对应源码做 L2 垂直切片深挖。</p>
+</main>
+</body>
+</html>

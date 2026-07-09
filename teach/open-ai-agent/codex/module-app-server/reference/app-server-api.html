@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App-server 生态 API 参考</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .sig { font-family: "SF Mono", Consolas, monospace; font-size: 0.85rem; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 6px; padding: 0.6rem 0.9rem; margin: 0.5rem 0; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .sig-type { color: #0f766e; }
+    .sig-fn { color: #9a3412; }
+    .field { color: var(--muted); font-size: 0.86rem; }
+    .badge { display: inline-block; border-radius: 4px; padding: 0.1rem 0.45rem; font-size: 0.78rem; font-weight: 600; }
+    .badge-pub { background: #0f766e15; color: #0f766e; }
+    .badge-async { background: #9a341215; color: #9a3412; }
+    .badge-type { background: #5d6a7c15; color: #5d6a7c; }
+    .toc { border: 1px solid var(--line); border-radius: 8px; padding: 14px 20px; margin: 1.2rem 0; background: var(--soft); }
+    .toc ol { margin: 0.4rem 0; padding-left: 1.3rem; }
+    .toc li { margin: 0.25rem 0; }
+    hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Reference &middot; App-server 生态 API</div>
+  <h1>App-server 生态 API 参考</h1>
+  <p class="lead">覆盖 <code>app-server-client</code>、<code>app-server-daemon</code>、<code>app-server-transport</code>、<code>app-server-test-client</code> 四个 crate 的公开 API：类型签名、参数、返回值、边界条件和调用示例。每一个公开项都标注了对应的源码位置和测试引用。</p>
+
+  <div class="meta">
+    <span class="pill">层级 L3 &mdash; 微观 API 参考</span>
+    <span class="pill">上游模块 <a href="../../00-overview/lessons/0001-project-map.html">00-overview</a></span>
+    <span class="pill">前置课程 <a href="../lessons/0001-app-server-module-tour.html">0001-app-server-module-tour</a></span>
+    <span class="pill">关联参考 <a href="app-server-overview.html">app-server-overview</a></span>
+  </div>
+
+  <!-- ============ TOC ============ -->
+  <nav class="toc">
+    <strong>目录</strong>
+    <ol>
+      <li><a href="#crate-client">app-server-client</a> &mdash; 进程内客户端门面</li>
+      <li><a href="#crate-daemon">app-server-daemon</a> &mdash; 守护进程生命周期管理</li>
+      <li><a href="#crate-transport">app-server-transport</a> &mdash; 传输层与连接管理</li>
+      <li><a href="#crate-test-client">app-server-test-client</a> &mdash; 端到端测试客户端</li>
+    </ol>
+  </nav>
+
+  <!-- ================================================================== -->
+  <!-- SECTION 1: app-server-client                                        -->
+  <!-- ================================================================== -->
+  <hr id="crate-client">
+  <h2>1. app-server-client</h2>
+  <p>
+    源码：<code>codex-rs/app-server-client/src/lib.rs</code>（2319 行，含测试），
+    <code>src/remote.rs</code>，
+    <code>src/path.rs</code>。
+    此 crate 为 CLI 界面（TUI、exec）提供统一的进程内/远程 app-server 客户端门面，
+    封装初始化握手、请求/通知分发、背压事件流与优雅关闭。
+  </p>
+
+  <h3>1.1 核心类型</h3>
+
+  <h4>AppServerEvent <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> <span class="sig-fn">AppServerEvent</span> {
+    Lagged { skipped: <span class="sig-type">usize</span> },
+    ServerNotification(<span class="sig-type">ServerNotification</span>),
+    ServerRequest(<span class="sig-type">ServerRequest</span>),
+    Disconnected { message: <span class="sig-type">String</span> },
+}</div>
+  <p>客户端事件枚举。<code>Lagged</code> 表示消费端落后，已跳过 <code>skipped</code> 个事件；<code>ServerNotification</code>/<code>ServerRequest</code> 为服务端推送；<code>Disconnected</code> 仅远程客户端使用。</p>
+  <p class="field">From 实现：<code>From&lt;InProcessServerEvent&gt; for AppServerEvent</code>（L124-134）</p>
+  <p class="field">测试：L2120-2130（<code>next_event_surfaces_lagged_markers</code>）</p>
+
+  <h4>TypedRequestError <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> <span class="sig-fn">TypedRequestError</span> {
+    Transport { method: <span class="sig-type">String</span>, source: <span class="sig-type">IoError</span> },
+    Server   { method: <span class="sig-type">String</span>, source: <span class="sig-type">JSONRPCErrorError</span> },
+    Deserialize { method: <span class="sig-type">String</span>, source: <span class="sig-type">serde_json::Error</span> },
+}</div>
+  <p>分层错误类型，将传输失败、服务端 JSON-RPC 错误和响应反序列化失败区分开来，便于调用方决定重试策略。</p>
+  <p class="field">实现了 <code>Display</code>（L282-304）和 <code>Error</code>（L306-314），<code>Server</code> 变体无 source。</p>
+  <p class="field">测试：L2074-2102（<code>typed_request_error_exposes_sources</code>）</p>
+
+  <h4>InProcessAppServerClient <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> InProcessAppServerClient {
+    command_tx:  mpsc::Sender&lt;ClientCommand&gt;,
+    event_rx:    mpsc::Receiver&lt;InProcessServerEvent&gt;,
+    worker_handle: JoinHandle&lt;()&gt;,
+}</div>
+  <p>进程内 app-server 运行时的异步门面。持有一个 worker 任务，在调用方面向的 mpsc 通道与嵌入式 <code>MessageProcessor</code> 之间桥接。</p>
+
+  <h4>InProcessAppServerRequestHandle <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> InProcessAppServerRequestHandle {
+    command_tx: mpsc::Sender&lt;ClientCommand&gt;,
+}</div>
+  <p>可克隆的请求句柄，允许多个调用方共享同一个进程内客户端而无需持有 <code>&amp;mut</code> 引用。</p>
+
+  <h4>AppServerClient <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> AppServerClient {
+    InProcess(InProcessAppServerClient),
+    Remote(RemoteAppServerClient),
+}</div>
+  <p>统一客户端枚举，对进程内和远程路径提供相同的请求/通知/事件接口。</p>
+
+  <h4>AppServerRequestHandle <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> AppServerRequestHandle {
+    InProcess(InProcessAppServerRequestHandle),
+    Remote(RemoteAppServerRequestHandle),
+}</div>
+
+  <h4>InProcessClientStartArgs <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> InProcessClientStartArgs {
+    arg0_paths:           Arg0DispatchPaths,        <span class="field">// argv0 分发路径</span>
+    config:               Arc&lt;Config&gt;,               <span class="field">// 共享配置</span>
+    cli_overrides:        Vec&lt;(String, TomlValue)&gt;,  <span class="field">// CLI 覆盖项</span>
+    loader_overrides:     LoaderOverrides,           <span class="field">// 加载器覆盖</span>
+    strict_config:        bool,                      <span class="field">// 严格配置模式</span>
+    cloud_config_bundle:  CloudConfigBundleLoader,   <span class="field">// 云端配置包</span>
+    feedback:             CodexFeedback,             <span class="field">// 反馈接收器</span>
+    log_db:               Option&lt;LogDbLayer&gt;,         <span class="field">// SQLite 日志层</span>
+    state_db:             Option&lt;StateDbHandle&gt;,      <span class="field">// SQLite 状态句柄</span>
+    environment_manager:  Arc&lt;EnvironmentManager&gt;,    <span class="field">// 环境管理器</span>
+    config_warnings:      Vec&lt;ConfigWarning&gt;,         <span class="field">// 启动后警告</span>
+    session_source:       SessionSource,             <span class="field">// 会话来源 (Exec / Cli)</span>
+    enable_codex_api_key_env: bool,                  <span class="field">// 是否读取 CODEX_API_KEY</span>
+    client_name:          String,                    <span class="field">// initialize 中上报的客户端名</span>
+    client_version:       String,                    <span class="field">// initialize 中上报的版本</span>
+    experimental_api:     bool,                      <span class="field">// 是否启用实验 API</span>
+    mcp_server_openai_form_elicitation: bool,        <span class="field">// MCP 表单引出的开关</span>
+    opt_out_notification_methods: Vec&lt;String&gt;,       <span class="field">// 通知退订列表</span>
+    channel_capacity:     usize,                     <span class="field">// 通道容量（最小 1）</span>
+}</div>
+  <p><strong>边界条件：</strong><code>channel_capacity</code> 会被 clamp 到最小 1（L481）。<code>opt_out_notification_methods</code> 为空时 initialize capabilities 中为 <code>None</code>。</p>
+  <p class="field">方法：<code>fn initialize_params(&amp;self) -&gt; InitializeParams</code>（L367-387），从 start args 构建 initialize 参数。</p>
+  <p class="field">测试：L2209-2268（<code>runtime_start_args_forward_environment_manager_and_openai_form_capability</code>）</p>
+
+  <h3>1.2 InProcessAppServerClient 方法</h3>
+
+  <h4>start <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">start</span>(args: InProcessClientStartArgs) -> <span class="sig-type">IoResult</span>&lt;<span class="sig-type">Self</span>&gt;</div>
+  <p>启动进程内运行时和 worker 任务。内部调用 <code>codex_app_server::in_process::start()</code>，建立 command/event 两个 mpsc 通道，spawn worker。</p>
+  <p><strong>边界条件：</strong>若内部事件队列饱和，服务端请求将被拒绝并返回 overload 错误码 <code>-32001</code>（L571-577），而非静默丢弃。ChatGPT auth token refresh 服务端请求因进程内不支持而被直接拒绝（L544-556）。</p>
+  <p class="field">测试：L1021-1057（<code>start_test_client</code>）</p>
+
+  <h4>request <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">request</span>(&amp;self, request: ClientRequest) -> <span class="sig-type">IoResult</span>&lt;RequestResult&gt;</div>
+  <p>发送原始客户端请求并返回 JSON-RPC 结果。请求在 worker 的 detached task 上等待，不阻塞事件循环。</p>
+  <p><strong>错误：</strong>通道关闭时返回 <code>BrokenPipe</code>。</p>
+
+  <h4>request_typed <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">request_typed</span>&lt;T: DeserializeOwned&gt;(&amp;self, request: ClientRequest) -> <span class="sig-type">Result</span>&lt;T, TypedRequestError&gt;</div>
+  <p>发送请求并解码响应体为具体类型 <code>T</code>。三层错误：Transport（通道关闭）、Server（JSON-RPC 错误）、Deserialize（响应类型不匹配）。</p>
+  <p class="field">测试：L1260-1271（<code>typed_request_roundtrip_works</code>）、L1273-1291（<code>typed_request_reports_json_rpc_errors</code>）</p>
+
+  <h4>notify <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">notify</span>(&amp;self, notification: ClientNotification) -> <span class="sig-type">IoResult</span>&lt;()&gt;</div>
+  <p>发送通知（无响应）。</p>
+
+  <h4>resolve_server_request / reject_server_request <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">resolve_server_request</span>(&amp;self, request_id: RequestId, result: JsonRpcResult) -> <span class="sig-type">IoResult</span>&lt;()&gt;
+<span class="sig-type">pub async fn</span> <span class="sig-fn">reject_server_request</span>(&amp;self, request_id: RequestId, error: JSONRPCErrorError) -> <span class="sig-type">IoResult</span>&lt;()&gt;</div>
+  <p>解析或拒绝待处理的服务端请求。只能使用从当前客户端事件流中获取的 request ID。</p>
+
+  <h4>next_event <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">next_event</span>(&amp;mut self) -> <span class="sig-type">Option</span>&lt;InProcessServerEvent&gt;</div>
+  <p>返回下一个进程内事件，worker 退出时返回 <code>None</code>。调用方须及时消费，否则触发 <code>Lagged</code> 标记。</p>
+
+  <h4>shutdown <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">shutdown</span>(self) -> <span class="sig-type">IoResult</span>&lt;()&gt;</div>
+  <p>关闭 worker 和运行时。先丢弃 <code>event_rx</code> 以解除 pending must-deliver 阻塞，然后发送 Shutdown 命令。若 5 秒内未完成则 abort worker 任务（L752-784）。</p>
+  <p class="field">测试：L2309-2317（<code>shutdown_completes_promptly_without_retained_managers</code>）</p>
+
+  <h3>1.3 背压与事件优先级</h3>
+  <p><code>server_notification_requires_delivery</code>（L160-172）定义无损层：</p>
+  <div class="sig"><span class="sig-type">pub(crate) fn</span> <span class="sig-fn">server_notification_requires_delivery</span>(notification: &amp;ServerNotification) -> <span class="sig-type">bool</span></div>
+  <p>以下通知必须无损投递（阻塞等待消费端排空）：<code>TurnCompleted</code>、<code>ThreadSettingsUpdated</code>、<code>ItemCompleted</code>、<code>ExternalAgentConfigImportCompleted</code>、<code>AgentMessageDelta</code>、<code>PlanDelta</code>、<code>ReasoningSummaryTextDelta</code>、<code>ReasoningTextDelta</code>。</p>
+  <p>其余（如 <code>CommandExecutionOutputDelta</code>）为尽力投递，队列满时丢弃并递增 <code>skipped_events</code> 计数器。</p>
+  <p><code>forward_in_process_event</code>（L193-259）实现了分流逻辑：无损事件阻塞发送，尽力事件使用 <code>try_send</code>。当有积压的 skip 计数时，在下一次无损事件前刷新 <code>Lagged</code> 标记。</p>
+  <p class="field">测试：L1360-1446（<code>forward_in_process_event_preserves_transcript_notifications_under_backpressure</code>）</p>
+
+  <h3>1.4 公共自由函数</h3>
+
+  <h4>migrate_personality_if_needed <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">migrate_personality_if_needed</span>(
+    codex_home: &amp;Path,
+    config_toml: &amp;ConfigToml,
+    state_db: Option&lt;StateDbHandle&gt;,
+) -> <span class="sig-type">IoResult</span>&lt;<span class="sig-type">bool</span>&gt;</div>
+  <p>运行嵌入式 app-server 人格迁移。返回 <code>true</code> 表示迁移修改了配置，调用方应重新加载配置（L95-107）。</p>
+
+  <h4>app_server_control_socket_path <span class="badge badge-pub">pub use</span></h4>
+  <p>从 <code>codex_app_server</code> 重新导出控制 socket 路径。</p>
+
+  <h3>1.5 RemoteAppServerClient（远程客户端）</h3>
+  <p>
+    源码：<code>src/remote.rs</code>。通过 WebSocket 或 Unix socket 连接远程 app-server。
+    关键类型从 lib.rs 重新导出：
+  </p>
+
+  <h4>RemoteAppServerConnectArgs <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> RemoteAppServerConnectArgs {
+    endpoint:        RemoteAppServerEndpoint,
+    client_name:     String,
+    client_version:  String,
+    experimental_api: bool,
+    mcp_server_openai_form_elicitation: bool,
+    opt_out_notification_methods: Vec&lt;String&gt;,
+    channel_capacity: usize,
+}</div>
+
+  <h4>RemoteAppServerEndpoint <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> RemoteAppServerEndpoint {
+    WebSocket { websocket_url: String, auth_token: Option&lt;String&gt; },
+    UnixSocket { socket_path: AbsolutePathBuf },
+}</div>
+  <p><strong>边界条件：</strong>auth_token 仅允许 <code>wss://</code> 或 loopback <code>ws://</code>（<code>ws://127.0.0.1</code>），非 loopback ws + auth_token 会返回 <code>InvalidInput</code> 错误。</p>
+  <p class="field">测试：L1629-1653（<code>remote_connect_rejects_non_loopback_ws_when_auth_configured</code>）</p>
+
+  <h4>RemoteAppServerClient <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">connect</span>(args: RemoteAppServerConnectArgs) -> <span class="sig-type">IoResult</span>&lt;<span class="sig-type">Self</span>&gt;</div>
+  <p>连接远程 app-server。自动完成 initialize 握手（发送 initialize request，等待 response，发送 initialized notification）。</p>
+  <p>远程客户端提供与 <code>InProcessAppServerClient</code> 相同的 <code>request</code>、<code>request_typed</code>、<code>notify</code>、<code>resolve_server_request</code>、<code>reject_server_request</code>、<code>next_event</code>、<code>shutdown</code> 方法，外加 <code>server_version()</code> 和 <code>codex_home()</code> 访问器。远程端还实现了重复 request ID 检测（返回 transport error）。</p>
+  <p class="field">测试：L1448-1490（WebSocket roundtrip）、L1492-1549（Unix socket roundtrip）、L1551-1598（大帧响应）、L1668-1754（重复 request ID）</p>
+
+  <h3>1.6 AppServerPath</h3>
+  <p>源码：<code>src/path.rs</code>。封装 app-server 的 codex_home 路径解析。</p>
+  <div class="sig"><span class="sig-type">pub struct</span> AppServerPath { <span class="field">/* 内部字段 */</span> }
+<span class="sig-type">pub fn</span> <span class="sig-fn">from_app_server</span>(codex_home: String) -> AppServerPath;</div>
+
+  <h3>1.7 legacy_core 模块</h3>
+  <div class="sig"><span class="sig-type">pub mod</span> legacy_core {
+    <span class="sig-type">pub mod</span> config {
+        <span class="sig-type">pub use</span> codex_core::config::*;
+        <span class="sig-type">pub mod</span> edit { <span class="sig-type">pub use</span> codex_core::config::edit::*; }
+    }
+}</div>
+  <p>过渡性访问模块。新 TUI 行为应优先使用 app-server protocol 方法。此模块存在是为了让客户端在迁移到 RPC 期间能移除对 <code>codex-core</code> 的直接依赖（L75-88）。</p>
+
+  <!-- ================================================================== -->
+  <!-- SECTION 2: app-server-daemon                                        -->
+  <!-- ================================================================== -->
+  <hr id="crate-daemon">
+  <h2>2. app-server-daemon</h2>
+  <p>
+    源码：<code>codex-rs/app-server-daemon/src/lib.rs</code>（1043 行，含测试），
+    <code>src/client.rs</code>，
+    <code>src/backend/</code>，
+    <code>src/managed_install.rs</code>，
+    <code>src/settings.rs</code>，
+    <code>src/update_loop.rs</code>。
+    此 crate 管理独立 Codex app-server 后台进程的生命周期（启动/停止/重启/版本探测），
+    以及 bootstrap、远程控制和自动更新。仅支持 Unix 平台。
+  </p>
+
+  <h3>2.1 公开枚举</h3>
+
+  <h4>LifecycleCommand <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> LifecycleCommand { Start, Restart, Stop, Version }</div>
+  <p>守护进程生命周期命令。</p>
+
+  <h4>LifecycleStatus <span class="badge badge-pub">pub enum</span> <span class="badge badge-type">Serialize</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> LifecycleStatus {
+    AlreadyRunning, Started, Restarted, Stopped, NotRunning, Running,
+}</div>
+  <p>序列化为 camelCase JSON。</p>
+
+  <h4>LifecycleOutput <span class="badge badge-pub">pub struct</span> <span class="badge badge-type">Serialize</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> LifecycleOutput {
+    status:               LifecycleStatus,
+    backend:              Option&lt;BackendKind&gt;,    <span class="field">// skip if None</span>
+    pid:                  Option&lt;u32&gt;,            <span class="field">// skip if None</span>
+    managed_codex_path:   PathBuf,
+    managed_codex_version: Option&lt;String&gt;,        <span class="field">// skip if None</span>
+    socket_path:          PathBuf,
+    cli_version:          Option&lt;String&gt;,         <span class="field">// skip if None</span>
+    app_server_version:   Option&lt;String&gt;,         <span class="field">// skip if None</span>
+}</div>
+
+  <h4>BootstrapOptions <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> BootstrapOptions { remote_control_enabled: bool }</div>
+
+  <h4>BootstrapStatus / BootstrapOutput <span class="badge badge-pub">pub enum/struct</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> BootstrapStatus { Bootstrapped }
+<span class="sig-type">pub struct</span> BootstrapOutput {
+    status: BootstrapStatus, backend: BackendKind,
+    auto_update_enabled: bool, remote_control_enabled: bool,
+    managed_codex_path: PathBuf, managed_codex_version: Option&lt;String&gt;,
+    socket_path: PathBuf, cli_version: String, app_server_version: String,
+}</div>
+
+  <h4>RemoteControlMode / RemoteControlStatus <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> RemoteControlMode  { Enabled, Disabled }
+<span class="sig-type">pub enum</span> RemoteControlStatus { Enabled, Disabled, AlreadyEnabled, AlreadyDisabled }</div>
+
+  <h4>RemoteControlOutput <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> RemoteControlOutput {
+    status: RemoteControlStatus, backend: Option&lt;BackendKind&gt;,
+    remote_control_enabled: bool, socket_path: PathBuf,
+    cli_version: String, app_server_version: Option&lt;String&gt;,
+}</div>
+
+  <h4>RemoteControlStartOutput <span class="badge badge-pub">pub enum</span> <span class="badge badge-type">untagged</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> RemoteControlStartOutput {
+    Bootstrap(BootstrapOutput),
+    Start(LifecycleOutput),
+}</div>
+  <p>使用 <code>#[serde(untagged)]</code>，序列化时不带标签。</p>
+  <p class="field">测试：L950-1012（<code>remote_control_start_output_serializes_inner_output_without_tag</code>）</p>
+
+  <h4>RemoteControlReadyStatus / RemoteControlReadyOutput <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> RemoteControlReadyStatus {
+    status: RemoteControlConnectionStatus, server_name: String,
+    environment_id: Option&lt;String&gt;, timed_out: bool,
+}
+<span class="sig-type">pub struct</span> RemoteControlReadyOutput {
+    daemon: RemoteControlStartOutput,
+    remote_control: RemoteControlReadyStatus,
+}</div>
+
+  <h3>2.2 公开函数</h3>
+
+  <h4>probe_app_server_version <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">probe_app_server_version</span>(socket_path: &amp;Path) -> <span class="sig-type">Result</span>&lt;<span class="sig-type">String</span>&gt;</div>
+  <p>被动探测已运行的 app-server socket，返回其 app-server 版本。通过 WebSocket connect -> initialize -> parse user_agent 实现（L80-82）。</p>
+  <p><strong>边界条件：</strong>超时时间 <code>CONTROL_SOCKET_RESPONSE_TIMEOUT = 2s</code>（client.rs L25）。</p>
+
+  <h4>run <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">run</span>(command: LifecycleCommand) -> <span class="sig-type">Result</span>&lt;LifecycleOutput&gt;</div>
+  <p>执行守护进程生命周期命令。Start/Restart/Stop 在操作锁保护下执行（<code>OPERATION_LOCK_TIMEOUT = 75s</code>）。</p>
+  <p><strong>Start 逻辑：</strong>先探测 socket，若已响应则返回 <code>AlreadyRunning</code>；否则检查 PID 文件中的后端实例，若有则等待就绪；若都无则启动 managed backend（L302-338）。</p>
+  <p><strong>Stop 逻辑：</strong>若有 PID 后端则停止；若 socket 可探测但无 PID 后端则报错 "not managed by daemon"；否则返回 <code>NotRunning</code>（L413-441）。</p>
+
+  <h4>bootstrap <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">bootstrap</span>(options: BootstrapOptions) -> <span class="sig-type">Result</span>&lt;BootstrapOutput&gt;</div>
+  <p>首次初始化守护进程：检查 managed codex binary 存在，写入 settings，停止已有后端，启动 PID 后端和更新循环后端（L592-632）。</p>
+
+  <h4>ensure_remote_control_started <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">ensure_remote_control_started</span>() -> <span class="sig-type">Result</span>&lt;RemoteControlStartOutput&gt;</div>
+  <p>若已 bootstrap 则启用远程控制并启动；否则先 bootstrap（remote_control_enabled=true）再返回（L499-516）。</p>
+
+  <h4>ensure_remote_control_ready <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">ensure_remote_control_ready</span>() -> <span class="sig-type">Result</span>&lt;RemoteControlReadyOutput&gt;</div>
+  <p>确保远程控制启动并已就绪，包含 daemon 和 remote_control 两部分输出。</p>
+
+  <h4>enable_remote_control_on_socket <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">enable_remote_control_on_socket</span>(
+    socket_path: &amp;Path, connect_timeout: Duration, connect_retry_delay: Duration,
+) -> <span class="sig-type">Result</span>&lt;RemoteControlReadyStatus&gt;</div>
+  <p>通过已运行的 daemon app-server socket 启用远程控制，支持连接重试。</p>
+
+  <h4>start_remote_control_pairing <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">start_remote_control_pairing</span>() -> <span class="sig-type">Result</span>&lt;RemoteControlPairingStartResponse&gt;</div>
+  <p>通过已运行的 daemon app-server 启动手动配对会话。</p>
+
+  <h4>set_remote_control <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">set_remote_control</span>(mode: RemoteControlMode) -> <span class="sig-type">Result</span>&lt;RemoteControlOutput&gt;</div>
+  <p>设置远程控制模式。若 mode 与当前设置相同则返回 Already* 状态，否则更新 settings 并重启 backend。</p>
+
+  <h4>run_pid_update_loop <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">run_pid_update_loop</span>() -> <span class="sig-type">Result</span>&lt;()&gt;</div>
+  <p>运行 PID 更新循环（自动更新 managed binary）。</p>
+
+  <h3>2.3 内部常量</h3>
+  <div class="sig"><span class="sig-type">const</span> START_POLL_INTERVAL:  Duration = Duration::from_millis(50);
+<span class="sig-type">const</span> START_TIMEOUT:       Duration = Duration::from_secs(10);
+<span class="sig-type">const</span> OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(75);</div>
+  <p>各文件路径：<code>app-server.pid</code>、<code>app-server-updater.pid</code>、<code>daemon.lock</code>、<code>settings.json</code>，均位于 <code>$CODEX_HOME/app-server-daemon/</code>。</p>
+
+  <h3>2.4 平台支持</h3>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">ensure_supported_platform</span>() -> <span class="sig-type">Result</span>&lt;()&gt;</div>
+  <p>Unix：直接返回 OK。非 Unix：返回错误 "codex app-server daemon lifecycle is only supported on Unix platforms"（L246-256）。</p>
+
+  <h3>2.5 客户端探测（client.rs）</h3>
+  <p><code>probe(socket_path)</code> 通过 Unix socket WebSocket 连接 -> initialize -> initialized -> close 完成探测。返回 <code>ProbeInfo { app_server_version }</code>。</p>
+  <p><strong>边界条件：</strong>initialize 响应超时 2s。版本号从 user_agent 的 <code>originator/version</code> 格式解析（L148-157）。</p>
+  <p class="field">测试：L166-181（<code>parses_version_from_codex_user_agent</code>、<code>rejects_user_agent_without_version</code>）</p>
+
+  <!-- ================================================================== -->
+  <!-- SECTION 3: app-server-transport                                     -->
+  <!-- ================================================================== -->
+  <hr id="crate-transport">
+  <h2>3. app-server-transport</h2>
+  <p>
+    源码：<code>codex-rs/app-server-transport/src/lib.rs</code>，
+    <code>src/transport/mod.rs</code>（491 行，含测试），
+    <code>src/outgoing_message.rs</code>，
+    <code>src/transport/stdio.rs</code>，
+    <code>src/transport/websocket.rs</code>，
+    <code>src/transport/unix_socket.rs</code>，
+    <code>src/transport/remote_control/</code>，
+    <code>src/transport/auth.rs</code>。
+    此 crate 提供 app-server 的所有传输层抽象：连接管理、消息路由、远程控制和认证。
+  </p>
+
+  <h3>3.1 传输核心类型</h3>
+
+  <h4>AppServerTransport <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> AppServerTransport {
+    Stdio,
+    UnixSocket { socket_path: AbsolutePathBuf },
+    WebSocket  { bind_address: SocketAddr },
+    Off,
+}</div>
+  <p>传输模式枚举。从 <code>--listen</code> URL 解析：<code>stdio://</code> -> Stdio，<code>unix://</code> / <code>unix://PATH</code> -> UnixSocket，<code>ws://IP:PORT</code> -> WebSocket，<code>off</code> -> Off。</p>
+
+  <h4>AppServerTransport::from_listen_url <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">from_listen_url</span>(listen_url: &amp;str) -> <span class="sig-type">Result</span>&lt;Self, AppServerTransportParseError&gt;</div>
+  <p>从 listen URL 字符串解析传输模式。实现了 <code>FromStr</code> trait。</p>
+  <p><strong>边界条件：</strong>空 <code>unix://</code> 使用默认 CODEX_HOME 下的 control socket 路径；<code>ws://</code> 要求有效 SocketAddr 解析。</p>
+  <p class="field">测试：L289-295（<code>listen_off_parses_as_off_transport</code>）</p>
+
+  <h4>AppServerTransportParseError <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> AppServerTransportParseError {
+    UnsupportedListenUrl(String),
+    InvalidUnixSocketPath { listen_url: String, message: String },
+    InvalidWebSocketListenUrl(String),
+}</div>
+  <p>实现了 <code>Display</code> 和 <code>Error</code>。</p>
+
+  <h4>ConnectionId <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> ConnectionId(<span class="sig-type">pub u64</span>);  <span class="field">// Copy, Clone, Eq, Hash</span></div>
+  <p>传输连接的稳定标识符。实现了 <code>Display</code>。</p>
+
+  <h4>ConnectionOrigin <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> ConnectionOrigin { Stdio, InProcess, WebSocket, RemoteControl }</div>
+  <p>连接来源标识。</p>
+
+  <h4>TransportEvent <span class="badge badge-pub">pub enum</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> TransportEvent {
+    ConnectionOpened {
+        connection_id: ConnectionId, origin: ConnectionOrigin,
+        writer: mpsc::Sender&lt;QueuedOutgoingMessage&gt;,
+        disconnect_sender: Option&lt;CancellationToken&gt;,
+    },
+    ConnectionClosed { connection_id: ConnectionId },
+    IncomingMessage  { connection_id: ConnectionId, message: JSONRPCMessage },
+}</div>
+  <p>传输层向上层（MessageProcessor）发送的事件。每个新连接携带一个 writer sender 用于出站消息，以及可选的 disconnect sender 用于主动断开。</p>
+
+  <h3>3.2 出站消息</h3>
+
+  <h4>OutgoingMessage <span class="badge badge-pub">pub enum</span> <span class="badge badge-type">untagged</span></h4>
+  <div class="sig"><span class="sig-type">pub enum</span> OutgoingMessage {
+    Request(ServerRequest),
+    AppServerNotification(ServerNotification),
+    Response(OutgoingResponse),
+    Error(OutgoingError),
+}</div>
+
+  <h4>OutgoingResponse / OutgoingError <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> OutgoingResponse { id: RequestId, result: Result }
+<span class="sig-type">pub struct</span> OutgoingError    { id: RequestId, error: JSONRPCErrorError }</div>
+
+  <h4>QueuedOutgoingMessage <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> QueuedOutgoingMessage {
+    message: OutgoingMessage,
+    write_complete_tx: Option&lt;oneshot::Sender&lt;()&gt;&gt;,
+}</div>
+  <p>带可选写完成通知的出站消息。使用 <code>QueuedOutgoingMessage::new(message)</code> 构造（write_complete_tx = None）。</p>
+
+  <h3>3.3 远程控制</h3>
+
+  <h4>RemoteControlHandle / RemoteControlPolicy / RemoteControlStartConfig <span class="badge badge-pub">pub struct</span></h4>
+  <div class="sig"><span class="sig-type">pub struct</span> RemoteControlHandle;        <span class="field">// 远程控制生命周期句柄</span>
+<span class="sig-type">pub enum</span>   RemoteControlPolicy;        <span class="field">// 远程控制策略</span>
+<span class="sig-type">pub struct</span> RemoteControlStartConfig;    <span class="field">// 远程控制启动配置</span></div>
+  <p>从 <code>transport::remote_control</code> 模块重新导出。</p>
+
+  <h4>RemoteControlStartupMode <span class="badge badge-pub">pub enum</span></h4>
+  <p>远程控制启动模式。</p>
+
+  <h4>RemoteControlEnableError / RemoteControlUnavailable / RemoteControlDisabledByRequirements <span class="badge badge-pub">pub enum/struct</span></h4>
+  <p>远程控制相关的错误和状态类型。</p>
+
+  <h3>3.4 传输启动函数</h3>
+
+  <h4>start_stdio_connection <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">start_stdio_connection</span>(
+    transport_event_tx: mpsc::Sender&lt;TransportEvent&gt;,
+    cancel_token: CancellationToken,
+) -> (mpsc::Sender&lt;QueuedOutgoingMessage&gt;, JoinHandle&lt;()&gt;)</div>
+  <p>启动 stdio 连接：在 stdin/stdout 上读写 JSON-RPC 消息。</p>
+
+  <h4>start_websocket_acceptor <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">start_websocket_acceptor</span>(
+    bind_address: SocketAddr,
+    transport_event_tx: mpsc::Sender&lt;TransportEvent&gt;,
+    cancel_token: CancellationToken,
+    remote_control_policy: RemoteControlPolicy,
+    auth: Option&lt;Arc&lt;dyn Authenticator&gt;&gt;,
+) -> JoinHandle&lt;()&gt;</div>
+  <p>启动 WebSocket acceptor，在指定地址监听并接受连接。</p>
+
+  <h4>start_control_socket_acceptor <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">start_control_socket_acceptor</span>(
+    socket_path: AbsolutePathBuf,
+    transport_event_tx: mpsc::Sender&lt;TransportEvent&gt;,
+    cancel_token: CancellationToken,
+    auth: Option&lt;Arc&lt;dyn Authenticator&gt;&gt;,
+) -> JoinHandle&lt;()&gt;</div>
+  <p>启动 Unix domain socket acceptor。由 daemon 用于本地控制连接。</p>
+
+  <h4>start_remote_control <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">start_remote_control</span>(
+    config: RemoteControlStartConfig,
+    transport_event_tx: mpsc::Sender&lt;TransportEvent&gt;,
+    cancel_token: CancellationToken,
+) -> <span class="sig-type">Result</span>&lt;RemoteControlHandle, RemoteControlEnableError&gt;</div>
+  <p>启动远程控制子系统。</p>
+
+  <h3>3.5 路径与锁</h3>
+
+  <h4>app_server_control_socket_path <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">app_server_control_socket_path</span>(codex_home: &amp;Path) -> <span class="sig-type">io::Result</span>&lt;AbsolutePathBuf&gt;</div>
+  <p>返回 <code>$CODEX_HOME/app-server-control/app-server-control.sock</code>。</p>
+
+  <h4>app_server_startup_lock_path <span class="badge badge-pub">pub fn</span></h4>
+  <div class="sig"><span class="sig-type">pub fn</span> <span class="sig-fn">app_server_startup_lock_path</span>(codex_home: &amp;Path) -> <span class="sig-type">io::Result</span>&lt;AbsolutePathBuf&gt;</div>
+  <p>返回 <code>$CODEX_HOME/app-server-control/app-server-startup.lock</code>。</p>
+
+  <h4>prepare_control_socket_path / acquire_app_server_startup_lock <span class="badge badge-pub">pub fn</span></h4>
+  <p>Unix socket 相关的准备和锁获取函数。</p>
+
+  <h3>3.6 过载保护</h3>
+  <p><code>enqueue_incoming_message</code>（L217-256）实现了有界队列过载保护：</p>
+  <ul>
+    <li>当 transport_event_tx 满且消息为 <code>Request</code> 时，不丢弃，而是向 writer 发送 overload error（code <code>-32001</code>，message "Server overloaded; retry later."）。</li>
+    <li>当 overload error 的 writer queue 也满时，丢弃 overload 响应并 warn。</li>
+    <li>非 Request 消息（Response/Notification）在队列满时阻塞等待（<code>send().await</code>）而非丢弃。</li>
+  </ul>
+  <p class="field">测试：L297-489（overload error 测试）</p>
+
+  <h3>3.7 常量</h3>
+  <div class="sig"><span class="sig-type">pub const</span> CHANNEL_CAPACITY: usize = 128;</div>
+  <p>mpsc 通道容量，在交互式 CLI 的吞吐量和内存使用之间取得平衡。</p>
+  <div class="sig"><span class="sig-type">pub const</span> REMOTE_CONTROL_DISABLED_ENV_VAR: &amp;str;</div>
+  <p>环境变量名，用于在运行时禁用远程控制。</p>
+
+  <!-- ================================================================== -->
+  <!-- SECTION 4: app-server-test-client                                   -->
+  <!-- ================================================================== -->
+  <hr id="crate-test-client">
+  <h2>4. app-server-test-client</h2>
+  <p>
+    源码：<code>codex-rs/app-server-test-client/src/lib.rs</code>（2353 行），
+    <code>src/main.rs</code>，
+    <code>src/loopback_responses_server.rs</code>，
+    <code>src/request_user_input.rs</code>，
+    <code>src/plugin_analytics_capture.rs</code>，
+    <code>src/plugin_analytics_smoke.rs</code>，
+    <code>src/plugin_analytics_mutation_smoke.rs</code>。
+    端到端测试客户端，通过 stdio (spawn codex) 或 WebSocket 连接 app-server，
+    涵盖 Thread/Turn 生命周期、审批流程、登录、模型列表、插件分析等场景。
+  </p>
+
+  <h3>4.1 入口</h3>
+
+  <h4>run <span class="badge badge-pub">pub async fn</span></h4>
+  <div class="sig"><span class="sig-type">pub async fn</span> <span class="sig-fn">run</span>() -> <span class="sig-type">Result</span>&lt;()&gt;</div>
+  <p>解析 CLI 参数并分发到对应子命令。CLI 结构如下：</p>
+  <div class="sig"><span class="sig-type">struct</span> Cli {
+    --codex-bin        PATH         <span class="field">// spawn codex app-server 子进程（stdio）</span>
+    --url              URL          <span class="field">// 连接已有 WebSocket 服务器</span>
+    -c / --config      key=value    <span class="field">// 配置覆盖（可重复）</span>
+    --dynamic-tools    json|@file   <span class="field">// 动态工具定义</span>
+    &lt;subcommand&gt;
+}</div>
+  <p><strong>边界条件：</strong><code>--codex-bin</code> 和 <code>--url</code> 互斥。两者均未提供时默认连接 <code>ws://127.0.0.1:4222</code>。</p>
+
+  <h3>4.2 子命令一览</h3>
+  <table>
+    <thead><tr><th>子命令</th><th>功能</th><th>传输</th></tr></thead>
+    <tbody>
+    <tr><td><code>serve</code></td><td>后台启动 WebSocket app-server，日志写入 /tmp</td><td>spawn</td></tr>
+    <tr><td><code>send-message</code></td><td>通过 V1 API 发送用户消息</td><td>stdio/ws</td></tr>
+    <tr><td><code>send-message-v2</code></td><td>通过 V2 thread/turn API 发送消息</td><td>stdio/ws</td></tr>
+    <tr><td><code>resume-message-v2</code></td><td>恢复已有 thread 并发送消息</td><td>stdio/ws</td></tr>
+    <tr><td><code>thread-resume</code></td><td>恢复 thread 并持续流式输出通知（不自动退出）</td><td>stdio/ws</td></tr>
+    <tr><td><code>watch</code></td><td>初始化后 dump 所有入站消息（不自动退出）</td><td>stdio/ws</td></tr>
+    <tr><td><code>trigger-cmd-approval</code></td><td>触发命令审批（approval_policy=OnRequest, sandbox=ReadOnly）</td><td>stdio/ws</td></tr>
+    <tr><td><code>trigger-patch-approval</code></td><td>触发文件变更审批（apply_patch）</td><td>stdio/ws</td></tr>
+    <tr><td><code>no-trigger-cmd-approval</code></td><td>验证默认策略下不触发命令审批</td><td>stdio/ws</td></tr>
+    <tr><td><code>send-follow-up-v2</code></td><td>同一 thread 内连续两个 turn</td><td>stdio/ws</td></tr>
+    <tr><td><code>trigger-zsh-fork-multi-cmd-approval</code></td><td>zsh-fork 多子命令审批，可选 abort</td><td>stdio/ws</td></tr>
+    <tr><td><code>test-login</code></td><td>ChatGPT 登录流程（browser/device_code）</td><td>stdio/ws</td></tr>
+    <tr><td><code>get-account-rate-limits</code></td><td>查询账户速率限制</td><td>stdio/ws</td></tr>
+    <tr><td><code>model-list</code></td><td>列出可用模型</td><td>stdio/ws</td></tr>
+    <tr><td><code>thread-list</code></td><td>列出已存储的 thread</td><td>stdio/ws</td></tr>
+    <tr><td><code>thread-increment-elicitation</code></td><td>增加 thread 引出暂停计数</td><td>ws only</td></tr>
+    <tr><td><code>thread-decrement-elicitation</code></td><td>减少 thread 引出暂停计数</td><td>ws only</td></tr>
+    <tr><td><code>live-elicitation-timeout-pause</code></td><td>验证引出暂停防止 exec timeout</td><td>spawn/ws</td></tr>
+    <tr><td><code>plugin-analytics-smoke</code></td><td>远程插件分析冒烟测试</td><td>spawn only</td></tr>
+    <tr><td><code>plugin-analytics-mutation-smoke</code></td><td>安装/卸载插件分析验证</td><td>spawn only</td></tr>
+    <tr><td><code>plugin-remote-uninstall</code></td><td>卸载远程插件（清理命令）</td><td>spawn only</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 CodexClient 核心方法</h3>
+  <p><code>CodexClient</code> 是测试客户端的核心结构，封装了传输（Stdio/WebSocket）和 JSON-RPC 请求/通知处理。</p>
+
+  <h4>connect <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">connect</span>(endpoint: &amp;Endpoint, config_overrides: &amp;[String]) -> <span class="sig-type">Result</span>&lt;Self&gt;</div>
+  <p>根据 endpoint 类型建立连接。Stdio: spawn <code>codex app-server</code> 子进程，pipe stdin/stdout。WebSocket: 连接 URL，10s 超时循环重试（L1598-1635）。</p>
+
+  <h4>initialize / initialize_with_experimental_api <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">initialize</span>(&amp;mut self) -> <span class="sig-type">Result</span>&lt;InitializeResponse&gt;
+<span class="sig-type">fn</span> <span class="sig-fn">initialize_with_experimental_api</span>(&amp;mut self, experimental_api: bool) -> <span class="sig-type">Result</span>&lt;InitializeResponse&gt;</div>
+  <p>发送 initialize 请求并等待响应，然后发送 initialized notification 完成握手。默认 opt-out 了 item delta 通知（<code>NOTIFICATIONS_TO_OPT_OUT</code>，L96-104）。</p>
+
+  <h4>thread_start / thread_resume <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">thread_start</span>(&amp;mut self, params: ThreadStartParams) -> <span class="sig-type">Result</span>&lt;ThreadStartResponse&gt;
+<span class="sig-type">fn</span> <span class="sig-fn">thread_resume</span>(&amp;mut self, params: ThreadResumeParams) -> <span class="sig-type">Result</span>&lt;ThreadResumeResponse&gt;</div>
+
+  <h4>turn_start <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">turn_start</span>(&amp;mut self, params: TurnStartParams) -> <span class="sig-type">Result</span>&lt;TurnStartResponse&gt;</div>
+
+  <h4>stream_turn <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">stream_turn</span>(&amp;mut self, thread_id: &amp;str, turn_id: &amp;str) -> <span class="sig-type">Result</span>&lt;()&gt;</div>
+  <p>消费通知流直到 <code>TurnCompleted</code>。途中处理：<code>ThreadStarted</code>、<code>TurnStarted</code>、<code>AgentMessageDelta</code>（输出到 stdout）、<code>CommandExecutionOutputDelta</code>（输出 + helper 检测）、<code>ItemStarted</code>、<code>ItemCompleted</code>、<code>TerminalInteraction</code>、<code>McpToolCallProgress</code>。</p>
+  <p>记录 <code>command_execution_statuses</code>、<code>command_execution_outputs</code>、<code>last_turn_status</code>、<code>last_turn_error_message</code>。</p>
+
+  <h4>login_account_chatgpt / login_account_chatgpt_device_code <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">login_account_chatgpt</span>(&amp;mut self) -> <span class="sig-type">Result</span>&lt;LoginAccountResponse&gt;
+<span class="sig-type">fn</span> <span class="sig-fn">login_account_chatgpt_device_code</span>(&amp;mut self) -> <span class="sig-type">Result</span>&lt;LoginAccountResponse&gt;</div>
+
+  <h4>wait_for_account_login_completion <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">wait_for_account_login_completion</span>(&amp;mut self, expected_login_id: &amp;str) -> <span class="sig-type">Result</span>&lt;AccountLoginCompletedNotification&gt;</div>
+  <p>循环消费通知直到匹配的 <code>AccountLoginCompleted</code>。忽略不匹配的 login_id。</p>
+
+  <h4>get_account_rate_limits / model_list / thread_list <span class="badge badge-pub">fn</span></h4>
+  <p>标准 JSON-RPC 请求封装。</p>
+
+  <h4>thread_increment_elicitation / thread_decrement_elicitation <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">thread_increment_elicitation</span>(&amp;mut self, params: ThreadIncrementElicitationParams) -> <span class="sig-type">Result</span>&lt;ThreadIncrementElicitationResponse&gt;
+<span class="sig-type">fn</span> <span class="sig-fn">thread_decrement_elicitation</span>(&amp;mut self, params: ThreadDecrementElicitationParams) -> <span class="sig-type">Result</span>&lt;ThreadDecrementElicitationResponse&gt;</div>
+  <p>引出暂停计数器增减。仅支持 WebSocket 传输（不支持 <code>--codex-bin</code> 的 stdio 路径，因为需要共享的 websocket URL）。</p>
+
+  <h4>handle_server_request <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">handle_server_request</span>(&amp;mut self, request: JSONRPCRequest) -> <span class="sig-type">Result</span>&lt;()&gt;</div>
+  <p>处理三种服务端请求：<code>CommandExecutionRequestApproval</code>（打印参数，按 <code>command_approval_behavior</code> 决策）、<code>FileChangeRequestApproval</code>（总是 Accept）、<code>ToolRequestUserInput</code>（交互式提示）。不支持的服务端请求返回错误。</p>
+
+  <h3>4.4 审批行为控制</h3>
+  <div class="sig"><span class="sig-type">enum</span> CommandApprovalBehavior {
+    AlwaysAccept,
+    AbortOn(<span class="sig-type">usize</span>),  <span class="field">// 在第 N 次审批时 Cancel</span>
+}</div>
+  <p><code>command_approval_behavior</code> 字段控制审批响应：<code>AlwaysAccept</code> 全部接受；<code>AbortOn(n)</code> 在第 n 次审批时返回 Cancel，其余 Accept。用于验证 approval abort 流程。</p>
+
+  <h3>4.5 传输模式</h3>
+  <div class="sig"><span class="sig-type">enum</span> ClientTransport {
+    Stdio    { child: Child, stdin: Option&lt;ChildStdin&gt;, stdout: BufReader&lt;ChildStdout&gt; },
+    WebSocket { url: String, socket: Box&lt;WebSocket&lt;MaybeTlsStream&lt;TcpStream&gt;&gt;&gt; },
+}</div>
+  <p>Stdio: JSONL 行协议（每行一个 JSON-RPC 消息）。WebSocket: tungstenite Text 帧。</p>
+  <p><strong>Stdio 生命周期：</strong>Drop 时先等待 5s 优雅退出，超时则 kill 子进程（L2322-2352）。</p>
+
+  <h3>4.6 辅助函数</h3>
+
+  <h4>resolve_endpoint <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">resolve_endpoint</span>(codex_bin: Option&lt;PathBuf&gt;, url: Option&lt;String&gt;) -> <span class="sig-type">Result</span>&lt;Endpoint&gt;</div>
+  <p><strong>边界条件：</strong>两者同不为 None 时报错 "mutually exclusive"。两者都为 None 时默认 <code>ws://127.0.0.1:4222</code>。</p>
+
+  <h4>parse_dynamic_tools_arg <span class="badge badge-pub">fn</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">parse_dynamic_tools_arg</span>(dynamic_tools: &amp;Option&lt;String&gt;) -> <span class="sig-type">Result</span>&lt;Option&lt;Vec&lt;DynamicToolSpec&gt;&gt;&gt;</div>
+  <p>支持直接 JSON 字符串或 <code>@filepath</code> 从文件读取。解析后经 <code>normalize_dynamic_tool_specs</code> 标准化。</p>
+
+  <h4>BackgroundAppServer <span class="badge badge-pub">struct</span></h4>
+  <div class="sig"><span class="sig-type">fn</span> <span class="sig-fn">spawn</span>(codex_bin: &amp;Path, config_overrides: &amp;[String]) -> <span class="sig-type">Result</span>&lt;Self&gt;</div>
+  <p>后台启动 app-server：先 bind 临时端口获取地址，再 spawn <code>codex app-server --listen ws://addr</code>。Drop 时 kill 子进程。</p>
+
+  <h3>4.7 跟踪与遥测</h3>
+  <p><code>TestClientTracing::initialize</code> 加载配置并构建 OTel provider。每个命令/sub-request 创建带 W3C trace context 的 span。命令执行完成后打印 trace URL 或 "not enabled" 提示。</p>
+  <p><code>TraceSummary</code> 枚举：<code>Enabled { url }</code> 或 <code>Disabled</code>。</p>
+
+  <!-- ================================================================== -->
+  <!-- CROSS-CUTTING: 测试引用索引                                          -->
+  <!-- ================================================================== -->
+  <hr>
+  <h2>5. 测试引用索引</h2>
+  <p>以下汇总各 crate 中覆盖关键 API 路径的测试函数：</p>
+
+  <table>
+    <thead><tr><th>Crate</th><th>测试函数</th><th>覆盖的 API</th></tr></thead>
+    <tbody>
+    <tr><td>client</td><td><code>typed_request_roundtrip_works</code></td><td>request_typed 正常路径</td></tr>
+    <tr><td>client</td><td><code>typed_request_reports_json_rpc_errors</code></td><td>request_typed 错误路径</td></tr>
+    <tr><td>client</td><td><code>caller_provided_session_source_is_applied</code></td><td>start args -> session_source</td></tr>
+    <tr><td>client</td><td><code>tiny_channel_capacity_still_supports_request_roundtrip</code></td><td>capacity=1 边界</td></tr>
+    <tr><td>client</td><td><code>forward_in_process_event_preserves_transcript_notifications_under_backpressure</code></td><td>背压分流逻辑</td></tr>
+    <tr><td>client</td><td><code>remote_typed_request_roundtrip_works</code></td><td>RemoteClient request_typed (WS)</td></tr>
+    <tr><td>client</td><td><code>remote_unix_socket_typed_request_roundtrip_works</code></td><td>RemoteClient request_typed (Unix)</td></tr>
+    <tr><td>client</td><td><code>remote_typed_request_accepts_large_single_frame_response</code></td><td>大帧响应 (>17MB)</td></tr>
+    <tr><td>client</td><td><code>remote_connect_includes_auth_header_when_configured</code></td><td>auth_token</td></tr>
+    <tr><td>client</td><td><code>remote_connect_rejects_non_loopback_ws_when_auth_configured</code></td><td>auth_token 安全策略</td></tr>
+    <tr><td>client</td><td><code>remote_duplicate_request_id_keeps_original_waiter</code></td><td>重复 request ID 检测</td></tr>
+    <tr><td>client</td><td><code>remote_backpressure_preserves_transcript_notifications</code></td><td>远程背压</td></tr>
+    <tr><td>client</td><td><code>remote_server_request_resolution_roundtrip_works</code></td><td>resolve_server_request</td></tr>
+    <tr><td>client</td><td><code>remote_server_request_received_during_initialize_is_delivered</code></td><td>init 期间的 ServerRequest</td></tr>
+    <tr><td>client</td><td><code>remote_unknown_server_request_is_rejected</code></td><td>未知 ServerRequest -> error</td></tr>
+    <tr><td>client</td><td><code>remote_disconnect_surfaces_as_event</code></td><td>Disconnected 事件</td></tr>
+    <tr><td>client</td><td><code>shutdown_completes_promptly_without_retained_managers</code></td><td>shutdown() 不超时</td></tr>
+    <tr><td>daemon</td><td><code>not_ready_context_reports_daemon_app_server_before_stderr</code></td><td>app_server_not_ready_context</td></tr>
+    <tr><td>daemon</td><td><code>remote_control_start_output_serializes_inner_output_without_tag</code></td><td>RemoteControlStartOutput 序列化</td></tr>
+    <tr><td>daemon</td><td><code>restart_decision_preserves_forced_refreshes</code></td><td>restart_decision</td></tr>
+    <tr><td>daemon</td><td><code>updater_reexec_waits_for_validated_restart</code></td><td>should_reexec_updater</td></tr>
+    <tr><td>transport</td><td><code>listen_off_parses_as_off_transport</code></td><td>AppServerTransport::from_listen_url</td></tr>
+    <tr><td>transport</td><td><code>enqueue_incoming_request_returns_overload_error_when_queue_is_full</code></td><td>过载保护 (Request)</td></tr>
+    <tr><td>transport</td><td><code>enqueue_incoming_response_waits_instead_of_dropping_when_queue_is_full</code></td><td>过载保护 (Response)</td></tr>
+  </tbody>
+  </table>
+</main>
+</body>
+</html>

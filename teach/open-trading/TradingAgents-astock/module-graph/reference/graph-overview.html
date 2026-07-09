@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考 — LangGraph 工作流引擎模块</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .filetree {
+    font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .toc {
+    background: #f9fafc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .toc ol { margin: 4px 0; padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">参考文档 &middot; L1 模块总览 &middot; 速查用</p>
+
+<h1>LangGraph 工作流引擎模块参考</h1>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li><a href="#sec-classes">模块类速查</a></li>
+    <li><a href="#sec-nodes">LangGraph 节点映射表</a></li>
+    <li><a href="#sec-edges">边与条件路由速查</a></li>
+    <li><a href="#sec-states">状态类型定义</a></li>
+    <li><a href="#sec-lifecycle">TradingAgentsGraph 生命周期</a></li>
+    <li><a href="#sec-llm">双 LLM 分配决策表</a></li>
+    <li><a href="#sec-checkpoint">Checkpointer API</a></li>
+  </ol>
+</div>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-classes">1. 模块类速查</h2>
+
+<table>
+  <tr><th>类</th><th>文件</th><th>职责</th><th>实例化参数</th></tr>
+  <tr><td><code>TradingAgentsGraph</code></td><td><code>trading_graph.py</code></td><td>主入口：组装所有组件，暴露 propagate()</td><td><code>selected_analysts, debug, config, callbacks</code></td></tr>
+  <tr><td><code>GraphSetup</code></td><td><code>setup.py</code></td><td>创建 StateGraph 节点与边</td><td><code>quick_llm, deep_llm, tool_nodes, conditional_logic</code></td></tr>
+  <tr><td><code>ConditionalLogic</code></td><td><code>conditional_logic.py</code></td><td>9 个条件路由函数</td><td><code>max_debate_rounds, max_risk_discuss_rounds</code></td></tr>
+  <tr><td><code>Propagator</code></td><td><code>propagation.py</code></td><td>初始状态构建 + 运行参数</td><td><code>max_recur_limit</code>（默认 100）</td></tr>
+  <tr><td><code>Reflector</code></td><td><code>reflection.py</code></td><td>根据实际收益生成反思文本</td><td><code>quick_thinking_llm</code></td></tr>
+  <tr><td><code>SignalProcessor</code></td><td><code>signal_processing.py</code></td><td>从 PM 决策提取 5 档评级</td><td><code>quick_thinking_llm</code>（兼容性参数，已不再使用）</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-nodes">2. LangGraph 节点映射表</h2>
+
+<p>以下为 <code>setup_graph()</code> 中创建的所有节点（假设 7 个 Analyst 全选）：</p>
+
+<table>
+  <tr><th>阶段</th><th>节点名称</th><th>节点类型</th><th>对应 Agent 模块</th><th>使用 LLM</th></tr>
+  <tr><td rowspan="3">① Market</td><td><code>Market Analyst</code></td><td>LLM Agent</td><td><code>market_analyst.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_market</code></td><td>ToolNode</td><td>get_stock_data, get_indicators</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Market</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">② Social</td><td><code>Social Analyst</code></td><td>LLM Agent</td><td><code>social_media_analyst.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_social</code></td><td>ToolNode</td><td>get_news</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Social</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">③ News</td><td><code>News Analyst</code></td><td>LLM Agent</td><td><code>news_analyst.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_news</code></td><td>ToolNode</td><td>get_news, get_global_news, get_insider_transactions</td><td>—</td></tr>
+  <tr><td><code>Msg Clear News</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">④ Fundamentals</td><td><code>Fundamentals Analyst</code></td><td>LLM Agent</td><td><code>fundamentals_analyst.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_fundamentals</code></td><td>ToolNode</td><td>6 个基本面数据工具</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Fundamentals</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">⑤ Policy</td><td><code>Policy Analyst</code></td><td>LLM Agent</td><td><code>policy_analyst.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_policy</code></td><td>ToolNode</td><td>get_news, get_global_news</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Policy</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">⑥ Hot Money</td><td><code>Hot_Money Analyst</code></td><td>LLM Agent</td><td><code>hot_money_tracker.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_hot_money</code></td><td>ToolNode</td><td>9 个资金/题材工具</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Hot_money</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td rowspan="3">⑦ Lockup</td><td><code>Lockup Analyst</code></td><td>LLM Agent</td><td><code>lockup_watcher.py</code></td><td>quick</td></tr>
+  <tr><td><code>tools_lockup</code></td><td>ToolNode</td><td>4 个解禁/减持工具</td><td>—</td></tr>
+  <tr><td><code>Msg Clear Lockup</code></td><td>msg_delete</td><td>清消息历史</td><td>—</td></tr>
+  <tr><td>质量门控</td><td><code>Quality Gate</code></td><td>LLM Agent</td><td><code>quality_gate.py</code></td><td>quick</td></tr>
+  <tr><td>多空辩论</td><td><code>Bull Researcher</code></td><td>LLM Agent</td><td><code>bull_researcher.py</code></td><td>quick</td></tr>
+  <tr><td>多空辩论</td><td><code>Bear Researcher</code></td><td>LLM Agent</td><td><code>bear_researcher.py</code></td><td>quick</td></tr>
+  <tr><td>综合研判</td><td><code>Research Manager</code></td><td>LLM Agent</td><td><code>research_manager.py</code></td><td><strong>deep</strong></td></tr>
+  <tr><td>交易方案</td><td><code>Trader</code></td><td>LLM Agent</td><td><code>trader.py</code></td><td>quick</td></tr>
+  <tr><td>风险辩论</td><td><code>Aggressive Analyst</code></td><td>LLM Agent</td><td><code>aggressive_debator.py</code></td><td>quick</td></tr>
+  <tr><td>风险辩论</td><td><code>Conservative Analyst</code></td><td>LLM Agent</td><td><code>conservative_debator.py</code></td><td>quick</td></tr>
+  <tr><td>风险辩论</td><td><code>Neutral Analyst</code></td><td>LLM Agent</td><td><code>neutral_debator.py</code></td><td>quick</td></tr>
+  <tr><td>最终决策</td><td><code>Portfolio Manager</code></td><td>LLM Agent</td><td><code>portfolio_manager.py</code></td><td><strong>deep</strong></td></tr>
+</table>
+
+<p><strong>节点总数：</strong>7 Analyst × 3 + Quality Gate + Bull + Bear + Research Manager + Trader + 3 Risk × 1 + Portfolio Manager = 7×3 + 1 + 2 + 1 + 1 + 3 + 1 = <strong>30 个节点</strong>（全选时）。</p>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-edges">3. 边与条件路由速查</h2>
+
+<table>
+  <tr><th>源节点</th><th>目标</th><th>路由函数</th><th>逻辑</th></tr>
+  <tr><td><code>START</code></td><td><code>{first} Analyst</code></td><td>—（固定边）</td><td>直接连第一个选中的 Analyst</td></tr>
+  <tr><td><code>{X} Analyst</code></td><td><code>tools_{x}</code> 或 <code>Msg Clear {X}</code></td><td><code>should_continue_{x}</code></td><td>有 tool_calls → tools；否则 → msg_clear</td></tr>
+  <tr><td><code>tools_{x}</code></td><td><code>{X} Analyst</code></td><td>—（固定回环）</td><td>工具执行完回到同个分析师</td></tr>
+  <tr><td><code>Msg Clear {X}</code></td><td>下一个 Analyst 或 Quality Gate</td><td>—（固定边）</td><td>非最后一个 Analyst → 下一个；最后一个 → Quality Gate</td></tr>
+  <tr><td><code>Quality Gate</code></td><td><code>Bull Researcher</code></td><td>—（固定边）</td><td>无分支：通过即进辩论</td></tr>
+  <tr><td><code>Bull Researcher</code></td><td><code>Bear</code> 或 <code>Research Manager</code></td><td><code>should_continue_debate</code></td><td>count >= 2×max → Manager；否则 Bear</td></tr>
+  <tr><td><code>Bear Researcher</code></td><td><code>Bull</code> 或 <code>Research Manager</code></td><td><code>should_continue_debate</code></td><td>同上</td></tr>
+  <tr><td><code>Research Manager</code></td><td><code>Trader</code></td><td>—（固定边）</td><td>Manager 输出 ResearchPlan 后进 Trader</td></tr>
+  <tr><td><code>Trader</code></td><td><code>Aggressive Analyst</code></td><td>—（固定边）</td><td>交易方案提交三方风控</td></tr>
+  <tr><td><code>Aggressive Analyst</code></td><td><code>Conservative</code> 或 <code>PM</code></td><td><code>should_continue_risk_analysis</code></td><td>count >= 3×max → PM；否则轮转</td></tr>
+  <tr><td><code>Conservative Analyst</code></td><td><code>Neutral</code> 或 <code>PM</code></td><td><code>should_continue_risk_analysis</code></td><td>同上</td></tr>
+  <tr><td><code>Neutral Analyst</code></td><td><code>Aggressive</code> 或 <code>PM</code></td><td><code>should_continue_risk_analysis</code></td><td>同上</td></tr>
+  <tr><td><code>Portfolio Manager</code></td><td><code>END</code></td><td>—（固定边）</td><td>最终输出 5 档评级</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-states">4. 状态类型定义</h2>
+
+<p><code>tradingagents/agents/utils/agent_states.py</code> 定义了三个核心 TypedDict：</p>
+
+<table>
+  <tr><th>类型</th><th>用途</th><th>关键字段</th></tr>
+  <tr><td><code>AgentState</code></td><td>LangGraph 全局状态，包含图执行全链路数据</td><td><code>messages</code>, <code>company_of_interest</code>, <code>trade_date</code>, <code>past_context</code>, 7 个 report 字段, <code>investment_debate_state</code>, <code>risk_debate_state</code>, <code>final_trade_decision</code></td></tr>
+  <tr><td><code>InvestDebateState</code></td><td>Bull/Bear 辩论状态</td><td><code>bull_history</code>, <code>bear_history</code>, <code>history</code>, <code>current_response</code>, <code>judge_decision</code>, <code>count</code></td></tr>
+  <tr><td><code>RiskDebateState</code></td><td>三方风险辩论状态</td><td><code>aggressive_history</code>, <code>conservative_history</code>, <code>neutral_history</code>, <code>history</code>, <code>latest_speaker</code>, <code>judge_decision</code>, <code>count</code></td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-lifecycle">5. TradingAgentsGraph 生命周期</h2>
+
+<table>
+  <tr><th>阶段</th><th>方法</th><th>操作</th></tr>
+  <tr><td>初始化</td><td><code>__init__()</code></td><td>创建双 LLM → 创建 ToolNode 字典 → 初始化 5 个组件 → compile graph</td></tr>
+  <tr><td>运行准备</td><td><code>prepare_graph_run()</code></td><td>解析 pending 反思 → 按需创建 SqliteSaver → 查询 checkpoint → 构建初始状态</td></tr>
+  <tr><td>图执行</td><td><code>_run_graph()</code> → <code>graph.invoke()</code></td><td>LangGraph 按节点-边拓扑执行，debug 模式逐 chunk 打印</td></tr>
+  <tr><td>运行收尾</td><td><code>finalize_graph_run()</code></td><td>状态落盘 JSON → 存 pending 决策 → 清 checkpoint → 提取信号</td></tr>
+  <tr><td>资源释放</td><td><code>close_graph_run()</code></td><td>关闭 SqliteSaver context → graph 恢复为无 checkpointer 编译</td></tr>
+</table>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-llm">6. 双 LLM 分配决策表</h2>
+
+<table>
+  <tr><th>LLM</th><th>参数字段</th><th>使用节点</th><th>调用次数（单次分析）</th><th>选择理由</th></tr>
+  <tr><td><code>deep_thinking_llm</code></td><td><code>deep_think_llm</code></td><td>Research Manager, Portfolio Manager</td><td>2 次</td><td>综合全局信息做最终决策——推理品质 > 速度</td></tr>
+  <tr><td><code>quick_thinking_llm</code></td><td><code>quick_think_llm</code></td><td>7 Analyst + Quality Gate + Bull + Bear + Trader + 3 Risk Debater</td><td>28-48 次</td><td>高频快速推理——领域聚焦，不需要深度推理</td></tr>
+</table>
+
+<p><strong>Provider 适配：</strong><code>_get_provider_kwargs()</code> 根据 <code>llm_provider</code> 设置不同参数——Google 设 <code>thinking_level</code>，OpenAI 设 <code>reasoning_effort</code>，Anthropic 设 <code>effort</code>——确保深度/快速语义正确映射到各厂商的 thinking 控制字段。</p>
+
+<!-- ───────────────────────────────────────────────── -->
+
+<h2 id="sec-checkpoint">7. Checkpointer API</h2>
+
+<table>
+  <tr><th>函数</th><th>签名</th><th>返回值</th><th>说明</th></tr>
+  <tr><td><code>get_checkpointer</code></td><td><code>(data_dir, ticker) -> ContextManager[SqliteSaver]</code></td><td>上下文管理器</td><td>打开 {TICKER}.db，创建 SqliteSaver，调用 setup()</td></tr>
+  <tr><td><code>checkpoint_step</code></td><td><code>(data_dir, ticker, date) -> int | None</code></td><td>步骤编号或 None</td><td>查询最新 checkpoint 的 step 号</td></tr>
+  <tr><td><code>has_checkpoint</code></td><td><code>(data_dir, ticker, date) -> bool</code></td><td>布尔值</td><td>是否存在可恢复的断点</td></tr>
+  <tr><td><code>thread_id</code></td><td><code>(ticker, date) -> str</code></td><td>SHA256[:16]</td><td>ticker+date 的确定性 thread_id</td></tr>
+  <tr><td><code>clear_checkpoint</code></td><td><code>(data_dir, ticker, date) -> None</code></td><td>—</td><td>删除 ticker+date 在 writes 和 checkpoints 表中的行</td></tr>
+  <tr><td><code>clear_all_checkpoints</code></td><td><code>(data_dir) -> int</code></td><td>删除的文件数</td><td>删除 checkpoints/ 下所有 .db 文件</td></tr>
+</table>
+
+<p style="margin-top:28px;">
+  <strong>关联课程：</strong><a href="../lessons/0001-graph-module-tour.html">0001 — LangGraph 工作流引擎模块总览</a><br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的 API 或设计决策。
+</p>
+
+</div>
+</main>
+</body>
+</html>

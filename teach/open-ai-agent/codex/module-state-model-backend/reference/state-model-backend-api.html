@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>L3 API 参考：状态与后端通信辅助 crate</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>L3 API 参考：状态与后端通信辅助 crate</h1>
+    <p class="meta">覆盖范围：analytics（分析事件）、otel（OpenTelemetry 集成）、rollout-trace（trace bundle 写作与归约）、feedback（用户反馈收集）。源码路径：<code>codex-rs/analytics/src/</code>、<code>codex-rs/otel/src/</code>、<code>codex-rs/rollout-trace/src/</code>、<code>codex-rs/feedback/src/</code>。上层概览见 <a href="./state-model-backend-overview.html">模块总览参考</a>。</p>
+  </header>
+
+  <!-- ============================================================ -->
+  <!-- 1. analytics -->
+  <!-- ============================================================ -->
+  <section>
+    <h2>1. analytics — 分析事件捕获与上报</h2>
+    <p><code>codex-analytics</code> crate 负责将 Codex 运行时产生的事件（session 初始化、turn 生命周期、工具调用、Guardian 审查、compaction、插件操作等）归约、批处理并通过 HTTP 发送到后端分析端点。核心入口是 <code>AnalyticsEventsClient</code>，内部使用 <code>AnalyticsReducer</code> 将原始事实（<code>AnalyticsFact</code>）归约为可序列化事件（<code>TrackEventRequest</code>），再通过 tokio mpsc 队列异步发送。</p>
+
+    <h3>1.1 AnalyticsEventsClient</h3>
+    <table>
+      <thead><tr><th>方法</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>new()</code></td>
+          <td><code>pub fn new(auth_manager: Arc&lt;AuthManager&gt;, base_url: String, analytics_enabled: Option&lt;bool&gt;) -> Self</code></td>
+          <td>创建客户端。当 <code>analytics_enabled == Some(false)</code> 时队列为 None（禁用）。否则创建队列并启动 tokio 后台任务消费事件</td>
+        </tr>
+        <tr>
+          <td><code>disabled()</code></td>
+          <td><code>pub fn disabled() -> Self</code></td>
+          <td>返回一个完全禁用的客户端（<code>queue: None</code>），所有 track_* 调用均为空操作</td>
+        </tr>
+        <tr>
+          <td><code>track_initialize()</code></td>
+          <td><code>pub fn track_initialize(&self, connection_id: u64, params: InitializeParams, product_client_id: String, rpc_transport: AppServerRpcTransport)</code></td>
+          <td>记录 session 初始化事件，包含客户端元数据和运行时信息</td>
+        </tr>
+        <tr>
+          <td><code>track_skill_invocations()</code></td>
+          <td><code>pub fn track_skill_invocations(&self, tracking: TrackEventsContext, invocations: Vec&lt;SkillInvocation&gt;)</code></td>
+          <td>记录技能调用事件。空 invocations 直接跳过</td>
+        </tr>
+        <tr>
+          <td><code>track_subagent_thread_started()</code></td>
+          <td><code>pub fn track_subagent_thread_started(&self, input: SubAgentThreadStartedInput)</code></td>
+          <td>记录子 agent 线程创建事件</td>
+        </tr>
+        <tr>
+          <td><code>track_guardian_review()</code></td>
+          <td><code>pub fn track_guardian_review(&self, tracking: &GuardianReviewTrackContext, result: GuardianReviewAnalyticsResult, completed_at_ms: u64)</code></td>
+          <td>记录 Guardian 审查结果，含决策、token 用量、延迟、模型信息等</td>
+        </tr>
+        <tr>
+          <td><code>track_request()</code></td>
+          <td><code>pub fn track_request(&self, connection_id: u64, request_id: RequestId, request: &ClientRequest)</code></td>
+          <td>记录 app-server 客户端请求。仅处理 <code>TurnStart</code> 和 <code>TurnSteer</code></td>
+        </tr>
+        <tr>
+          <td><code>track_response()</code></td>
+          <td><code>pub fn track_response(&self, connection_id: u64, request_id: RequestId, response: ClientResponsePayload)</code></td>
+          <td>记录 app-server 响应。仅处理 ThreadStart/Resume/Fork 和 TurnStart/Steer</td>
+        </tr>
+        <tr>
+          <td><code>track_response_with_thread_originator()</code></td>
+          <td><code>pub fn track_response_with_thread_originator(&self, connection_id: u64, request_id: RequestId, response: ClientResponsePayload, thread_originator: String)</code></td>
+          <td>同上，额外携带 thread originator 标识</td>
+        </tr>
+        <tr>
+          <td><code>track_error_response()</code></td>
+          <td><code>pub fn track_error_response(&self, connection_id: u64, request_id: RequestId, error: JSONRPCErrorError, error_type: Option&lt;AnalyticsJsonRpcError&gt;)</code></td>
+          <td>记录 JSON-RPC 错误响应。error_type 区分 TurnSteer/Input 错误</td>
+        </tr>
+        <tr>
+          <td><code>track_server_request()</code></td>
+          <td><code>pub fn track_server_request(&self, connection_id: u64, request: ServerRequest)</code></td>
+          <td>记录服务器端发起的请求</td>
+        </tr>
+        <tr>
+          <td><code>track_server_response()</code></td>
+          <td><code>pub fn track_server_response(&self, completed_at_ms: u64, response: ServerResponse)</code></td>
+          <td>记录服务器响应及完成时间</td>
+        </tr>
+        <tr>
+          <td><code>track_effective_permissions_approval_response()</code></td>
+          <td><code>pub fn track_effective_permissions_approval_response(&self, completed_at_ms: u64, request_id: RequestId, response: RequestPermissionsResponse)</code></td>
+          <td>记录权限审批结果</td>
+        </tr>
+        <tr>
+          <td><code>track_server_request_aborted()</code></td>
+          <td><code>pub fn track_server_request_aborted(&self, completed_at_ms: u64, request_id: RequestId)</code></td>
+          <td>记录被中止的服务器请求</td>
+        </tr>
+        <tr>
+          <td><code>track_notification()</code></td>
+          <td><code>pub fn track_notification(&self, notification: ServerNotification)</code></td>
+          <td>记录服务器通知。仅处理 TurnStarted/Completed/DiffUpdated、ItemStarted/Completed/GuardianApprovalReviewStarted/Completed</td>
+        </tr>
+        <tr>
+          <td><code>track_app_mentioned()</code></td>
+          <td><code>pub fn track_app_mentioned(&self, tracking: TrackEventsContext, mentions: Vec&lt;AppInvocation&gt;)</code></td>
+          <td>记录应用被提及事件</td>
+        </tr>
+        <tr>
+          <td><code>track_app_used()</code></td>
+          <td><code>pub fn track_app_used(&self, tracking: TrackEventsContext, app: AppInvocation)</code></td>
+          <td>记录应用使用事件。含去重逻辑：同 turn 内相同 connector_id 只发一次</td>
+        </tr>
+        <tr>
+          <td><code>track_hook_run()</code></td>
+          <td><code>pub fn track_hook_run(&self, tracking: TrackEventsContext, hook: HookRunFact)</code></td>
+          <td>记录 hook 执行事件</td>
+        </tr>
+        <tr>
+          <td><code>track_compaction()</code></td>
+          <td><code>pub fn track_compaction(&self, event: CodexCompactionEvent)</code></td>
+          <td>记录上下文压缩事件，含 trigger/reason/implementation/phase/strategy/status 及 token 前后统计</td>
+        </tr>
+        <tr>
+          <td><code>track_goal_event()</code></td>
+          <td><code>pub fn track_goal_event(&self, event: CodexGoalEvent)</code></td>
+          <td>记录 goal 生命周期事件（Created/UsageAccounted/StatusChanged/Cleared）</td>
+        </tr>
+        <tr>
+          <td><code>track_turn_resolved_config()</code></td>
+          <td><code>pub fn track_turn_resolved_config(&self, fact: TurnResolvedConfigFact)</code></td>
+          <td>记录 turn 解析后的配置快照（model、permission profile、approval policy 等）</td>
+        </tr>
+        <tr>
+          <td><code>track_turn_token_usage()</code></td>
+          <td><code>pub fn track_turn_token_usage(&self, fact: TurnTokenUsageFact)</code></td>
+          <td>记录 turn 级 token 消耗</td>
+        </tr>
+        <tr>
+          <td><code>track_turn_profile()</code></td>
+          <td><code>pub fn track_turn_profile(&self, fact: TurnProfileFact)</code></td>
+          <td>记录 turn 性能剖析数据（sampling 前/中/后耗时、重试次数）</td>
+        </tr>
+        <tr>
+          <td><code>track_turn_codex_error()</code></td>
+          <td><code>pub fn track_turn_codex_error(&self, fact: TurnCodexErrorFact)</code></td>
+          <td>记录 turn 级错误（CodexErrKind + HTTP 状态码）</td>
+        </tr>
+        <tr>
+          <td><code>track_plugin_used()</code></td>
+          <td><code>pub fn track_plugin_used(&self, tracking: TrackEventsContext, plugin: PluginTelemetryMetadata)</code></td>
+          <td>记录插件使用。含去重逻辑</td>
+        </tr>
+        <tr>
+          <td><code>track_plugin_install_requested()</code></td>
+          <td><code>pub fn track_plugin_install_requested(&self, tracking: TrackEventsContext, request: PluginInstallRequested)</code></td>
+          <td>记录插件安装请求</td>
+        </tr>
+        <tr>
+          <td><code>track_plugin_installed()</code> / <code>track_plugin_uninstalled()</code> / <code>track_plugin_enabled()</code> / <code>track_plugin_disabled()</code></td>
+          <td><code>pub fn track_plugin_installed(&self, plugin: PluginTelemetryMetadata)</code></td>
+          <td>记录插件状态变更事件</td>
+        </tr>
+        <tr>
+          <td><code>track_plugin_install_failed()</code></td>
+          <td><code>pub fn track_plugin_install_failed(&self, plugin: PluginTelemetryMetadata, error_type: String)</code></td>
+          <td>记录插件安装失败事件</td>
+        </tr>
+        <tr>
+          <td><code>track_external_agent_config_import_completed()</code></td>
+          <td><code>pub fn track_external_agent_config_import_completed(&self, input: ExternalAgentConfigImportCompletedInput)</code></td>
+          <td>记录外部 agent 配置导入完成（含成功/失败计数）</td>
+        </tr>
+        <tr>
+          <td><code>track_external_agent_config_import_failure()</code></td>
+          <td><code>pub fn track_external_agent_config_import_failure(&self, input: ExternalAgentConfigImportFailureInput)</code></td>
+          <td>记录外部 agent 配置导入失败（含 failure_stage + error_type）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>1.2 事件数据模型（facts）</h3>
+    <table>
+      <thead><tr><th>类型</th><th>字段要点</th><th>实现</th></tr></thead>
+      <tbody>
+        <tr><td><code>TrackEventsContext</code></td><td>model_slug, thread_id, turn_id, product_client_id</td><td>Clone</td></tr>
+        <tr><td><code>AcceptedLineFingerprint</code></td><td>path_hash: String, line_hash: String</td><td>Clone, Debug, PartialEq, Eq, Serialize</td></tr>
+        <tr><td><code>TurnResolvedConfigFact</code></td><td>turn_id, thread_id, num_input_images, ephemeral, session_source, model, model_provider, permission_profile, permission_profile_cwd, reasoning_effort, reasoning_summary, service_tier, approval_policy, approvals_reviewer, sandbox_network_access, collaboration_mode, personality, workspace_kind, is_first_turn</td><td>Clone</td></tr>
+        <tr><td><code>TurnTokenUsageFact</code></td><td>turn_id, thread_id, token_usage: TokenUsage</td><td>Clone</td></tr>
+        <tr><td><code>TurnProfile</code></td><td>before_first_sampling_ms, sampling_ms, between_sampling_overhead_ms, tool_blocking_ms, after_last_sampling_ms, sampling_request_count, sampling_retry_count</td><td>Clone, Debug, PartialEq, Eq, Serialize</td></tr>
+        <tr><td><code>TurnProfileFact</code></td><td>turn_id: String, profile: TurnProfile</td><td>Clone</td></tr>
+        <tr><td><code>TurnCodexErrorFact</code></td><td>turn_id, thread_id, error: TurnCodexError (kind + http_status_code)</td><td>Clone</td></tr>
+        <tr><td><code>SkillInvocation</code></td><td>skill_name, skill_scope: SkillScope, skill_path: PathBuf, plugin_id, invocation_type: InvocationType</td><td>Clone, Debug</td></tr>
+        <tr><td><code>AppInvocation</code></td><td>connector_id, app_name, invocation_type</td><td>-</td></tr>
+        <tr><td><code>SubAgentThreadStartedInput</code></td><td>session_id, thread_id, parent_thread_id, forked_from_thread_id, product_client_id, client_name, client_version, model, ephemeral, subagent_source, created_at</td><td>Clone</td></tr>
+        <tr><td><code>CodexCompactionEvent</code></td><td>thread_id, turn_id, trigger, reason, implementation, phase, strategy, status, codex_error_kind, codex_error_http_status_code, active_context_tokens_before, active_context_tokens_after, retained_image_count, compaction_summary_tokens, cached_input_tokens, started_at, completed_at, duration_ms</td><td>Clone</td></tr>
+        <tr><td><code>CodexGoalEvent</code></td><td>thread_id, turn_id, goal_id, event_kind: GoalEventKind, goal_status, has_token_budget, cumulative_tokens_accounted, cumulative_time_accounted_seconds</td><td>Clone</td></tr>
+        <tr><td><code>HookRunFact</code></td><td>event_name: HookEventName, hook_source: HookSource, status: HookRunStatus</td><td>-</td></tr>
+        <tr><td><code>PluginInstallRequested</code></td><td>suggestion_id, plugins: Vec&lt;PluginInstallRequestedPlugin&gt;, source: PluginInstallRequestSource</td><td>Clone, Debug, PartialEq, Eq</td></tr>
+        <tr><td><code>ExternalAgentConfigImportCompletedInput</code></td><td>import_id, source, item_type, success_count, failed_count</td><td>-</td></tr>
+        <tr><td><code>ExternalAgentConfigImportFailureInput</code></td><td>import_id, source, item_type, failure_stage, error_type</td><td>-</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1.3 枚举速查</h3>
+    <table>
+      <thead><tr><th>枚举</th><th>变体</th><th>序列化</th></tr></thead>
+      <tbody>
+        <tr><td><code>CodexErrKind</code></td><td>TurnAborted, SessionBudgetExceeded, Stream, ContextWindowExceeded, ThreadNotFound, AgentLimitReached, Timeout, RequestTimeout, Spawn, Interrupted, UnexpectedStatus, InvalidRequest, InvalidImageRequest, UsageLimitReached, ServerOverloaded, CyberPolicy, ResponseStreamFailed, ConnectionFailed, QuotaExceeded, UsageNotIncluded, InternalServerError, RetryLimit, InternalAgentDied, Sandbox, LandlockSandboxExecutableNotProvided, UnsupportedOperation, RefreshTokenFailed, Fatal, Io, Json, TokioJoin, EnvVar (及 Linux 专有 LandlockRuleset, LandlockPathFd)</td><td>snake_case</td></tr>
+        <tr><td><code>TurnStatus</code></td><td>Completed, Failed, Interrupted</td><td>snake_case</td></tr>
+        <tr><td><code>TurnSteerResult</code></td><td>Accepted, Rejected</td><td>snake_case</td></tr>
+        <tr><td><code>TurnSteerRejectionReason</code></td><td>NoActiveTurn, ExpectedTurnMismatch, NonSteerableReview, NonSteerableCompact, EmptyInput, InputTooLarge</td><td>snake_case</td></tr>
+        <tr><td><code>ThreadInitializationMode</code></td><td>New, Forked, Resumed</td><td>snake_case</td></tr>
+        <tr><td><code>InvocationType</code></td><td>Explicit, Implicit</td><td>lowercase</td></tr>
+        <tr><td><code>CompactionTrigger</code></td><td>Manual, Auto</td><td>snake_case</td></tr>
+        <tr><td><code>CompactionReason</code></td><td>UserRequested, ContextLimit, ModelDownshift, CompHashChanged</td><td>snake_case</td></tr>
+        <tr><td><code>CompactionImplementation</code></td><td>Responses, ResponsesCompactionV2, ResponsesCompact</td><td>snake_case</td></tr>
+        <tr><td><code>CompactionPhase</code></td><td>StandaloneTurn, PreTurn, MidTurn</td><td>snake_case</td></tr>
+        <tr><td><code>CompactionStrategy</code></td><td>Memento, PrefixCompaction</td><td>snake_case</td></tr>
+        <tr><td><code>CompactionStatus</code></td><td>Completed, Failed, Interrupted</td><td>snake_case</td></tr>
+        <tr><td><code>GoalEventKind</code></td><td>Created, UsageAccounted, StatusChanged, Cleared</td><td>snake_case</td></tr>
+        <tr><td><code>PluginInstallRequestSource</code></td><td>EndpointRecommendation, LegacyDiscovery</td><td>snake_case</td></tr>
+        <tr><td><code>GuardianReviewDecision</code></td><td>Approved, Denied, Aborted</td><td>snake_case</td></tr>
+        <tr><td><code>GuardianReviewTerminalStatus</code></td><td>Approved, Denied, Aborted, TimedOut, FailedClosed</td><td>snake_case</td></tr>
+        <tr><td><code>GuardianReviewFailureReason</code></td><td>Timeout, Cancelled, PromptBuildError, SessionError, ParseError</td><td>snake_case</td></tr>
+        <tr><td><code>GuardianReviewSessionKind</code></td><td>TrunkNew, TrunkReused, EphemeralForked</td><td>snake_case</td></tr>
+        <tr><td><code>GuardianApprovalRequestSource</code></td><td>MainTurn, DelegatedSubagent</td><td>snake_case</td></tr>
+        <tr><td><code>AppServerRpcTransport</code></td><td>Stdio, Websocket, InProcess</td><td>snake_case</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1.4 GuardianReviewedAction（tagged union）</h3>
+    <div class="diagram">#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GuardianReviewedAction {
+    Shell { sandbox_permissions, additional_permissions },
+    UnifiedExec { sandbox_permissions, additional_permissions, tty },
+    Execve { source: GuardianCommandSource, program, additional_permissions },
+    ApplyPatch {},
+    NetworkAccess { protocol: NetworkApprovalProtocol, port: u16 },
+    McpToolCall { server, tool_name, connector_id, connector_name, tool_title },
+    RequestPermissions {},
+}</div>
+
+    <h3>1.5 内部事件队列与批处理</h3>
+    <p>客户端通过 <code>AnalyticsEventsQueue</code>（tokio mpsc channel，容量 256）将事实异步送入后台任务。后台任务逐条调用 <code>AnalyticsReducer::ingest()</code> 归约为 <code>Vec&lt;TrackEventRequest&gt;</code>，然后通过 HTTP POST 发送到 <code>{base_url}/codex/analytics-events/events</code>。</p>
+    <ul>
+      <li><strong>去重</strong>：<code>track_app_used</code> 和 <code>track_plugin_used</code> 维护 HashSet（容量 4096），同 turn 内相同 (turn_id, connector_id) 或 (turn_id, plugin_id) 只发一次。</li>
+      <li><strong>隔离发送</strong>：<code>AcceptedLineFingerprints</code> 事件通过 <code>should_send_in_isolated_request()</code> 标记为独立请求，不与其它事件合并。</li>
+      <li><strong>认证筛选</strong>：仅当 <code>auth.uses_codex_backend()</code> 为 true 时才发送。</li>
+      <li><strong>超时</strong>：HTTP 请求超时 10 秒。</li>
+      <li><strong>调试捕获</strong>：debug 构建下，如果设置了 <code>ANALYTICS_EVENTS_CAPTURE_FILE</code> 环境变量，网络传输被禁用，事件写入本地文件。</li>
+    </ul>
+
+    <h3>1.6 公共工具函数</h3>
+    <table>
+      <thead><tr><th>函数</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>now_unix_seconds()</code></td><td><code>pub fn now_unix_seconds() -> u64</code></td><td>当前 Unix 时间戳（秒）</td></tr>
+        <tr><td><code>now_unix_millis()</code></td><td><code>pub fn now_unix_millis() -> u64</code></td><td>当前 Unix 时间戳（毫秒）</td></tr>
+        <tr><td><code>build_track_events_context()</code></td><td><code>pub fn build_track_events_context(model_slug, thread_id, turn_id, product_client_id) -> TrackEventsContext</code></td><td>构造 track events 上下文</td></tr>
+        <tr><td><code>accepted_line_fingerprints_from_unified_diff()</code></td><td><code>pub fn ...(diff: &str) -> Vec&lt;AcceptedLineFingerprint&gt;</code></td><td>从 unified diff 提取被接受行的指纹</td></tr>
+        <tr><td><code>fingerprint_hash()</code></td><td><code>pub fn ...(data: &str) -> String</code></td><td>计算指纹哈希</td></tr>
+      </tbody>
+    </table>
+
+    <h3>1.7 测试引用</h3>
+    <p>单元测试：<code>analytics/src/client_tests.rs</code>、<code>analytics/src/analytics_client_tests.rs</code>。</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 2. otel -->
+  <!-- ============================================================ -->
+  <section>
+    <h2>2. otel — OpenTelemetry 集成</h2>
+    <p><code>codex-otel</code> crate 封装 OpenTelemetry SDK，提供统一的日志、trace、metrics 导出管道。核心入口是 <code>OtelProvider</code>，它从 <code>OtelSettings</code> 配置构建 SdkLoggerProvider、SdkTracerProvider 和 MetricsClient，并安装为进程全局 provider。</p>
+
+    <h3>2.1 配置类型</h3>
+    <table>
+      <thead><tr><th>类型</th><th>字段</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>OtelSettings</code></td>
+          <td>environment, service_name, service_version, codex_home: PathBuf, exporter: OtelExporter, trace_exporter: OtelExporter, metrics_exporter: OtelExporter, runtime_metrics: bool, span_attributes: BTreeMap&lt;String, String&gt;, tracestate: BTreeMap&lt;String, BTreeMap&lt;String, String&gt;&gt;</td>
+          <td>完整的 OTEL 配置。日志/跟踪/指标可分别使用不同 exporter</td>
+        </tr>
+        <tr>
+          <td><code>OtelExporter</code></td>
+          <td>None, Statsig, OtlpGrpc { endpoint, headers, tls }, OtlpHttp { endpoint, headers, protocol, tls }</td>
+          <td>导出目标。Statsig 是内置变体，解析为 OTLP HTTP（仅指标）</td>
+        </tr>
+        <tr>
+          <td><code>OtelHttpProtocol</code></td>
+          <td>Binary, Json</td>
+          <td>OTLP HTTP 协议格式</td>
+        </tr>
+        <tr>
+          <td><code>OtelTlsConfig</code></td>
+          <td>ca_certificate, client_certificate, client_private_key (均为 Option&lt;AbsolutePathBuf&gt;)</td>
+          <td>TLS 客户端证书配置</td>
+        </tr>
+        <tr>
+          <td><code>StatsigMetricsSettings</code></td>
+          <td>environment: String</td>
+          <td>解析后的 Statsig 指标设置，可跨进程传递而不暴露凭据</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>2.2 OtelProvider</h3>
+    <table>
+      <thead><tr><th>方法/字段</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>字段</td>
+          <td><code>pub logger: Option&lt;SdkLoggerProvider&gt;</code>, <code>pub tracer_provider: Option&lt;SdkTracerProvider&gt;</code>, <code>pub tracer: Option&lt;Tracer&gt;</code>, <code>pub metrics: Option&lt;MetricsClient&gt;</code></td>
+          <td>公开字段，供外部获取底层 provider</td>
+        </tr>
+        <tr>
+          <td><code>from()</code></td>
+          <td><code>pub fn from(settings: &OtelSettings) -> Result&lt;Option&lt;Self&gt;, Box&lt;dyn Error&gt;&gt;</code></td>
+          <td>从配置构建 OtelProvider。若所有 exporter 均为 None 则返回 None。安装进程全局 tracer provider 和 text map propagator</td>
+        </tr>
+        <tr>
+          <td><code>shutdown()</code></td>
+          <td><code>pub fn shutdown(&self)</code></td>
+          <td>依次 flush 并关闭 tracer_provider、metrics、logger</td>
+        </tr>
+        <tr>
+          <td><code>logger_layer()</code></td>
+          <td><code>pub fn logger_layer&lt;S&gt;(&self) -> Option&lt;impl Layer&lt;S&gt;&gt;</code></td>
+          <td>构建 OpenTelemetryTracingBridge 层，将 tracing 日志桥接到 OTLP 日志导出。仅导出 target 匹配 <code>codex_otel.*</code> 的日志</td>
+        </tr>
+        <tr>
+          <td><code>tracing_layer()</code></td>
+          <td><code>pub fn tracing_layer&lt;S&gt;(&self) -> Option&lt;impl Layer&lt;S&gt;&gt;</code></td>
+          <td>构建 tracing-opentelemetry 层，将 tracing span 转换为 OTLP span。仅导出 <code>trace_safe</code> target 的 span/event</td>
+        </tr>
+        <tr>
+          <td><code>metrics()</code></td>
+          <td><code>pub fn metrics(&self) -> Option&lt;&MetricsClient&gt;</code></td>
+          <td>获取指标客户端引用</td>
+        </tr>
+        <tr>
+          <td><code>codex_export_filter()</code></td>
+          <td><code>pub fn codex_export_filter(meta: &Metadata) -> bool</code></td>
+          <td>等同于 log_export_filter</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Drop 行为</strong>：<code>OtelProvider</code> 实现 <code>Drop</code>，析构时自动调用 force_flush + shutdown，确保进程退出前数据不丢失。</p>
+
+    <h3>2.3 W3C Trace Context 传播</h3>
+    <table>
+      <thead><tr><th>函数</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>current_span_w3c_trace_context()</code></td><td><code>pub fn ...() -> Option&lt;W3cTraceContext&gt;</code></td><td>获取当前 span 的 W3C trace context（traceparent + tracestate）</td></tr>
+        <tr><td><code>span_w3c_trace_context()</code></td><td><code>pub fn span_w3c_trace_context(span: &Span) -> Option&lt;W3cTraceContext&gt;</code></td><td>提取指定 span 的 W3C trace context。合并配置的 tracestate 条目</td></tr>
+        <tr><td><code>inject_span_w3c_trace_headers()</code></td><td><code>pub fn inject_span_w3c_trace_headers(span: &Span, headers: &mut HeaderMap) -> bool</code></td><td>将 W3C traceparent/tracestate 注入 HTTP 请求头。替换已有值</td></tr>
+        <tr><td><code>current_span_trace_id()</code></td><td><code>pub fn current_span_trace_id() -> Option&lt;String&gt;</code></td><td>获取当前 span 的 trace ID（32 位十六进制字符串）</td></tr>
+        <tr><td><code>context_from_w3c_trace_context()</code></td><td><code>pub fn context_from_w3c_trace_context(trace: &W3cTraceContext) -> Option&lt;Context&gt;</code></td><td>从 W3cTraceContext 构建 OpenTelemetry Context</td></tr>
+        <tr><td><code>set_parent_from_w3c_trace_context()</code></td><td><code>pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -> bool</code></td><td>为 span 设置父 context（从 W3C trace context）</td></tr>
+        <tr><td><code>set_parent_from_context()</code></td><td><code>pub fn set_parent_from_context(span: &Span, context: Context)</code></td><td>为 span 设置父 context</td></tr>
+        <tr><td><code>traceparent_context_from_env()</code></td><td><code>pub fn traceparent_context_from_env() -> Option&lt;Context&gt;</code></td><td>从 TRACEPARENT/TRACESTATE 环境变量加载父 context（一次性初始化）</td></tr>
+        <tr><td><code>validate_tracestate_entries()</code></td><td><code>pub fn validate_tracestate_entries(entries: &BTreeMap&lt;...&gt;) -> Result&lt;...&gt;</code></td><td>验证配置的 tracestate 条目格式</td></tr>
+        <tr><td><code>validate_tracestate_member()</code></td><td><code>pub fn validate_tracestate_member(member_key: &str, fields: &BTreeMap&lt;...&gt;) -> Result&lt;...&gt;</code></td><td>验证单个 tracestate 成员</td></tr>
+        <tr><td><code>validate_span_attributes()</code></td><td><code>pub fn validate_span_attributes(attributes: &BTreeMap&lt;...&gt;) -> io::Result&lt;()&gt;</code></td><td>验证 span 属性键不为空</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.4 会话遥测</h3>
+    <table>
+      <thead><tr><th>类型</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>SessionTelemetry</code></td><td>会话遥测数据载体，由 <code>events/session_telemetry.rs</code> 定义</td></tr>
+        <tr><td><code>SessionTelemetryMetadata</code></td><td>会话遥测元数据</td></tr>
+        <tr><td><code>AuthEnvTelemetryMetadata</code></td><td>认证环境遥测元数据</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.5 指标系统</h3>
+    <table>
+      <thead><tr><th>类型/函数</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>MetricsClient</code></td><td>指标客户端，封装 OTLP 指标导出（<code>metrics/client.rs</code>）</td></tr>
+        <tr><td><code>MetricsConfig</code></td><td>指标配置，包含 <code>otlp()</code> 构造器和 <code>with_runtime_reader()</code> 方法</td></tr>
+        <tr><td><code>MetricsExporter</code></td><td>指标导出器枚举</td></tr>
+        <tr><td><code>MetricsError</code></td><td>指标操作错误类型</td></tr>
+        <tr><td><code>Timer</code></td><td>计时器，提供开始/停止和耗时记录（<code>metrics/timer.rs</code>）</td></tr>
+        <tr><td><code>RuntimeMetricTotals</code> / <code>RuntimeMetricsSummary</code></td><td>运行时指标汇总</td></tr>
+        <tr><td><code>start_global_timer()</code></td><td><code>pub fn start_global_timer(name: &str, tags: &[(&str, &str)]) -> MetricsResult&lt;Timer&gt;</code></td></tr>
+        <tr><td><code>global()</code></td><td><code>pub fn global() -> Option&lt;MetricsClient&gt;</code> — 获取全局指标客户端</td></tr>
+        <tr><td><code>global_statsig_metrics_settings()</code></td><td><code>pub fn global_statsig_metrics_settings() -> Option&lt;StatsigMetricsSettings&gt;</code></td></tr>
+        <tr><td><code>record_process_start_once()</code></td><td>记录进程启动指标（一次性）</td></tr>
+        <tr><td><code>sanitize_metric_tag_value()</code></td><td>清洗指标标签值</td></tr>
+      </tbody>
+    </table>
+
+    <h3>2.6 测试引用</h3>
+    <p><code>otel/src/config.rs</code>（resolve_exporter 单元测试）、<code>otel/src/provider.rs</code>（resource_attributes、log_export_target、trace_export_target 测试）、<code>otel/src/trace_context.rs</code>（W3C trace context 解析测试）。</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 3. rollout-trace -->
+  <!-- ============================================================ -->
+  <section>
+    <h2>3. rollout-trace — 特性使用追踪与遥测</h2>
+    <p><code>codex-rollout-trace</code> crate 拥有 trace schema 的所有权。热路径 Codex 代码依赖其轻量级 writer API；语义回放和查看器投影位于 <code>codex-core</code> 之外。crate 的核心抽象分为三层：<strong>writer</strong>（热路径追加写入）、<strong>raw event</strong>（序列化格式）、<strong>reducer</strong>（确定性回放生成 <code>RolloutTrace</code> 图）。</p>
+
+    <h3>3.1 TraceWriter — 热路径写入器</h3>
+    <table>
+      <thead><tr><th>方法</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>create()</code></td>
+          <td><code>pub fn create(bundle_dir: impl AsRef&lt;Path&gt;, trace_id: String, rollout_id: String, root_thread_id: AgentThreadId) -> Result&lt;Self&gt;</code></td>
+          <td>创建 trace bundle 目录，写入 manifest.json。<code>bundle_dir</code> 下创建 <code>payloads/</code> 子目录和 <code>trace.jsonl</code> 事件日志。内部维护 <code>BufWriter</code> 和自增 seq</td>
+        </tr>
+        <tr>
+          <td><code>write_json_payload()</code></td>
+          <td><code>pub fn write_json_payload(&self, kind: RawPayloadKind, value: &impl Serialize) -> Result&lt;RawPayloadRef&gt;</code></td>
+          <td>将任意可序列化值写入 <code>payloads/{ordinal}.json</code> 并返回引用。payload 文件在引用它的事件之前创建，保证回放中断时不会出现悬空引用</td>
+        </tr>
+        <tr>
+          <td><code>append()</code></td>
+          <td><code>pub fn append(&self, payload: RawTraceEventPayload) -> Result&lt;RawTraceEvent&gt;</code></td>
+          <td>追加一行 raw event 到 trace.jsonl（无额外上下文）</td>
+        </tr>
+        <tr>
+          <td><code>append_with_context()</code></td>
+          <td><code>pub fn append_with_context(&self, context: RawTraceEventContext, payload: RawTraceEventPayload) -> Result&lt;RawTraceEvent&gt;</code></td>
+          <td>追加带 thread_id/codex_turn_id 上下文的 raw event。写入后立即 flush</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>线程安全</strong>：<code>TraceWriter</code> 内部使用 <code>Mutex&lt;TraceWriterInner&gt;</code>，所有公开方法都是 <code>&self</code>（不可变借用），适合多线程共享。PoisonError 时保留事件日志。</p>
+    <p><strong>环境变量</strong>：<code>CODEX_ROLLOUT_TRACE_ROOT_ENV</code> 控制本地 trace bundle 录制的根目录。</p>
+
+    <h3>3.2 RawTraceEvent — raw 事件格式</h3>
+    <div class="diagram">pub struct RawTraceEvent {
+    pub schema_version: u32,             // 当前版本 = 1
+    pub seq: RawEventSeq,                // 单调递增序号（u64）
+    pub wall_time_unix_ms: i64,          // 墙钟时间（毫秒）
+    pub rollout_id: String,
+    pub thread_id: Option&lt;AgentThreadId&gt;,
+    pub codex_turn_id: Option&lt;CodexTurnId&gt;,
+    pub payload: RawTraceEventPayload,   // 事件负载（tagged enum）
+}</div>
+
+    <h3>3.3 RawTraceEventPayload — 事件负载枚举（完整清单）</h3>
+    <table>
+      <thead><tr><th>变体</th><th>关键字段</th><th>语义</th></tr></thead>
+      <tbody>
+        <tr><td><code>RolloutStarted</code></td><td>trace_id, root_thread_id</td><td>rollout 生命周期开始</td></tr>
+        <tr><td><code>RolloutEnded</code></td><td>status: RolloutStatus</td><td>rollout 终止（Completed/Failed/Aborted）</td></tr>
+        <tr><td><code>ThreadStarted</code></td><td>thread_id, agent_path, metadata_payload</td><td>线程/agent 启动</td></tr>
+        <tr><td><code>ThreadEnded</code></td><td>thread_id, status: RolloutStatus</td><td>线程结束</td></tr>
+        <tr><td><code>CodexTurnStarted</code></td><td>codex_turn_id, thread_id</td><td>Codex turn 激活开始</td></tr>
+        <tr><td><code>CodexTurnEnded</code></td><td>codex_turn_id, status: ExecutionStatus</td><td>turn 结束</td></tr>
+        <tr><td><code>InferenceStarted</code></td><td>inference_call_id, thread_id, codex_turn_id, model, provider_name, request_payload</td><td>推理请求发起</td></tr>
+        <tr><td><code>InferenceCompleted</code></td><td>inference_call_id, response_id, upstream_request_id, response_payload</td><td>推理成功完成</td></tr>
+        <tr><td><code>InferenceFailed</code></td><td>inference_call_id, upstream_request_id, error, partial_response_payload</td><td>推理失败</td></tr>
+        <tr><td><code>InferenceCancelled</code></td><td>inference_call_id, upstream_request_id, reason, partial_response_payload</td><td>推理被取消</td></tr>
+        <tr><td><code>ToolCallStarted</code></td><td>tool_call_id, model_visible_call_id, code_mode_runtime_tool_id, requester, kind, summary, invocation_payload</td><td>工具调用开始。requester 区分 Model / CodeCell</td></tr>
+        <tr><td><code>McpToolCallCorrelationAssigned</code></td><td>tool_call_id, mcp_call_id</td><td>MCP 工具调用关联 UUID 分配</td></tr>
+        <tr><td><code>ToolCallRuntimeStarted</code></td><td>tool_call_id, runtime_payload</td><td>工具运行时开始执行</td></tr>
+        <tr><td><code>ToolCallRuntimeEnded</code></td><td>tool_call_id, status, runtime_payload</td><td>工具运行时结束</td></tr>
+        <tr><td><code>ToolCallEnded</code></td><td>tool_call_id, status, result_payload</td><td>工具调用结束</td></tr>
+        <tr><td><code>CodeCellStarted</code></td><td>runtime_cell_id, model_visible_call_id, source_js</td><td>代码单元格开始执行</td></tr>
+        <tr><td><code>CodeCellInitialResponse</code></td><td>runtime_cell_id, status: CodeCellRuntimeStatus, response_payload</td><td>代码单元格初始响应</td></tr>
+        <tr><td><code>CodeCellEnded</code></td><td>runtime_cell_id, status, response_payload</td><td>代码单元格结束</td></tr>
+        <tr><td><code>CompactionRequestStarted</code></td><td>compaction_id, compaction_request_id, thread_id, codex_turn_id, model, provider_name, request_payload</td><td>远程压缩请求开始</td></tr>
+        <tr><td><code>CompactionRequestCompleted</code></td><td>compaction_id, compaction_request_id, response_payload</td><td>压缩请求完成</td></tr>
+        <tr><td><code>CompactionRequestFailed</code></td><td>compaction_id, compaction_request_id, error</td><td>压缩请求失败</td></tr>
+        <tr><td><code>CompactionInstalled</code></td><td>compaction_id, checkpoint_payload</td><td>压缩检查点安装（替换历史）</td></tr>
+        <tr><td><code>AgentResultObserved</code></td><td>edge_id, child_thread_id, child_codex_turn_id, parent_thread_id, message, carried_payload</td><td>子 agent 向父 agent 报告完成</td></tr>
+        <tr><td><code>ProtocolEventObserved</code></td><td>event_type, event_payload</td><td>UI/协议事件包装</td></tr>
+        <tr><td><code>Other</code></td><td>kind, summary, payloads: Vec&lt;RawPayloadRef&gt;, metadata: Value</td><td>早期插桩的通用载体（无专用变体时使用）</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.4 RawToolCallRequester</h3>
+    <div class="diagram">#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RawToolCallRequester {
+    Model,                              // 模型直接发起的工具调用
+    CodeCell { runtime_cell_id },       // 代码单元格发起的工具调用
+}</div>
+
+    <h3>3.5 replay_bundle — 确定性回放</h3>
+    <table>
+      <thead><tr><th>函数</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>replay_bundle()</code></td>
+          <td><code>pub fn replay_bundle(bundle_dir: impl AsRef&lt;Path&gt;) -> Result&lt;RolloutTrace&gt;</code></td>
+          <td>读取 <code>manifest.json</code> 和 <code>trace.jsonl</code>，逐行解析 <code>RawTraceEvent</code>，通过 <code>TraceReducer</code> 的状态机归约生成 <code>RolloutTrace</code> 图。自动处理 pending spawn edge fallback</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>3.6 RolloutTrace — 归约后的追踪图</h3>
+    <p><code>RolloutTrace</code> 是 replay 的输出，包含以下 BTreeMap 索引集合（全部以 ID 字符串索引）：</p>
+    <div class="diagram">pub struct RolloutTrace {
+    pub schema_version: u32,
+    pub trace_id: String,
+    pub rollout_id: String,
+    pub started_at_unix_ms: i64,
+    pub ended_at_unix_ms: Option&lt;i64&gt;,
+    pub status: RolloutStatus,                              // Running/Completed/Failed/Aborted
+    pub root_thread_id: AgentThreadId,
+    pub threads: BTreeMap&lt;AgentThreadId, AgentThread&gt;,       // AgentThread { agent_path, origin, execution, conversation_item_ids, ... }
+    pub codex_turns: BTreeMap&lt;CodexTurnId, CodexTurn&gt;,       // CodexTurn { thread_id, execution, input_item_ids }
+    pub conversation_items: BTreeMap&lt;ConversationItemId, ConversationItem&gt;,
+    pub inference_calls: BTreeMap&lt;InferenceCallId, InferenceCall&gt;,
+    pub code_cells: BTreeMap&lt;CodeCellId, CodeCell&gt;,
+    pub tool_calls: BTreeMap&lt;ToolCallId, ToolCall&gt;,
+    pub terminal_sessions: BTreeMap&lt;TerminalId, TerminalSession&gt;,
+    pub terminal_operations: BTreeMap&lt;TerminalOperationId, TerminalOperation&gt;,
+    pub compactions: BTreeMap&lt;CompactionId, Compaction&gt;,
+    pub compaction_requests: BTreeMap&lt;CompactionRequestId, CompactionRequest&gt;,
+    pub interaction_edges: BTreeMap&lt;EdgeId, InteractionEdge&gt;,  // 线程/单元格/工具间信息流边
+    pub raw_payloads: BTreeMap&lt;RawPayloadId, RawPayloadRef&gt;,   // 原始负载引用
+}</div>
+
+    <h3>3.7 Reducer 架构</h3>
+    <p><code>TraceReducer</code> 是有状态的回放引擎。它维护以下中间状态：</p>
+    <ul>
+      <li><code>thread_conversation_snapshots</code>：每个线程的模型可见对话快照，用于对话归约器的请求/响应对比</li>
+      <li><code>pending_compaction_replacement_item_ids</code>：压缩安装的替换历史，在下一次 sampling 请求时对比</li>
+      <li><code>code_cell_ids_by_runtime</code>：运行时代码单元格 handle 到 reducer ID 的映射</li>
+      <li><code>pending_code_cell_starts</code>：已开始但模型可见源项尚未归约的代码单元格</li>
+      <li><code>pending_code_cell_lifecycle_events</code>：等待 start 就绪的生命周期事件队列</li>
+      <li><code>pending_agent_interaction_edges</code>：等待接收方 transcript item 归约的 agent 交互边</li>
+    </ul>
+    <p>Reducer 子模块对应关系：</p>
+    <table>
+      <thead><tr><th>子模块</th><th>文件</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td>conversation</td><td><code>reducer/conversation.rs</code> + <code>reducer/conversation/normalize.rs</code></td><td>推理请求/响应中的对话项归约与标准化</td></tr>
+        <tr><td>inference</td><td><code>reducer/inference.rs</code></td><td>推理调用生命周期归约（StartedInferenceCall 到 Completion）</td></tr>
+        <tr><td>tool/agents</td><td><code>reducer/tool/agents.rs</code></td><td>多 agent 工具调用归约</td></tr>
+        <tr><td>tool/terminal</td><td><code>reducer/tool/terminal.rs</code></td><td>终端会话和终端操作生命周期归约</td></tr>
+        <tr><td>code_cell</td><td><code>reducer/code_cell.rs</code></td><td>代码单元格生命周期归约</td></tr>
+        <tr><td>compaction</td><td><code>reducer/compaction.rs</code></td><td>压缩请求生命周期和检查点安装归约</td></tr>
+        <tr><td>thread</td><td><code>reducer/thread.rs</code></td><td>线程生命周期归约</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.8 模型类型 ID 速查</h3>
+    <table>
+      <thead><tr><th>类型别名</th><th>底层类型</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>AgentThreadId</code></td><td><code>String</code></td><td>会话 UUID</td></tr>
+        <tr><td><code>AgentPath</code></td><td><code>String</code></td><td>多 agent 路由路径（如 /root、/root/search_docs）</td></tr>
+        <tr><td><code>CodexTurnId</code></td><td><code>String</code></td><td>运行时提交/激活 UUID</td></tr>
+        <tr><td><code>ConversationItemId</code></td><td><code>String</code></td><td>归约器分配的对话项 ID</td></tr>
+        <tr><td><code>InferenceCallId</code></td><td><code>String</code></td><td>一次出站推理请求 ID</td></tr>
+        <tr><td><code>McpCallId</code></td><td><code>String</code></td><td>MCP 后端请求全局唯一 ID</td></tr>
+        <tr><td><code>ToolCallId</code></td><td><code>String</code></td><td>归约器分配的工具调用 ID</td></tr>
+        <tr><td><code>ModelVisibleCallId</code></td><td><code>String</code></td><td>推理负载中可见的 call_id</td></tr>
+        <tr><td><code>CodeCellId</code></td><td><code>String</code></td><td>归约器分配的 exec 代码单元格 ID</td></tr>
+        <tr><td><code>TerminalId</code></td><td><code>String</code></td><td>终端运行时返回的进程/会话 ID</td></tr>
+        <tr><td><code>TerminalOperationId</code></td><td><code>String</code></td><td>终端命令/写入/poll 操作 ID</td></tr>
+        <tr><td><code>CompactionId</code></td><td><code>String</code></td><td>压缩检查点 ID</td></tr>
+        <tr><td><code>CompactionRequestId</code></td><td><code>String</code></td><td>压缩上游请求 ID</td></tr>
+        <tr><td><code>EdgeId</code></td><td><code>String</code></td><td>信息流边 ID</td></tr>
+        <tr><td><code>CorrelationId</code></td><td><code>String</code></td><td>请求/日志关联元数据 ID</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.9 端到端示例：writer 写入 + replay 回读</h3>
+    <p>见 <code>rollout-trace/src/writer.rs</code> 的内联测试 <code>writer_records_payload_refs_and_replays_rollout_status</code>：创建 TraceWriter -> 写入 RolloutStarted/ThreadStarted/CodexTurnStarted/InferenceStarted/InferenceCompleted/TurnEnded/RolloutEnded -> replay_bundle -> 验证 RolloutTrace 拓扑。</p>
+
+    <h3>3.10 测试引用</h3>
+    <p><code>rollout-trace/src/writer.rs</code>（端到端测试）、<code>rollout-trace/src/reducer/conversation_tests.rs</code>、<code>rollout-trace/src/reducer/inference_tests.rs</code>、<code>rollout-trace/src/reducer/tool/agents_tests.rs</code>、<code>rollout-trace/src/reducer/tool/terminal_tests.rs</code>、<code>rollout-trace/src/reducer/code_cell_tests.rs</code>、<code>rollout-trace/src/thread_tests.rs</code>、<code>rollout-trace/src/protocol_event_tests.rs</code>。</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 4. feedback -->
+  <!-- ============================================================ -->
+  <section>
+    <h2>4. feedback — 用户反馈收集</h2>
+    <p><code>codex-feedback</code> crate 提供日志环形缓冲区、tracing 层集成和 Sentry 上传能力。核心入口是 <code>CodexFeedback</code>，它通过 tracing subscriber 的 layer 机制捕获全保真度日志到内存环形缓冲区，并提供 <code>FeedbackSnapshot</code> 供上传。</p>
+
+    <h3>4.1 CodexFeedback — 反馈系统入口</h3>
+    <table>
+      <thead><tr><th>方法</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>new()</code></td>
+          <td><code>pub fn new() -> Self</code></td>
+          <td>创建默认容量（4 MiB）的反馈实例。实现 Default trait</td>
+        </tr>
+        <tr>
+          <td><code>make_writer()</code></td>
+          <td><code>pub fn make_writer(&self) -> FeedbackMakeWriter</code></td>
+          <td>创建实现 <code>MakeWriter</code> trait 的写入器，供 tracing_subscriber fmt layer 使用</td>
+        </tr>
+        <tr>
+          <td><code>logger_layer()</code></td>
+          <td><code>pub fn logger_layer&lt;S&gt;(&self) -> impl Layer&lt;S&gt;</code></td>
+          <td>构建捕获全保真度日志的 tracing layer。配置：SystemTime 计时器、无 ANSI、无 target、Level::TRACE 过滤（无论调用方 RUST_LOG 如何，确保反馈包含完整 trace）</td>
+        </tr>
+        <tr>
+          <td><code>metadata_layer()</code></td>
+          <td><code>pub fn metadata_layer&lt;S&gt;(&self) -> impl Layer&lt;S&gt;</code></td>
+          <td>构建结构化元数据收集层。仅收集 target="feedback_tags" 的 event，将字段提取为 key/value 标签存入 BTreeMap（容量上限 64）</td>
+        </tr>
+        <tr>
+          <td><code>snapshot()</code></td>
+          <td><code>pub fn snapshot(&self, session_id: Option&lt;ThreadId&gt;) -> FeedbackSnapshot</code></td>
+          <td>创建当前日志和标签的快照。从环境收集 FeedbackDiagnostics。若 session_id 为 None 则生成占位 thread_id</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>4.2 FeedbackRequestTags</h3>
+    <p>用于标记反馈上传的请求/认证上下文结构体：</p>
+    <div class="diagram">pub struct FeedbackRequestTags&lt;'a&gt; {
+    pub endpoint: &'a str,
+    pub auth_header_attached: bool,
+    pub auth_header_name: Option&lt;&'a str&gt;,
+    pub auth_mode: Option&lt;&'a str&gt;,
+    pub auth_retry_after_unauthorized: Option&lt;bool&gt;,
+    pub auth_recovery_mode: Option&lt;&'a str&gt;,
+    pub auth_recovery_phase: Option&lt;&'a str&gt;,
+    pub auth_connection_reused: Option&lt;bool&gt;,
+    pub auth_request_id: Option&lt;&'a str&gt;,
+    pub auth_cf_ray: Option&lt;&'a str&gt;,
+    pub auth_error: Option&lt;&'a str&gt;,
+    pub auth_error_code: Option&lt;&'a str&gt;,
+    pub auth_recovery_followup_success: Option&lt;bool&gt;,
+    pub auth_recovery_followup_status: Option&lt;u16&gt;,
+}</div>
+
+    <h3>4.3 标签发射函数</h3>
+    <table>
+      <thead><tr><th>函数</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>emit_feedback_request_tags()</code></td>
+          <td><code>pub fn emit_feedback_request_tags(tags: &FeedbackRequestTags&lt;'_&gt;)</code></td>
+          <td>将请求标签通过 tracing::info! 发射到 feedback_tags target</td>
+        </tr>
+        <tr>
+          <td><code>emit_feedback_request_tags_with_auth_env()</code></td>
+          <td><code>pub fn emit_feedback_request_tags_with_auth_env(tags: &FeedbackRequestTags&lt;'_&gt;, auth_env: &AuthEnvTelemetry)</code></td>
+          <td>同上，额外附加认证环境遥测数据（openai_api_key_present、codex_api_key_present 等）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>4.4 FeedbackSnapshot — 快照与上传</h3>
+    <table>
+      <thead><tr><th>方法/字段</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>thread_id</code></td>
+          <td><code>pub thread_id: String</code></td>
+          <td>关联的 thread ID</td>
+        </tr>
+        <tr>
+          <td><code>feedback_diagnostics()</code></td>
+          <td><code>pub fn feedback_diagnostics(&self) -> &FeedbackDiagnostics</code></td>
+          <td>获取环境诊断信息</td>
+        </tr>
+        <tr>
+          <td><code>with_feedback_diagnostics()</code></td>
+          <td><code>pub fn with_feedback_diagnostics(mut self, diagnostics: FeedbackDiagnostics) -> Self</code></td>
+          <td>设置诊断信息（builder 模式）</td>
+        </tr>
+        <tr>
+          <td><code>feedback_diagnostics_attachment_text()</code></td>
+          <td><code>pub fn ...(&self, include_logs: bool) -> Option&lt;String&gt;</code></td>
+          <td>生成诊断附件文本（仅当 include_logs 为 true）</td>
+        </tr>
+        <tr>
+          <td><code>save_to_temp_file()</code></td>
+          <td><code>pub fn save_to_temp_file(&self) -> io::Result&lt;PathBuf&gt;</code></td>
+          <td>将日志保存到临时文件：<code>$TEMP/codex-feedback-{thread_id}.log</code></td>
+        </tr>
+        <tr>
+          <td><code>upload_feedback()</code></td>
+          <td><code>pub fn upload_feedback(&self, options: FeedbackUploadOptions&lt;'_&gt;) -> Result&lt;()&gt;</code></td>
+          <td>上传反馈到 Sentry。构建 Envelope（Event + Attachments），flush 超时 10 秒。classification="bug"/"bad_result"/"safety_check" 使用 Error 级别</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>4.5 上传相关类型</h3>
+    <table>
+      <thead><tr><th>类型</th><th>字段</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>FeedbackUploadOptions&lt;'a&gt;</code></td>
+          <td>classification, reason, tags, include_logs, extra_attachments, extra_attachment_paths, session_source, logs_override</td>
+          <td>控制一次 Sentry 上传的输入。调用方负责在传入之前应用用户同意门控</td>
+        </tr>
+        <tr>
+          <td><code>FeedbackAttachmentPath</code></td>
+          <td>path: PathBuf, attachment_filename_override: Option&lt;String&gt;</td>
+          <td>文件系统附件路径（如 rollout 文件），上传时读取并作为 attachment 发送</td>
+        </tr>
+        <tr>
+          <td><code>FeedbackAttachment</code></td>
+          <td>filename: String, content_type: Option&lt;String&gt;, buffer: Vec&lt;u8&gt;</td>
+          <td>内存附件（如 redacted doctor report），直接缓冲，不上磁盘</td>
+        </tr>
+        <tr>
+          <td><code>FeedbackDiagnostic</code></td>
+          <td>headline: String, details: Vec&lt;String&gt;</td>
+          <td>单条诊断信息（如代理环境变量检测）</td>
+        </tr>
+        <tr>
+          <td><code>FeedbackDiagnostics</code></td>
+          <td>diagnostics: Vec&lt;FeedbackDiagnostic&gt;</td>
+          <td>诊断信息集合</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>4.6 环形缓冲区</h3>
+    <p>内部使用 <code>RingBuffer</code>（基于 <code>VecDeque&lt;u8&gt;</code>），默认容量 4 MiB。写入策略：</p>
+    <ul>
+      <li>单次写入超过容量：清空缓冲区，仅保留尾部 <code>max</code> 字节</li>
+      <li>超出容量：从头部逐字节驱逐</li>
+      <li><code>snapshot_bytes()</code>：完整拷贝当前缓冲区内容</li>
+    </ul>
+
+    <h3>4.7 标签元数据层</h3>
+    <p><code>FeedbackMetadataLayer</code> 实现 <code>tracing_subscriber::Layer</code>，从 target="feedback_tags" 的 event 中提取所有字段（i64/u64/bool/f64/str/debug）并存入 <code>BTreeMap&lt;String, String&gt;</code>。标签上限 64 个，已存在的 key 不覆盖。</p>
+
+    <h3>4.8 上传标签合并策略</h3>
+    <p><code>upload_tags()</code> 构建最终标签 BTreeMap 的规则：</p>
+    <ol>
+      <li>预留字段（thread_id、classification、cli_version、session_source、reason）始终使用计算值</li>
+      <li>调用方传入的 <code>client_tags</code> 中非预留字段优先（insert if vacant）</li>
+      <li>快照中的 tags（来自 metadata layer）作为后备填充</li>
+    </ol>
+
+    <h3>4.9 Sentry 集成常量</h3>
+    <table>
+      <thead><tr><th>常量</th><th>值</th></tr></thead>
+      <tbody>
+        <tr><td><code>SENTRY_DSN</code></td><td><code>https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458</code></td></tr>
+        <tr><td><code>UPLOAD_TIMEOUT_SECS</code></td><td>10 秒</td></tr>
+        <tr><td><code>DEFAULT_MAX_BYTES</code></td><td>4 MiB</td></tr>
+        <tr><td><code>MAX_FEEDBACK_TAGS</code></td><td>64</td></tr>
+        <tr><td><code>FEEDBACK_TAGS_TARGET</code></td><td><code>"feedback_tags"</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.10 测试引用</h3>
+    <p><code>feedback/src/lib.rs</code>（内联测试模块）：ring_buffer_drops_front_when_full、metadata_layer_records_tags_from_feedback_target、feedback_attachments_gate_connectivity_diagnostics、path_backed_attachments_use_binary_content_types、upload_tags_include_client_tags_and_preserve_reserved_fields。</p>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- 5. cross reference -->
+  <!-- ============================================================ -->
+  <section>
+    <h2>5. Crate 间依赖关系</h2>
+    <div class="diagram">┌─ analytics ──────────────────────────────────────────────┐
+│ 依赖: codex-login (AuthManager), codex-plugin,            │
+│       codex-app-server-protocol, codex-protocol            │
+│ 被依赖: codex-core (通过 AnalyticsEventsClient 注入)       │
+└──────────────────────────────────────────────────────────┘
+
+┌─ otel ───────────────────────────────────────────────────┐
+│ 依赖: opentelemetry, opentelemetry-otlp,                  │
+│       opentelemetry_sdk, tracing-opentelemetry,            │
+│       codex-protocol, codex-utils-absolute-path            │
+│ 被依赖: codex-core (进程初始化时安装 OtelProvider)         │
+└──────────────────────────────────────────────────────────┘
+
+┌─ rollout-trace ──────────────────────────────────────────┐
+│ 依赖: serde, serde_json, anyhow                            │
+│ 被依赖: codex-core (热路径 writer 注入),                   │
+│         codex-thread-store (间接)                          │
+└──────────────────────────────────────────────────────────┘
+
+┌─ feedback ───────────────────────────────────────────────┐
+│ 依赖: tracing, tracing-subscriber, sentry, codex-login,   │
+│       codex-protocol, anyhow, mime_guess                   │
+│ 被依赖: codex-core (反馈收集初始化)                        │
+└──────────────────────────────────────────────────────────┘</div>
+  </section>
+
+  <section>
+    <h2>6. 源码阅读顺序推荐（L3 辅助 crate）</h2>
+    <ol>
+      <li><code>codex-rs/analytics/src/lib.rs</code>：先理解公共导出面和 <code>AnalyticsEventsClient</code> 的组织方式（46 行）。</li>
+      <li><code>codex-rs/analytics/src/client.rs</code>：看 <code>AnalyticsEventsClient</code> 的全部 track_* 方法实现和 HTTP 发送逻辑（256 行）。</li>
+      <li><code>codex-rs/analytics/src/events.rs</code>：看事件序列化模型（GuardianReviewEventParams、CodexTurnEventParams 等，含所有字段定义）。</li>
+      <li><code>codex-rs/analytics/src/facts.rs</code>：看事实模型（CodexCompactionEvent、CodexGoalEvent、所有输入类型和枚举）。</li>
+      <li><code>codex-rs/analytics/src/reducer.rs</code>：看 <code>AnalyticsReducer</code> 如何将 facts 归约为 events。</li>
+      <li><code>codex-rs/otel/src/lib.rs</code>：看 <code>OtelProvider</code> 的公共接口、<code>start_global_timer</code>、<code>TelemetryAuthMode</code>。</li>
+      <li><code>codex-rs/otel/src/config.rs</code>：看 <code>OtelSettings</code>、<code>OtelExporter</code> 和 Statsig 解析逻辑。</li>
+      <li><code>codex-rs/otel/src/provider.rs</code>：看 <code>OtelProvider::from()</code> 如何构建 logger/tracer/metrics 三管齐下的 provider。</li>
+      <li><code>codex-rs/otel/src/trace_context.rs</code>：看 W3C Trace Context 传播的全套函数（inject/extract/validate）。</li>
+      <li><code>codex-rs/rollout-trace/src/lib.rs</code>：看 crate 总出口——TraceWriter、RawTraceEvent、replay_bundle、各类 handle。</li>
+      <li><code>codex-rs/rollout-trace/src/writer.rs</code>：看 <code>TraceWriter</code> 的热路径写入实现和端到端测试（128 行实现）。</li>
+      <li><code>codex-rs/rollout-trace/src/raw_event.rs</code>：看 <code>RawTraceEvent</code> 和 <code>RawTraceEventPayload</code> 的 22 种变体（162 行）。</li>
+      <li><code>codex-rs/rollout-trace/src/reducer/mod.rs</code>：看 <code>replay_bundle</code> 和 <code>TraceReducer</code> 的 apply_event 分发（248 行）。</li>
+      <li><code>codex-rs/feedback/src/lib.rs</code>：看 <code>CodexFeedback</code> 的完整实现——环形缓冲区、tracing layer、Sentry 上传（全部在一个文件，700 行）。</li>
+    </ol>
+  </section>
+</main>
+</body>
+</html>

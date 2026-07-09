@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — 7 数据源路由地图</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .route-block { text-align: center; margin: 20px 0; }
+  .route-block pre { display: inline-block; text-align: left; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 1 节 &middot; 预计 14 分钟</p>
+
+<h1>0001 — 7 数据源路由地图</h1>
+
+<p class="objective"><strong>学习目标：</strong>能说出 VENDOR_METHODS 的 17 个方法如何按 5 大类别分组、3 种 vendor（a_stock / yfinance / alpha_vantage）的覆盖差异，以及 <code>route_to_vendor</code> 的 fallback 链构建规则。</p>
+
+<h2>1. 统一入口：从 get_data_inflo 到 route_to_vendor</h2>
+
+<p>上层调用方（Agent 的 ToolNode 或 Graph 节点）不直接调用 <code>a_stock.py</code> 中的函数。它们通过 <code>interface.py</code> 的统一入口发起请求。调用链路为：</p>
+
+<div class="route-block">
+<pre>
+调用方 → get_data_inflo(method, *args)
+       → get_category_for_method(method)     # 查 TOOLS_CATEGORIES
+       → get_vendor(category, method)        # 查 config 获取首选 vendor
+       → route_to_vendor(method, *args)      # 构建 fallback 链并执行
+         → VENDOR_METHODS[method][vendor](*args)
+</pre>
+</div>
+
+<p><code>get_data_inflo</code> 本身是一个薄封装（仅做参数透传），真正的路由逻辑在 <code>route_to_vendor</code> 中。这个方法做了三件事：确定方法所属类别、读取配置中的 vendor 偏好、构建 fallback 链。</p>
+
+<h2>2. VENDOR_METHODS：17 方法 x 3 Vendor 矩阵</h2>
+
+<p>每个数据方法在 3 种 vendor 上的覆盖情况不同。以下按类别展示：</p>
+
+<table>
+  <tr><th>类别</th><th>方法</th><th>a_stock</th><th>yfinance</th><th>alpha_vantage</th></tr>
+  <tr>
+    <td rowspan="1">core_stock_apis</td>
+    <td>get_stock_data</td>
+    <td>mootdx TCP</td><td>Yahoo Finance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td rowspan="1">technical_indicators</td>
+    <td>get_indicators</td>
+    <td>stockstats + mootdx</td><td>stockstats + yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td rowspan="4">fundamental_data</td>
+    <td>get_fundamentals</td>
+    <td>腾讯+mootdx+东财+同花顺</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td>get_balance_sheet</td>
+    <td>新浪 HTTP</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td>get_cashflow</td>
+    <td>新浪 HTTP</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td>get_income_statement</td>
+    <td>新浪 HTTP</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td rowspan="3">news_data</td>
+    <td>get_news</td>
+    <td>东财搜索→新浪</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td>get_global_news</td>
+    <td>财联社+东财7x24</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td>get_insider_transactions</td>
+    <td>mootdx F10</td><td>yfinance</td><td>Alpha Vantage</td>
+  </tr>
+  <tr>
+    <td rowspan="8"><strong>signal_data</strong><br><em>A股专属</em></td>
+    <td>get_profit_forecast</td>
+    <td>同花顺 EPS</td><td>—</td><td>—</td>
+  </tr>
+  <tr><td>get_hot_stocks</td><td>同花顺热股</td><td>—</td><td>—</td></tr>
+  <tr><td>get_northbound_flow</td><td>同花顺 hsgtApi</td><td>—</td><td>—</td></tr>
+  <tr><td>get_concept_blocks</td><td>百度 PAE</td><td>—</td><td>—</td></tr>
+  <tr><td>get_fund_flow</td><td>东财 push2</td><td>—</td><td>—</td></tr>
+  <tr><td>get_dragon_tiger_board</td><td>东财 datacenter</td><td>—</td><td>—</td></tr>
+  <tr><td>get_lockup_expiry</td><td>东财 datacenter</td><td>—</td><td>—</td></tr>
+  <tr><td>get_industry_comparison</td><td>东财 push2</td><td>—</td><td>—</td></tr>
+</table>
+
+<p><strong>关键观察：</strong>signal_data 的 8 个方法仅在 a_stock vendor 上有实现——这是 A 股特化 fork 与上游 TradingAgents 的最大差异点。yfinance 和 alpha_vantage 无法提供龙虎榜、北向资金、解禁日历等 A 股专属数据。</p>
+
+<h2>3. Fallback 降级链机制</h2>
+
+<p><code>route_to_vendor</code> 的降级策略设计得很克制：</p>
+
+<pre># interface.py:202-230 — fallback 链构建与执行
+def route_to_vendor(method: str, *args, **kwargs):
+    category = get_category_for_method(method)
+    vendor_config = get_vendor(category, method)
+    primary_vendors = [v.strip() for v in vendor_config.split(',')]
+
+    # 首选在前，其余可用 vendor 追加在后（去重）
+    all_available_vendors = list(VENDOR_METHODS[method].keys())
+    fallback_vendors = primary_vendors.copy()
+    for vendor in all_available_vendors:
+        if vendor not in fallback_vendors:
+            fallback_vendors.append(vendor)
+
+    for vendor in fallback_vendors:
+        try:
+            return VENDOR_METHODS[method][vendor](*args, **kwargs)
+        except AlphaVantageRateLimitError:
+            continue  # 仅在 AV 限流时触发降级
+    raise RuntimeError(f"No available vendor for '{method}'")</pre>
+
+<p><strong>三个要点：</strong></p>
+<ol>
+  <li><strong>仅 AlphaVantageRateLimitError 触发降级</strong> — 网络超时、数据为空、其他异常直接抛出，不静默切换。这是刻意设计：避免在用户不知情时切到不同数据源导致数据口径不一致。</li>
+  <li><strong>config 支持多 vendor 逗号分隔</strong> — 如 <code>"a_stock,alpha_vantage"</code>，a_stock 失败不会自动切到 AV（因为不是 AV 限流异常），但 config 层面的主备链会在首次路由时按顺序尝试。</li>
+  <li><strong>signal_data 无降级</strong> — VENDOR_METHODS 中只有一个 a_stock 条目，无法构建 fallback 链，失败直接抛 RuntimeError。</li>
+</ol>
+
+<h2>4. 7 数据源 → 协议 → 用途速查</h2>
+
+<table>
+  <tr><th>数据源</th><th>协议</th><th>数据</th><th>限流</th></tr>
+  <tr><td>mootdx</td><td>TCP :7709</td><td>K线、财务快照、F10、代码-名称映射</td><td>无</td></tr>
+  <tr><td>腾讯财经</td><td>HTTP GBK</td><td>实时报价、PE/PB/市值/换手率</td><td>无</td></tr>
+  <tr><td>东方财富</td><td>HTTP（走 _em_get）</td><td>个股信息、龙虎榜、解禁、资金流、板块、新闻</td><td><strong>是</strong></td></tr>
+  <tr><td>新浪财经</td><td>HTTP</td><td>K线 fallback、财报三表、新闻 fallback</td><td>无</td></tr>
+  <tr><td>同花顺</td><td>HTTP GBK</td><td>EPS一致预期、热股题材、北向资金</td><td>无</td></tr>
+  <tr><td>财联社</td><td>HTTP</td><td>全球快讯（telegraphList）</td><td>无</td></tr>
+  <tr><td>百度股市通</td><td>HTTP</td><td>概念板块归属（申万/概念/地域）</td><td>无</td></tr>
+</table>
+
+<p>仅东财系有严格风控——所有 eastmoney.com 请求强制走 <code>_em_get()</code> 节流入口。其余 6 个源不走限流（详见第 3 节异常路径课）。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>VENDOR_METHODS 中的 17 个方法分为哪 5 大类别？signal_data 为什么只有 a_stock 实现？</li>
+    <li><code>route_to_vendor</code> 的 fallback 链在什么异常下才会触发降级？为什么设计得这么克制？</li>
+    <li>7 个数据源中，唯一有主动限流机制的是哪个？限流入口函数叫什么？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> core_stock_apis、technical_indicators、fundamental_data、news_data、signal_data。signal_data 包含龙虎榜、北向资金、资金流、解禁等 A 股特有数据，yfinance 和 alpha_vantage 作为美股数据源无法提供这些数据。</p>
+      <p><strong>2.</strong> 仅 <code>AlphaVantageRateLimitError</code> 触发降级。设计克制的原因是避免静默切换数据源导致数据口径不一致——网络超时、空数据等异常应直接暴露给调用方处理，而非悄悄切到另一个 vendor。</p>
+      <p><strong>3.</strong> 东方财富（eastmoney.com），限流入口是 <code>_em_get()</code>，通过模块级时间戳串行限流 + 随机抖动 + Session 复用来防止封 IP。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>速查资料：</strong><a href="../reference/data-fetching-flow-map.html">数据获取完整链路速查图谱</a> —— 17 方法 x 7 数据源矩阵、config 配置项速查、关键数据结构。<br>
+  <strong>下一节：</strong><a href="0002-main-path.html">K线/财务/新闻主路径</a> —— 跟踪三个核心方法的完整调用链路。<br>
+  <strong>有疑问？</strong>向 AI 教师追问任何不清楚的概念。
+</p>
+
+</div>
+</main>
+</body>
+</html>

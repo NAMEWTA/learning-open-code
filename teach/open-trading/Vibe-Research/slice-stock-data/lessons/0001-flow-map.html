@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 个股数据查询 — 全链路地图</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    pre { margin: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>0001 个股数据查询 — 全链路地图</h1>
+  <p class="meta">学习目标：15 分钟内能说出 6 位代码输入后经历的三层请求编排（竞态守卫 / 主数据块 / fire-and-forget），以及请求如何从浏览器走到各个后端端点。</p>
+
+  <h2>1. 入口分叉：A 股还是美股？</h2>
+  <p>用户在输入框敲入代码，点击"查询"或按 Enter 后，<code>StockData.tsx</code> 的 <code>run()</code> 函数被调用。第一步不是发请求，而是<strong>判断代码类型</strong>：</p>
+  <div class="diagram">/^\d{6}$/  匹配 6 位纯数字 → A 股路径（20+ 端点并行）
+非 6 位纯数字 → 美股/港股路径（单端点 /api/global/stock）</div>
+  <p>这个分支在 <code>StockData.tsx:114</code> 行。A 股路径是整个页面最复杂的部分——单次查询拉起 20+ 个 API。理解它的请求编排是本节的核心。</p>
+
+  <h2>2. A 股路径：三层请求编排</h2>
+  <p>A 股查询并非一次性发起所有请求。它被设计为<strong>三层</strong>，每一层有不同的错误处理策略：</p>
+
+  <table>
+    <tr><th>层</th><th>端点</th><th>策略</th><th>失败时</th></tr>
+    <tr><td><strong>竞态守卫</strong></td><td><code>runIdRef</code>（非端点）</td><td>每次查询分配新 ID，回填时只接受最新 ID 的结果</td><td>旧结果自动丢弃</td></tr>
+    <tr><td><strong>主数据块</strong></td><td>valuation / reports / percentile / financials / announcements / news</td><td><code>Promise.all()</code> 并发 + 各自 .catch 降级</td><td>单端点失败不影响其余；news 独立 try/catch</td></tr>
+    <tr><td><strong>fire-and-forget</strong></td><td>margin / blockTrade / holders / dividend / fundFlow / dragonTiger / lockup / blocks / hotConcepts / investorQa</td><td>10 个独立 <code>.then().catch()</code>，不 await，不阻塞主数据</td><td>静默失败，对应卡片不渲染</td></tr>
+  </table>
+
+  <p>关键代码结构（简化）：</p>
+  <div class="diagram">// 竞态守卫
+const rid = ++runIdRef.current;  // 每次查询递增
+
+// 第 3 层 — 先行发射，不阻塞
+api.margin(c).then(ok(setMargin)).catch(() => {});
+api.blockTrade(c).then(ok(setBlockT)).catch(() => {});
+// ... 共 10 个 fire-and-forget
+
+// 第 2 层 — 主数据并发
+const [v, r, p, f, a] = await Promise.all([
+  api.valuation(c),
+  api.reports(c).catch(() => []),
+  api.percentile(c).catch(() => null),
+  api.financials(c).catch(() => null),
+  api.announcements(c).catch(() => []),
+]);
+if (rid !== runIdRef.current) return;  // 竞态检查
+// news 独立降级
+try { setNews(await api.news(c)); } catch (e) { setDepNote(e.message); }</div>
+
+  <p><strong>为什么这样设计？</strong>主数据块（行情/估值/财务/研报/公告）是用户第一眼看到的内容，必须尽快展示。资金面/龙虎榜/解禁等是"进一步探索"的数据——先展示核心卡片，再逐步回填外围卡片，体验更好。竞态守卫确保用户快速切换代码时，旧请求的回填不会覆盖新请求的结果。</p>
+
+  <h2>3. 从浏览器到后端的物理路径</h2>
+  <p>前端 <code>api.ts</code> 中的 <code>request()</code> 函数将所有调用统一发到 <code>/api/*</code>：</p>
+  <div class="diagram">浏览器 :5899
+  │  fetch("/api/valuation?code=600519")
+  ▼
+Vite 开发服务器（代理 /api → localhost:8900）
+  │
+  ▼
+FastAPI app.py（uvicorn :8900）
+  │  中间件链：CORS 放行 → 可选 Bearer 鉴权
+  │  路由匹配：@app.get("/api/valuation") → valuation(code)
+  ▼
+astock.py  → 腾讯/东财/同花顺/mootdx/akshare</div>
+
+  <p>注意：Vite 代理只在开发模式生效。生产部署时通常用 Nginx 反向代理替代。无论哪种方式，<strong>前端代码只看到 /api/*</strong>，不知道后端跑在哪里——这是前后端分离的标准实践。</p>
+
+  <h2>4. 全链路时序全景</h2>
+  <p>下面这张图覆盖从输入框到 DOM 更新的完整时间线：</p>
+  <div class="diagram">用户输入 "600519" → Enter
+  │
+  ├─[0ms] run() 调用
+  │   ├─ 清空所有 state
+  │   ├─ rid = ++runIdRef.current
+  │   └─ setLoading(true)
+  │
+  ├─[~1ms] 10 个 fire-and-forget 发射（不阻塞）
+  │   margin / blockTrade / holders / dividend
+  │   fundFlow / dragonTiger / lockup / blocks / hotConcepts / investorQa
+  │
+  ├─[~2ms] Promise.all 发射 5 个主端点
+  │   valuation / reports / percentile / financials / announcements
+  │
+  │   ─── 网络往返（50-2000ms，取决于数据源响应速度）───
+  │
+  ├─[~200ms] Promise.all 陆续 resolve
+  │   ├─ 估值、财务先到 → setVal / setFin / setPctl
+  │   ├─ 研报、公告稍后 → setReports / setAnns
+  │   └─ rid 检查通过 → setLoading(false)
+  │
+  ├─[~300ms] news 独立 try/catch 完成 → setNews 或 setDepNote
+  │
+  └─[~500-2000ms] 资金面陆续回填
+      margin / blockTrade / holders → 对应卡片渐进出现</div>
+
+  <div class="callout">
+    <p><strong>暂停回忆：</strong>StockData 页面的请求编排为什么不选择 <code>Promise.allSettled</code> 而是用各自 <code>.catch()</code>？这两种方式在失败处理上有什么本质区别？</p>
+    <p><strong>参考答案：</strong><code>Promise.allSettled</code> 会等待所有请求完成（无论成功失败）后才返回，这意味着一个慢端点会拖慢整个主数据块的渲染。<code>.catch(() => null)</code> 配合 <code>Promise.all</code> 则让该端点立即以 null 结束，不影响其他端点的数据展示。另外，news 端点放在独立 try/catch 而非 Promise.all 里，是因为它的失败需要区分 <code>501</code>（依赖缺失，提示安装）和普通异常（静默降级）——这种细粒度控制在 <code>.catch()</code> 里更容易实现。</p>
+  </div>
+
+  <p class="source">主要来源：<code>frontend/src/pages/StockData.tsx:105-165</code>（run 函数全链路）、<code>frontend/src/lib/api.ts:54-81</code>（request 统一封装）、<code>backend/app.py:1-68</code>（FastAPI 应用与中间件）。完整 20+ 端点速查见 <a href="../reference/stock-data-flow-map.html">stock-data-flow-map 参考</a>。下节课深入主数据块中估值+财务的请求链路：<a href="./0002-valuation-finance.html">0002 估值+财务路径</a>。</p>
+</main>
+</body>
+</html>

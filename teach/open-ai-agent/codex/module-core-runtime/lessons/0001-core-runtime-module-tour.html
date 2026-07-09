@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 Core Runtime 模块导览：先抓住 Thread 与 Turn</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      .filetree {
+        font-family: "SF Mono", Consolas, monospace;
+        font-size: 0.82rem;
+        line-height: 1.75;
+        background: #fafbfc;
+        border: 1px solid #ebebeb;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        white-space: pre;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>Core Runtime 模块导览：先抓住 Thread 与 Turn</h1>
+        <p class="meta">学习目标：15 分钟内说清 `codex-core` 的边界，并能读懂一次最小 turn 的入口与事件输出。</p>
+
+        <div class="callout">
+          一句话定位：core 是 TUI、exec、app-server 共享的 agent 编排层；它持有 thread/session/turn 状态，组织模型上下文、任务执行、模型客户端和事件流，但 protocol、tools、sandboxing、MCP、skills、config 等能力已经拆在周边 crate。
+          主要来源：<span class="where">codex-rs/core-api/src/lib.rs</span>、<span class="where">codex-rs/core/src/codex_thread.rs</span>、<span class="where">codex-rs/protocol/src/protocol.rs</span>。
+        </div>
+
+        <h2>1. core 在整体架构里的位置</h2>
+        <p>
+          L0 已经把 Codex 看成“本地 agent 系统”（回看 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>）：用户可能从 TUI、`codex exec`、SDK 或富客户端进入，但最终都会碰到同一类问题：如何开始一个线程、如何提交用户输入、如何把模型流和工具结果变成客户端事件。L1 读 core 时不要从最大文件开始，而要先记住三层边界：`core-api` 是更窄的 public facade，`codex-core` 是运行时编排，`codex-protocol` 是跨模块共享的消息合同。
+        </p>
+        <div class="filetree">codex-rs/
+├── core-api/              ← 面向 thread management 的公开 facade
+├── core/                  ← agent runtime：thread、session、turn、context、client
+└── protocol/              ← Op、Event、EventMsg、权限、模型与输入类型</div>
+        <p>
+          这个边界也解释了为什么 AGENTS.md 要求“resist adding code to codex-core”：core 已经足够大，新增工具、协议、配置或扩展能力时，应先找 `tools`、`mcp`、`skills`、`config`、`sandboxing` 或新 crate，而不是默认塞进 core。
+        </p>
+
+        <h2>2. 对外接口先看 SQ/EQ</h2>
+        <p>
+          `protocol.rs` 的注释把通信模型称为 Submission Queue / Event Queue。外部调用者提交 `Op`，core 按线程顺序处理，再持续产出 `EventMsg`。因此 L1 只需要抓住四个对象：`ThreadManager` 创建或恢复 `NewThread`；`CodexThread` 是双向通道；`Op::UserInput`、`Op::Review`、`Op::Compact` 等表达请求；`EventMsg::TurnStarted`、`AgentMessage`、`ExecCommandBegin`、`TurnComplete` 等表达结果。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// 伪代码：展示调用形状，省略 Config/AuthManager 构造细节
+let new_thread = thread_manager.start_thread(config).await?;
+let thread = new_thread.thread;
+
+thread
+    .submit(Op::UserInput {
+        items: vec![UserInput::Text {
+            text: "解释当前仓库结构".into(),
+            text_elements: Vec::new(),
+        }],
+        final_output_json_schema: None,
+        responsesapi_client_metadata: None,
+        additional_context: Default::default(),
+        thread_settings: Default::default(),
+    })
+    .await?;
+
+loop {
+    let event = thread.next_event().await?;
+    // 客户端根据 EventMsg 渲染文本、工具进度、审批请求或完成状态
+    // 真实代码会按 EventMsg 决定继续等待、响应审批或结束 turn
+}</code></pre>
+        </div>
+
+        <h2>3. 内部分层只记四个方向</h2>
+        <p>
+          第一，`session/` 持有运行时状态：配置快照、输入队列、active turn、MCP runtime、context window、multi-agent 和 rollout 重建都在这里汇合。第二，`tasks/` 把工作流收束成统一任务接口：普通对话是 `RegularTask`，评审是 `ReviewTask`，压缩是 `CompactTask`，用户显式 shell 是 `UserShellCommandTask`。第三，`context/` 放 model-visible fragments，例如权限、环境、skills、plugins、时间、token budget；这些片段必须有边界和大小上限。第四，模型和事件桥接分两边：`ModelClient` 负责 provider/auth/streaming，`event_mapping` 把 Responses API 的 `ResponseItem` 变成 UI 和 app-server 更容易消费的 turn item。
+        </p>
+
+        <h2>4. 检索练习</h2>
+        <div class="practice">
+          <p><strong>暂停回忆：</strong>如果你要研究“为什么一次用户输入后 UI 收到了 `TurnStarted` 和 `TurnComplete`”，第一站是哪两个对象？如果你要新增一种模型可见的上下文提醒，应该先看哪个目录？如果你要新增一个全新的工具能力，应不应该默认写进 `codex-core`？</p>
+          <div class="answer">
+            参考答案：事件生命周期先从 `CodexThread` 的 `submit/next_event` 和 `protocol::EventMsg` 入手，再下钻 `session` 与 `tasks`。模型可见提醒先看 `codex-rs/core/src/context/`。新工具不应默认写进 `codex-core`，应先评估 `tools`、MCP、skills、config 或独立 crate。下一步查阅 <a href="../reference/core-runtime-overview.html">Core Runtime 参考地图</a>；仍不清楚时，直接追问 agent 让它带你沿某个 `Op` 做 L2 垂直切片。
+          </div>
+        </div>
+      </article>
+    </main>
+  </body>
+</html>

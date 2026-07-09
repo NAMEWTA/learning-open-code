@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>核心机制：三级降级与描述预算分配</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:920px;margin:40px auto;padding:0 24px;color:#1f2937}
+    h1{font-size:28px}
+    h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}
+    code,pre{background:#f6f8fa;border-radius:6px;font-family:"SF Mono",Consolas,monospace;font-size:0.9rem}
+    code{padding:2px 5px}
+    pre{padding:14px;overflow:auto;font-size:0.84rem;line-height:1.6}
+    .note{border-left:4px solid #2563eb;padding:10px 14px;background:#eff6ff;margin:16px 0}
+    .practice{border-left:4px solid #16a34a;padding:10px 14px;background:#f0fdf4;margin:16px 0}
+    table{border-collapse:collapse;width:100%;margin:12px 0}
+    th,td{border:1px solid #e5e7eb;padding:8px 12px;text-align:left;font-size:0.92rem}
+    th{background:#f9fafb;font-weight:600}
+    .warning{border-left:4px solid #dc2626;padding:10px 14px;background:#fef2f2;margin:16px 0}
+    .flow{background:#fbfcfe;border:1px solid #e5e7eb;border-radius:8px;padding:1rem 1.2rem;margin:16px 0;font-family:"SF Mono",Consolas,monospace;font-size:0.84rem;line-height:1.8;white-space:pre;overflow-x:auto}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>核心机制：三级降级与描述预算分配</h1>
+    <p class="meta">学习目标：能手绘三级降级决策树，写出 2% 预算公式，解释逐字符轮转分配算法的工作原理。</p>
+    <p class="meta">前置：<a href="0001-problem-frame.html">问题背景——为什么需要 Skill 上下文预算模型？</a></p>
+  </header>
+
+  <section>
+    <h2>1. 三级降级决策树</h2>
+    <p><code>render_skill_lines_from_lines</code>（render.rs 第 319 行）是核心决策函数。它按预算压力分三级渲染：</p>
+
+    <div class="flow">输入：skills 列表 + 预算上限
+  │
+  ├─ 计算 full_cost（完整描述 + 路径的总成本）
+  │
+  ├─ [一级] full_cost ≤ 预算？
+  │     YES → 全部以【完整描述】渲染 → 返回，无截断
+  │     NO  ↓
+  ├─ 计算 minimum_cost（仅名称 + 路径，无描述）
+  │
+  ├─ [二级] minimum_cost ≤ 预算？
+  │     YES → 所有 skills 保留，但描述被【按预算截断】
+  │     NO  ↓
+  └─ [三级] minimum_cost > 预算
+        → 仅保留部分 skills（仅名称 + 路径），其余【完全丢弃】
+          按 scope 优先级排序，超出预算的 skill 不出现在列表中</div>
+
+    <p>对应源码：</p>
+    <pre><code>// render.rs 第 319-373 行（简化）
+fn render_skill_lines_from_lines(skill_lines, total_count, budget) {
+    // 一级检查：完整成本是否在预算内？
+    let full_cost = skill_lines.iter().fold(0, |used, line| {
+        used + line.full_cost(budget)
+    });
+    if full_cost &lt;= budget.limit() {
+        return (全部完整渲染, 零截断);
+    }
+
+    // 二级检查：最低成本（无描述）是否在预算内？
+    let minimum_cost = skill_lines.iter().fold(0, |used, line| {
+        used + line.minimum_cost(budget)
+    });
+    if minimum_cost &lt;= budget.limit() {
+        let desc_budget = budget - minimum_cost;
+        return (全部保留 + 描述按预算截断, 截断统计);
+    }
+
+    // 三级：连最低成本都超预算，按优先级逐个取舍
+    render_minimum_skill_lines_until_budget(budget, skill_lines, total_count)
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>2. 描述预算分配：逐字符轮转算法</h2>
+    <p>当进入二级降级时，Codex 不是简单地把每个 skill 的描述截断到相同长度，而是使用<strong>逐字符轮转分配</strong>算法——短描述自然退出竞争后，其未使用的预算自动转移给长描述。</p>
+
+    <p>算法流程（<code>render_lines_with_description_budget</code>，render.rs 第 599 行）：</p>
+    <div class="flow">1. 为每个 skill 计算 extra_costs[i][k] =
+      "添加第 k 个字符后，总渲染成本增加多少"
+
+2. char_allocations[i] = 0（所有 skill 初始零字符描述）
+
+3. 循环：
+   对每个 skill i：
+     如果 char_allocations[i] >= 该 skill 的描述总长度 → 跳过（已完整）
+     否则：
+       delta = extra_costs[i][next_chars] - extra_costs[i][current_chars]
+       如果 delta ≤ remaining_budget：
+         char_allocations[i] += 1
+         remaining_budget -= delta
+         changed = true
+
+   直到没有任何 skill 能被分配更多字符（remaining_budget 不够或全部完整）</div>
+
+    <p>这个算法保证：</p>
+    <ul>
+      <li><strong>公平性</strong>：每个 skill 轮流获得一个字符的预算，不会出现前几个 skill 独占预算的情况</li>
+      <li><strong>效率</strong>：短描述 skill 完整渲染后自动退出循环，其释放的预算归长描述 skill 所用</li>
+      <li><strong>精确性</strong>：以字符为粒度分配，而非固定字节块，最大化预算利用率</li>
+    </ul>
+
+    <p>测试用例验证了这一点（render.rs 第 1163 行）：</p>
+    <pre><code>// 短描述 "x"（1 字符）+ 长描述 "abcdefghi"（9 字符）
+// 预算 = 最低成本 + 11 字符
+// 预期：短描述完整渲染 "x"，长描述得到 8/9 字符 → "abcdefgh"
+let short = make_skill_with_description("short-skill", Repo, "x");
+let long  = make_skill_with_description("long-skill",  Repo, "abcdefghi");
+// ... 结果: long="abcdefgh", short="x"
+assert_eq!(rendered.skill_lines, vec![
+    expected_skill_line(&amp;long, "abcdefgh"),
+    expected_skill_line(&amp;short, "x"),
+]);</code></pre>
+  </section>
+
+  <section>
+    <h2>3. 别名压缩：路径共享优化</h2>
+    <p>当多个 skills 共享同一个插件根目录时，绝对路径中有大量重复前缀。Codex 的别名压缩机制将公共根目录替换为短别名（<code>r0</code>、<code>r1</code>…），显著减少元数据开销。</p>
+
+    <table>
+      <tr><th>模式</th><th>示例</th></tr>
+      <tr><td>绝对路径</td><td><code>/Users/xl/.codex/plugins/cache/openai-curated/github/hash123/skills/gh-fix-ci/SKILL.md</code></td></tr>
+      <tr><td>别名路径</td><td><code>r0/github/hash123/skills/gh-fix-ci/SKILL.md</code></td></tr>
+    </table>
+
+    <p>别名根表作为额外的元数据注入：</p>
+    <pre><code>### Skill roots
+- `r0` = `/Users/xl/.codex/plugins/cache/openai-curated`</code></pre>
+
+    <p>别名压缩不是无条件启用的。Codex 只在别名方案<strong>确实更好</strong>时才替换绝对路径（<code>aliased_render_is_better</code>，render.rs 第 870 行）：</p>
+    <pre><code>fn aliased_render_is_better(aliased, absolute, budget) -> bool {
+    // 1. 优先比较：包含的 skills 数量（多者胜）
+    if aliased.included_count != absolute.included_count {
+        return aliased.included_count > absolute.included_count;
+    }
+    // 2. 次比较：截断字符数（少者胜）
+    if aliased.truncated_chars != absolute.truncated_chars {
+        return aliased.truncated_chars < absolute.truncated_chars;
+    }
+    // 3. 最终比较：总成本（低者胜）
+    available_skills_cost(budget, aliased) < available_skills_cost(budget, absolute)
+}</code></pre>
+
+    <div class="note">
+      <strong>关键细节：</strong>当单个插件版本只有一个 skill 时，别名根会进一步上溯到 marketplace 根（而非停留在 skill root），以最大化共享。当同一插件版本有多个 skills 时，别名根停留在 skill root，避免路径歧义。见 <code>alias_root_for_skill_root</code>（render.rs 第 769 行）。
+    </div>
+  </section>
+
+  <section>
+    <h2>4. 设计权衡与已知局限</h2>
+    <table>
+      <tr><th>权衡点</th><th>Codex 的选择</th><th>代价</th></tr>
+      <tr>
+        <td>预算粒度</td>
+        <td>Token-based（有窗口信息时）或 Character-based（回退）</td>
+        <td>Token 估算使用 4 bytes/token 近似值，实际 tokenizer 分片可能导致偏差</td>
+      </tr>
+      <tr>
+        <td>优先级模型</td>
+        <td>固定四层：System > Admin > Repo > User</td>
+        <td>同一 scope 内不做进一步排序（仅按名称字母序），无法表达"GitHub plugin 比 Slack plugin 更重要"</td>
+      </tr>
+      <tr>
+        <td>描述截断</td>
+        <td>逐字符截断，添加 "..." 后缀</td>
+        <td>截断可能发生在词中间，破坏语义完整性；不尝试做语义感知的句子级截断</td>
+      </tr>
+      <tr>
+        <td>别名压缩</td>
+        <td>基于文件系统路径前缀匹配</td>
+        <td>不适用于非文件系统 skill（如 orchestrator resource），也不压缩跨 marketplace 的公共前缀</td>
+      </tr>
+      <tr>
+        <td>警告阈值</td>
+        <td>平均截断 > 100 字符或 skill 被丢弃时触发警告</td>
+        <td>警告是静态文本，不含可操作建议（如"禁用 X plugin 可节省 Y tokens"）</td>
+      </tr>
+    </table>
+
+    <p>完整实现细节参见 <a href="../reference/skill-budget-model-notes.html">Skill 预算模型参考手册</a>。</p>
+
+    <div class="practice">
+      <p><strong>检索练习：</strong>不看上文，回答以下问题：</p>
+      <ol>
+        <li>三级降级分别对应什么渲染输出？给出每级的一个具体示例。</li>
+        <li>逐字符轮转分配算法和"均分截断"有什么区别？为什么前者更好？</li>
+        <li>什么条件下 Codex 会放弃别名压缩、退回绝对路径模式？</li>
+      </ol>
+    </div>
+    <div class="practice">
+      <p><strong>参考答案：</strong></p>
+      <ol>
+        <li>一级：完整描述 + 路径，如 <code>- github:gh-fix-ci: Automatically fix failing CI checks... (file: /Users/xl/...)</code>；二级：截断描述 + 路径，如 <code>- github:gh-fix-ci: Automatically fix... (file: /Users/xl/...)</code>；三级：仅名称 + 路径，如 <code>- github:gh-fix-ci: (file: /Users/xl/...)</code>，部分 skill 完全不出现在列表中。</li>
+        <li>均分截断给每个 skill 固定字符数，短描述 skill 用不满的预算被浪费。逐字符轮转让短描述完整渲染后自动退出竞争，释放的预算转移给长描述。</li>
+        <li>当别名根表本身的开销（<code>### Skill roots</code> 段落）超过了路径压缩节省的成本，或者别名方案包含的 skills 数量比绝对路径少时，退回绝对路径。</li>
+      </ol>
+    </div>
+    <p>下一步：阅读 <a href="../reference/skill-budget-model-notes.html">Skill 预算模型参考手册</a> 了解完整 API 接口和常量速查。如有疑问，追问 agent 让它带你调试一次 <code>render_lines_with_description_budget</code> 的逐字符分配过程。</p>
+  </section>
+</main>
+</body>
+</html>

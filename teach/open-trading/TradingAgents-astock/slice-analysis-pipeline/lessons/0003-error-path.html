@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 — 异常与边界路径：当链路中途失败时</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .decision-box { border-left: 4px solid #d95b4a; background: #fef6f5; padding: 14px 18px; margin: 18px 0; border-radius: 0 8px 8px 0; }
+  .decision-box strong { display: block; margin-bottom: 6px; color: #9b2d1e; }
+  table { font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 3/3 节 &middot; 预计 13 分钟</p>
+
+<h1>0003 — 异常与边界路径</h1>
+
+<p class="objective"><strong>目标任务：</strong>能说出全链路中 4 类异常场景的触发条件和降级逻辑，并能判断在什么情况下链路会"静默继续"而非报错中断。</p>
+
+<p>前两节沿主成功路径追踪，本节专门覆盖异常和边界场景。TradingAgents-Astock 的设计哲学是"尽力产出，不因局部失败阻塞链路"——理解这一点对后续调试至关重要。</p>
+
+<h2>1. 数据获取失败：工具返回空数据</h2>
+
+<p>最频繁的异常场景。当某个 Analyst 调用工具（如 <code>get_stock_data</code>、<code>get_fundamentals</code>）返回空结果或错误时，<strong>不会抛出异常</strong>——工具将错误信息作为消息内容返回。LLM 在后续分析中可能会在报告中写入 <code>[数据缺失]</code> 标记，但 Analyst 节点本身仍然正常退出。</p>
+
+<p>这意味着：即使数据源（如东财接口）临时不可用，链路会继续跑完——只是最终报告质量受影响，体现在质量门控的评分中。</p>
+
+<h2>2. 质量门控不通过：跳过 LLM 复审</h2>
+
+<p>质量门控（<code>quality_gate.py:150</code>）有一个关键分支：</p>
+
+<pre><code>llm_review = ""
+if fail_count < 4:
+    try:
+        response = llm.invoke(review_prompt)
+        llm_review = response.content
+    except Exception as e:
+        llm_review = f"（LLM 复审失败: {type(e).__name__}: {e}）"
+# 否则 llm_review 保持为 ""，summary 中显示"跳过"</code></pre>
+
+<div class="decision-box">
+<strong>边界条件：fail_count >= 4</strong>
+当 4 份或更多研报未通过硬检查（评级 D 或 F），LLM 复审被<strong>直接跳过</strong>。这是合理的：如果多数数据都不可用，让 LLM 再审一遍没有意义。
+</div>
+
+<p><strong>注意：</strong>质量门控不通过<strong>不会</strong>阻断链路。它只写入 <code>data_quality_summary</code> 到 state，但下游 Bull Researcher 仍然正常启动——辩论代理会看到质量低下的报告，但决策过程照常进行。这是一个设计选择：宁可基于不完美数据给出低信心决策，也不在管线中途抛出异常。</p>
+
+<h2>3. 分析师未选中：空节点不会创建</h2>
+
+<p><code>setup_graph()</code>（<code>setup.py:29</code>）接收 <code>selected_analysts</code> 参数。如果用户只选了 <code>["market", "fundamentals"]</code>，那么：</p>
+
+<ul>
+  <li>只有 Market 和 Fundamentals 的节点/工具/删除节点被创建</li>
+  <li>未选中的 Analyst 的对应报告字段（如 <code>sentiment_report</code>）在初始状态中仍存在（为空字符串），后续节点读取它们时发现为空</li>
+  <li>质量门控中，未运行的 Analyst 报告为空字符串 → 硬检查评级 F（"报告为空"）</li>
+</ul>
+
+<p><strong>边界情况：</strong>如果 <code>selected_analysts</code> 为空列表，<code>setup_graph()</code> 直接 <code>raise ValueError</code>——这是整个链路中少数几个会硬中断的检查点。</p>
+
+<h2>4. 异常和降级策略总览</h2>
+
+<table>
+  <tr><th>场景</th><th>触发条件</th><th>行为</th><th>是否阻断</th></tr>
+  <tr>
+    <td>工具返回空/错</td>
+    <td>数据源不可用</td>
+    <td>工具返回错误消息，Agent 继续分析</td>
+    <td>否</td>
+  </tr>
+  <tr>
+    <td>质量门控 LLM 复审失败</td>
+    <td>LLM 调用异常</td>
+    <td>捕获异常，写入失败原因，<code>data_quality_summary</code> 仍正常产出</td>
+    <td>否</td>
+  </tr>
+  <tr>
+    <td>质量门控跳过 LLM 复审</td>
+    <td>4+ 报告评级 D/F</td>
+    <td>仅保留硬检查结果</td>
+    <td>否</td>
+  </tr>
+  <tr>
+    <td>分析师列表为空</td>
+    <td>用户传入空列表</td>
+    <td><code>raise ValueError</code> 硬中断</td>
+    <td>是（启动前校验）</td>
+  </tr>
+  <tr>
+    <td>延迟反思收益获取失败</td>
+    <td>yfinance 数据未就绪</td>
+    <td>返回 <code>None, None, None</code>，跳过该条日志，下次重试</td>
+    <td>否</td>
+  </tr>
+  <tr>
+    <td>checkpoint 恢复</td>
+    <td>上次运行崩溃</td>
+    <td>检测已有 checkpoint，直接从上次成功节点继续</td>
+    <td>否（恢复执行）</td>
+  </tr>
+</table>
+
+<div class="quiz">
+<h3>判断题</h3>
+<p>判断以下说法的正误：</p>
+<ol>
+  <li>"如果市场分析师的数据全部获取失败，链路会在 Market Analyst 节点抛异常并终止。"</li>
+  <li>"质量门控中，只要有任意一份报告不通过硬检查，LLM 复审就会被跳过。"</li>
+  <li>"如果用户只选了 2 个 Analyst，质量门控会检测到其余 5 份报告为空并给出 F 评级。"</li>
+</ol>
+<div class="answer">
+<p><strong>参考答案：</strong>(1) 错误。工具将错误以消息形式返回，Market Analyst 仍然会产出一份可能质量低下的报告，链路不会中断。(2) 错误。只有 fail_count >= 4（即 4 份以上 D/F）时才跳过 LLM 复审。(3) 正确。未运行的 Analyst 的报告字段保持初始化的空字符串，硬检查会评级为 F。</p>
+</div>
+</div>
+
+<p style="margin-top: 24px;">全链路速查表与节点函数索引见 <a href="../reference/analysis-pipeline-flow-map.html">analysis-pipeline-flow-map.html</a>。回看主成功路径：<a href="0002-main-path.html">0002 — 主成功路径</a>。链路地图：<a href="0001-flow-map.html">0001 — 分析决策全链路地图</a>。</p>
+
+</div>
+</main>
+</body>
+</html>

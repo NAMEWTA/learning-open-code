@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 — 输入→分析→保存主成功路径</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 2 节 &middot; 预计 14 分钟</p>
+
+<h1>0002 — 输入→分析→保存主成功路径</h1>
+
+<p class="objective"><strong>学习目标：</strong>能逐步说出从用户输入 ticker 到 complete_report.md 写入磁盘的完整数据流转，理解 selections dict → config dict → graph state → final_state 的逐层变换。</p>
+
+<h2>1. 阶段一：参数收集 —— 从终端到 Dict</h2>
+
+<p><code>get_user_selections()</code> 是 CLI 的第一个屏障。它编排 8 步交互式输入，全部完成后返回一个扁平 dict。以下为去除了 Rich Panel 装饰后的核心调用链：</p>
+
+<div class="filetree">
+get_user_selections() {
+    get_ticker()              → "AAPL"            # safe_ticker_component 校验
+    get_analysis_date()       → "2025-07-01"      # 正则+非未来日期校验
+    ask_output_language()     → "Chinese"         # 12 种语言 + 自定义
+    select_analysts()         → [MARKET, SOCIAL]  # checkbox 多选
+    select_research_depth()   → 3                 # Shallow(1)/Medium(3)/Deep(5)
+    select_llm_provider()     → ("openai", url)   # 10 种 provider
+    select_shallow_thinker()  → "gpt-5.4-mini"    # 按 provider 拉取模型列表
+    select_deep_thinker()     → "gpt-5.4"         # 同上
+    # 步骤 8 条件执行（仅 Google/OpenAI/Anthropic）
+    ask_*_config()            → thinking_level/effort
+}
+</div>
+
+<p>步骤 7 的模型列表依赖于步骤 6 的 provider 选择——<code>select_shallow_thinking_agent(provider)</code> 从 <code>tradingagents.llm_clients.model_catalog</code> 按 provider key 拉取可选模型。这是整个 8 步中唯一的步骤间依赖。</p>
+
+<p>返回的 selections dict 结构如下（所有值均为终端用户输入的直接产物）：</p>
+
+<pre><code>{
+    "ticker": "AAPL",
+    "analysis_date": "2025-07-01",
+    "analysts": [AnalystType.MARKET, AnalystType.SOCIAL],
+    "research_depth": 3,
+    "llm_provider": "openai",
+    "backend_url": "https://api.openai.com/v1",
+    "shallow_thinker": "gpt-5.4-mini",
+    "deep_thinker": "gpt-5.4",
+    "google_thinking_level": None,
+    "openai_reasoning_effort": "medium",
+    "anthropic_effort": None,
+    "output_language": "Chinese",
+}</code></pre>
+
+<h2>2. 阶段二：图初始化与流式执行</h2>
+
+<p><code>run_analysis()</code> 拿到 selections 后进入核心阶段，分三步：</p>
+
+<p><strong>第一步：从 selections 到 config。</strong> 以 <code>DEFAULT_CONFIG</code> 为基座，将用户选择的 research_depth 映射为 <code>max_debate_rounds</code> 和 <code>max_risk_discuss_rounds</code>，将 shallow/deep thinker 映射为 <code>quick_think_llm</code>/<code>deep_think_llm</code>，并合并 provider 专用配置。至此，用户态参数完成到系统态配置的转换。</p>
+
+<pre><code>config = DEFAULT_CONFIG.copy()
+config["max_debate_rounds"] = selections["research_depth"]   # 3 → 3 轮辩论
+config["quick_think_llm"] = selections["shallow_thinker"]     # 快速模型
+config["deep_think_llm"] = selections["deep_thinker"]         # 深度模型
+config["backend_url"] = selections["backend_url"]
+config["llm_provider"] = selections["llm_provider"]
+config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
+config["output_language"] = selections.get("output_language")</code></pre>
+
+<p><strong>第二步：初始化 Graph 和 UI。</strong> 创建 <code>StatsCallbackHandler</code> 用于统计追踪，创建 <code>TradingAgentsGraph</code> 并将 callback 绑定到所有 LLM 节点。同时调用 <code>message_buffer.init_for_analysis()</code> 初始化 Agent 状态表——只有用户选中的 Analyst 才出现在状态表中，其余固定团队（Research/Trading/Risk/Portfolio）始终存在。</p>
+
+<p><strong>第三步：流式循环。</strong> 核心是一个 <code>for chunk in graph.graph.stream(...)</code> 循环，包裹在 Rich Live 上下文中（4 fps 刷新）。每个 chunk 的处理流程固定：</p>
+
+<pre><code>for chunk in graph.graph.stream(init_agent_state, **args):
+    # 1. 消息分类与去重（按 message.id）
+    for message in chunk.get("messages", []):
+        msg_type, content = classify_message_type(message)
+        if content:
+            message_buffer.add_message(msg_type, content)
+        # 记录 tool_calls
+    # 2. Agent 状态推进（按 report 字段检测）
+    update_analyst_statuses(message_buffer, chunk)
+    # 3. 处理 Debate State → 更新研究/交易/风控状态
+    if chunk.get("investment_debate_state"): ...
+    if chunk.get("trader_investment_plan"): ...
+    if chunk.get("risk_debate_state"): ...
+    # 4. 刷新 Rich 终端布局
+    update_display(layout, stats_handler=stats_handler, start_time=start_time)</code></pre>
+
+<p>流式循环退出后，<code>final_state = trace[-1]</code> 持有所有中间报告和最终决策的完整快照。</p>
+
+<h2>3. 阶段三：报告保存与展示</h2>
+
+<p>流式执行完成后，Rich Live 上下文关闭，进入后处理阶段。两个独立提示（<code>typer.prompt</code>）分别询问是否保存和是否展示：</p>
+
+<p><strong>保存路径（save_report_to_disk）：</strong> 用户确认后，<code>final_state</code> 被写入 5 级子目录结构。每个子目录使用 <code>.mkdir(exist_ok=True)</code> 渐进创建，每个报告独立写入 <code>.md</code> 文件。最后汇总为 <code>complete_report.md</code>——包含免责声明 header 和所有报告段落的拼接。保存前会进行路径安全检查——若目标路径在项目目录之外，需用户二次确认。</p>
+
+<p><strong>终端展示（display_complete_report）：</strong> 使用 Rich Panel + Markdown 组件，按五大团队顺序渲染：Analyst Reports（蓝框）→ Research（品红框）→ Trading（黄框）→ Risk（红框）→ Portfolio（绿框）。每个 Panel 独立渲染，避免 Rich 因单次输出过大而截断。</p>
+
+<h2>4. 数据流转总结</h2>
+
+<p>整个主路径中，数据经历了四次关键变换：</p>
+
+<div class="filetree">
+用户输入                    selections dict             config dict
+  │                             │                          │
+  │  get_user_selections()      │  run_analysis()          │  TradingAgentsGraph()
+  └─────────────────────────►   └──────────────────────►   └──────────────────►
+                                                                      │
+                                                                      ▼
+  complete_report.md    ◄───  save_report_to_disk()  ◄───  final_state
+  终端 Rich Panel       ◄───  display_complete_report()
+       ▲                                                        ▲
+       └── 阶段三：持久化与展示 ──┘          └── 阶段二：流式执行 ──┘
+</div>
+
+<p>注意两个关键边界：<strong>selections dict → config dict</strong> 是用户语义到系统语义的翻译（"medium depth"变成 <code>max_debate_rounds=3</code>）；<strong>config dict → TradingAgentsGraph</strong> 是 CLI 层到 Graph 层的控制权交接——此后 CLI 仅被动接收 chunk 并渲染，不再主动干预分析逻辑。</p>
+
+<div class="quiz">
+  <h3>检索练习</h3>
+  <p>不看上文，尝试用自己的话回答。完成后向上滚动核对。</p>
+  <ol>
+    <li>8 步交互中，哪两个步骤之间存在数据依赖？依赖的内容是什么？</li>
+    <li>selections dict 中的 <code>research_depth</code>（值 1/3/5）在 config dict 中映射为什么字段？</li>
+    <li>流式循环中处理每个 chunk 的 4 个固定步骤是什么？</li>
+    <li>从 config dict 传入 TradingAgentsGraph 后，CLI 层还控制分析逻辑吗？</li>
+  </ol>
+  <details>
+    <summary>点击查看参考答案</summary>
+    <div class="answer">
+      <p><strong>1.</strong> 步骤 6（LLM Provider）和步骤 7（Thinking Agents）。步骤 7 使用步骤 6 的 provider key 从 model_catalog 注册表拉取该 provider 的可选模型列表。</p>
+      <p><strong>2.</strong> 映射为 <code>max_debate_rounds</code> 和 <code>max_risk_discuss_rounds</code>——控制多空辩论和风控辩论的轮次数。</p>
+      <p><strong>3.</strong> ① 消息分类与去重（classify_message_type + message.id 去重）；② Agent 状态推进（update_analyst_statuses 检测 report 字段）；③ Debate/Risk/Trading 状态处理（按 chunk 字段更新报告段落和 Agent 状态）；④ Rich 终端布局刷新（update_display）。</p>
+      <p><strong>4.</strong> 不控制。config 传给 Graph 后，CLI 进入被动模式——仅接收 stream 返回的 chunk、更新 MessageBuffer 状态并渲染 Rich 界面。所有分析决策（调用哪些 Agent、如何辩论、何时结束）由 Graph 内部节点编排决定。</p>
+    </div>
+  </details>
+</div>
+
+<p style="margin-top:28px;">
+  <strong>前一节：</strong><a href="0001-flow-map.html">0001 — CLI 命令执行链路全景地图</a> —— 6 阶段全景图和跨文件调用关系。<br>
+  <strong>有疑问？</strong>向 AI 教师追问数据流转中任何不清楚的变换步骤。
+</p>
+
+</div>
+</main>
+</body>
+</html>

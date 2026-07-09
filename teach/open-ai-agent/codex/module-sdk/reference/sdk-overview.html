@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex SDK 模块速查</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <div class="eyebrow">Reference · Python 与 TypeScript SDK</div>
+  <h1>Codex SDK 模块速查</h1>
+  <p class="lead">这份参考文档承接 <a href="../lessons/0001-sdk-module-tour.html">0001-sdk-module-tour</a> 没有展开的 API 清单、依赖、分层和源码阅读顺序。回到全局位置看 <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> 或 <a href="../../00-overview/reference/00-overview.html">00-overview 参考</a>。</p>
+
+  <section>
+    <h2>模块边界</h2>
+    <table>
+      <thead>
+      <tr><th>SDK</th><th>运行时边界</th><th>主要职责</th><th>关键依赖</th></tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Python</td>
+        <td><code>codex app-server --listen stdio://</code>；typed JSON-RPC request / notification。</td>
+        <td>同步与 async 客户端、账户登录、thread 生命周期、turn 启动 / steering / interrupt、通知流和结果收集。</td>
+        <td><code>pydantic&gt;=2.12</code>、<code>openai-codex-cli-bin==0.137.0a4</code>。</td>
+      </tr>
+      <tr>
+        <td>Python runtime</td>
+        <td>wheel-only platform runtime package。</td>
+        <td>随 Python SDK pin 住 Codex CLI binary 和资源，避免源码仓库直接保存平台二进制。</td>
+        <td><code>hatchling</code> build hook、<code>sdk/python-runtime/src/codex_cli_bin/bin/**</code>。</td>
+      </tr>
+      <tr>
+        <td>TypeScript</td>
+        <td><code>codex exec --experimental-json</code>；stdout JSONL event stream。</td>
+        <td>Node API、thread 对象、run / runStreamed、结构化输出临时 schema 文件、env/config/CLI 参数转换。</td>
+        <td>Node 18+；运行时需能解析 <code>@openai/codex</code> 及其 optional platform binaries；<code>zod-to-json-schema</code> 仅用于示例生态。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Python 对外 API 清单</h2>
+    <table>
+      <thead>
+      <tr><th>入口</th><th>API</th><th>用途</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+      <tr><td>root exports</td><td><code>CodexConfig</code>、<code>Codex</code>、<code>AsyncCodex</code>、<code>ApprovalMode</code>、<code>Sandbox</code>、输入类型、login handle、turn handle、errors、<code>retry_on_overload</code></td><td>包根只暴露 curated public API。</td><td><a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/__init__.py">__init__.py</a>、<a href="../../../../../open-ai-agent/codex/sdk/python/tests/test_public_api_signatures.py">test_public_api_signatures.py</a></td></tr>
+      <tr><td><code>Codex</code></td><td><code>metadata</code>、<code>close()</code>、<code>login_api_key()</code>、<code>login_chatgpt()</code>、<code>login_chatgpt_device_code()</code>、<code>account()</code>、<code>logout()</code>、<code>models()</code></td><td>连接生命周期、认证、账户、模型目录。</td><td><a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/api.py">api.py</a></td></tr>
+      <tr><td><code>Codex</code> thread 方法</td><td><code>thread_start()</code>、<code>thread_list()</code>、<code>thread_resume()</code>、<code>thread_fork()</code>、<code>thread_archive()</code>、<code>thread_unarchive()</code></td><td>创建、列出、恢复、分叉和归档 thread。</td><td><code>api.py</code>、<a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/client.py">client.py</a></td></tr>
+      <tr><td><code>Thread</code></td><td><code>run()</code>、<code>turn()</code>、<code>read()</code>、<code>set_name()</code>、<code>compact()</code></td><td><code>run()</code> 收集 <code>TurnResult</code>；<code>turn()</code> 返回可流式控制的 handle。</td><td><code>api.py</code>、<a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/_run.py">_run.py</a></td></tr>
+      <tr><td><code>TurnHandle</code></td><td><code>steer()</code>、<code>interrupt()</code>、<code>stream()</code>、<code>run()</code></td><td>向运行中的 turn 追加 steering、打断、消费通知或收集结果。</td><td><code>api.py</code></td></tr>
+      <tr><td><code>AsyncCodex</code> / async handles</td><td>同步 API 的 async mirror；<code>async with</code>、lazy initialization、async stream。</td><td>用于 asyncio 宿主应用。</td><td><a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/async_client.py">async_client.py</a>、<code>api.py</code></td></tr>
+      <tr><td>输入类型</td><td><code>TextInput</code>、<code>ImageInput</code>、<code>LocalImageInput</code>、<code>SkillInput</code>、<code>MentionInput</code>；<code>RunInput = str | Input</code></td><td>把 Python 对象转换为 wire input list。</td><td><a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/_inputs.py">_inputs.py</a></td></tr>
+      <tr><td>错误与重试</td><td><code>JsonRpcError</code>、<code>InvalidRequestError</code>、<code>ServerBusyError</code>、<code>RetryLimitExceededError</code>、<code>is_retryable_error()</code>、<code>retry_on_overload()</code></td><td>映射 JSON-RPC 错误并对 overload 做有限重试。</td><td><a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/errors.py">errors.py</a>、<a href="../../../../../open-ai-agent/codex/sdk/python/src/openai_codex/retry.py">retry.py</a></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>TypeScript 对外 API 清单</h2>
+    <table>
+      <thead>
+      <tr><th>入口</th><th>API</th><th>用途</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+      <tr><td>root exports</td><td><code>Codex</code>、<code>Thread</code>、<code>RunResult</code>、<code>RunStreamedResult</code>、<code>Input</code>、<code>UserInput</code>、events、items、options 类型。</td><td>npm 包的完整公开面。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/index.ts">index.ts</a></td></tr>
+      <tr><td><code>Codex</code></td><td><code>new Codex(options)</code>、<code>startThread(options)</code>、<code>resumeThread(id, options)</code></td><td>构造 exec 封装，创建或恢复 thread。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/codex.ts">codex.ts</a></td></tr>
+      <tr><td><code>Thread</code></td><td><code>id</code>、<code>run(input, turnOptions)</code>、<code>runStreamed(input, turnOptions)</code></td><td>运行 turn；<code>run()</code> 缓冲结果，<code>runStreamed()</code> 返回 async generator。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/thread.ts">thread.ts</a></td></tr>
+      <tr><td>输入类型</td><td><code>Input = string | UserInput[]</code>；<code>UserInput</code> 包含 <code>text</code> 和 <code>local_image</code>。</td><td>文本拼接为 prompt，图片变为 CLI <code>--image</code> 参数。</td><td><code>thread.ts</code></td></tr>
+      <tr><td>事件类型</td><td><code>thread.started</code>、<code>turn.started</code>、<code>item.started</code>、<code>item.updated</code>、<code>item.completed</code>、<code>turn.completed</code>、<code>turn.failed</code>、<code>error</code></td><td>JSONL 顶层事件 union。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/events.ts">events.ts</a></td></tr>
+      <tr><td>item 类型</td><td><code>agent_message</code>、<code>reasoning</code>、<code>command_execution</code>、<code>file_change</code>、<code>mcp_tool_call</code>、<code>web_search</code>、<code>todo_list</code>、<code>error</code></td><td>事件中的可渲染工作单元。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/items.ts">items.ts</a></td></tr>
+      <tr><td>options</td><td><code>CodexOptions</code>、<code>ThreadOptions</code>、<code>TurnOptions</code></td><td>base URL、API key、env、config override、model、sandbox、cwd、web search、approval、output schema、AbortSignal。</td><td><a href="../../../../../open-ai-agent/codex/sdk/typescript/src/codexOptions.ts">codexOptions.ts</a>、<a href="../../../../../open-ai-agent/codex/sdk/typescript/src/threadOptions.ts">threadOptions.ts</a>、<a href="../../../../../open-ai-agent/codex/sdk/typescript/src/turnOptions.ts">turnOptions.ts</a></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>内部分层与关键流程</h2>
+    <table>
+      <thead>
+      <tr><th>层</th><th>Python</th><th>TypeScript</th></tr>
+      </thead>
+      <tbody>
+      <tr><td>公开门面</td><td><code>api.py</code> 暴露 <code>Codex</code>、<code>Thread</code>、<code>TurnHandle</code>。</td><td><code>codex.ts</code> 和 <code>thread.ts</code> 暴露 <code>Codex</code>、<code>Thread</code>。</td></tr>
+      <tr><td>运行时进程</td><td><code>client.py</code> resolve pinned binary，spawn <code>app-server --listen stdio://</code>。</td><td><code>exec.ts</code> resolve npm native package，spawn <code>exec --experimental-json</code>。</td></tr>
+      <tr><td>协议转换</td><td>Pydantic generated models、<code>_to_wire_input()</code>、<code>_sandbox_policy()</code>、<code>_approval_mode_settings()</code>。</td><td>CLI args、TOML <code>--config</code> serialization、output schema temp file、input normalize。</td></tr>
+      <tr><td>事件路由</td><td><code>MessageRouter</code> 按 response id、login id、turn id、thread goal route 分流。</td><td><code>runStreamedInternal()</code> 逐行 <code>JSON.parse</code>，更新 thread id 并 yield。</td></tr>
+      <tr><td>结果收集</td><td><code>_collect_turn_result()</code> 从 item completed、usage updated、turn completed 组装 <code>TurnResult</code>。</td><td><code>Thread.run()</code> 从 <code>item.completed</code> 和 <code>turn.completed</code> 组装 <code>Turn</code>。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>最小调用序列对照</h2>
+<pre><code class="language-text">Python:
+Codex()
+  -> CodexClient.start()
+  -> initialize()
+  -> thread_start()
+  -> Thread.turn(input)
+  -> turn_start()
+  -> TurnHandle.stream()
+  -> MessageRouter.next_turn_notification()
+  -> _collect_turn_result() 或调用者自行消费
+
+TypeScript:
+new Codex()
+  -> new CodexExec()
+  -> startThread()
+  -> Thread.runStreamed(input)
+  -> CodexExec.run()
+  -> spawn codex exec --experimental-json
+  -> parse stdout JSONL as ThreadEvent
+  -> Thread.run() 可在此基础上缓冲结果</code></pre>
+  </section>
+
+  <section>
+    <h2>源码阅读顺序</h2>
+    <ol>
+      <li>先读 <code>sdk/python/README.md</code> 和 <code>sdk/typescript/README.md</code>，确认用户体验。</li>
+      <li>读 Python <code>__init__.py</code> 与测试 <code>test_public_api_signatures.py</code>，确认根导出不是随意暴露 internals。</li>
+      <li>读 Python <code>api.py</code> 的 <code>Codex.thread_start()</code>、<code>Thread.turn()</code>、<code>TurnHandle.stream()</code>、<code>Thread.run()</code>。</li>
+      <li>下钻 Python <code>client.py</code>、<code>_message_router.py</code>、<code>_run.py</code>，理解长连接、路由和结果收集。</li>
+      <li>读 TypeScript <code>index.ts</code>、<code>codex.ts</code>、<code>thread.ts</code>，确认公开面和 run / runStreamed 差异。</li>
+      <li>下钻 TypeScript <code>exec.ts</code>、<code>events.ts</code>、<code>items.ts</code>，理解 CLI 参数、binary resolution、JSONL event union。</li>
+      <li>最后抽查 Python <code>tests/test_app_server_streaming.py</code> 与 TypeScript <code>tests/runStreamed.test.ts</code>、<code>tests/exec.test.ts</code>，用测试验证心智模型。</li>
+    </ol>
+  </section>
+</main>
+</body>
+</html>

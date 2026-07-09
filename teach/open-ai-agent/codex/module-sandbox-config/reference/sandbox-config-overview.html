@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sandbox、权限与配置系统参考总览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+<article>
+  <h1>Sandbox、权限与配置系统参考总览</h1>
+  <p class="meta">本参考服务于 L1 主题 `module-sandbox-config`。短课入口：<a href="../lessons/0001-sandbox-config-module-tour.html">0001：Sandbox 配置到执行的 15 分钟导览</a>。全局架构入口：<a href="../../00-overview/reference/00-overview.html">L0 参考总览</a>。</p>
+
+  <h2>模块职责与架构位置</h2>
+  <p>该系统位于“用户/会话配置”和“工具执行”之间，负责把安全意图变成可执行边界。上游是配置层、CLI overrides、requirements、项目 trust；下游是 shell/unified exec、网络代理、平台 sandbox helper。</p>
+  <div class="diagram">用户配置 / CLI override / requirements
+  → codex_config：解析 TOML schema
+  → core::config：合并层、选择 profile、应用约束
+  → protocol：PermissionProfile 与 runtime policy 类型
+  → codex_sandboxing：选择并变换 sandbox 执行请求
+  → 平台后端：Seatbelt / Linux helper / Windows sandbox</div>
+
+  <h2>对外配置与 API 清单</h2>
+  <table>
+    <thead><tr><th>入口</th><th>作用</th><th>源码</th></tr></thead>
+    <tbody>
+      <tr><td><code>sandbox_mode</code></td><td>旧语法，三档 sandbox：read-only、workspace-write、danger-full-access。</td><td><code>codex-rs/protocol/src/config_types.rs</code></td></tr>
+      <tr><td><code>sandbox_workspace_write</code></td><td>旧 workspace-write 的 writable roots、network、tmp 排除设置。</td><td><code>codex-rs/config/src/config_toml.rs</code></td></tr>
+      <tr><td><code>default_permissions</code></td><td>选择内置 profile 或 `[permissions]` 命名 profile。</td><td><code>codex-rs/config/src/config_toml.rs</code></td></tr>
+      <tr><td><code>[permissions]</code></td><td>声明可继承的文件系统、网络、workspace roots profile。</td><td><code>codex-rs/config/src/permissions_toml.rs</code></td></tr>
+      <tr><td><code>approval_policy</code></td><td>决定命令执行何时进入审批流程。</td><td><code>codex-rs/core/src/config/mod.rs</code></td></tr>
+      <tr><td><code>PermissionProfile</code></td><td>运行态权限主模型，封装 enforcement、filesystem、network。</td><td><code>codex-rs/protocol/src/models.rs</code></td></tr>
+      <tr><td><code>FileSystemSandboxPolicy</code></td><td>文件系统读、写、拒绝条目和路径解析。</td><td><code>codex-rs/protocol/src/permissions.rs</code></td></tr>
+      <tr><td><code>NetworkSandboxPolicy</code></td><td>网络 enabled / restricted 二值策略。</td><td><code>codex-rs/protocol/src/permissions.rs</code></td></tr>
+      <tr><td><code>SandboxManager</code></td><td>选择 sandbox 类型并转换命令请求。</td><td><code>codex-rs/sandboxing/src/manager.rs</code></td></tr>
+      <tr><td><code>execpolicy</code></td><td>命令前缀 allow/prompt/forbidden 策略；与文件/网络 sandbox 并列而非替代。</td><td><code>codex-rs/execpolicy/README.md</code></td></tr>
+    </tbody>
+  </table>
+  <h3>外部调用如何进入权限系统</h3>
+  <p>app-server 的 JSON-RPC 外部入口先在 <span class="where">codex-rs/app-server/README.md</span> 和 <span class="where">codex-rs/app-server-protocol/src/protocol/</span> 中定义请求形状，再由 <span class="where">codex-rs/app-server/src/request_processors/</span> 转成 core config overrides 或 thread settings。换句话说，外部客户端不是直接操作 sandbox 后端，而是通过 `permissions` profile 选择或 legacy `sandboxPolicy` 覆盖进入权限系统。</p>
+  <table>
+    <thead><tr><th>外部入口</th><th>权限相关字段</th><th>进入点</th></tr></thead>
+    <tbody>
+      <tr><td><code>turn/start</code></td><td>实验性 <code>permissions</code> 选择本 turn 与后续 turn 的 profile；legacy <code>sandboxPolicy</code> 仍可用，但不能与 <code>permissions</code> 同时出现。</td><td><code>codex-rs/app-server/README.md</code>、<code>codex-rs/app-server-protocol/src/protocol/v2/turn.rs</code>、<code>codex-rs/app-server/src/request_processors/turn_processor.rs</code></td></tr>
+      <tr><td><code>thread/start</code></td><td>实验性 <code>permissions</code> 选择线程默认 profile；legacy <code>sandbox</code> shorthand 仍可用，响应还带 legacy sandbox 兼容投影。</td><td><code>codex-rs/app-server/README.md</code>、<code>codex-rs/app-server-protocol/src/protocol/v2/thread.rs</code>、<code>codex-rs/app-server/src/request_processors/thread_processor.rs</code></td></tr>
+      <tr><td><code>thread/settings/update</code></td><td>更新已加载 thread 的 next-turn 权限设置；<code>permissions</code> 与 <code>sandboxPolicy</code> 互斥，成功后可能触发 <code>thread/settings/updated</code>。</td><td><code>codex-rs/app-server/README.md</code>、<code>codex-rs/app-server-protocol/src/protocol/v2/thread.rs</code>、<code>codex-rs/app-server/src/request_processors/turn_processor.rs</code></td></tr>
+      <tr><td><code>permissionProfile/list</code></td><td>列出可选 permission profile，帮助客户端选择内置或用户定义 profile。</td><td><code>codex-rs/app-server-protocol/src/protocol/common.rs</code>、<code>codex-rs/app-server/tests/suite/v2/permission_profile_list.rs</code></td></tr>
+      <tr><td><code>configRequirements/read</code></td><td>读取托管配置 requirements，其中 <code>default_permissions</code> 等字段会约束可用权限。</td><td><code>codex-rs/app-server-protocol/src/protocol/common.rs</code>、<code>codex-rs/app-server-protocol/src/protocol/v2/config.rs</code>、<code>codex-rs/app-server/src/request_processors/config_processor.rs</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>内部分层</h2>
+  <h3>1. TOML schema 层</h3>
+  <p><span class="where">codex-rs/config/src/config_toml.rs</span> 定义 `ConfigToml`。与本主题直接相关的字段包括 `approval_policy`、`approvals_reviewer`、`shell_environment_policy`、`allow_login_shell`、`sandbox_mode`、`sandbox_workspace_write`、`default_permissions`、`permissions`。</p>
+  <p><span class="where">codex-rs/config/src/permissions_toml.rs</span> 定义 `PermissionsToml` 和 `PermissionProfileToml`。profile 支持 `extends`，父 profile 先合并，子 profile 覆盖父字段；继承会检查 undefined parent、built-in parent 限制和 cycle。边界是：可扩展的内置父 profile 主要是 <code>:read-only</code> 与 <code>:workspace</code>，不能扩展 <code>:danger-full-access</code>。</p>
+
+  <h3>2. 配置合并与约束层</h3>
+  <p><span class="where">codex-rs/core/src/config/mod.rs</span> 的 `Config::load_config_with_layer_stack` 是阅读主入口。它合并配置层，处理 CLI overrides，解析项目 trust，选择 legacy `sandbox_mode` 还是 profile 语法，并应用 requirements 约束。最终构造 `Config { permissions: Permissions { ... } }`。</p>
+  <p>重要判断点：互斥覆盖项会报错；如果 `[permissions]` 已定义但没有 `default_permissions` 且不是 legacy 模式，会报错；requirements 可把不允许的 profile 降级，并清空 active profile 标识。</p>
+
+  <h3>3. 权限编译层</h3>
+  <p><span class="where">codex-rs/core/src/config/permissions.rs</span> 负责从 profile 名称编译到运行态 policy。内置 profile 包括 `:read-only`、`:workspace`、`:danger-full-access`。自定义 profile 会经过 `compile_permission_profile`，将 filesystem 条目编译为 `FileSystemSandboxEntry`，将 network.enabled 编译为 `NetworkSandboxPolicy`。</p>
+  <table>
+    <thead><tr><th>内置 profile</th><th>文件系统</th><th>网络</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>:read-only</code></td><td>只读</td><td>通常 restricted</td><td>默认保守边界</td></tr>
+      <tr><td><code>:workspace</code></td><td>workspace 可写</td><td>受 `sandbox_workspace_write.network_access` 或 profile network 控制</td><td>常见开发模式</td></tr>
+      <tr><td><code>:danger-full-access</code></td><td>不限制</td><td>enabled</td><td>显式高风险模式</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4. protocol 权限模型层</h3>
+  <p><span class="where">codex-rs/protocol/src/config_types.rs</span> 提供 `SandboxMode`。<span class="where">codex-rs/protocol/src/models.rs</span> 提供 `PermissionProfile`、`AdditionalPermissionProfile`、`SandboxEnforcement`。<span class="where">codex-rs/protocol/src/permissions.rs</span> 提供 `FileSystemAccessMode`、`FileSystemSandboxPolicy`、`NetworkSandboxPolicy`。</p>
+  <p>`FileSystemAccessMode` 的冲突优先级是 deny 高于 write，高于 read。`NetworkSandboxPolicy` 只有 restricted 与 enabled。`SandboxEnforcement` 区分 managed、disabled、external。</p>
+
+  <h3>5. sandbox transform 与平台层</h3>
+  <p><span class="where">codex-rs/sandboxing/src/manager.rs</span> 的 `SandboxManager` 提供三个关键阶段：`should_sandbox` 判断需求，`select_initial` 选择平台类型，`transform` 生成 `SandboxExecRequest`。它会合并运行时 additional permissions，加入 managed MITM CA 可读根，并为平台后端准备参数。</p>
+  <table>
+    <thead><tr><th>平台</th><th>后端</th><th>关键文件</th></tr></thead>
+    <tbody>
+      <tr><td>macOS</td><td>Seatbelt / `sandbox-exec`</td><td><code>codex-rs/sandboxing/src/seatbelt.rs</code></td></tr>
+      <tr><td>Linux</td><td>当前主体链路是 manager → sandboxing/bwrap/landlock → linux-sandbox helper；默认 bubblewrap + seccomp，legacy Landlock 可选</td><td><code>codex-rs/sandboxing/src/bwrap.rs</code>、<code>codex-rs/sandboxing/src/landlock.rs</code>、<code>codex-rs/linux-sandbox/src/bwrap.rs</code>、<code>codex-rs/linux-sandbox/src/launcher.rs</code>、<code>codex-rs/linux-sandbox/src/proxy_routing.rs</code>、<code>codex-rs/linux-sandbox/README.md</code></td></tr>
+      <tr><td>Windows</td><td>restricted token 或 elevated backend；ACL、WFP、deny-read 与 token 逻辑是继续深挖入口</td><td><code>codex-rs/windows-sandbox-rs/src/lib.rs</code>、<code>codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs</code>、<code>codex-rs/windows-sandbox-rs/src/acl.rs</code>、<code>codex-rs/windows-sandbox-rs/src/wfp/</code>、<code>codex-rs/windows-sandbox-rs/src/deny_read_acl.rs</code>、<code>codex-rs/windows-sandbox-rs/src/token.rs</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2>最小序列：配置到执行</h2>
+  <pre><code class="language-text">1. 用户设置 default_permissions / sandbox_mode / approval_policy。
+2. ConfigToml 读取 TOML，ConfigLayerStack 合并本地、托管、session 层。
+3. Config::load_config_with_layer_stack 解析 profile 语法并选择默认 profile。
+4. permissions.rs 编译 filesystem/network，生成 PermissionProfile。
+5. requirements 约束可能收窄 profile 或 approval policy。
+6. Permissions::effective_permission_profile 物化 workspace roots。
+7. SandboxManager::select_initial 判断是否需要平台 sandbox。
+8. SandboxManager::transform 生成 SandboxExecRequest。
+9. 平台后端包裹命令并执行。</code></pre>
+
+  <h2>关键依赖</h2>
+  <ul>
+    <li>`codex_config`：配置层、requirements、TOML schema、profile 解析。</li>
+    <li>`codex_protocol`：跨 core、exec、UI 共享的权限和配置类型。</li>
+    <li>`codex_sandboxing`：平台无关 sandbox 选择与命令变换。</li>
+    <li>`codex_network_proxy`：受限网络、domain/unix socket、managed MITM/proxy 配置。</li>
+    <li>`codex_windows_sandbox` 与 `codex-linux-sandbox`：平台专用执行边界。</li>
+    <li>`codex_execpolicy`：命令前缀策略，用于 allow/prompt/forbidden 决策。</li>
+  </ul>
+
+  <h2>推荐源码阅读顺序</h2>
+  <ol>
+    <li><code>docs/config.md</code> 与 <code>docs/sandbox.md</code>：确认用户文档入口。</li>
+    <li><code>codex-rs/protocol/src/config_types.rs</code>：先看 `SandboxMode`。</li>
+    <li><code>codex-rs/config/src/config_toml.rs</code>：定位 `ConfigToml` 中的 sandbox/profile 字段。</li>
+    <li><code>codex-rs/config/src/permissions_toml.rs</code>：理解 `[permissions]` schema、extends、network/domain/unix socket。</li>
+    <li><code>codex-rs/core/src/config/mod.rs</code>：读 `Config::load_config_with_layer_stack` 中 profile 选择到 `Permissions` 构造。</li>
+    <li><code>codex-rs/core/src/config/permissions.rs</code>：读 `builtin_permission_profile`、`compile_permission_profile_selection`、`compile_filesystem_permission`。</li>
+    <li><code>codex-rs/protocol/src/models.rs</code> 与 <code>codex-rs/protocol/src/permissions.rs</code>：理解 runtime 类型和访问判定。</li>
+    <li><code>codex-rs/sandboxing/src/manager.rs</code>：读 `select_initial`、`transform`、`compatibility_sandbox_policy_for_permission_profile`。</li>
+    <li><code>codex-rs/linux-sandbox/README.md</code>、<code>codex-rs/sandboxing/src/seatbelt.rs</code>、<code>codex-rs/windows-sandbox-rs/src/unified_exec/mod.rs</code>：按平台补细节。</li>
+    <li><code>codex-rs/execpolicy/README.md</code>：最后区分命令策略和 sandbox 权限。</li>
+  </ol>
+
+  <h2>源码引用清单</h2>
+  <p><span class="where">docs/config.md</span>、<span class="where">docs/sandbox.md</span>、<span class="where">codex-rs/sandboxing/</span>、<span class="where">codex-rs/linux-sandbox/</span>、<span class="where">codex-rs/windows-sandbox-rs/</span>、<span class="where">codex-rs/execpolicy/</span>、<span class="where">codex-rs/config/src/config_toml.rs</span>、<span class="where">codex-rs/config/src/permissions_toml.rs</span>、<span class="where">codex-rs/core/src/config/</span>、<span class="where">codex-rs/protocol/src/config_types.rs</span>。</p>
+</article>
+</main>
+</body>
+</html>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 链路地图：从 npm bin 到 Rust exec 的完整时序</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>链路地图：从 npm bin 到 Rust exec 的完整时序</h1>
+        <p class="meta">学习目标：15 分钟内画出 `codex exec "hello"` 从终端敲下到 Rust exec 进程启动的完整时序图。</p>
+
+        <div class="callout">
+          一句话定位：本切片沿 `package.json` → `codex.js` → 平台二进制 → `cli/main.rs` → `codex_exec::run_main` 逐层追踪，每层只做一件事，不越界。
+          前置知识：<a href="../../module-cli-packaging/lessons/0001-cli-packaging-module-tour.html">L1 CLI 包装层模块导览</a>。
+        </div>
+
+        <h2>1. 时序总览</h2>
+        <p>
+          下面这张 mermaid 时序图覆盖了从终端敲下命令到 Rust exec 进程启动的全部 6 层。建议先扫一遍全图建立心理模型，再逐层下钻。
+        </p>
+        <div class="diagram">
+          <pre class="mermaid">sequenceDiagram
+    participant U as 用户终端
+    participant NPM as npm bin (package.json)
+    participant JS as codex.js (Node.js)
+    participant FS as 文件系统 (vendor/)
+    participant CLI as codex-rs/cli (Rust)
+    participant EXEC as codex-rs/exec (Rust)
+
+    U->>NPM: codex exec "hello"
+    NPM->>JS: 解析 bin 映射 → 执行 bin/codex.js
+    JS->>JS: platform + arch → target triple
+    JS->>FS: require.resolve(platformPackage/package.json)
+    alt 二进制存在
+        FS-->>JS: vendor/{triple}/bin/codex
+        JS->>CLI: spawn(binaryPath, ["exec","hello"])
+    else 二进制缺失
+        JS-->>U: Error: Missing optional dependency
+    end
+    CLI->>CLI: arg0_dispatch_or_else → cli_main
+    CLI->>CLI: MultitoolCli::parse() → Subcommand::Exec
+    CLI->>EXEC: codex_exec::run_main(exec_cli, arg0_paths)
+    EXEC->>EXEC: 构建 Config → 启动 agent 循环</pre>
+        </div>
+
+        <h2>2. 第 1-2 层：npm bin 到 Node.js 入口</h2>
+        <p>
+          用户在终端敲下 <code>codex exec "hello"</code>。操作系统根据 <code>$PATH</code> 找到 npm 全局安装的 <code>codex</code> 符号链接，它指向 <code>@openai/codex</code> 包的 <code>bin/codex.js</code>。这一切由 <code>package.json</code> 中的 <code>"bin": { "codex": "bin/codex.js" }</code> 声明。此时 Node.js 进程启动，但尚未触及任何 Rust 代码。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-json">{
+  "name": "@openai/codex",
+  "bin": { "codex": "bin/codex.js" },
+  "type": "module",
+  "engines": { "node": "&gt;=16" }
+}</code></pre>
+        </div>
+
+        <h2>3. 第 3-4 层：平台检测、二进制发现与异常降级</h2>
+        <p>
+          <code>codex.js</code> 的核心逻辑分三步：<b>算 triple</b>（<code>process.platform</code> + <code>process.arch</code> 映射为 Rust target triple，如 <code>aarch64-apple-darwin</code>）、<b>找二进制</b>（优先从对应平台 npm 包的 <code>vendor/</code> 目录找，找不到回退到当前包的 <code>vendor/</code>）、<b>启动子进程</b>（<code>spawn(binaryPath, argv.slice(2), { stdio: "inherit" })</code>）。其中 <code>spawn</code> 而非 <code>spawnSync</code> 确保了 Node 能响应 Ctrl-C 等信号。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-javascript">const targetTriple = (() => {
+  switch (platform) {
+    case "darwin":
+      return arch === "arm64"
+        ? "aarch64-apple-darwin"
+        : "x86_64-apple-darwin";
+    // linux, win32 ...
+  }
+})();
+
+const binaryPath = findCodexExecutable();
+// findCodexExecutable → require.resolve(platformPkg)
+// → vendor/{triple}/bin/codex
+
+const child = spawn(binaryPath, process.argv.slice(2), {
+  stdio: "inherit",
+  env,
+});</code></pre>
+        </div>
+        <p>
+          <strong>异常路径：</strong>当平台 npm optional package 未安装时，<code>findCodexExecutable()</code> 先后尝试 <code>require.resolve</code> 和本地 <code>vendor/</code> 回退，均失败后抛出 <code>Missing optional dependency @openai/codex-{platform}。Reinstall Codex: npm install -g @openai/codex@latest</code>。此错误在 Node.js 层就已终止，不会到达 Rust 二进制。排查思路：先确认 platform/arch 是否在 <code>PLATFORM_PACKAGE_BY_TARGET</code> 映射表中；如果在，检查对应 platform package 是否作为 optional dependency 安装。
+        </p>
+
+        <h2>4. 第 5-6 层：Rust CLI 分发与 exec 子进程</h2>
+        <p>
+          原生 <code>codex</code> 二进制由 <code>codex-rs/cli/src/main.rs</code> 编译。入口 <code>fn main()</code> 首先调用 <code>arg0_dispatch_or_else</code> 处理多名称分发（同一个二进制可能以 <code>codex-linux-sandbox</code> 等名称调用），随后进入 <code>cli_main</code>。clap 解析到 <code>Subcommand::Exec</code> 后，将 <code>exec_cli</code> 与根级配置覆盖合并，调用 <code>codex_exec::run_main(exec_cli, arg0_paths)</code>。至此，从 npm bin 到 exec 的启动链路完成，控制权交给 exec 模块的 agent 循环。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">// codex-rs/cli/src/main.rs (精简)
+fn main() -&gt; anyhow::Result&lt;()&gt; {
+    arg0_dispatch_or_else(move |arg0_paths| async move {
+        cli_main(arg0_paths, remote_control_disabled).await
+    })
+}
+
+// cli_main 中 Exec 分支
+Some(Subcommand::Exec(mut exec_cli)) =&gt; {
+    exec_cli.shared.inherit_exec_root_options(&amp;interactive.shared);
+    prepend_config_flags(&amp;mut exec_cli.config_overrides,
+        root_config_overrides.clone());
+    codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+}</code></pre>
+        </div>
+
+        <div class="practice">
+          <p><strong>检索练习：</strong>如果用户在 Linux arm64 上运行 <code>codex exec "test"</code> 时报 "Unsupported platform"，请说出排查方向。如果报 "Missing optional dependency"，排查方向又是什么？两种错误的根本区别是什么？</p>
+          <div class="answer">
+            参考答案：<br>
+            "Unsupported platform" → 检查 <code>codex.js</code> 中 platform/arch 的 switch-case 是否覆盖该组合；可能是新架构未加入映射表，需修改 <code>PLATFORM_PACKAGE_BY_TARGET</code>。<br>
+            "Missing optional dependency" → platform/arch 已识别但对应 npm 包未安装；检查 <code>npm ls @openai/codex-linux-arm64</code> 是否存在。<br>
+            根本区别：前者是"不认识这个平台"，后者是"认识但找不到二进制"。前者发生在 targetTriple 计算阶段，后者发生在 findCodexExecutable 阶段。<br>
+            还有疑问时，向 agent 追问具体错误栈，让它带你定位到 <code>codex.js</code> 的精确行。
+          </div>
+        </div>
+
+        <p>
+          速查：<a href="../reference/npm-to-rust-exec-flow-map.html">npm 到 Rust exec 调用链速查表</a>，包含每层输入/输出、关键函数和异常处理一览。
+          回到父模块：<a href="../../module-cli-packaging/lessons/0001-cli-packaging-module-tour.html">L1 CLI 包装层模块导览</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>状态、模型提供商与后端通信：15 分钟模块导览</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>状态、模型提供商与后端通信：15 分钟模块导览</h1>
+    <p class="meta">学习目标：能定位认证令牌从平台密钥链到 HTTP 请求头的完整路径，并能区分 state / thread-store / rollout / model-provider / login 五个核心 crate 的职责边界。</p>
+    <p class="meta">架构位置：先看 L0 <a href="../../00-overview/lessons/0001-project-map.html">项目地图</a>；完整清单见 <a href="../reference/state-model-backend-overview.html">状态与后端通信参考</a>。</p>
+  </header>
+
+  <section>
+    <h2>1. 这 10 个 crate 如何分四层</h2>
+    <p>本模块不是"一个功能"，而是 Codex 连接外部世界的四层基础设施：<strong>状态持久化层</strong>（state、thread-store、rollout、rollout-trace）负责把 session 数据写入磁盘和 SQLite；<strong>认证密钥层</strong>（login、keyring-store）负责 OAuth 登录和令牌安全存储；<strong>模型 API 层</strong>（model-provider、model-provider-info、backend-client）负责 provider 抽象和 HTTP 通信；<strong>配置遥测层</strong>（cloud-config）负责云端配置拉取和缓存。</p>
+    <div class="filetree">codex-rs/
+├── state/                       ← SQLite 状态持久化（4 个 db）
+│   ├── src/lib.rs               ← StateRuntime、LogEntry、ThreadMetadata
+│   ├── src/log_db.rs            ← 日志查询与 schema
+│   └── src/runtime/             ← threads/goals/memories/logs/backfill/agent_jobs/recovery 等 12 个子模块
+├── thread-store/                ← Thread CRUD 存储抽象
+│   ├── src/store.rs             ← ThreadStore trait（20 个方法，含 as_any、default_history_mode、read_thread_by_rollout_path）
+│   └── src/local/               ← LocalThreadStore 实现
+├── rollout/                     ← Rollout 文件持久化与发现
+│   ├── src/recorder.rs          ← RolloutRecorder 写入
+│   └── src/list.rs              ← Thread 列表与游标分页
+├── rollout-trace/               ← Trace bundle 记录与回放
+│   └── src/writer.rs            ← TraceWriter 热路径写入
+├── model-provider/              ← 模型提供商运行时抽象
+│   └── src/provider.rs          ← ModelProvider trait + ConfiguredModelProvider
+├── model-provider-info/         ← 提供商配置元数据
+│   └── src/lib.rs               ← ModelProviderInfo + 内置 provider 合并
+├── backend-client/              ← 后端 REST API 客户端
+│   └── src/client.rs            ← accounts/config/rate limits/tasks
+├── login/                       ← OAuth 登录与认证管理
+│   ├── src/auth/manager.rs      ← AuthManager 状态机
+│   └── src/device_code_auth.rs  ← 设备码 OAuth 流程
+├── keyring-store/               ← 平台密钥链抽象
+│   └── src/lib.rs               ← KeyringStore trait（load/save/delete）
+└── cloud-config/                ← 云端配置拉取与缓存
+    ├── src/service.rs           ← CloudConfigService
+    └── src/cache.rs             ← 本地缓存</div>
+  </section>
+
+  <section>
+    <h2>2. 认证令牌的最短路径</h2>
+    <p>理解这四层如何协作，最直观的方式是追踪一次认证令牌的完整生命周期。从用户执行 <code>codex login</code> 到 API 请求携带 Bearer token，经过以下关键节点：</p>
+    <div class="diagram">codex login
+  → LoginServer (启动本地 HTTP 服务器接收回调)
+  → DeviceCode (OAuth 设备码流程: request → 浏览器授权 → poll token)
+  → AuthManager (令牌缓存、刷新调度、过期检测)
+  → KeyringStore (macOS Keychain / Windows Credential Manager / Linux secret-service)
+  → ModelProvider::auth() (从 AuthManager 拉取当前有效令牌)
+  → ResolvedProviderAuth (按 scope 解析认证方式)
+  → BearerAuthProvider → HTTP Authorization header</div>
+    <p>关键边界：<code>login</code> crate 拥有认证流程和令牌生命周期，<code>keyring-store</code> 只负责安全存储的 load/save/delete 三个操作，<code>model-provider</code> 在每次 API 调用时通过 <code>auth()</code> 获取当前有效令牌。三者通过 trait 解耦，测试时可以注入 MockKeyringStore。</p>
+  </section>
+
+  <section>
+    <h2>3. 状态持久化的读写分离</h2>
+    <p><code>codex-state</code> 管理 4 个 SQLite 数据库（logs_2、goals_1、memories_1、state_5），通过 <code>StateRuntime</code> 提供统一入口。但 session 的原始数据并不直接写入 SQLite——而是先由 <code>RolloutRecorder</code> 追加到 JSONL rollout 文件，再由 <code>codex-core</code> 中的 backfill 机制提取 metadata 写入 SQLite。</p>
+    <p>因此持久化存在两条路径：</p>
+    <div class="diagram">写入路径（实时）:
+  Turn 事件 → RolloutRecorder::append → JSONL rollout 文件 → 压缩 worker
+
+读取路径（索引）:
+  RolloutRecorder → backfill → codex-state SQLite → ThreadStore::read_thread
+  ThreadStore::list_threads → RolloutConfig → rollout 文件系统扫描 + 游标分页</div>
+    <p><code>thread-store</code> 的 <code>ThreadStore</code> trait 定义了 20 个抽象方法（含 3 个带默认实现的可选方法），<code>LocalThreadStore</code> 将其映射到本地文件系统操作。读操作（list/search/read）走 rollout 文件扫描，写操作（create/resume/append）通过 <code>RolloutRecorder</code> 和 <code>LiveThread</code> 管理，flush/shutdown 确保数据落盘。</p>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li><code>codex-state</code> 管理哪 4 个 SQLite 数据库？各自的文件名是什么？</li>
+        <li>认证令牌从 <code>KeyringStore</code> 取出后，经过哪个 crate 的哪个方法到达 HTTP 请求头？</li>
+        <li>session 数据是先写 SQLite 还是先写 JSONL rollout 文件？backfill 的作用是什么？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. logs_2.sqlite（日志）、goals_1.sqlite（目标）、memories_1.sqlite（记忆）、state_5.sqlite（状态元数据）。2. 经过 <code>model-provider</code> 的 <code>ModelProvider::auth()</code> → <code>resolve_provider_auth()</code> → <code>BearerAuthProvider</code>，最终成为 HTTP Authorization header。3. 先写 JSONL rollout 文件（实时），backfill 机制随后提取 metadata 写入 SQLite 供索引查询。</p>
+    </div>
+    <p>主要阅读来源：<code>codex-rs/login/src/device_code_auth.rs</code>、<code>codex-rs/model-provider/src/provider.rs</code> 和 <code>codex-rs/rollout/src/recorder.rs</code>。后续可以追问 agent 带你从 <code>codex login</code> 的 CLI 入口一路追到 keyring 写入，或从 <code>ThreadStore::create_thread</code> 追到 rollout 文件落盘。</p>
+  </section>
+</main>
+</body>
+</html>

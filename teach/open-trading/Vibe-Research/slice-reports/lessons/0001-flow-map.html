@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 研报上传与管理全链路 — 从拖拽到归档的完整数据流</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    .error-path { border-left: 4px solid #d32f2f; background: #fff5f5; padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    .seq-box { font-size: 0.85rem; line-height: 1.6; }
+    .where { color: var(--muted); font-size: 0.88em; display: block; margin-top: 2px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>研报上传与管理全链路 — 从拖拽到归档的完整数据流</h1>
+  <p class="meta">学习目标：15 分钟内能画出研报从浏览器拖拽上传到后端本地落盘、行业归档、下载删除的全链路时序图，理解每一层的职责与故障兜底机制。</p>
+
+  <h2>1. 入口：拖拽文件到 base64 编码</h2>
+  <p>用户在 <code>MyReports</code> 页面将文件拖入虚线框区域，<code>onDrop</code> 事件获取 <code>FileList</code>，调用 <code>upload(files)</code> 进入逐文件上传循环。每个文件通过 <code>fileToB64()</code> 做异步 base64 转换：</p>
+  <div class="filetree">const fileToB64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);   // → "data:application/pdf;base64,JVBERi..."
+  });</div>
+  <p><code>readAsDataURL</code> 会生成带 MIME 前缀的 data URI 字符串，后端 <code>myreports.py</code> 会自动剥掉 <code>data:...</code> 前缀再解码。这样前端无需额外依赖，后端兼容纯 base64 和 data URI 两种格式。</p>
+
+  <h2>2. 四层调用时序图</h2>
+  <div class="diagram seq-box">浏览器 (MyReports.tsx)          Vite代理 :5899           FastAPI :8900             myreports.py             本地磁盘
+    │                              │                       │                         │                      │
+    │  拖拽 PDF 文件                │                       │                         │                      │
+    ├─ fileToB64(file) ────────────┤                       │                         │                      │
+    │  → "data:app/pdf;base64,..." │                       │                         │                      │
+    ├─ api.uploadReport(name,b64)──►├─ POST /api/myreports─►├─ mr.save_report() ─────►│                      │
+    │                              │                       │  ├─ base64.b64decode()   │                      │
+    │                              │                       │  ├─ 校验扩展名白名单      │                      │
+    │                              │                       │  ├─ 校验文件大小 ≤25MB   │                      │
+    │                              │                       │  ├─ classify(filename) ──┤                      │
+    │                              │                       │  │  匹配行业关键词表       │                      │
+    │                              │                       │  ├─ uuid4 → rid          │                      │
+    │                              │                       │  ├─ write_bytes(blob) ──►├─ {rid}.pdf           │
+    │                              │                       │  ├─ _LOCK: index 追加 ──►├─ index.json          │
+    │  ◄── {id, name, industry, size, ts} ◄────────────────┤◄─ return meta ◄─────────┤                      │
+    │                              │                       │                         │                      │
+    │  api.myReports() ────────────►├─ GET /api/myreports ─►├─ mr.list_reports() ────►├─ read index.json     │
+    │  ◄── [{...}, {...}] 按时间倒序◄───────────────────────┤◄─ sorted by ts desc ◄──┤                      │
+    │                              │                       │                         │                      │
+    │  downloadReport(id, name) ───►├─ GET /api/myreports/  │                         │                      │
+    │                              │  file/{rid} ──────────►├─ mr.report_path(rid) ─►├─ Path("{rid}.pdf")   │
+    │  ◄── blob → <a download> ◄───┤◄─ FileResponse ◄──────┤◄─ return (path, name) ◄┤                      │
+    │                              │                       │                         │                      │
+    │  api.deleteReport(rid) ──────►├─ DELETE /api/myreports│                         │                      │
+    │                              │  /{rid} ──────────────►├─ mr.delete_report(rid)─┤                      │
+    │  ◄── {ok: true} ◄────────────┤◄──────────────────────┤  ├─ _LOCK: index 移除   │  ├─ unlink("{rid}.pdf")
+    │                              │                       │  └─ _save_index() ──────►├─ index.json 覆写     │</div>
+  <p><strong>关键观察：</strong>下载链路不走 <code>&lt;a download&gt;</code> 直接指向文件 URL，因为后端可能要求 <code>Authorization: Bearer</code> 鉴权头，而浏览器原生 <code>&lt;a&gt;</code> 标签无法携带自定义请求头。因此前端用 <code>fetch → blob → URL.createObjectURL → 程序化点击</code> 完成带鉴权的文件下载。</p>
+
+  <h2>3. 三层职责速查</h2>
+  <table>
+    <tr><th>层</th><th>源码</th><th>职责</th><th>故障兜底</th></tr>
+    <tr><td>页面组件</td><td><code>MyReports.tsx</code></td><td>拖拽交互 + FileReader 编码 + 行业分组展示 + 下载/删除触发</td><td><code>err</code> 状态 → 红色提示条</td></tr>
+    <tr><td>API 客户端</td><td><code>api.ts</code></td><td><code>uploadReport</code> POST、<code>downloadReport</code> blob 下载、<code>myReports</code> 列表</td><td><code>ApiError</code> 统一错误类型</td></tr>
+    <tr><td>FastAPI 端点</td><td><code>app.py:155-189</code></td><td>参数校验 + 异常转 HTTP 400/404</td><td><code>ReportError → 400</code>、文件缺失 → <code>404</code></td></tr>
+    <tr><td>业务逻辑层</td><td><code>myreports.py</code></td><td>base64 解码 + 扩展名/大小校验 + 关键词行业分类 + index.json 并发安全 + 文件读写</td><td><code>threading.Lock</code> 防并发覆盖、原子写入 <code>.tmp → rename</code></td></tr>
+  </table>
+
+  <h2>4. 异常路径：三种典型失败场景</h2>
+  <div class="error-path">
+    <p><strong>场景 A — 文件过大：</strong>用户拖入一个 50MB PDF。<code>save_report</code> 解码后 <code>len(blob) > MAX_BYTES</code> 为真 → 抛出 <code>ReportError("文件过大...")</code> → FastAPI 捕获 → HTTP 400 → 前端 <code>catch</code> 设置 <code>err</code> 状态 → 页面显示红色错误条"上传失败"。</p>
+  </div>
+  <div class="error-path">
+    <p><strong>场景 B — 格式不支持：</strong>用户拖入 <code>.exe</code> 文件。扩展名不在 <code>ALLOWED_EXT</code> 白名单中 → <code>ReportError("不支持的文件类型")</code> → HTTP 400 → 前端同样显示错误。<strong>设计意图：</strong>白名单排除了可执行文件和网页文件，避免下载回放时的安全风险。</p>
+  </div>
+  <div class="error-path">
+    <p><strong>场景 C — 并发上传覆盖索引：</strong>用户同时拖入 5 个文件。<code>upload</code> 循环逐文件 POST，后端 <code>_LOCK</code>（<code>threading.Lock</code>）串行化索引的读-改-写操作。每个请求在写入 <code>index.json</code> 前获取锁，防止并发追加导致数据丢失。索引文件通过先写 <code>.tmp</code> 再 <code>os.replace</code> 原子改名，即使进程被 kill 也不会留下半截损坏的 JSON。</p>
+  </div>
+
+  <p><strong>暂停回忆：</strong>如果后端 <code>VR_API_KEY</code> 环境变量已设置，但前端 <code>localStorage</code> 中没有存储 access key，用户点击"下载"按钮会发生什么？前端 <code>downloadReport</code> 为什么不直接用 <code>&lt;a href="/api/myreports/file/{rid}" download&gt;</code>？</p>
+  <p><strong>参考答案：</strong>1) fetch 请求因缺少 <code>Authorization</code> 头而收到 HTTP 401 → <code>resp.ok</code> 为 false → 抛出 <code>ApiError("下载失败 HTTP 401", 401)</code> → 前端显示红色错误条。2) 浏览器 <code>&lt;a&gt;</code> 标签发起的 GET 请求是浏览器原生行为，无法注入自定义 HTTP 请求头（如 <code>Authorization: Bearer xxx</code>），因此必须走 <code>fetch → blob → createObjectURL → 程序化 &lt;a&gt; click</code> 的链路来携带鉴权信息。</p>
+
+  <p class="source">主要来源：<code>MyReports.tsx:15-21</code>（fileToB64 base64 编码）、<code>MyReports.tsx:41-55</code>（upload 逐文件上传循环）、<code>myreports.py:94-132</code>（save_report 解码-校验-分类-存盘-索引）、<code>myreports.py:135-141</code>（report_path 文件定位）、<code>api.ts:40-52</code>（downloadReport blob 下载）、<code>app.py:155-189</code>（四个 FastAPI 端点）。交叉引用：<a href="../../module-backend/lessons/0001-backend-module-tour.html">L1 后端模块</a>、<a href="../../module-frontend/lessons/0001-frontend-module-tour.html">L1 前端模块</a>。API 速查：<a href="../reference/reports-flow-map.html">研报 API 端点速查表</a>。</p>
+</main>
+</body>
+</html>

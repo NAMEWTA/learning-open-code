@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>反向重建类型关系图与 API 速查</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .type-grid {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 14px 0 20px;
+    }
+    .type-grid > div {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.92rem;
+    }
+    .type-grid > div:nth-child(odd) {
+      font-family: "SF Mono", Consolas, monospace;
+      font-weight: 600;
+      background: #f7f8fb;
+    }
+    .type-grid > div:nth-child(even) {
+      background: #fff;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>反向重建参考文档</h1>
+    <p class="meta">本页为速查资料，覆盖 <code>rollout_reconstruction.rs</code> 的核心类型、关键函数签名、数据结构关系图。配合 <a href="../lessons/0001-problem-frame.html">0001 问题框架</a> 和 <a href="../lessons/0002-core-mechanism.html">0002 核心机制</a> 使用。</p>
+  </header>
+
+  <section>
+    <h2>1. 输出类型：RolloutReconstruction</h2>
+    <p>这是 <code>reconstruct_history_from_rollout()</code> 的返回值，包含 Resume 所需的全部信息：</p>
+    <div class="type-grid">
+      <div>history: Vec&lt;ResponseItem&gt;</div>
+      <div>完整对话历史（从 replacement_history + rollout_suffix 重建）</div>
+
+      <div>previous_turn_settings: Option&lt;PreviousTurnSettings&gt;</div>
+      <div>最近一次 TurnContext 中的模型配置（model、comp_hash、realtime_active）</div>
+
+      <div>reference_context_item: Option&lt;TurnContextItem&gt;</div>
+      <div>当前会话的 TurnContext 基线。若被 Compaction 清除则为 None</div>
+
+      <div>world_state_baseline: Option&lt;WorldStateSnapshot&gt;</div>
+      <div>重建后的完整世界状态快照（从 full snapshot + patches 还原）</div>
+
+      <div>window_number: u64</div>
+      <div>上下文窗口编号（递增计数）</div>
+
+      <div>first_window_id: Option&lt;Uuid&gt;</div>
+      <div>首个窗口的 UUID v7</div>
+
+      <div>previous_window_id: Option&lt;Uuid&gt;</div>
+      <div>前一窗口的 UUID v7</div>
+
+      <div>window_id: Option&lt;Uuid&gt;</div>
+      <div>当前窗口的 UUID v7</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. 中间类型：ActiveReplaySegment</h2>
+    <p>反向扫描期间累积每个 turn 段信息的临时结构：</p>
+    <div class="type-grid">
+      <div>turn_id: Option&lt;String&gt;</div>
+      <div>当前 turn 的标识符，由 TurnStarted/TurnComplete 事件提供</div>
+
+      <div>counts_as_user_turn: bool</div>
+      <div>是否包含用户消息边界（UserMessage event 或 InterAgentCommunication）</div>
+
+      <div>previous_turn_settings</div>
+      <div>本 turn 的 TurnContext 中的模型配置</div>
+
+      <div>reference_context_item: TurnReferenceContextItem</div>
+      <div>三段状态：NeverSet（未遇到）→ Latest(TurnContextItem)（已设置）→ Cleared（被 compaction 清除）</div>
+
+      <div>world_state_replay</div>
+      <div>收集本 turn 内所有 WorldState 和 Compaction items 供后续 replay</div>
+
+      <div>base_replacement_history</div>
+      <div>若本 turn 内 Compaction 携带 replacement_history，则记录之</div>
+
+      <div>window: Option&lt;ReconstructedWindow&gt;</div>
+      <div>上下文窗口信息（number、first_id、previous_id、id）</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. TurnReferenceContextItem 三段状态机</h2>
+    <pre><code>enum TurnReferenceContextItem {
+    NeverSet,                        // 尚未遇到任何 TurnContext 或 Cleared
+    Cleared,                         // 曾被 Compaction 清除
+    Latest(Box&lt;TurnContextItem&gt;),     // 当前有效的 TurnContext 基线
+}</code></pre>
+    <p>状态转换规则：</p>
+    <ul>
+      <li><code>NeverSet</code> + 遇到 <code>TurnContext</code> → <code>Latest(...)</code></li>
+      <li><code>NeverSet</code> + 遇到 <code>Compacted</code> → <code>Cleared</code></li>
+      <li><code>Latest(...)</code> + 遇到 <code>Compacted</code> → <code>Cleared</code>（不覆盖已有值，因为反向扫描从新往旧——一旦看到 Cleared 就不应再回到 Latest）</li>
+      <li>实际上代码中仅在 <code>matches!(..., NeverSet)</code> 时才写入，因此 Latest 一旦设置就不会被 Cleared 反向覆盖（除非先看到 Cleared = 更旧的数据被抛弃）</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>4. finalize_active_segment 逻辑</h2>
+    <p>将累积的 segment 信息写入全局状态变量，同时处理 rollback 跳过：</p>
+    <ol>
+      <li>若 <code>pending_rollback_turns > 0</code> 且 segment 包含用户 turn → 减少计数并<strong>丢弃</strong>该 segment</li>
+      <li>将 <code>world_state_replay</code> 追加到全局 <code>world_state_replay</code> 列表</li>
+      <li>若全局 <code>base_replacement_history</code> 尚未设置且 segment 中有 → 记录之</li>
+      <li>若全局 <code>window</code> 尚未设置且 segment 中有 → 记录之</li>
+      <li>若全局 <code>previous_turn_settings</code> 尚未设置且 segment 是 user turn → 记录之</li>
+      <li>若全局 <code>reference_context_item</code> 为 NeverSet 且 segment 中有（user turn 或 Cleared）→ 记录之</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>5. 涉及文件速查</h2>
+    <table>
+      <tr><th>文件</th><th>行数</th><th>职责</th></tr>
+      <tr>
+        <td><code>codex-rs/core/src/session/rollout_reconstruction.rs</code></td>
+        <td>460</td>
+        <td>反向扫描算法主实现，包含 <code>reconstruct_history_from_rollout</code>、<code>ActiveReplaySegment</code>、<code>finalize_active_segment</code></td>
+      </tr>
+      <tr>
+        <td><code>codex-rs/core/src/session/rollout_reconstruction_tests.rs</code></td>
+        <td>~500</td>
+        <td>单元测试，覆盖 turn 段边界、compaction 窗口、rollback 跳过场景</td>
+      </tr>
+      <tr>
+        <td><code>codex-rs/rollout/src/recorder.rs</code></td>
+        <td>1973</td>
+        <td>JSONL 写入端，包含 <code>RolloutRecorder</code>、<code>RolloutWriterState</code>、<code>load_rollout_items</code></td>
+      </tr>
+      <tr>
+        <td><code>codex-rs/state/src/runtime/backfill.rs</code></td>
+        <td>279</td>
+        <td>SQLite backfill 租约机制与增量水印</td>
+      </tr>
+      <tr>
+        <td><code>codex-rs/protocol/src/protocol.rs</code></td>
+        <td>—</td>
+        <td><code>RolloutItem</code> 枚举定义（所有变体）</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>6. 已知局限与改进方向</h2>
+    <table>
+      <tr><th>局限</th><th>描述</th><th>改进方向</th></tr>
+      <tr>
+        <td>全量 eager load</td>
+        <td>当前 <code>load_rollout_items</code> 将整个 JSONL 文件读入内存 <code>Vec&lt;RolloutItem&gt;</code></td>
+        <td>改为 lazy reverse reader，流式从文件尾部反向读取，避免大文件内存压力</td>
+      </tr>
+      <tr>
+        <td>legacy compaction 双循环</td>
+        <td>没有 <code>replacement_history</code> 的 legacy compaction 需要在正向 replay 阶段额外处理，且需清 <code>reference_context_item</code></td>
+        <td>逐步淘汰 legacy 格式，移除备选路径和 <code>saw_legacy_compaction_*</code> 标志</td>
+      </tr>
+      <tr>
+        <td>无增量更新</td>
+        <td>每次 resume 都完整扫描并重建，即便只新增了几行</td>
+        <td>可记录上次扫描位置（文件 offset），resume 时只扫描新增部分</td>
+      </tr>
+      <tr>
+        <td>Window number fallback</td>
+        <td>若 rollout 中没有 Compaction，window_number 回退为 Compaction 计数</td>
+        <td>SessionMeta 中携带初始 window 信息可缓解，但并非所有 session 都有</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <p>返回课程：<a href="../lessons/0001-problem-frame.html">0001 问题框架</a> | <a href="../lessons/0002-core-mechanism.html">0002 核心机制</a></p>
+  </section>
+</main>
+</body>
+</html>

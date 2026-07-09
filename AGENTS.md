@@ -64,9 +64,13 @@ learning-open-code/
 │   └── Trilium/
 ├── open-productivity/              # ✅ 效率工具（1 个项目）
 │   └── super-productivity/
-├── open-java/                      # ☕ Java 企业开发（4 个项目）
+├── open-java/                      # ☕ Java 企业开发（2 个项目）
 │   ├── RuoYiVuePlus/
 │   └── snail-ai/
+├── open-trading/                   # 📈 量化交易与金融数据（3 个项目）
+│   ├── TradingAgents-astock/
+│   ├── Vibe-Research/
+│   └── a-stock-data/
 ├── teach/                          # 教学课程输出目录
 ├── self/                           # 个人研究/实验
 └── translator/                     # 翻译工作区
@@ -83,6 +87,7 @@ learning-open-code/
 | `open-knowledge/` | 知识管理与编辑器 | 6 |
 | `open-productivity/` | 效率工具 | 1 |
 | `open-java/` | Java 企业开发 | 2（含多子模块） |
+| `open-trading/` | 量化交易与金融数据 | 3 |
 
 > **说明：** `open-java/RuoYiVuePlus/` 是逻辑项目组，包含 3 个子模块（`ruoyi-vue-plus`、`ruoyi-vue`、`ruoyi-react`），它们共享同一个父目录，属于同一个 Java 全栈系统。处理时应视为一个整体逻辑项目。
 

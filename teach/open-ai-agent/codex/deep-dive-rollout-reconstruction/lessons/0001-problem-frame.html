@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>问题框架：为什么用 JSONL 重建 Session 而非 SQLite 查询？</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>问题框架：JSONL 与 SQLite 的持久化分工</h1>
+    <p class="meta">学习目标：理解 Codex 为什么将 JSONL 作为热路径、SQLite 作为冷 backfill，能对比两种方案在 Session 重建场景下的设计权衡。</p>
+    <p class="meta">前置：<a href="../../slice-session-resume-fork/lessons/0001-flow-map.html">L2 会话持久化链路地图</a></p>
+    <p class="meta">参考：<a href="../reference/rollout-reconstruction-notes.html">反向重建快速参考</a></p>
+  </header>
+
+  <section>
+    <h2>1. 问题的本质：Session 重建需要什么？</h2>
+    <p>进程重启后恢复一个 Session，需要回答三个问题：</p>
+    <ol>
+      <li><strong>最近一次 Turn 的配置</strong>（模型、comp hash、realtime 开关）——用于向 API 发续接请求</li>
+      <li><strong>完整的对话历史</strong>（ResponseItem 列表）——用于构建 prompt context</li>
+      <li><strong>World State 基线</strong>（沙箱文件快照）——确保环境一致性</li>
+    </ol>
+    <p>这三个答案全部编码在 rollout JSONL 文件中——一份按时间顺序追加的、人类可读的 JSON 事件日志。重建算法要做的，是从这份 append-only 日志中<em>高效</em>提取上述信息。</p>
+
+    <div class="callout">
+      <p><strong>关键约束</strong>：JSONL 文件在写入时只管追加，不维护索引。写入端（RolloutRecorder）和读取端（Session resume）解耦，读取端不能假设文件结构——只能通过逐行扫描来发现数据。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. JSONL 方案：append-only 的"源"</h2>
+    <p>Codex 选择 JSONL 作为主持久化介质，有以下设计理由：</p>
+
+    <table>
+      <tr><th>特性</th><th>对 Session 持久化的意义</th></tr>
+      <tr>
+        <td>追加写（append-only）</td>
+        <td>写入无锁竞争；崩溃时最多丢最后一行，不会损坏已有数据</td>
+      </tr>
+      <tr>
+        <td>人类可读</td>
+        <td>用户可用 <code>jq</code> / <code>fx</code> 直接检查会话内容，调试友好</td>
+      </tr>
+      <tr>
+        <td>行级原子性</td>
+        <td>每行是一个完整的 JSON 对象，写入即为持久化单元</td>
+      </tr>
+      <tr>
+        <td>zstd 压缩</td>
+        <td>旧 rollout 自动压缩为 <code>.jsonl.zst</code>，节省磁盘空间</td>
+      </tr>
+      <tr>
+        <td>文件系统天然排序</td>
+        <td>文件名嵌入时间戳和 UUID，按名称排序即可获得时间顺序</td>
+      </tr>
+    </table>
+
+    <p>写出端是 <code>RolloutRecorder</code>（<code>codex-rs/rollout/src/recorder.rs</code>），运行在独立的 Tokio 后台任务中。items 通过 mpsc channel 异步投递，由 <code>RolloutWriterState</code> 负责缓冲、写入重试、错误恢复。</p>
+  </section>
+
+  <section>
+    <h2>3. 双轨制的代价与缓解</h2>
+    <p>Codex 的选择是<em>双轨制</em>——JSONL 作为 source-of-truth（热路径），SQLite 作为元数据索引（冷 backfill）。关键权衡是：宁可让 resume 做一次 O(n) 行扫描，也不在每次 <code>append()</code> 时付出 SQLite 写入代价（WAL 写入放大、单写者锁、migration 负担）。</p>
+    <p>双轨制引入了"元数据滞后"问题——用户刚结束对话时，SQLite 中的 thread 元数据可能尚未 backfill。Codex 通过以下机制缓解：</p>
+    <ul>
+      <li><strong>Backfill 租约</strong>（<code>try_claim_backfill</code>）：同一时刻只有一个进程持有 backfill 锁，避免重复扫描</li>
+      <li><strong>文件系统优先</strong>（<code>list_threads_with_db_fallback</code>）：thread 列表先扫文件系统、再与 SQLite 交叉校验</li>
+      <li><strong>Read-repair</strong>：读取时发现 SQLite 缺失行，从 JSONL 头中提取元数据补写</li>
+    </ul>
+    <p>这种设计使热路径（rollout 写入、resume 重建）完全独立于 SQLite 可用性——即使 SQLite 损坏或未初始化，Session 的创建和恢复仍能正常工作。</p>
+  </section>
+
+  <section>
+    <h2>4. 暂停回忆</h2>
+    <div class="exercise">
+      <p>不看上文，回答三个问题：</p>
+      <ol>
+        <li>Codex 的 Session 重建需要从 rollout 中提取哪三种信息？</li>
+        <li>JSONL append-only 相比 SQLite 在<em>热路径</em>上的两个关键优势是什么？</li>
+        <li>"双轨制"中的 SQLite 后置 backfill 解决了什么问题？又引入了什么新问题？</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. 最近 Turn 配置（模型、comp hash）、完整对话历史（ResponseItem 列表）、World State 基线。2. 无写锁竞争（append-only 天然无冲突）+ 崩溃安全性（最多丢最后一行，不损坏已有数据）；此外还保留了人类可读性。3. backfill 解决了 SQLite 查询速度（O(log n) 索引过滤线程列表）的优势，但引入了元数据滞后——刚结束的对话在 SQLite 中可能尚未体现，需要文件系统优先 + read-repair 交叉验证。</p>
+    </div>
+    <p>下一步：<a href="0002-core-mechanism.html">核心机制——反向扫描算法的逐步拆解</a>。如有疑问，追问 agent 让它带你看一次真实的 resume 调用栈。</p>
+  </section>
+</main>
+</body>
+</html>

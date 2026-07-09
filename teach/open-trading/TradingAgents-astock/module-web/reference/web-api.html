@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>参考 — Web 模块公共 API 参考</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .toc {
+    background: #f9fafc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+  }
+  .toc ol { margin: 4px 0; padding-left: 20px; }
+  .sig { font-family: "SF Mono", Consolas, monospace; font-size: 0.88rem; background: #f4f6f9; border-radius: 4px; padding: 1px 6px; }
+  .ret { color: #0f6b8f; }
+  .warn { border-left: 4px solid #e6a817; background: #fef9e7; padding: 10px 14px; margin: 14px 0; border-radius: 0 8px 8px 0; }
+  .info { border-left: 4px solid #0f6b8f; background: #f4f8fb; padding: 10px 14px; margin: 14px 0; border-radius: 0 8px 8px 0; }
+  .diagram-box {
+    background: #fafbfc;
+    border: 1px solid #dfe5ec;
+    border-radius: 8px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">参考文档 · L3 web 模块 · API 签名与通信模型速查</p>
+
+<h1>Web 模块公共 API 参考</h1>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li><a href="#sec-files">源码文件索引</a></li>
+  <li><a href="#sec-runner">通信模型：Thread + Stream + 传播控制</a></li>
+  <li><a href="#sec-progress">线程安全设计：Event + Lock 暂停/停止机制</a></li>
+  <li><a href="#sec-font">中文字体适配：fpdf2 字体探测全链路</a></li>
+  <li><a href="#sec-api">完整 API 签名参考</a>
+    <ol>
+      <li><a href="#api-runner">runner.py — 后台线程运行器</a></li>
+      <li><a href="#api-progress">progress.py — ProgressTracker 类</a></li>
+      <li><a href="#api-app">app.py — Streamlit 主页面</a></li>
+      <li><a href="#api-history">history.py — 历史记录管理</a></li>
+      <li><a href="#api-pdf">pdf_export.py — PDF/Markdown 导出</a></li>
+      <li><a href="#api-stock">stock_display.py — 股票名展示</a></li>
+      <li><a href="#api-launch">launch.py — CLI 启动器</a></li>
+      <li><a href="#api-sidebar">components/sidebar.py — 侧边栏</a></li>
+      <li><a href="#api-progress-panel">components/progress_panel.py — 进度面板</a></li>
+      <li><a href="#api-report">components/report_viewer.py — 报告展示</a></li>
+    </ol>
+  </li>
+  <li><a href="#sec-data">关键数据结构</a></li>
+</ol>
+</div>
+
+<!-- ──────────────────────────── -->
+<!-- 1. 源码文件索引 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-files">1. 源码文件索引</h2>
+
+<table>
+<tr><th>文件</th><th>行数</th><th>公共符号数</th><th>职责</th></tr>
+<tr><td><code>web/app.py</code></td><td>~310</td><td>1 函数</td><td>主页面入口：5 状态机 + 自定义 CSS + 配置构建</td></tr>
+<tr><td><code>web/runner.py</code></td><td>~210</td><td>1 函数</td><td>后台线程启动器：Thread + Stage 检测 + 暂停/停止传播</td></tr>
+<tr><td><code>web/progress.py</code></td><td>~185</td><td>1 类 + 2 常量</td><td>进度追踪器：Event + Lock 线程安全状态管理</td></tr>
+<tr><td><code>web/history.py</code></td><td>~205</td><td>5 函数</td><td>历史管理：扫描/记录/恢复/清理</td></tr>
+<tr><td><code>web/pdf_export.py</code></td><td>~655</td><td>3 函数 + 1 类 + 1 异常</td><td>PDF 生成：fpdf2 + 字体探测链 + Markdown 降级</td></tr>
+<tr><td><code>web/launch.py</code></td><td>~17</td><td>1 函数</td><td>CLI 入口：streamlit run 封装</td></tr>
+<tr><td><code>web/stock_display.py</code></td><td>~265</td><td>5 函数</td><td>股票展示：代码↔名称解析 + 报告文本归一化</td></tr>
+<tr><td><code>web/components/sidebar.py</code></td><td>~300</td><td>1 函数</td><td>侧边栏：股票输入 + LLM 配置 + 暂停/恢复/停止控制</td></tr>
+<tr><td><code>web/components/progress_panel.py</code></td><td>~120</td><td>1 函数</td><td>进度面板：阶段图标网格 + 进度条 + 统计指标</td></tr>
+<tr><td><code>web/components/report_viewer.py</code></td><td>~170</td><td>1 函数</td><td>报告展示：信号卡片 + 可折叠分区 + 下载按钮</td></tr>
+</table>
+
+<!-- ──────────────────────────── -->
+<!-- 2. 通信模型 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-runner">2. 通信模型：Thread + Stream + 传播控制</h2>
+
+<p>Web 模块采用<strong>共享内存 + 轮询</strong>的线程通信模型，不依赖 <code>queue.Queue</code>。后台线程写入共享的 <code>ProgressTracker</code> 对象，Streamlit UI 线程每轮 <code>st.rerun()</code> 时读取该对象。</p>
+
+<h3>2.1 线程生命周期</h3>
+
+<div class="diagram-box">
+<pre>用户点击"开始分析"
+  │
+  ▼
+app.py: start_analysis 触发
+  │
+  ├─ 创建 ProgressTracker(ticker, trade_date)
+  ├─ 存入 st.session_state["tracker"]
+  │
+  ▼
+run_analysis_in_thread(ticker, trade_date, config, tracker)
+  │
+  ├─ tracker.is_running = True
+  ├─ tracker.mark_stage_active("market")
+  ├─ record_incomplete_task(...)
+  │
+  ├─ threading.Thread(target=_target, daemon=True).start()
+  │     │
+  │     ▼
+  │   _run() — 在后台线程中执行
+  │     │
+  │     ├─ 创建 TradingAgentsGraph 实例
+  │     ├─ graph.prepare_graph_run() → init_state, args
+  │     ├─ graph.graph.stream(init_state) → 迭代器
+  │     │
+  │     ├─ while True:
+  │     │     ├─ tracker.wait_if_paused()    ← Event 阻塞点
+  │     │     ├─ if tracker.stop_requested → _close_and_discard() → return
+  │     │     ├─ chunk = next(stream)        ← 可能 StopIteration
+  │     │     ├─ _detect_completed_stages(chunk, tracker)
+  │     │     ├─ _infer_active_stage(tracker)
+  │     │     ├─ record_incomplete_task(...) ← 断点续跑
+  │     │     └─ tracker.update_stats(...)
+  │     │
+  │     ├─ normalize_report_state_mentions(last_chunk, ticker)
+  │     ├─ graph.finalize_graph_run(ticker, trade_date, last_chunk) → signal
+  │     └─ tracker.mark_complete(last_chunk, signal)
+  │
+  ▼
+  返回 threading.Thread 句柄（不 join，不阻塞 UI 线程）
+</pre>
+</div>
+
+<h3>2.2 停止传播路径</h3>
+
+<p>停止请求从 UI 线程发起，通过以下路径传播到后台线程：</p>
+
+<div class="diagram-box">
+<pre>UI 线程                                   后台线程
+────────                                  ────────
+用户点击"停止"
+  │
+  ▼
+tracker.request_stop()
+  ├─ Lock 保护
+  ├─ stop_requested = True
+  ├─ 清空 UI 可见状态
+  └─ _pause_gate.set() ──────────────►  _pause_gate.wait() 解除阻塞
+                                          │
+                                          ▼
+                                        tracker.stop_requested == True?
+                                          │ YES
+                                          ▼
+                                        _close_and_discard()
+                                          ├─ graph.close_graph_run()
+                                          └─ _discard_stopped_run()
+                                               ├─ clear_incomplete_task()
+                                               ├─ clear_checkpoint()
+                                               └─ tracker.mark_stopped()
+
+异常路径: _target() 捕获 Exception
+  ├─ if tracker.stop_requested → _discard_stopped_run() → return
+  └─ else → record_incomplete_task(status="error") + tracker.mark_error()
+</pre>
+</div>
+
+<p><strong>关键设计原则：</strong></p>
+<ul>
+  <li><strong>多重检查点：</strong>stream 循环的每次迭代前/后、stream next() 后、finalize 前都检查 <code>stop_requested</code>，确保停止信号不丢失。</li>
+  <li><strong>Daemon 线程：</strong>线程设为 <code>daemon=True</code>，Streamlit 进程退出时自动终止，不会残留阻塞线程。</li>
+  <li><strong>异常双路径：</strong>正常停止和异常崩溃走不同清理逻辑——停止时丢弃断点（纯清理），异常时保留断点（可续跑）。</li>
+</ul>
+
+<h3>2.3 Stage 检测机制</h3>
+
+<p><span class="sig">_detect_completed_stages(chunk, tracker)</span> 通过检查流式 chunk 中的字段来判断阶段完成。映射关系：</p>
+
+<table>
+<tr><th>chunk 字段</th><th>阶段 ID</th><th>检测条件</th></tr>
+<tr><td><code>market_report</code> ~ <code>lockup_report</code>（7 个报告键）</td><td><code>market</code> ~ <code>lockup</code></td><td>字段非空 且 该阶段未完成</td></tr>
+<tr><td><code>data_quality_summary</code></td><td><code>quality_gate</code></td><td>字段非空 且 未完成</td></tr>
+<tr><td><code>investment_debate_state</code> (dict)</td><td><code>debate</code></td><td>含有 <code>judge_decision</code> 非空 且 未完成</td></tr>
+<tr><td><code>trader_investment_plan</code></td><td><code>trader</code></td><td>字段非空 且 未完成</td></tr>
+<tr><td><code>risk_debate_state</code> (dict)</td><td><code>risk</code></td><td>含有 <code>judge_decision</code> 非空 且 未完成</td></tr>
+<tr><td><code>final_trade_decision</code></td><td><code>pm</code></td><td>字段非空 且 未完成</td></tr>
+</table>
+
+<p>每检测到一个完成阶段，调用 <span class="sig">tracker.mark_stage_done(stage_id, report)</span>，同时执行 <span class="sig">normalize_stock_mentions()</span> 和 <span class="sig">_strip_think_tags()</span> 清洗文本。</p>
+
+<!-- ──────────────────────────── -->
+<!-- 3. 线程安全设计 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-progress">3. 线程安全设计：Event + Lock 暂停/停止机制</h2>
+
+<div class="info">
+<strong>核心挑战：</strong><code>ProgressTracker</code> 是一个 <code>@dataclass</code> 可变状态容器，同时被两个线程访问——后台线程写入（mark_*、update_stats），UI 线程读取（stage_status、elapsed）和控制（pause、resume、request_stop）。必须保证线程安全且不引入死锁。
+</div>
+
+<h3>3.1 双原语分工</h3>
+
+<table>
+<tr><th>原语</th><th>类型</th><th>用途</th><th>初始化</th></tr>
+<tr><td><code>_lock</code></td><td><code>threading.Lock</code></td><td>保护所有可变字段的读写原子性</td><td><code>field(default_factory=threading.Lock)</code></td></tr>
+<tr><td><code>_pause_gate</code></td><td><code>threading.Event</code></td><td>后台线程的阻塞/放行闸门</td><td><code>field(default_factory=threading.Event)</code> + <code>__post_init__</code> 中 <code>.set()</code></td></tr>
+</table>
+
+<div class="warn">
+<strong>关键细节：</strong><code>_pause_gate</code> 使用 <code>init=False</code> 构造（默认 cleared），然后在 <code>__post_init__</code> 中立即 <code>.set()</code>。这确保初始化完成后门是开的（不阻塞），只有显式调用 <code>pause()</code> 才会关门。
+</div>
+
+<h3>3.2 暂停/恢复时序</h3>
+
+<div class="diagram-box">
+<pre>┌─ pause() ──────────────────────────────────────────────────┐
+│  with self._lock:                                          │
+│    guard: not running / complete / error / paused / stop   │
+│    → 任一为真则 return False（不允许暂停）                    │
+│    self.is_paused = True                                   │
+│    self._pause_gate.clear()   ← 关门                        │
+│  return True                                               │
+└────────────────────────────────────────────────────────────┘
+
+┌─ resume() ─────────────────────────────────────────────────┐
+│  with self._lock:                                          │
+│    guard: not is_paused or stop_requested                  │
+│    → return False                                          │
+│    self.is_paused = False                                  │
+│    self._pause_gate.set()      ← 开门                        │
+│  return True                                               │
+└────────────────────────────────────────────────────────────┘
+
+┌─ wait_if_paused() ── （后台线程调用）───────────────────────┐
+│  self._pause_gate.wait()     ← 阻塞直到 set() 或 stop 触发   │
+│  （无 Lock，因为 Event.wait() 本身线程安全）                 │
+└────────────────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<h3>3.3 request_stop() 的激进清空策略</h3>
+
+<p><span class="sig">request_stop()</span> 不仅设置标志位，还<strong>立即清空所有 UI 可见状态</strong>（<code>current_stage</code>、<code>completed_stages</code>、<code>stage_reports</code>、<code>final_state</code>、统计数据），同时 <code>_pause_gate.set()</code> 解除后台线程的阻塞。这确保停止操作有即时视觉反馈，且后台线程能尽快退出阻塞点检测到 <code>stop_requested</code>。</p>
+
+<h3>3.4 Lock 保护范围</h3>
+
+<p>以下方法均在 <span class="sig">with self._lock:</span> 保护下执行：</p>
+
+<table>
+<tr><th>方法</th><th>锁内操作</th></tr>
+<tr><td><code>pause()</code></td><td>读 is_running/is_complete/error/is_paused/stop_requested → 写 is_paused + clear Event</td></tr>
+<tr><td><code>resume()</code></td><td>读 is_paused/stop_requested → 写 is_paused + set Event</td></tr>
+<tr><td><code>request_stop()</code></td><td>读状态守卫 → 写 stop_requested + 清空 10+ 字段 + set Event</td></tr>
+<tr><td><code>mark_stopped()</code></td><td>重置所有字段至初始值 + set Event</td></tr>
+<tr><td><code>mark_stage_active()</code></td><td>读 stop_requested → 写 current_stage</td></tr>
+<tr><td><code>mark_stage_done()</code></td><td>读 stop_requested → 写 completed_stages + stage_reports + current_stage</td></tr>
+<tr><td><code>mark_complete()</code></td><td>写 final_state/signal + 切换 is_running→is_complete + set Event</td></tr>
+<tr><td><code>mark_error()</code></td><td>写 error + 切换 is_running→False + set Event</td></tr>
+<tr><td><code>update_stats()</code></td><td>读 stop_requested → 写 4 个统计字段</td></tr>
+<tr><td><code>stage_status()</code></td><td>读 completed_stages/current_stage → 返回 "done"/"active"/"pending"</td></tr>
+</table>
+
+<p><strong>不持锁的操作：</strong><span class="sig">wait_if_paused()</span> 只调用 <code>Event.wait()</code>（自带内部锁）；<span class="sig">elapsed</span> 属性读取 <code>start_time</code>（float 赋值在 CPython 中是原子操作，但不保证内存可见性——此处容忍微小误差）。</p>
+
+<!-- ──────────────────────────── -->
+<!-- 4. 中文字体适配 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-font">4. 中文字体适配：fpdf2 字体探测全链路</h2>
+
+<div class="info">
+<strong>背景：</strong>fpdf2 生成 PDF 时需要可嵌入的 TTF/OTF/TTC 字体文件。中文（CJK）字符集远大于 latin-1，必须使用专门的中文字体。常见问题：安装了旧版 pyfpdf（latin-1 编码）导致 <code>UnicodeEncodeError</code>（issue #54）；系统未安装中文字体导致 PDF 导出失败。
+</div>
+
+<h3>4.1 库版本检测</h3>
+
+<p><span class="sig">_ensure_fpdf2()</span> 在 PDF 生成前首先检查 fpdf 版本：</p>
+
+<div class="diagram-box">
+<pre>fpdf.__version__ 或 fpdf.FPDF_VERSION
+  │
+  ├─ major >= 2 → 通过（fpdf2 维护分支）
+  └─ major &lt; 2  → RuntimeError:
+      "检测到旧版 fpdf (pyfpdf)，请执行:
+       pip uninstall -y fpdf && pip install 'fpdf2>=2.8.0'"
+</pre>
+</div>
+
+<h3>4.2 字体探测四层优先级</h3>
+
+<div class="diagram-box">
+<pre>_find_cjk_fonts() → (regular_font_path, bold_font_path)
+
+Layer 1: 环境变量（最高优先级）
+  TRADINGAGENTS_PDF_FONT=/path/to/regular.ttf
+  TRADINGAGENTS_PDF_BOLD_FONT=/path/to/bold.ttf   ← 可选，缺失则复用 regular
+
+Layer 2: 预置候选路径（11 组，覆盖三大平台）
+  Linux:
+    /usr/share/fonts/truetype/wqy/wqy-microhei.ttc     ← 首选
+    /usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+    /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+    /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc
+    /usr/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf
+    /usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf
+    /usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf
+
+  macOS:
+    /System/Library/Fonts/PingFang.ttc
+    /System/Library/Fonts/STHeiti Light.ttc → STHeiti Medium.ttc (Bold)
+
+  Windows:
+    C:/Windows/Fonts/msyh.ttc  → msyhbd.ttc (Bold)
+    C:/Windows/Fonts/simhei.ttf
+
+Layer 3: 文件系统搜索 (_discover_cjk_fonts)
+  搜索根目录:
+    /usr/share/fonts
+    /usr/local/share/fonts
+    ~/.local/share/fonts
+    ~/.fonts
+    $XDG_DATA_HOME/fonts
+  匹配文件模式（按优先级）:
+    wqy-microhei.ttc → wqy-zenhei.ttc → NotoSansCJK-Regular.ttc
+    → NotoSansCJKsc-Regular.otf → NotoSansSC-Regular.ttf
+    → SourceHanSansSC-Regular.otf → DroidSansFallbackFull.ttf
+
+Layer 4: fontconfig 系统查询 (_font_from_fontconfig)
+  fc-match -f '%{file}' 'WenQuanYi Micro Hei:style=Regular'
+  fc-match 'Noto Sans CJK SC:style=Regular'
+  fc-match 'Noto Sans SC:style=Regular'
+  fc-match 'Source Han Sans SC:style=Regular'
+  （依次尝试，直到找到一个 CJK 字体）
+
+全部失败 → PDFExportError("PDF 导出需要可嵌入的 Unicode 中文字体...")
+</pre>
+</div>
+
+<h3>4.3 TTC 字体集合处理</h3>
+
+<p>TTC（TrueType Collection）文件包含多个字体 face。<span class="sig">_collection_font_number(path)</span> 根据文件名返回对应的简体中文 face 索引：</p>
+
+<table>
+<tr><th>TTC 文件</th><th>Face 索引</th><th>说明</th></tr>
+<tr><td><code>NotoSansCJK-Regular.ttc</code></td><td>2</td><td>索引 2 为 SC（简体中文）变体</td></tr>
+<tr><td><code>NotoSansCJK-Bold.ttc</code></td><td>2</td><td>同上</td></tr>
+<tr><td><code>NotoSerifCJK-Regular.ttc</code></td><td>2</td><td>衬线 SC 变体</td></tr>
+<tr><td><code>NotoSerifCJK-Bold.ttc</code></td><td>2</td><td>同上</td></tr>
+<tr><td>其他（PingFang、msyh 等）</td><td>0</td><td>默认取第一个 face</td></tr>
+</table>
+
+<h3>4.4 单文件加粗回退</h3>
+
+<p>部分中文字体（<code>wqy-microhei.ttc</code>、<code>wqy-zenhei.ttc</code>、<code>DroidSansFallbackFull.ttf</code>）只有一个文件，不区分 Regular/Bold。对于这些字体，regular 和 bold 使用同一个文件路径，由 fpdf2 的样式引擎模拟加粗。</p>
+
+<h3>4.5 降级策略</h3>
+
+<p>当 PDF 生成因字体缺失失败时，系统不崩溃，而是：</p>
+<ul>
+  <li><code>report_viewer.py</code> 中捕获 <code>Exception</code>，将 PDF 下载按钮替换为禁用的 "PDF 不可用" 按钮，并在 tooltip 中显示原因。</li>
+  <li>Markdown 导出（<span class="sig">generate_markdown()</span>）始终可用，不依赖任何字体文件——作为安全兜底方案。</li>
+</ul>
+
+<!-- ──────────────────────────── -->
+<!-- 5. 完整 API 签名参考 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-api">5. 完整 API 签名参考</h2>
+
+<!-- ─── 5.1 runner.py ─── -->
+
+<h3 id="api-runner">5.1 runner.py — 后台线程运行器</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>run_analysis_in_thread</strong></td>
+  <td><span class="sig">(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker)</span></td>
+  <td><span class="ret">threading.Thread</span></td>
+</tr>
+</table>
+
+<p><strong>参数说明：</strong></p>
+<table>
+<tr><th>参数</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td>6 位 A 股代码（如 "300750"）</td></tr>
+<tr><td><code>trade_date</code></td><td><code>str</code></td><td>分析日期，格式 "YYYY-MM-DD"</td></tr>
+<tr><td><code>config</code></td><td><code>dict</code></td><td>完整运行时配置（LLM provider、model、backend_url、data_vendors 等）</td></tr>
+<tr><td><code>tracker</code></td><td><code>ProgressTracker</code></td><td>共享进度追踪器，用于 UI 线程读取进度和发送控制信号</td></tr>
+</table>
+
+<p><strong>行为：</strong></p>
+<ol>
+  <li>设置 <code>tracker.ticker</code>、<code>tracker.trade_date</code>、<code>tracker.is_running = True</code></li>
+  <li>标记初始活跃阶段为 <code>"market"</code></li>
+  <li>记录 <code>record_incomplete_task(status="running")</code>（用于断点续跑）</li>
+  <li>创建 <code>threading.Thread(target=_target, daemon=True)</code> 并启动</li>
+  <li>返回 Thread 句柄（调用方不 join）</li>
+</ol>
+
+<div class="warn">
+<strong>内部函数 _target()：</strong>包装 <code>_run()</code> 调用，捕获所有异常。如果 <code>tracker.stop_requested</code> 为真，执行静默清理（<code>_discard_stopped_run</code>）；否则记录错误到 <code>record_incomplete_task(status="error")</code> 并调用 <code>tracker.mark_error()</code>。
+</div>
+
+<h4>内部函数</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>职责</th></tr>
+<tr><td><code>_run</code></td><td><span class="sig">(ticker, trade_date, config, tracker) -> None</span></td><td>完整 pipeline 执行：创建 TradingAgentsGraph → prepare → stream 循环 → finalize</td></tr>
+<tr><td><code>_detect_completed_stages</code></td><td><span class="sig">(chunk: dict, tracker: ProgressTracker) -> None</span></td><td>检查 stream chunk 中 12 个阶段的完成状态</td></tr>
+<tr><td><code>_infer_active_stage</code></td><td><span class="sig">(tracker: ProgressTracker) -> None</span></td><td>将 current_stage 设为第一个 pending 阶段</td></tr>
+<tr><td><code>_discard_stopped_run</code></td><td><span class="sig">(ticker, trade_date, config, tracker) -> None</span></td><td>清理停止运行的残留：clear_incomplete_task + clear_checkpoint + mark_stopped</td></tr>
+<tr><td><code>_strip_think_tags</code></td><td><span class="sig">(text: str) -> str</span></td><td>移除 LLM 输出中的 <code>&lt;think&gt;...&lt;/think&gt;</code> 块</td></tr>
+</table>
+
+<!-- ─── 5.2 progress.py ─── -->
+
+<h3 id="api-progress">5.2 progress.py — ProgressTracker 类</h3>
+
+<h4>模块常量</h4>
+
+<table>
+<tr><th>常量</th><th>类型</th><th>值</th></tr>
+<tr><td><code>PIPELINE_STAGES</code></td><td><code>list[dict[str, str]]</code></td><td>12 个阶段定义列表，每个元素含 id/name/icon/report_key</td></tr>
+<tr><td><code>STAGE_IDS</code></td><td><code>list[str]</code></td><td>12 个阶段 ID 的列表推导式</td></tr>
+</table>
+
+<h4>ProgressTracker 类</h4>
+
+<p><strong>装饰器：</strong><span class="sig">@dataclass</span></p>
+
+<p><strong>公共字段（dataclass 属性）：</strong></p>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td><code>""</code></td><td>股票代码</td></tr>
+<tr><td><code>trade_date</code></td><td><code>str</code></td><td><code>""</code></td><td>分析日期</td></tr>
+<tr><td><code>start_time</code></td><td><code>float</code></td><td><code>time.time()</code></td><td>开始时间戳</td></tr>
+<tr><td><code>is_running</code></td><td><code>bool</code></td><td><code>False</code></td><td>是否正在运行</td></tr>
+<tr><td><code>is_complete</code></td><td><code>bool</code></td><td><code>False</code></td><td>是否已完成</td></tr>
+<tr><td><code>is_paused</code></td><td><code>bool</code></td><td><code>False</code></td><td>是否已暂停</td></tr>
+<tr><td><code>stop_requested</code></td><td><code>bool</code></td><td><code>False</code></td><td>是否已请求停止</td></tr>
+<tr><td><code>error</code></td><td><code>Optional[str]</code></td><td><code>None</code></td><td>错误信息</td></tr>
+<tr><td><code>current_stage</code></td><td><code>str</code></td><td><code>""</code></td><td>当前活跃阶段 ID</td></tr>
+<tr><td><code>completed_stages</code></td><td><code>list[str]</code></td><td><code>[]</code></td><td>已完成阶段 ID 列表（有序）</td></tr>
+<tr><td><code>stage_reports</code></td><td><code>dict[str, str]</code></td><td><code>{}</code></td><td>阶段 ID → 报告文本映射</td></tr>
+<tr><td><code>final_state</code></td><td><code>dict[str, Any]</code></td><td><code>{}</code></td><td>最终分析结果</td></tr>
+<tr><td><code>signal</code></td><td><code>str</code></td><td><code>""</code></td><td>交易信号（Buy/Sell/Hold）</td></tr>
+<tr><td><code>llm_calls</code></td><td><code>int</code></td><td><code>0</code></td><td>LLM 调用次数</td></tr>
+<tr><td><code>tool_calls</code></td><td><code>int</code></td><td><code>0</code></td><td>工具调用次数</td></tr>
+<tr><td><code>tokens_in</code></td><td><code>int</code></td><td><code>0</code></td><td>输入 token 数</td></tr>
+<tr><td><code>tokens_out</code></td><td><code>int</code></td><td><code>0</code></td><td>输出 token 数</td></tr>
+</table>
+
+<p><strong>私有字段：</strong></p>
+
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>_lock</code></td><td><code>threading.Lock</code></td><td>互斥锁，保护所有可变状态读写</td></tr>
+<tr><td><code>_pause_gate</code></td><td><code>threading.Event</code></td><td>暂停闸门，初始 set（不阻塞）</td></tr>
+</table>
+
+<p><strong>公共方法（全部线程安全）：</strong></p>
+
+<table>
+<tr><th>方法</th><th>签名</th><th>返回</th><th>线程</th></tr>
+<tr><td><code>pause</code></td><td><span class="sig">() -> bool</span></td><td>是否成功暂停</td><td>UI</td></tr>
+<tr><td><code>resume</code></td><td><span class="sig">() -> bool</span></td><td>是否成功恢复</td><td>UI</td></tr>
+<tr><td><code>request_stop</code></td><td><span class="sig">() -> bool</span></td><td>是否成功请求停止</td><td>UI</td></tr>
+<tr><td><code>wait_if_paused</code></td><td><span class="sig">() -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>mark_stopped</code></td><td><span class="sig">() -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>mark_stage_active</code></td><td><span class="sig">(stage_id: str) -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>mark_stage_done</code></td><td><span class="sig">(stage_id: str, report: str = "") -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>mark_complete</code></td><td><span class="sig">(final_state: dict, signal: str) -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>mark_error</code></td><td><span class="sig">(err: str) -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>update_stats</code></td><td><span class="sig">(llm: int, tool: int, tok_in: int, tok_out: int) -> None</span></td><td>—</td><td>后台</td></tr>
+<tr><td><code>stage_status</code></td><td><span class="sig">(stage_id: str) -> str</span></td><td>"done"/"active"/"pending"</td><td>UI</td></tr>
+</table>
+
+<p><strong>只读属性：</strong></p>
+
+<table>
+<tr><th>属性</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>elapsed</code></td><td><code>float</code></td><td><code>time.time() - start_time</code></td></tr>
+</table>
+
+<!-- ─── 5.3 app.py ─── -->
+
+<h3 id="api-app">5.3 app.py — Streamlit 主页面</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>_build_config</strong></td>
+  <td><span class="sig">() -> dict</span></td>
+  <td><span class="ret">dict</span></td>
+</tr>
+</table>
+
+<p><strong>返回值字段：</strong></p>
+<table>
+<tr><th>键</th><th>来源</th><th>说明</th></tr>
+<tr><td><code>llm_provider</code></td><td><code>st.session_state.llm_provider</code> 或默认 <code>"minimax"</code></td><td>LLM 供应商 key</td></tr>
+<tr><td><code>deep_think_llm</code></td><td><code>st.session_state.deep_think_llm</code> 或默认 <code>"MiniMax-M2.7"</code></td><td>深度思考模型 ID</td></tr>
+<tr><td><code>quick_think_llm</code></td><td><code>st.session_state.quick_think_llm</code> 或默认 <code>"MiniMax-M2.7-highspeed"</code></td><td>快速思考模型 ID</td></tr>
+<tr><td><code>backend_url</code></td><td><code>st.session_state.llm_base_url</code> 或 <code>BACKEND_URL</code> 环境变量</td><td>第三方代理地址</td></tr>
+<tr><td><code>data_vendors</code></td><td>硬编码为全部 <code>"a_stock"</code></td><td>5 类数据供应商映射</td></tr>
+<tr><td><code>max_debate_rounds</code></td><td>硬编码 <code>1</code></td><td>最大辩论轮数</td></tr>
+<tr><td><code>max_risk_discuss_rounds</code></td><td>硬编码 <code>1</code></td><td>最大风控讨论轮数</td></tr>
+<tr><td><code>checkpoint_enabled</code></td><td>硬编码 <code>True</code></td><td>启用断点续跑</td></tr>
+<tr><td><code>output_language</code></td><td>硬编码 <code>"Chinese"</code></td><td>输出语言</td></tr>
+</table>
+
+<p><strong>状态机逻辑（模块级）：</strong></p>
+<ul>
+  <li>检测 <code>st.session_state.start_analysis</code> 字典 → 创建 tracker + 启动线程</li>
+  <li>检测 <code>st.session_state.viewing_history</code> → 加载历史分析</li>
+  <li>检测 <code>tracker.is_running</code> → 渲染进度面板 + 每 2s <code>st.rerun()</code></li>
+  <li>检测 <code>tracker.is_complete</code> → 渲染完整报告</li>
+  <li>检测 <code>tracker.error</code> → 显示错误 + "继续未完成任务" 按钮</li>
+</ul>
+
+<!-- ─── 5.4 history.py ─── -->
+
+<h3 id="api-history">5.4 history.py — 历史记录管理</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th><th>说明</th></tr>
+<tr>
+  <td><strong>get_history</strong></td>
+  <td><span class="sig">() -> list[dict[str, str]]</span></td>
+  <td><span class="ret">list[dict]</span></td>
+  <td>扫描 <code>~/.tradingagents/logs/</code> 下所有 <code>full_states_log_*.json</code>，每项含 ticker/date/path，按日期倒序</td>
+</tr>
+<tr>
+  <td><strong>get_incomplete_history</strong></td>
+  <td><span class="sig">() -> list[dict[str, Any]]</span></td>
+  <td><span class="ret">list[dict]</span></td>
+  <td>返回未完成任务列表，自动过滤已完成任务，附加 <code>checkpoint_step</code> 字段</td>
+</tr>
+<tr>
+  <td><strong>record_incomplete_task</strong></td>
+  <td><span class="sig">(ticker: str, trade_date: str, *, status: str, error: str | None = None, completed_stages: list[str] | None = None) -> None</span></td>
+  <td><span class="ret">None</span></td>
+  <td>写入/更新 <code>~/.tradingagents/incomplete_tasks.json</code>（upsert 语义）</td>
+</tr>
+<tr>
+  <td><strong>clear_incomplete_task</strong></td>
+  <td><span class="sig">(ticker: str, trade_date: str) -> None</span></td>
+  <td><span class="ret">None</span></td>
+  <td>从 <code>incomplete_tasks.json</code> 中删除指定条目</td>
+</tr>
+<tr>
+  <td><strong>load_analysis</strong></td>
+  <td><span class="sig">(path: str) -> dict[str, Any]</span></td>
+  <td><span class="ret">dict[str, Any]</span></td>
+  <td>加载完整分析 JSON 文件</td>
+</tr>
+<tr>
+  <td><strong>extract_signal</strong></td>
+  <td><span class="sig">(state: dict[str, Any]) -> str</span></td>
+  <td><span class="ret">str</span></td>
+  <td>从 state 中提取交易信号：遍历 investment_plan / trader_investment_decision / final_trade_decision，去 think 标签后匹配 BUY/SELL/HOLD 关键词，返回 "Buy"/"Sell"/"Hold"，无匹配返回 "N/A"</td>
+</tr>
+</table>
+
+<p><strong>线程安全：</strong>所有写 <code>incomplete_tasks.json</code> 的操作使用全局 <code>_INCOMPLETE_TASKS_LOCK</code>（<code>threading.Lock</code>）+ <code>tempfile + replace</code> 保证原子写入。</p>
+
+<p><strong>存储路径：</strong></p>
+<ul>
+  <li>已完成：<code>~/.tradingagents/logs/{TICKER}/{DATE}/full_states_log_{DATE}.json</code></li>
+  <li>未完成：<code>~/.tradingagents/incomplete_tasks.json</code></li>
+</ul>
+
+<!-- ─── 5.5 pdf_export.py ─── -->
+
+<h3 id="api-pdf">5.5 pdf_export.py — PDF/Markdown 导出</h3>
+
+<h4>异常类</h4>
+
+<table>
+<tr><th>类</th><th>基类</th><th>说明</th></tr>
+<tr><td><code>PDFExportError</code></td><td><code>RuntimeError</code></td><td>PDF 导出不可用（字体缺失 / fpdf 版本错误）</td></tr>
+</table>
+
+<h4>公共函数</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>generate_pdf</strong></td>
+  <td><span class="sig">(final_state: dict[str, Any], ticker: str, trade_date: str, signal: str) -> bytes</span></td>
+  <td><span class="ret">bytes</span></td>
+</tr>
+<tr>
+  <td><strong>generate_markdown</strong></td>
+  <td><span class="sig">(final_state: dict[str, Any], ticker: str, trade_date: str, signal: str) -> str</span></td>
+  <td><span class="ret">str</span></td>
+</tr>
+</table>
+
+<p><strong>generate_pdf 参数：</strong></p>
+<table>
+<tr><th>参数</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>final_state</code></td><td><code>dict[str, Any]</code></td><td>完整分析状态，包含 7 个分析师报告 + 辩论结果 + 风控评估 + 最终决策</td></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td>股票代码</td></tr>
+<tr><td><code>trade_date</code></td><td><code>str</code></td><td>分析日期</td></tr>
+<tr><td><code>signal</code></td><td><code>str</code></td><td>交易信号（Buy/Sell/Hold）</td></tr>
+</table>
+
+<p><strong>可能抛出的异常：</strong></p>
+<ul>
+  <li><code>RuntimeError</code> — 检测到旧版 pyfpdf（latin-1 编码）</li>
+  <li><code>PDFExportError</code> — 中文字体缺失或无法加载</li>
+</ul>
+
+<h4>内部类 _ReportPDF</h4>
+
+<table>
+<tr><th>方法</th><th>签名</th><th>说明</th></tr>
+<tr><td><code>__init__</code></td><td><span class="sig">(self, ticker: str, trade_date: str, signal: str, final_state: dict | None = None)</span></td><td>初始化 FPDF、加载 CJK 字体、设置 stock_display_label</td></tr>
+<tr><td><code>header</code></td><td><span class="sig">(self) -> None</span></td><td>页眉：标题 + 股票标签 + 日期 + 分隔线</td></tr>
+<tr><td><code>footer</code></td><td><span class="sig">(self) -> None</span></td><td>页脚：页码 + 免责声明</td></tr>
+<tr><td><code>add_cover</code></td><td><span class="sig">(self) -> None</span></td><td>封面页：标题 + 股票名称 + 日期 + 信号（彩色大号） + 免责声明</td></tr>
+<tr><td><code>add_section</code></td><td><span class="sig">(self, title: str, content: str) -> None</span></td><td>添加一个分析分区页</td></tr>
+<tr><td><code>_render_markdown</code></td><td><span class="sig">(self, text: str) -> None</span></td><td>渲染 Markdown 文本：标题/分隔线/列表/表格/段落</td></tr>
+</table>
+
+<h4>内部函数（字体探测链）</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr><td><code>_find_cjk_fonts</code></td><td><span class="sig">() -> tuple[Path, Path]</span></td><td><span class="ret">(regular, bold)</span></td></tr>
+<tr><td><code>_ensure_fpdf2</code></td><td><span class="sig">() -> None</span></td><td>—</td></tr>
+<tr><td><code>_env_font_path</code></td><td><span class="sig">(env_name: str) -> Path | None</span></td><td>环境变量指定的字体路径</td></tr>
+<tr><td><code>_discover_cjk_fonts</code></td><td><span class="sig">() -> tuple[Path, Path] | None</span></td><td>文件系统搜索 + fontconfig 查询</td></tr>
+<tr><td><code>_font_from_fontconfig</code></td><td><span class="sig">(family: str, style: str) -> Path | None</span></td><td>fc-match 查询</td></tr>
+<tr><td><code>_find_font_file</code></td><td><span class="sig">(pattern: str) -> Path | None</span></td><td>在字体搜索根目录中按文件名模式查找</td></tr>
+<tr><td><code>_collection_font_number</code></td><td><span class="sig">(path: Path) -> int</span></td><td>TTC 文件 SC face 索引</td></tr>
+</table>
+
+<h4>内部函数（文本处理）</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr><td><code>_strip_think</code></td><td><span class="sig">(text: str) -> str</span></td><td>去除 think 标签</td></tr>
+<tr><td><code>_strip_md_inline</code></td><td><span class="sig">(text: str) -> str</span></td><td>去除行内 Markdown 格式</td></tr>
+<tr><td><code>_compact_inline_text</code></td><td><span class="sig">(text: str) -> str</span></td><td>折叠多余空白</td></tr>
+<tr><td><code>_format_table_cells</code></td><td><span class="sig">(cells: list[str]) -> str</span></td><td>格式化表格行</td></tr>
+<tr><td><code>_signal_color</code></td><td><span class="sig">(signal: str) -> tuple[int, int, int]</span></td><td>信号→RGB 颜色</td></tr>
+<tr><td><code>_collect_sections</code></td><td><span class="sig">(final_state: dict, ticker: str | None) -> list[tuple[str, str]]</span></td><td>组装分区列表（PDF 和 Markdown 共享）</td></tr>
+</table>
+
+<!-- ─── 5.6 stock_display.py ─── -->
+
+<h3 id="api-stock">5.6 stock_display.py — 股票名展示</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>stock_display_label</strong></td>
+  <td><span class="sig">(ticker: str, final_state: dict | None = None) -> str</span></td>
+  <td><span class="ret">str</span></td>
+</tr>
+<tr>
+  <td><strong>stock_display_parts</strong></td>
+  <td><span class="sig">(ticker: str, final_state: dict | None = None) -> tuple[str, str | None]</span></td>
+  <td><span class="ret">tuple[str, str | None]</span></td>
+</tr>
+<tr>
+  <td><strong>normalize_stock_mentions</strong></td>
+  <td><span class="sig">(text: str, ticker: str, final_state: dict | None = None) -> str</span></td>
+  <td><span class="ret">str</span></td>
+</tr>
+<tr>
+  <td><strong>normalize_report_state_mentions</strong></td>
+  <td><span class="sig">(final_state: dict[str, Any], ticker: str) -> dict[str, Any]</span></td>
+  <td><span class="ret">dict[str, Any]</span></td>
+</tr>
+<tr>
+  <td><strong>resolve_stock_name</strong></td>
+  <td><span class="sig">(ticker: str) -> str | None</span></td>
+  <td><span class="ret">str | None</span></td>
+</tr>
+</table>
+
+<p><strong>名称解析链路：</strong></p>
+<ol>
+  <li>输入标准化：去 <code>.SH/.SZ/.BJ</code> 后缀，去 <code>SH/SZ/BJ</code> 前缀，正则验证 6 位代码</li>
+  <li>如果含中文 → <code>resolve_ticker()</code> 查询 mootdx 全市场映射</li>
+  <li><code>resolve_stock_name()</code>：通过 <code>_build_name_code_map()</code>（LRU 缓存 1024 条）查询代码→名称</li>
+  <li>如果本地数据不可用 → 从 <code>final_state</code> 的文本字段按 3 种正则模式提取（"代码(名称)"、"标的：代码 名称"、"名称(代码)"）</li>
+  <li>提取的名称经过清洗：去除不可打印字符、截断报告标题关键词（"技术分析报告"等）、去除标点</li>
+</ol>
+
+<p><span class="sig">normalize_stock_mentions()</span> 是幂等的：已格式化过的 "300750 宁德时代" 不会被重复替换。通过检测前后文避免双重归一化。</p>
+
+<!-- ─── 5.7 launch.py ─── -->
+
+<h3 id="api-launch">5.7 launch.py — CLI 启动器</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>main</strong></td>
+  <td><span class="sig">() -> None</span></td>
+  <td><span class="ret">None</span></td>
+</tr>
+</table>
+
+<p>等价于执行：<code>python -m streamlit run web/app.py</code>，通过 <code>subprocess.run()</code> 调用。入口点注册为 <code>tradingagents-web</code> 命令。</p>
+
+<!-- ─── 5.8 sidebar.py ─── -->
+
+<h3 id="api-sidebar">5.8 components/sidebar.py — 侧边栏</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>render_sidebar</strong></td>
+  <td><span class="sig">() -> None</span></td>
+  <td><span class="ret">None</span></td>
+</tr>
+</table>
+
+<p><strong>渲染内容：</strong></p>
+<ol>
+  <li>品牌标题（TradingAgents-Astock + 作者链接）</li>
+  <li>新建分析区：股票代码输入（支持 6 位代码或中文名称） + 日期选择</li>
+  <li>模型配置折叠区（10 个供应商选择 + 快/慢模型选择 + 代理地址）</li>
+  <li>开始分析按钮（触发 <code>start_analysis</code> + <code>resolve_ticker</code>）</li>
+  <li>暂停/恢复/停止三个控制按钮</li>
+  <li>未完成任务列表（可恢复）</li>
+  <li>历史记录列表（最近 20 条）</li>
+  <li>风险免责声明</li>
+</ol>
+
+<h4>内部函数</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr><td><code>_resolve_user_input</code></td><td><span class="sig">(raw: str) -> tuple[str, str | None]</span></td><td><span class="ret">(code, error_msg)</span></td></tr>
+<tr><td><code>_render_llm_config</code></td><td><span class="sig">() -> None</span></td><td>—</td></tr>
+<tr><td><code>_render_analysis_controls</code></td><td><span class="sig">(raw_ticker: str, trade_date_value: date) -> None</span></td><td>—</td></tr>
+<tr><td><code>_clear_analysis_artifacts</code></td><td><span class="sig">(ticker: str, trade_date: str) -> None</span></td><td>—</td></tr>
+</table>
+
+<p><strong>10 个 LLM 供应商：</strong></p>
+<table>
+<tr><th>Key</th><th>展示名</th><th>环境变量</th></tr>
+<tr><td><code>minimax</code></td><td>MiniMax（推荐·国内直连）</td><td><code>MINIMAX_API_KEY</code></td></tr>
+<tr><td><code>deepseek</code></td><td>DeepSeek</td><td><code>DEEPSEEK_API_KEY</code></td></tr>
+<tr><td><code>qwen</code></td><td>通义千问 Qwen</td><td><code>DASHSCOPE_API_KEY</code></td></tr>
+<tr><td><code>glm</code></td><td>智谱 GLM</td><td><code>ZHIPU_API_KEY</code></td></tr>
+<tr><td><code>openai</code></td><td>OpenAI</td><td><code>OPENAI_API_KEY</code></td></tr>
+<tr><td><code>anthropic</code></td><td>Anthropic</td><td><code>ANTHROPIC_API_KEY</code></td></tr>
+<tr><td><code>google</code></td><td>Google Gemini</td><td><code>GOOGLE_API_KEY</code></td></tr>
+<tr><td><code>xai</code></td><td>xAI Grok</td><td><code>XAI_API_KEY</code></td></tr>
+<tr><td><code>openrouter</code></td><td>OpenRouter（聚合）</td><td><code>OPENROUTER_API_KEY</code></td></tr>
+<tr><td><code>ollama</code></td><td>Ollama（本地）</td><td>无需</td></tr>
+</table>
+
+<!-- ─── 5.9 progress_panel.py ─── -->
+
+<h3 id="api-progress-panel">5.9 components/progress_panel.py — 进度面板</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>render_progress</strong></td>
+  <td><span class="sig">(tracker: ProgressTracker) -> None</span></td>
+  <td><span class="ret">None</span></td>
+</tr>
+</table>
+
+<p><strong>渲染内容：</strong></p>
+<ul>
+  <li>标题行：分析进行中 + 股票代码</li>
+  <li>停止中/已暂停状态提示</li>
+  <li>进度条：completed/total 阶段完成 · 耗时</li>
+  <li>ANALYSTS 行：7 列阶段图标网格（●完成/◉活跃/○等待）</li>
+  <li>PIPELINE 行：5 列阶段图标网格</li>
+  <li>4 指标卡：LLM 调用数 / 工具调用数 / 输入 Tokens / 输出 Tokens</li>
+  <li>已完成报告折叠预览（最新报告默认展开）</li>
+</ul>
+
+<h4>内部函数</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr><td><code>_status_badge</code></td><td><span class="sig">(status: str) -> str</span></td><td>HTML 颜色圆点</td></tr>
+<tr><td><code>_format_time</code></td><td><span class="sig">(seconds: float) -> str</span></td><td>"m:ss" 格式</td></tr>
+</table>
+
+<!-- ─── 5.10 report_viewer.py ─── -->
+
+<h3 id="api-report">5.10 components/report_viewer.py — 报告展示</h3>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr>
+  <td><strong>render_report</strong></td>
+  <td><span class="sig">(final_state: dict[str, Any], ticker: str, trade_date: str, signal: str, elapsed: float | None = None) -> None</span></td>
+  <td><span class="ret">None</span></td>
+</tr>
+</table>
+
+<p><strong>渲染内容（自上而下）：</strong></p>
+<ol>
+  <li>交易信号大卡片：BUY(绿)/SELL(红)/HOLD(黄) 超大字 + 股票代码 + 日期 + 耗时</li>
+  <li>免责声明</li>
+  <li>Markdown 下载按钮（始终可用）</li>
+  <li>PDF 下载按钮（需 CJK 字体，失败时禁用并提示原因）</li>
+  <li>最终投资建议（<code>investment_plan</code> 字段）</li>
+  <li>7 个分析师报告折叠区（market/sentiment/news/fundamentals/policy/hot_money/lockup）</li>
+  <li>多空辩论：3 个 tabs（多方/空方/研究经理）</li>
+  <li>交易员决策折叠区</li>
+  <li>风控评估：4 个 tabs（激进/保守/中性/风控决策）</li>
+  <li>数据质量折叠区</li>
+</ol>
+
+<h4>内部函数</h4>
+
+<table>
+<tr><th>函数</th><th>签名</th><th>返回值</th></tr>
+<tr><td><code>_signal_style</code></td><td><span class="sig">(signal: str) -> tuple[str, str]</span></td><td><span class="ret">(hex_color, cn_label)</span></td></tr>
+<tr><td><code>_display_report_text</code></td><td><span class="sig">(text: Any, ticker: str, final_state: dict) -> str</span></td><td>去 think + 归一化后的文本</td></tr>
+<tr><td><code>_safe_filename_label</code></td><td><span class="sig">(label: str) -> str</span></td><td>安全的文件名（去特殊字符）</td></tr>
+</table>
+
+<!-- ──────────────────────────── -->
+<!-- 6. 关键数据结构 -->
+<!-- ──────────────────────────── -->
+
+<h2 id="sec-data">6. 关键数据结构</h2>
+
+<h3>6.1 PIPELINE_STAGES — 阶段定义</h3>
+
+<pre><code>list[dict[str, str]] = [
+    {"id": "market",       "name": "技术分析", "icon": "📊", "report_key": "market_report"},
+    {"id": "social",        "name": "情绪分析", "icon": "💬", "report_key": "sentiment_report"},
+    {"id": "news",          "name": "新闻舆情", "icon": "📰", "report_key": "news_report"},
+    {"id": "fundamentals",  "name": "基本面",   "icon": "📋", "report_key": "fundamentals_report"},
+    {"id": "policy",        "name": "政策分析", "icon": "🏛️", "report_key": "policy_report"},
+    {"id": "hot_money",     "name": "游资追踪", "icon": "🔥", "report_key": "hot_money_report"},
+    {"id": "lockup",        "name": "解禁监控", "icon": "🔒", "report_key": "lockup_report"},
+    {"id": "quality_gate",  "name": "质量门控", "icon": "✅", "report_key": "data_quality_summary"},
+    {"id": "debate",        "name": "多空辩论", "icon": "⚔️", "report_key": "investment_plan"},
+    {"id": "trader",        "name": "交易决策", "icon": "💹", "report_key": "trader_investment_plan"},
+    {"id": "risk",          "name": "风控评估", "icon": "🛡️", "report_key": "risk_debate_state"},
+    {"id": "pm",            "name": "最终决策", "icon": "👔", "report_key": "final_trade_decision"},
+]</code></pre>
+
+<h3>6.2 final_state — 分析结果字典</h3>
+
+<table>
+<tr><th>键</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>market_report</code></td><td><code>str</code></td><td>技术分析报告</td></tr>
+<tr><td><code>sentiment_report</code></td><td><code>str</code></td><td>市场情绪报告</td></tr>
+<tr><td><code>news_report</code></td><td><code>str</code></td><td>新闻舆情报告</td></tr>
+<tr><td><code>fundamentals_report</code></td><td><code>str</code></td><td>基本面报告</td></tr>
+<tr><td><code>policy_report</code></td><td><code>str</code></td><td>政策分析报告</td></tr>
+<tr><td><code>hot_money_report</code></td><td><code>str</code></td><td>游资追踪报告</td></tr>
+<tr><td><code>lockup_report</code></td><td><code>str</code></td><td>解禁/减持报告</td></tr>
+<tr><td><code>data_quality_summary</code></td><td><code>str</code></td><td>数据质量门控结果</td></tr>
+<tr><td><code>investment_debate_state</code></td><td><code>dict</code></td><td>多空辩论状态（含 bull_history / bear_history / judge_decision）</td></tr>
+<tr><td><code>trader_investment_plan</code></td><td><code>str</code></td><td>交易员投资计划</td></tr>
+<tr><td><code>trader_investment_decision</code></td><td><code>str</code></td><td>交易员决策</td></tr>
+<tr><td><code>risk_debate_state</code></td><td><code>dict</code></td><td>风控辩论状态（含 aggressive/conservative/neutral_history + judge_decision）</td></tr>
+<tr><td><code>investment_plan</code></td><td><code>str</code></td><td>最终投资建议</td></tr>
+<tr><td><code>final_trade_decision</code></td><td><code>str</code></td><td>最终交易决策</td></tr>
+</table>
+
+<h3>6.3 start_analysis — 触发信号字典</h3>
+
+<table>
+<tr><th>键</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td>6 位代码</td></tr>
+<tr><td><code>trade_date</code></td><td><code>str</code></td><td>"YYYY-MM-DD"</td></tr>
+<tr><td><code>fresh</code></td><td><code>bool</code>（可选）</td><td>True = 清理断点后全新开始</td></tr>
+</table>
+
+<h3>6.4 incomplete_tasks.json — 条目格式</h3>
+
+<table>
+<tr><th>键</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td>大写的 6 位代码</td></tr>
+<tr><td><code>trade_date</code></td><td><code>str</code></td><td>"YYYY-MM-DD"</td></tr>
+<tr><td><code>status</code></td><td><code>str</code></td><td>"running" / "paused" / "error"</td></tr>
+<tr><td><code>error</code></td><td><code>str</code></td><td>错误信息（status=error 时）</td></tr>
+<tr><td><code>completed_stages</code></td><td><code>list[str]</code></td><td>已完成阶段 ID 列表</td></tr>
+<tr><td><code>updated_at</code></td><td><code>float</code></td><td>最后更新时间戳</td></tr>
+</table>
+
+<h3>6.5 history 条目格式</h3>
+
+<table>
+<tr><th>键</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>ticker</code></td><td><code>str</code></td><td>股票代码（目录名）</td></tr>
+<tr><td><code>date</code></td><td><code>str</code></td><td>分析日期 "YYYY-MM-DD"</td></tr>
+<tr><td><code>path</code></td><td><code>str</code></td><td>JSON 文件绝对路径</td></tr>
+</table>
+
+<p style="margin-top:32px; color:#607086; font-size:0.9rem;">
+关联课程：<a href="../lessons/0001-web-module-tour.html">0001 — Streamlit Web UI 模块总览</a> ·
+关联参考：<a href="web-overview.html">Web 模块组件与 API 速查</a>
+</p>
+
+</div>
+</main>
+</body>
+</html>

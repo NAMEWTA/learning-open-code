@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>0001 每日复盘全链路地图 — 8 路数据从浏览器到数据源</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#5f6b7a; --line:#d9e2ec; --soft:#f6f8fa; --accent:#f35d2b; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: #fff; line-height: 1.72; }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 22px 56px; }
+    h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: 0; }
+    h2 { font-size: 1.18rem; margin: 2rem 0 0.6rem; border-top: 1px solid var(--line); padding-top: 1rem; letter-spacing: 0; }
+    p, li { font-size: 1rem; }
+    .meta, .source { color: var(--muted); font-size: 0.94rem; }
+    .diagram, .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diagram { white-space: pre-wrap; }
+    .callout { border-left: 4px solid var(--accent); background: var(--soft); padding: 0.8rem 1rem; margin: 1rem 0; }
+    .error-path { border-left: 4px solid #d32f2f; background: #fff5f5; padding: 0.8rem 1rem; margin: 1rem 0; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, .mono { font-family: "SF Mono", Consolas, monospace; font-size: 0.92em; background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.2rem; font-size: 0.94rem; }
+    th, td { border: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    .seq-box { font-size: 0.85rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>每日复盘全链路地图 — 8 路数据从浏览器到数据源</h1>
+  <p class="meta">学习目标：15 分钟内能画出每日复盘页面 8 路并加载的完整调用图，定位每一层的职责与故障兜底策略。</p>
+
+  <h2>1. 入口点：浏览器 URL 到组件挂载</h2>
+  <p>用户访问 <code>/daily-review</code>（默认首页），React Router 匹配到 <code>DailyReview</code> 组件。组件挂载时 <code>useEffect</code> 立即触发两条路径：</p>
+  <div class="filetree">useEffect(() => {
+  loadIndices();           // 路径A：并行 5 路大盘级数据
+  refreshWatch(loadWatch()); // 路径B：自选股行情（依赖 localStorage）
+}, []);</div>
+  <p><code>loadIndices()</code> 一次性发起 <strong>5 个独立的 HTTP GET</strong>，互不等待。这是页面性能的关键——如果串行请求，8 个 200ms 的 RTT 将累计 1.6 秒；并行则在最慢请求的延迟内全部返回。</p>
+
+  <h2>2. 五层调用时序图</h2>
+  <div class="diagram seq-box">浏览器 (DailyReview.tsx)          Vite代理 :5899          FastAPI :8900           market.py/astock.py       外部数据源
+     │                            │                      │                       │                       │
+     ├─ api.indices() ───────────►├─ GET /api/indices ──►├─ astock.index_quote()─►├─ 腾讯 qt.gtimg.cn ────►
+     ├─ api.globalIndices() ──────►├─ GET /api/global/*───►├─ market.get_global_*──►├─ 东财 push2ex ─────────►
+     ├─ api.marketOverview() ─────►├─ GET /api/market/ov──►├─ market.get_overview()─►├─ akshare 乐股 ─────────►
+     ├─ api.emotion() ────────────►├─ GET /api/mkt/emo ───►├─ market.get_st_emo*────►├─ 东财涨停四池 ─────────►
+     ├─ api.turnoverTop() ────────►├─ GET /api/mkt/tt ────►├─ market.get_turnover*──►├─ astock.market_turn* ───►
+     │                            │                      │                       │                       │
+     ├─ api.quote(codes) ─────────►├─ GET /api/quote ────►├─ astock.tencent_quote()─►├─ 腾讯 qt.gtimg.cn ────►
+     │                            │                      │                       │                       │
+     │  ◄── 各 Promise 独立 resolve，setState 触发 React 重渲染 ◄─────────────────────────────────────────────┤
+     │                            │                      │                       │                       │
+     ├─ runReview() ──────────────►├─ POST /api/chat ────►├─ chat.py stream ──────►├─ 用户配置的 LLM ───────►
+     │  ◄── NDJSON 流式 delta ◄──────────────────────────────────────────────────────────────────────────────┤</div>
+  <p><strong>关键观察：</strong>Vite 代理层对前端完全透明——<code>fetch("/api/indices")</code> 被 Vite dev server 转发到 <code>localhost:8900</code>。生产部署时换 Nginx 反代，代码零改动。FastAPI 层的 <code>market.py</code> 有全站共享的 5 分钟 TTL 缓存（<code>_CACHE</code> 字典），多次打开同页面不会重复抓取外部数据源。</p>
+
+  <h2>3. 各层职责速查</h2>
+  <table>
+    <tr><th>层</th><th>文件</th><th>职责</th><th>故障兜底</th></tr>
+    <tr><td>页面组件</td><td><code>DailyReview.tsx</code></td><td>8 路并行加载 + 状态管理 + 渲染</td><td><code>pending(done)</code> 双态占位</td></tr>
+    <tr><td>API 客户端</td><td><code>api.ts</code></td><td>类型定义 + fetch 封装 + 鉴权头注入</td><td><code>ApiError</code> 统一错误类型</td></tr>
+    <tr><td>LLM 客户端</td><td><code>llm.ts</code></td><td>LLM 配置管理 + NDJSON 流式解析</td><td><code>hasLlm()</code> 前置检测</td></tr>
+    <tr><td>Vite 代理</td><td><code>vite.config.ts</code></td><td><code>/api</code> → <code>localhost:8900</code> 转发</td><td>后端未启动时 <code>fetch</code> 抛连接错误</td></tr>
+    <tr><td>FastAPI 端点</td><td><code>app.py:251-323</code></td><td>参数校验 + 异常转 HTTP 状态码</td><td>502 + detail 消息返回前端</td></tr>
+    <tr><td>市场数据层</td><td><code>market.py</code></td><td>数据聚合 + 全站 TTL 缓存（5分钟）</td><td>空结果不缓存，下次请求重试</td></tr>
+    <tr><td>外部数据源</td><td>腾讯/东财/akshare</td><td>行情/涨停池/板块资金原始数据</td><td>惰性导入 + 501 降级</td></tr>
+  </table>
+
+  <h2>4. 异常路径：非交易时段数据空白</h2>
+  <div class="error-path">
+    <p><strong>场景：</strong>周末或收盘后打开每日复盘页面，东财涨停池返回空、akshare 乐股数据无更新。</p>
+    <p><strong>链路表现：</strong></p>
+    <p><code>market._emotion()</code> 回溯 8 天仍找不到涨停池 → 返回 <code>{}</code> → <code>get_short_term_emotion()</code> 空字典不缓存（<code>valid=bool</code> 判否）→ FastAPI 返回 <code>{"data": {}}</code> → 前端 <code>emotion?.zt_count === undefined</code> 为真 → 触发 <code>pending(emoDone)</code> 显示"暂无数据：可能是非交易时段或数据源暂时不可用"。</p>
+    <p><strong>设计意图：</strong>不报错、不崩溃、不显示过期数据。用户看到的是解释性占位文本，而非红色报错堆栈。</p>
+  </div>
+
+  <p><strong>暂停回忆：</strong>如果 <code>api.indices()</code> 成功但 <code>api.emotion()</code> 返回空对象，页面上的短线情绪卡片会显示什么？<code>emoDone</code> 状态是在哪个时刻被设为 <code>true</code> 的？</p>
+  <p><strong>参考答案：</strong>会显示 <code>pending(true)</code> 即"暂无数据：可能是非交易时段或数据源暂时不可用"。<code>emoDone</code> 在 <code>api.emotion().then(...).catch(...).finally(() => setEmoDone(true))</code> 的 <code>finally</code> 块中设为 true——无论请求成功还是失败，标记"已结束"以区分加载中状态。</p>
+
+  <p class="source">主要来源：<code>DailyReview.tsx:44-50</code>（loadIndices 并行发起）、<code>api.ts:236-244</code>（API 客户端端点定义）、<code>market.py:21-30</code>（TTL 缓存 + valid 判否）、<code>market.py:103-166</code>（_emotion 回溯与聚合）。交叉引用：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目全景</a>、<a href="../../module-backend/lessons/0001-backend-module-tour.html">L1 后端模块</a>、<a href="../../module-frontend/lessons/0001-frontend-module-tour.html">L1 前端模块</a>。下一步：<a href="0002-main-path.html">0002 主成功路径详解</a>。</p>
+</main>
+</body>
+</html>

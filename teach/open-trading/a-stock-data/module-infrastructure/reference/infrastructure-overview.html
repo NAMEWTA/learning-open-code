@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>a-stock-data 基础设施速查表</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    font-size: 15px; line-height: 1.7; color: #1a1a1a;
+    max-width: 960px; margin: 0 auto; padding: 2rem 2rem 4rem;
+    background: #fdfdfd;
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.5rem; margin-bottom: 0.8rem; color: #2c3e50; border-bottom: 2px solid #eaeaea; padding-bottom: 0.3rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; color: #3b6cb4; }
+  .meta { color: #888; font-size: 0.82rem; margin-bottom: 2rem; }
+  p { margin-bottom: 0.8rem; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0 1.5rem; font-size: 0.85rem; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.45rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: #f5f7fa; font-weight: 600; font-size: 0.82rem; }
+  tr:nth-child(even) { background: #fafbfc; }
+  code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85rem; }
+  .green { color: #065f46; font-weight: 600; }
+  .red { color: #991b1b; font-weight: 600; }
+  .yellow { color: #92400e; }
+  .note { font-size: 0.82rem; color: #888; margin-top: 0.2rem; }
+  .func-list { column-count: 2; column-gap: 2rem; margin: 0.8rem 0; }
+  .func-list li { margin-bottom: 0.25rem; font-size: 0.85rem; break-inside: avoid; }
+  .back-link { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #eaeaea; font-size: 0.88rem; color: #666; }
+  .back-link a { color: #3b6cb4; text-decoration: none; }
+  .back-link a:hover { text-decoration: underline; }
+  @media print { body { font-size: 12px; max-width: 100%; } table { font-size: 11px; } }
+</style>
+</head>
+<body>
+
+<h1>a-stock-data 基础设施速查表</h1>
+<p class="meta">V3.3.0 · 4 核心函数 · 13 数据源优先级 · 防封参数速查（打印友好）</p>
+
+<h2>一、核心函数总表</h2>
+
+<table>
+  <tr><th>函数</th><th>定位</th><th>功能</th><th>关键设计</th></tr>
+  <tr>
+    <td><code>em_get()</code></td>
+    <td>东财统一入口</td>
+    <td>所有 eastmoney.com 请求的节流代理</td>
+    <td>串行限流(≥1s+随机抖动) + Keep-Alive会话复用 + 连接级重试(total=3, 指数退避, 403不重试)</td>
+  </tr>
+  <tr>
+    <td><code>tdx_client()</code></td>
+    <td>mootdx 连接工厂</td>
+    <td>创建通达信客户端，规避 0.11.x BESTIP bug</td>
+    <td>TCP探测(_probe) → BESTIP测速 → 裸factory → RuntimeError明确报错。支持 0.10/0.11 双版本</td>
+  </tr>
+  <tr>
+    <td><code>get_prefix()</code></td>
+    <td>市场前缀判断</td>
+    <td>6位代码 → sh/sz/bj</td>
+    <td>6/9→sh, 8→bj, 其余→sz。所有层通用</td>
+  </tr>
+  <tr>
+    <td><code>eastmoney_datacenter()</code></td>
+    <td>数据中心查询</td>
+    <td>龙虎榜/解禁/两融/大宗/股东/分红 统一查询</td>
+    <td>统一 reportName 路由 + columns/filter/sort 参数体系，已内置 em_get 限流</td>
+  </tr>
+  <tr>
+    <td><code>EM_SESSION</code></td>
+    <td>全局 HTTP 会话</td>
+    <td>Keep-Alive 连接复用</td>
+    <td>挂载 HTTPAdapter(max_retries=3, backoff_factor=0.6), 默认 UA=Mozilla/5.0...</td>
+  </tr>
+  <tr>
+    <td><code>EM_MIN_INTERVAL</code></td>
+    <td>限流参数</td>
+    <td>两次东财请求最小间隔（秒）</td>
+    <td>默认 1.0s。批量建议 1.5-2s。配合 0.1-0.5s 随机抖动</td>
+  </tr>
+  <tr>
+    <td><code>_probe()</code></td>
+    <td>TCP 探测</td>
+    <td>判断通达信服务器可达性</td>
+    <td>socket.create_connection, timeout=2s。3次握手即返回，不等应用层</td>
+  </tr>
+  <tr>
+    <td><code>_TDX_SERVERS</code></td>
+    <td>服务器列表</td>
+    <td>10 个通达信IP:7709</td>
+    <td>按延迟排序，2026-06 验证。需自行维护更新</td>
+  </tr>
+</table>
+
+<h2>二、13 个数据源优先级分级</h2>
+
+<table>
+  <tr><th>序号</th><th>数据源</th><th>协议</th><th>封IP风险</th><th>鉴权</th><th>调用函数</th></tr>
+  <tr><td>1</td><td class="green">mootdx（通达信）</td><td>TCP 7709</td><td class="green">不封</td><td>无需</td><td>tdx_client() → client.bars/quotes/...</td></tr>
+  <tr><td>2</td><td class="green">腾讯财经</td><td>HTTP</td><td class="green">不封</td><td>无需</td><td>tencent_quote() 直连</td></tr>
+  <tr><td>3</td><td>新浪财经</td><td>HTTP</td><td>低</td><td>Referer</td><td>sina_financial_report() / sina_option_*() 直连</td></tr>
+  <tr><td>4</td><td>巨潮 cninfo</td><td>HTTP</td><td>低</td><td>无需</td><td>cninfo_announcements() 直连</td></tr>
+  <tr><td>5</td><td>同花顺 热点/北向</td><td>HTTP</td><td>低</td><td>UA</td><td>ths_hot_reason() / hsgt_realtime() 直连</td></tr>
+  <tr><td>6</td><td>同花顺 basic</td><td>HTTP</td><td>低</td><td>UA</td><td>ths_eps_forecast() 直连</td></tr>
+  <tr><td>7</td><td>百度股市通</td><td>HTTP</td><td>极低</td><td>UA+Referer</td><td>baidu_kline_with_ma() 直连</td></tr>
+  <tr><td>8</td><td>iwencai</td><td>OpenAPI</td><td>低</td><td>API Key</td><td>iwencai_search() 直连</td></tr>
+  <tr><td>9</td><td class="red">东财 datacenter</td><td>HTTP</td><td class="red">有风控</td><td>无需</td><td>eastmoney_datacenter() → em_get()</td></tr>
+  <tr><td>10</td><td class="red">东财 push2/push2his/push2ex</td><td>HTTP</td><td class="red">有风控</td><td>UA</td><td>各端点 → em_get()</td></tr>
+  <tr><td>11</td><td class="red">东财 reportapi</td><td>HTTP</td><td class="red">有风控</td><td>Referer</td><td>eastmoney_reports() → em_get()</td></tr>
+  <tr><td>12</td><td class="red">东财 search</td><td>HTTP</td><td class="red">有风控</td><td>UA</td><td>eastmoney_stock_news() → em_get()</td></tr>
+  <tr><td>13</td><td class="red">东财 np-weblist</td><td>HTTP</td><td class="red">有风控</td><td>UA</td><td>eastmoney_global_news() → em_get()</td></tr>
+</table>
+
+<p class="note">注：东财 5 个子系统（datacenter/push2/reportapi/search/np）共用同一风控体系，任意一个超阈值均可触发全站封禁。</p>
+
+<h2>三、东财风控阈值速查（社区实测 2026-05）</h2>
+
+<table>
+  <tr><th>行为</th><th>触发封禁的阈值</th><th>风险等级</th></tr>
+  <tr><td>每秒请求数</td><td>&gt; 5 次/秒</td><td class="red">高</td></tr>
+  <tr><td>单 IP 并发连接</td><td>&ge; 10</td><td class="red">高</td></tr>
+  <tr><td>1 分钟请求总数</td><td>&ge; 200 次</td><td class="yellow">中高</td></tr>
+  <tr><td>5 分钟请求总数</td><td>&ge; 300 次</td><td>触发封禁</td></tr>
+  <tr><td>User-Agent</td><td>空 UA / 无浏览器特征</td><td class="yellow">中</td></tr>
+</table>
+
+<h2>四、防封参数速查</h2>
+
+<table>
+  <tr><th>参数</th><th>默认值</th><th>说明</th><th>批量建议</th></tr>
+  <tr><td><code>EM_MIN_INTERVAL</code></td><td>1.0s</td><td>最小请求间隔</td><td>1.5s ~ 2.0s</td></tr>
+  <tr><td>随机抖动范围</td><td>0.1 ~ 0.5s</td><td>叠加在间隔之上</td><td>同左，叠加后实际 QPS ≈ 0.4-0.6</td></tr>
+  <tr><td>重试次数</td><td>3（total=3）</td><td>仅对 429/5xx 指数退避</td><td>不变</td></tr>
+  <tr><td>退避因子</td><td>0.6</td><td>等 0.6s → 1.2s → 2.4s</td><td>不变</td></tr>
+  <tr><td>连接超时</td><td>15s</td><td>em_get() timeout</td><td>不变</td></tr>
+</table>
+
+<h2>五、Ticker 格式归一化速查</h2>
+
+<table>
+  <tr><th>输入格式</th><th>示例</th><th>归一化结果</th><th>get_prefix() 返回</th></tr>
+  <tr><td>纯 6 位数字</td><td><code>688017</code></td><td><code>688017</code></td><td><code>sh</code></td></tr>
+  <tr><td>带前缀（大写）</td><td><code>SH688017</code></td><td><code>688017</code></td><td><code>sh</code></td></tr>
+  <tr><td>带后缀</td><td><code>688017.SH</code></td><td><code>688017</code></td><td><code>sh</code></td></tr>
+  <tr><td>深证代码</td><td><code>SZ000001</code></td><td><code>000001</code></td><td><code>sz</code></td></tr>
+  <tr><td>创业板代码</td><td><code>300750</code></td><td><code>300750</code></td><td><code>sz</code></td></tr>
+  <tr><td>北证代码</td><td><code>BJ832000</code></td><td><code>832000</code></td><td><code>bj</code></td></tr>
+  <tr><td>上证B股</td><td><code>900901</code></td><td><code>900901</code></td><td><code>sh</code></td></tr>
+</table>
+
+<h2>六、基础设施依赖矩阵</h2>
+
+<table>
+  <tr><th>数据层</th><th>em_get()</th><th>tdx_client()</th><th>get_prefix()</th><th>eastmoney_datacenter()</th></tr>
+  <tr><td>L1 行情层</td><td>—</td><td>✅</td><td>✅</td><td>—</td></tr>
+  <tr><td>L2 研报层</td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
+  <tr><td>L3 信号层</td><td>✅</td><td>—</td><td>✅</td><td>✅</td></tr>
+  <tr><td>L4 资金/筹码层</td><td>✅</td><td>—</td><td>—</td><td>✅</td></tr>
+  <tr><td>L5 新闻层</td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
+  <tr><td>L6 基础数据层</td><td>✅</td><td>✅</td><td>✅</td><td>—</td></tr>
+  <tr><td>L7 公告层</td><td>—</td><td>—</td><td>✅</td><td>—</td></tr>
+  <tr><td>L8 打板层</td><td>✅</td><td>—</td><td>—</td><td>—</td></tr>
+  <tr><td>L9 ETF期权层</td><td>—</td><td>—</td><td>✅</td><td>—</td></tr>
+  <tr><td>L10 舆情互动层</td><td>✅</td><td>—</td><td>✅</td><td>—</td></tr>
+</table>
+
+<p class="note">em_get() 覆盖 7/10 层（东财系数据），get_prefix() 覆盖 6/10 层（所有需要 sh/sz 路由的接口），tdx_client() 仅行情层和基础数据层需要。</p>
+
+<div class="back-link">
+  <strong>关联课程：</strong>
+  <a href="../lessons/0001-infrastructure-module-tour.html">第 1 节：数据源优先级</a> ·
+  <a href="../lessons/0002-infrastructure-module-tour.html">第 2 节：核心函数实战</a> ·
+  <a href="../../00-overview/reference/00-overview.html">L0 架构速查</a> ·
+  <a href="../MISSION.md">学习使命</a>
+</div>
+
+</body>
+</html>

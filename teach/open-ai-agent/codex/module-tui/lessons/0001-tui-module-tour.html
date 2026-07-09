@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TUI 模块导览：从入口到交互骨架</title>
+  <style>
+    :root { --ink:#202124; --muted:#5f6368; --line:#e6e8eb; --bg:#f8fafc; --accent:#0f766e; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:white; line-height:1.72; }
+    main { max-width:920px; margin:0 auto; padding:32px 20px 56px; }
+    nav { color:var(--muted); font-size:.92rem; margin-bottom:18px; }
+    a { color:#0b63ce; text-decoration:none; } a:hover { text-decoration:underline; }
+    h1 { font-size:2rem; line-height:1.2; margin:.2rem 0 .8rem; letter-spacing:0; }
+    h2 { font-size:1.2rem; margin:2rem 0 .6rem; border-top:1px solid var(--line); padding-top:1.1rem; }
+    p { margin:.55rem 0; }
+    .lead { color:#374151; font-size:1.05rem; }
+    .where { display:inline-block; font-family:"SF Mono",Consolas,monospace; font-size:.86rem; color:#334155; background:#eef6f5; padding:.08rem .35rem; border-radius:6px; }
+    .filetree { font-family:"SF Mono",Consolas,monospace; font-size:.82rem; line-height:1.75; background:#fafbfc; border:1px solid #ebebeb; border-radius:8px; padding:1rem 1.2rem; white-space:pre; overflow-x:auto; }
+    pre { margin:1rem 0; padding:1rem; overflow-x:auto; background:#0f172a; color:#e5e7eb; border-radius:8px; font-size:.86rem; line-height:1.55; }
+    code { font-family:"SF Mono",Consolas,monospace; font-size:.9em; }
+    .note { border-left:4px solid var(--accent); background:#f0fdfa; padding:.85rem 1rem; margin:1rem 0; }
+    .quiz { border:1px solid var(--line); border-radius:8px; padding:1rem; background:var(--bg); }
+    .answer { color:var(--muted); margin-top:.65rem; }
+  </style>
+</head>
+<body>
+<main>
+  <nav><a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> / <a href="../reference/tui-overview.html">TUI 参考速查</a></nav>
+  <h1>TUI 模块导览：从入口到交互骨架</h1>
+  <p class="lead">本课只解决一个目标：读懂 `codex-tui` 的边界。你不需要一次掌握所有 widget，只要能说清“启动后谁组装运行时、谁收事件、谁管聊天和输入”。</p>
+
+  <h2>1. 模块职责：终端 UI，不是 agent 执行器</h2>
+  <p><span class="where">codex-rs/tui/Cargo.toml</span> 定义了 `codex-tui` crate。它依赖 `ratatui`、`crossterm` 处理终端 UI 与事件，也依赖 `codex-app-server-client`、`codex-app-server-protocol`、`codex-protocol` 与 core 相接。这个依赖组合说明它位于“用户终端”和“会话/执行服务”之间：TUI 负责配置启动、交互状态、渲染与用户意图转换；真正的模型回合、工具执行、审批协议由 app-server/core 侧完成。</p>
+  <div class="filetree">codex-rs/tui/
+├── Cargo.toml                    ← crate、bin/lib 与关键依赖
+└── src/
+    ├── lib.rs                    ← run_main：启动入口和运行时组装
+    ├── app.rs                    ← App：顶层状态和事件循环
+    ├── chatwidget.rs             ← 聊天主体、transcript、流式状态
+    ├── bottom_pane/              ← 输入区、composer、footer、弹层
+    └── status_indicator_widget.rs
+                                     ← 运行中状态与 interrupt 提示</div>
+
+  <h2>2. 对外入口：`run_main` 先搭环境，再交给 `App`</h2>
+  <p><span class="where">codex-rs/tui/src/lib.rs</span> 暴露 `run_main`。它接收 TUI CLI 参数、arg0 派发路径、配置加载覆盖项和可选远端 app-server 端点。它先解析 sandbox/approval/search/OSS 等启动配置，加载认证与配置，决定复用本地 daemon、连接远端 app-server，或启动 embedded app-server；随后设置 terminal alternate screen，最后调用 `App::run`。</p>
+  <pre><code class="language-rust">pub async fn run_main(
+    mut cli: Cli,
+    arg0_paths: Arg0DispatchPaths,
+    loader_overrides: LoaderOverrides,
+    explicit_remote_endpoint: Option&lt;RemoteAppServerEndpoint&gt;,
+) -&gt; std::io::Result&lt;AppExitInfo&gt; {
+    // 加载配置、认证、日志、app-server target
+    // 设置终端模式并准备 AppServerSession
+    let app_result = App::run(/* tui、app_server、config、prompt 等 */).await;
+    terminal_restore_guard.restore_silently();
+    app_result
+}</code></pre>
+  <p>一个最小调用示例是普通用户路径：在顶层 CLI 没有选择非交互子命令时，执行 `codex "帮我解释这个仓库"`，最终会把 prompt 放进 TUI 初始消息，并进入这个入口。</p>
+
+  <h2>3. 内部分层：`App` 分发，`ChatWidget` 呈现，`BottomPane` 收输入</h2>
+  <p><span class="where">codex-rs/tui/src/app.rs</span> 中的 `App` 持有 `chat_widget`、配置、thread 状态、overlay、keymap、app-server 请求和事件通道。它的主循环同时等待四类输入：组件发出的 `AppEvent`、活跃 thread 的事件、终端事件、app-server 事件。这个设计让 UI 事件、模型回合事件和远端服务事件在同一个调度点汇合。</p>
+  <p>下面的 `select!` 是精简示意，用来帮助先建立事件源地图；真实落点请读 <span class="where">codex-rs/tui/src/app.rs::App::run</span>，那里包含初始 session、退出语义、终端恢复和错误处理。</p>
+  <pre><code class="language-rust">loop {
+    let control = select! {
+        Some(event) = app_event_rx.recv() =&gt; app.handle_event(tui, &amp;mut app_server, event).await?,
+        active = app.active_thread_rx.as_mut().unwrap().recv() =&gt; { /* thread event */ },
+        event = tui_events.next() =&gt; app.handle_tui_event(tui, &amp;mut app_server, event.unwrap()).await?,
+        app_server_event = app_server.next_event() =&gt; { /* server notification */ }
+    };
+}</code></pre>
+  <p>`ChatWidget` 是聊天屏幕的主体：它维护 transcript、流式输出、状态行，并把用户意图提交成 `AppCommand`。<span class="where">codex-rs/tui/src/bottom_pane/mod.rs</span> 则是底部输入容器：没有弹层时把按键交给 composer；有审批、选择器或表单弹层时先让当前 view 消费按键。`StatusIndicatorWidget` 只负责显示“正在工作多久、能否 Esc 中断、当前细节”。</p>
+
+  <h2>4. 检索练习：判断一次输入走哪条边界</h2>
+  <div class="quiz">
+    <p>暂停 30 秒回忆：用户在 composer 输入一句话并按 Enter，下面哪一层最应该负责“把文本变成一次 agent 回合请求”？</p>
+    <p>A. `run_main` 负责，因为它是入口。<br>B. `BottomPane` 负责，因为它拥有输入框。<br>C. `ChatWidget` 负责，因为它接收输入结果并提交 `AppCommand`。</p>
+    <p class="answer">参考答案：C。`BottomPane`/composer 负责本地编辑和提交结果，`ChatWidget` 才处在“聊天 UI 状态”和“向 core/app-server 提交操作”的边界上。若这里仍模糊，下一步追问 agent：“请沿着一次 Enter 提交流程带我读 `chat_composer.rs` 到 `submit_op`”。</p>
+  </div>
+  <p class="note">主要来源：当前源码中的 <code>codex-rs/tui/src/lib.rs</code>、<code>codex-rs/tui/src/app.rs</code>、<code>codex-rs/tui/src/bottom_pane/mod.rs</code>。复习时先看 <a href="../reference/tui-overview.html">TUI 参考速查</a>，再进入 L2 垂直切片。</p>
+</main>
+</body>
+</html>

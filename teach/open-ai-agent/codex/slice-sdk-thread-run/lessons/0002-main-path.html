@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0002 主路径：从 startThread 到事件消费</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>主路径：从 startThread 到事件消费</h1>
+        <p class="meta">学习目标：15 分钟内逐层追踪 TypeScript SDK 的 <code>Codex.startThread()</code> 和 <code>Thread.run()</code> 完整执行路径，理解每层的职责、输入输出和关键决策点。</p>
+
+        <div class="callout">
+          一句话定位：从 <code>new Codex()</code> 创建 <code>CodexExec</code>，到 <code>thread.run()</code> 消费流式事件，共 4 层。每层只做一件事：构造子进程管理器、组装 CLI 参数、启动 Rust 进程、解析 JSONL 事件流。
+          前置知识：<a href="0001-flow-map.html">0001 链路地图</a>。
+        </div>
+
+        <h2>1. 第 1 层：Codex 构造与 CodexExec 初始化</h2>
+        <p>
+          用户代码 <code>new Codex(options)</code> 时，构造函数只做一件事：创建 <code>CodexExec</code> 实例。<code>CodexExec</code> 负责定位平台原生二进制并管理子进程生命周期。如果用户未通过 <code>codexPathOverride</code> 指定二进制路径，<code>CodexExec</code> 通过 <code>findCodexPath()</code> 自动检测当前平台 target triple，定位 npm 安装的 <code>vendor/</code> 目录下的原生二进制。
+        </p>
+        <p class="where">源码：sdk/typescript/src/codex.ts (第 11-18 行)、sdk/typescript/src/exec.ts 第 63-84 行</p>
+
+        <h2>2. 第 2 层：startThread 与 Thread 延迟绑定</h2>
+        <p>
+          <code>codex.startThread(options)</code> 只是 <code>new Thread(this.exec, this.options, options)</code> 的工厂方法。关键设计：Thread 构造函数不发送任何网络请求，不启动子进程。thread_id 最初为 <code>null</code>，在首次 <code>run()</code> 收到 <code>thread.started</code> 事件后才赋值。这意味着 Thread 对象是轻量的，可以安全地提前创建，真正的通信延迟到 run 时。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-typescript">// codex.ts — startThread 和 resumeThread
+startThread(options: ThreadOptions = {}): Thread {
+  return new Thread(this.exec, this.options, options);
+}
+
+resumeThread(id: string, options: ThreadOptions = {}): Thread {
+  return new Thread(this.exec, this.options, options, id);
+}
+
+// thread.ts — 构造函数，id 默认为 null
+constructor(
+  exec: CodexExec,
+  options: CodexOptions,
+  threadOptions: ThreadOptions,
+  id: string | null = null,
+) {
+  this._exec = exec;
+  this._options = options;
+  this._id = id;       // 新 thread 时为 null
+  this._threadOptions = threadOptions;
+}</code></pre>
+        </div>
+
+        <h2>3. 第 3 层：Thread.run() 事件消费循环</h2>
+        <p>
+          <code>thread.run(input)</code> 是同步聚合器，内部调用 <code>runStreamedInternal()</code> 获取异步生成器，然后遍历事件流完成收集。核心循环处理 5 种事件类型：
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-typescript">// thread.ts — run() 的事件消费循环（精简）
+async run(input: Input, turnOptions: TurnOptions = {}): Promise&lt;Turn&gt; {
+  const generator = this.runStreamedInternal(input, turnOptions);
+  const items: ThreadItem[] = [];
+  let finalResponse = "";
+  let usage: Usage | null = null;
+  let turnFailure: ThreadError | null = null;
+
+  for await (const event of generator) {
+    if (event.type === "item.completed") {
+      if (event.item.type === "agent_message") {
+        finalResponse = event.item.text;   // 捕获最终回复
+      }
+      items.push(event.item);
+    } else if (event.type === "turn.completed") {
+      usage = event.usage;                 // 记录 token 用量
+    } else if (event.type === "turn.failed") {
+      turnFailure = event.error;           // 记录失败原因
+      break;
+    }
+  }
+  if (turnFailure) {
+    throw new Error(turnFailure.message);
+  }
+  return { items, finalResponse, usage };
+}</code></pre>
+        </div>
+        <p>
+          注意 <code>run()</code> 和 <code>runStreamed()</code> 的区别：<code>run()</code> 阻塞等待所有事件后返回聚合结果 <code>Turn</code>；<code>runStreamed()</code> 返回 <code>StreamedTurn</code>（包装了异步生成器），用户可自行逐事件消费。两者的底层都是同一个 <code>runStreamedInternal()</code> 生成器。
+        </p>
+        <p class="where">源码：sdk/typescript/src/thread.ts 第 70-138 行</p>
+
+        <h2>4. 第 4 层：CodexExec.run() 子进程 JSONL 通信</h2>
+        <p>
+          <code>runStreamedInternal()</code> 将用户参数（model、sandbox、workingDirectory 等）转换为 <code>CodexExecArgs</code>，交给 <code>CodexExec.run()</code>。此方法的核心流程：
+        </p>
+        <ol>
+          <li><strong>组装 CLI 参数</strong>：基础命令为 <code>codex exec --experimental-json</code>，将 config、model、sandbox 等映射为 <code>--config key=value</code>、<code>--model</code>、<code>--sandbox</code> 等 CLI flag</li>
+          <li><strong>构造环境变量</strong>：注入 <code>CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex_sdk_ts</code> 标记调用来源，可选设置 <code>CODEX_API_KEY</code></li>
+          <li><strong>spawn 子进程</strong>：<code>spawn(executablePath, commandArgs, {env, signal})</code>，执行 <code>codex exec --experimental-json ...</code></li>
+          <li><strong>写入输入并关闭 stdin</strong>：通过 <code>child.stdin.write(input)</code> 发送用户提示词，随即 <code>.end()</code> 通知 Rust 侧输入完毕</li>
+          <li><strong>逐行读取 stdout</strong>：用 <code>readline.createInterface</code> 按行解析 JSONL，每行 <code>yield</code> 给上层</li>
+          <li><strong>等待退出</strong>：子进程退出后检查 exit code，非 0 时合并 stderr 抛出异常</li>
+        </ol>
+        <div class="codeblock">
+          <pre><code class="language-typescript">// exec.ts — CodexExec.run() 核心片段
+async *run(args: CodexExecArgs): AsyncGenerator&lt;string&gt; {
+  const commandArgs = ["exec", "--experimental-json"];
+  if (args.model) commandArgs.push("--model", args.model);
+  if (args.sandboxMode) commandArgs.push("--sandbox", args.sandboxMode);
+  // ... 更多参数映射 ...
+
+  const child = spawn(this.executablePath, commandArgs, {
+    env, signal: args.signal,
+  });
+
+  child.stdin.write(args.input);
+  child.stdin.end();
+
+  const rl = readline.createInterface({ input: child.stdout });
+  for await (const line of rl) {
+    yield line as string;          // 每行一个 JSONL 事件
+  }
+
+  const { code } = await exitPromise;
+  if (code !== 0) {
+    throw new Error(`Codex Exec exited with code ${code}: ${stderr}`);
+  }
+}</code></pre>
+        </div>
+        <p class="where">源码：sdk/typescript/src/exec.ts 第 86-243 行</p>
+
+        <div class="practice">
+          <p><strong>检索练习：</strong>如果 <code>thread.run("hello")</code> 抛出 <code>Codex Exec exited with code 1: error: invalid model 'gpt-99'</code>，请说出这个错误经过了几层传递？每一层做了什么？</p>
+          <div class="answer">
+            参考答案：<br>
+            1. <strong>Rust 层</strong>：<code>codex exec</code> 进程检测到无效 model 参数，以 exit code 1 退出，stderr 写入错误信息<br>
+            2. <strong>CodexExec.run()</strong>：<code>exitPromise</code> 返回 <code>{code: 1}</code>，合并 stderr 后抛出 <code>Error("Codex Exec exited with code 1: ...")</code><br>
+            3. <strong>runStreamedInternal()</strong>：异步生成器向上传播异常<br>
+            4. <strong>Thread.run()</strong>：<code>for await</code> 循环被异常中断，异常透传到用户代码<br>
+            排查方向：检查 model 参数拼写；运行 <code>codex models</code> 确认可用模型列表。
+          </div>
+        </div>
+
+        <p>
+          上一课：<a href="0001-flow-map.html">0001 链路地图</a>。<br>
+          速查表：<a href="../reference/sdk-thread-run-flow-map.html">SDK Thread/Run 调用链速查表</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

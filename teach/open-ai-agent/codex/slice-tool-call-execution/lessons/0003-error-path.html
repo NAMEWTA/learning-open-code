@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>异常路径：权限拒绝、超时与命令失败</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>异常路径：权限拒绝、超时与命令失败</h1>
+    <p class="meta">学习目标：能定位三种异常场景的代码位置，说出每种异常如何转化为模型可见的错误消息。</p>
+    <p class="meta">前置：<a href="0002-main-path.html">主路径详解</a></p>
+  </header>
+
+  <section>
+    <h2>1. 异常类型总览与权限拒绝</h2>
+    <p>工具调用链路上有三类典型的异常，分别发生在不同阶段：</p>
+
+    <table>
+      <tr><th>异常类型</th><th>发生阶段</th><th>触发条件</th><th>返回给模型的形式</th></tr>
+      <tr>
+        <td>权限拒绝</td>
+        <td>Orchestrator 审批</td>
+        <td>execpolicy 返回 Forbidden 或用户点击拒绝</td>
+        <td><code>FunctionCallError::RespondToModel("rejected: ...")</code></td>
+      </tr>
+      <tr>
+        <td>沙箱拒绝</td>
+        <td>run_attempt 执行</td>
+        <td>沙箱策略拒绝访问文件/网络</td>
+        <td><code>ToolError::Codex(SandboxErr::Denied)</code> → 降级重试或返回错误</td>
+      </tr>
+      <tr>
+        <td>命令超时</td>
+        <td>exec-server 执行</td>
+        <td>命令执行超过 timeout 限制</td>
+        <td>输出前缀 "command timed out after Nms"</td>
+      </tr>
+      <tr>
+        <td>命令失败</td>
+        <td>exec-server 执行</td>
+        <td>命令返回非 0 exit code</td>
+        <td>正常返回，exit_code != 0 在输出中体现</td>
+      </tr>
+    </table>
+    <p>权限拒绝发生在 Orchestrator 的审批阶段。核心决策由 <code>execpolicy/src/policy.rs</code> 中的 <code>Policy</code> 结构体和 <code>Decision</code> 枚举驱动：</p>
+
+    <pre><code>// codex-rs/execpolicy/src/decision.rs
+pub enum Decision {
+    Allow,     // 无需审批，直接放行
+    Prompt,    // 需要用户确认（approval_policy="never" 时直接拒绝）
+    Forbidden, // 无条件禁止
+}
+
+// codex-rs/execpolicy/src/policy.rs
+impl Policy {
+    pub fn evaluate(&self, command: &[String], ...) -&gt; Decision {
+        // 1. 按可执行程序名查找规则
+        // 2. 按网络规则匹配目标 hosts
+        // 3. 返回最严格的 Decision
+    }
+}</code></pre>
+
+    <p>在 Orchestrator 中，<code>exec_approval_requirement()</code> 将 <code>Decision</code> 映射为 <code>ExecApprovalRequirement</code>：</p>
+
+    <pre><code>// 映射关系
+Decision::Allow     → ExecApprovalRequirement::Skip
+Decision::Prompt    → ExecApprovalRequirement::NeedsApproval { reason }
+Decision::Forbidden → ExecApprovalRequirement::Forbidden { reason }</code></pre>
+
+    <p>当返回 <code>Forbidden</code> 时，Orchestrator 立即返回 <code>ToolError::Rejected(reason)</code>，不进入沙箱选择，不启动进程。错误消息直接作为模型可见的响应文本返回。</p>
+
+    <p>当返回 <code>NeedsApproval</code> 时，系统弹出审批对话框。如果用户拒绝，同样返回 <code>ToolError::Rejected</code>。guardian 模式下则由 guardian 自动裁决。</p>
+  </section>
+
+  <section>
+    <h2>2. 沙箱拒绝与降级重试</h2>
+    <p>沙箱拒绝发生在 <code>run_attempt()</code> 执行阶段。例如，当 bwrap 沙箱因为文件系统权限不足而拒绝命令时，exec-server 返回 <code>SandboxErr::Denied</code>。</p>
+
+    <p>Orchestrator 的处理策略在 <code>orchestrator.rs</code> 的 <code>run()</code> 方法中：</p>
+
+    <pre><code>// codex-rs/core/src/tools/orchestrator.rs（简化逻辑）
+Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied { .. }))) =&gt; {
+    // 检查是否可以降级重试：
+    // 如果用户配置了 allow_unsandboxed_commands，
+    // 则尝试以更宽松的沙箱（或 no-sandbox）重新执行
+    if unsandboxed_execution_allowed(...) {
+        // 构造 escalated sandbox attempt，重新 run_attempt()
+        let escalated = SandboxAttempt { sandbox: SandboxType::None, ... };
+        Self::run_attempt(tool, req, tool_ctx, &amp;escalated, ...).await
+    } else {
+        // 无法降级，返回拒绝错误
+        Err(ToolError::Rejected(...))
+    }
+}</code></pre>
+
+    <p>这意味着用户如果配置了 <code>allow_unsandboxed_commands</code>，沙箱拒绝后系统会自动降级为无沙箱模式重试——无需重新审批（审批结果会被缓存）。</p>
+  </section>
+
+  <section>
+    <h2>3. 命令超时与非零退出</h2>
+    <p><strong>超时处理</strong>在 <code>format_exec_output_for_model()</code> 的输出格式化阶段体现，而非执行阶段。exec-server 的超时机制由 <code>ExecParams</code> 中的 timeout 字段控制，超时后进程被 kill，<code>ExecToolCallOutput.timed_out</code> 被设为 true：</p>
+
+    <pre><code>// codex-rs/core/src/tools/mod.rs
+fn build_content_with_timeout(exec_output: &amp;ExecToolCallOutput) -&gt; String {
+    if exec_output.timed_out {
+        format!(
+            "command timed out after {} milliseconds\n{}",
+            exec_output.duration.as_millis(),
+            exec_output.aggregated_output.text
+        )
+    } else {
+        exec_output.aggregated_output.text.clone()
+    }
+}</code></pre>
+
+    <p>超时命令的部分输出仍然会保留，模型可以看到命令在超时前输出了什么。</p>
+
+    <p><strong>命令失败（非零退出）</strong>不是错误——它是合法的执行结果。exit code、wall time 和 output 会一起通过 <code>format_exec_output_for_model()</code> 组合成文本返回给模型。模型根据输出内容决定下一步（修正命令、报告错误给用户等）。</p>
+
+    <p>主要阅读来源：<span class="where">codex-rs/execpolicy/src/policy.rs</span>、<span class="where">codex-rs/execpolicy/src/decision.rs</span>、<span class="where">codex-rs/core/src/tools/orchestrator.rs</span>、<span class="where">codex-rs/core/src/tools/mod.rs</span>。</p>
+  </section>
+
+  <section>
+    <h2>4. 检索练习</h2>
+    <div class="exercise">
+      <p>判断以下场景分别对应哪种异常路径：</p>
+      <ol>
+        <li>用户执行 <code>rm -rf /</code>，execpolicy 返回 Forbidden</li>
+        <li>bwrap 沙箱中执行 <code>curl api.github.com</code>，沙箱策略拒绝网络访问</li>
+        <li>执行 <code>sleep 100</code>，超过 120 秒 timeout 限制</li>
+      </ol>
+    </div>
+    <div class="answer">
+      <p>参考答案：1. 权限拒绝——发生在 Orchestrator 审批阶段，execpolicy 的 Decision::Forbidden 映射为 ExecApprovalRequirement::Forbidden，立即返回 ToolError::Rejected。2. 沙箱拒绝——发生在 run_attempt 执行阶段，SandboxErr::Denied 触发降级重试逻辑；如果 allow_unsandboxed_commands 未配置则返回错误。3. 命令超时——exec-server 在超时后 kill 进程，ExecToolCallOutput.timed_out=true，输出前缀自动加上 "command timed out after Nms"。</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

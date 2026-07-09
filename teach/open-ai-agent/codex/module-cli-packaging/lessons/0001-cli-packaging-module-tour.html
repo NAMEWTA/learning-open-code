@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0001 CLI 与 npm 包装层：从 codex 命令到 Rust 分发</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>CLI 与 npm 包装层：从 codex 命令到 Rust 分发</h1>
+        <p class="meta">学习目标：15 分钟内画出 `codex` 命令从 npm 包装层进入 Rust CLI，并被分流到运行模块的路径。</p>
+
+        <div class="callout">
+          一句话定位：`codex-cli/` 是发布和启动包装层，`codex-rs/cli` 是 Rust 多工具分发层；真正的业务能力继续下沉到 `tui`、`exec`、`mcp`、`plugin`、`app-server` 等 crate。
+          主要来源：<span class="where">codex-cli/package.json</span>、<span class="where">codex-cli/bin/codex.js</span>、<span class="where">codex-rs/cli/src/main.rs</span>。
+        </div>
+
+        <h2>1. 两段入口，不要混成一层</h2>
+        <p>
+          README 把 Codex CLI 定义成本地运行的 coding agent；用户可以通过安装脚本、npm、Homebrew 或 GitHub Release 获得它。npm 路径的第一站是 `@openai/codex` 包。这个包本身不实现 agent，只在 `package.json` 里声明 `bin`，把用户敲的 `codex` 映射到 `bin/codex.js`。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-json">"bin": {
+  "codex": "bin/codex.js"
+},
+"files": [
+  "bin/codex.js"
+]</code></pre>
+        </div>
+        <p>
+          因此排查“npm install 后为什么能运行”时，先读包装层；排查“`codex exec` 做了什么”时，马上切到 Rust CLI。这个边界能防止你在 JavaScript 启动脚本里寻找不存在的业务逻辑。
+        </p>
+
+        <h2>2. npm 包装层只做平台选择和进程转发</h2>
+        <p>
+          `codex.js` 根据 Node 的 `process.platform` 与 `process.arch` 计算 Rust target triple，再映射到平台 optional package，例如 macOS arm64 对应 `@openai/codex-darwin-arm64`。脚本优先从该平台包的 `vendor/` 目录找原生二进制；找不到时退回当前包的 `vendor/`。最后用 `spawn(binaryPath, process.argv.slice(2), { stdio: "inherit" })` 启动原生 `codex`，并转发 `SIGINT`、`SIGTERM`、`SIGHUP`，让 Ctrl-C 等信号落到子进程。
+        </p>
+        <div class="diagram">
+          <pre class="mermaid">flowchart LR
+  A[用户运行 codex exec "..."] --> B[@openai/codex bin]
+  B --> C[codex-cli/bin/codex.js]
+  C --> D[选择 target triple]
+  D --> E[查找平台 package/vendor 二进制]
+  E --> F[spawn 原生 codex]
+  F --> G[codex-rs/cli/src/main.rs]</pre>
+        </div>
+
+        <h2>3. Rust CLI 是薄分发层</h2>
+        <p>
+          `codex-rs/cli/src/main.rs` 用 clap 定义 `MultitoolCli`。它先接收全局配置覆盖、feature toggles、remote 选项和交互 TUI 参数，再读取 `subcommand: Option&lt;Subcommand&gt;`。没有子命令时进入 `run_interactive_tui`；有子命令时进入 `cli_main` 的 `match subcommand` 分支。
+        </p>
+        <div class="codeblock">
+          <pre><code class="language-rust">match subcommand {
+    None =&gt; run_interactive_tui(...).await?,
+    Some(Subcommand::Exec(mut exec_cli)) =&gt; {
+        codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+    }
+    Some(Subcommand::Mcp(mut mcp_cli)) =&gt; {
+        mcp_cli.run(loader_overrides).await?;
+    }
+    Some(Subcommand::Plugin(plugin_cli)) =&gt; { /* plugin_cmd */ }
+    Some(Subcommand::AppServer(app_server_cli)) =&gt; { /* app-server */ }
+    Some(Subcommand::RemoteControl(remote_control_cli)) =&gt; { /* daemon */ }
+}</code></pre>
+        </div>
+        <p>
+          这一层的关键依赖也印证了“分发层”职责：`codex-tui` 承接交互界面，`codex-exec` 承接非交互执行和 review，`codex-mcp-server`、`codex-mcp`、`codex-core-plugins`、`codex-app-server`、`codex-sandboxing` 等分别承接外部工具、扩展、富客户端和平台安全边界。
+        </p>
+
+        <h2>4. 用一个命令练习分流判断</h2>
+        <p>
+          简单调用示例：`codex exec "summarize this repo"`。npm 安装场景下，它先进入 `codex.js`，脚本把 `exec "summarize this repo"` 原样转发给原生二进制。Rust 侧 clap 解析到 `Subcommand::Exec`，合并根级配置与交互共享参数后调用 `codex_exec::run_main`。相反，单独运行 `codex` 不会进 exec，而是进入 TUI；运行 `codex mcp list` 会进入 `mcp_cmd.rs`；运行 `codex app-server` 会启动 app-server transport。
+        </p>
+        <div class="practice">
+          <p><strong>暂停回忆：</strong>下面三个命令分别应该从哪个源码区域继续下钻？`codex`、`codex plugin list`、`codex remote-control pair`。</p>
+          <div class="answer">
+            参考答案：`codex` 进入 `codex-rs/tui`；`codex plugin list` 先看 `codex-rs/cli/src/plugin_cmd.rs`，再下钻 `codex-core-plugins`；`codex remote-control pair` 先看 `codex-rs/cli/src/remote_control_cmd.rs`，再关联 app-server daemon。仍不确定时，向 agent 追问某个分支的完整调用链。
+          </div>
+        </div>
+
+        <p>
+          下一步查阅：<a href="../reference/cli-packaging-overview.html">CLI 包装层参考</a>，其中有子命令清单、内部分层、关键依赖和后续 L2/L3 候选；需要回到全局定位时，打开
+          <a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

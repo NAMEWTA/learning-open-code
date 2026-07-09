@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>主路径：GitHub Release 与 npm 发布</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>主路径：GitHub Release 与 npm 发布</h1>
+        <p class="meta">学习目标：15 分钟内理解 <code>release</code> job 如何收集多平台 artifacts、生成 npm tarballs、创建 GitHub Release，以及 <code>publish-npm</code> 如何通过 OIDC 发布到 npm registry。</p>
+
+        <div class="callout">
+          一句话定位：当所有平台的构建和签名完成后，<code>release</code> job 是汇聚点。它从分散的 workflow artifacts 中收集 6 个 target 的产物，调用 <code>stage_npm_packages.py</code> 生成 npm tarballs，创建 GitHub Release，并根据版本号决定是否触发 npm 发布。
+          前置：<a href="./0001-flow-map.html">0001 发布链路地图</a>。
+        </div>
+
+        <h2>1. release job — 汇聚与打包</h2>
+        <p>
+          <code>release</code> job 的 <code>needs</code> 声明了 5 个依赖：<code>tag-check</code>、<code>build</code>、<code>finalize-macos</code>、<code>build-windows</code>、<code>argument-comment-lint-release-assets</code>。它使用 <code>if: always() && ...result == 'success'</code> 确保即使某些依赖被跳过也能正确判断。
+        </p>
+        <p>
+          关键步骤依次为：
+        </p>
+        <ol>
+          <li><b>下载 artifacts</b>：用 <code>actions/download-artifact</code> 配合 <code>pattern</code> 参数，按 target triple 模式匹配下载所有平台的产物到 <code>dist/</code> 目录。</li>
+          <li><b>生成 SHA256SUMS</b>：扫描所有 <code>codex-package-*.tar.gz</code> 文件计算 SHA256，写入 <code>dist/codex-package_SHA256SUMS</code>。这是用户校验二进制完整性的依据。</li>
+          <li><b>确定 npm 发布策略</b>：<code>npm_publish_settings</code> step 根据版本号决定：纯数字版本（如 0.1.0）→ 发布到 latest tag；<code>-alpha.N</code> 后缀 → 发布到 alpha tag 且仅平台包打平台 tag；其他格式 → 不发布 npm。</li>
+          <li><b>执行 stage_npm_packages.py</b>：安装 pnpm 依赖后，调用 <code>./scripts/stage_npm_packages.py</code> 为 codex、codex-responses-api-proxy、codex-sdk 三个包生成 <code>.tgz</code> tarballs。</li>
+          <li><b>创建 GitHub Release</b>：使用 <code>softprops/action-gh-release</code>，上传 <code>dist/**</code> 全部文件，根据版本号是否含 <code>-</code> 决定 <code>prerelease</code> 标记。</li>
+        </ol>
+
+        <div class="codeblock">
+          <pre><code class="language-yaml"># .github/workflows/rust-release.yml — release job 关键步骤
+- name: Stage npm packages
+  env:
+    GH_TOKEN: ${{ github.token }}
+    RELEASE_VERSION: ${{ steps.release_name.outputs.name }}
+  run: |
+    ./scripts/stage_npm_packages.py \
+      --release-version "$RELEASE_VERSION" \
+      --workflow-url "$workflow_url" \
+      --artifacts-dir "${GITHUB_WORKSPACE}/dist" \
+      --package codex \
+      --package codex-responses-api-proxy \
+      --package codex-sdk</code></pre>
+        </div>
+
+        <h2>2. stage_npm_packages.py — npm 包准备引擎</h2>
+        <p>
+          这个脚本是 npm 发布的核心协调器。它从 release workflow 的 artifact 中下载每个 target 的 <code>codex-package-{target}.tar.gz</code>（Codex 自有分发格式），解压到 <code>vendor/{target}/</code> 目录，然后调用 <code>codex-cli/scripts/build_npm_package.py</code> 为每个包生成标准 npm tarball。
+        </p>
+        <p>
+          脚本的关键设计：（1）<b>扩展映射</b>——<code>codex</code> 扩展为 1 个主包 + 6 个平台包；（2）<b>并发下载</b>——用 <code>ThreadPoolExecutor</code> 并行下载和解压各 target 的 package archive；（3）<b>平台包命名</b>——<code>tarball_name_for_package()</code> 根据 <code>CODEX_PLATFORM_PACKAGES</code> 映射生成 <code>codex-npm-{platform}-{version}.tgz</code> 格式的文件名。
+        </p>
+
+        <div class="codeblock">
+          <pre><code class="language-python"># scripts/stage_npm_packages.py — 核心常量
+BINARY_TARGETS = (
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+)
+# 从 codex-cli/scripts/build_npm_package.py 加载
+CODEX_PLATFORM_PACKAGES  # {"codex-linux-x64": ..., ...}
+PACKAGE_NATIVE_COMPONENTS # {"codex": ["codex-package"], ...}</code></pre>
+        </div>
+
+        <h2>3. publish-npm — OIDC 无密钥发布</h2>
+        <p>
+          <code>publish-npm</code> job 使用 npm 的 OIDC（OpenID Connect）可信发布机制，无需配置 <code>NODE_AUTH_TOKEN</code>。其权限声明 <code>id-token: write</code> 允许 GitHub Actions 向 npm registry 证明身份。
+        </p>
+        <p>
+          发布顺序很重要：<b>先发布 6 个平台包，最后发布主包</b>。这是因为主包 <code>@openai/codex</code> 的 <code>optionalDependencies</code> 引用了所有平台包——npm registry 不允许依赖尚不存在的包版本。脚本通过 <code>CODEX_PLATFORM_PACKAGES</code> 列表确保平台包先于主包发布。若某包已存在（并发重试场景），脚本捕获 "previously published" 错误并跳过。
+        </p>
+
+        <div class="codeblock">
+          <pre><code class="language-bash"># rust-release.yml — npm 发布顺序
+platform_tarballs=(
+  "dist/npm/codex-npm-linux-x64-${VERSION}.tgz"
+  "dist/npm/codex-npm-linux-arm64-${VERSION}.tgz"
+  "dist/npm/codex-npm-darwin-x64-${VERSION}.tgz"
+  "dist/npm/codex-npm-darwin-arm64-${VERSION}.tgz"
+  "dist/npm/codex-npm-win32-x64-${VERSION}.tgz"
+  "dist/npm/codex-npm-win32-arm64-${VERSION}.tgz"
+)
+# 发布顺序：平台包 → 其他包 → root 包 → SDK 包
+tarballs=("${platform_tarballs[@]}" "${other_tarballs[@]}" "${root_tarball}" "${sdk_tarball}")</code></pre>
+        </div>
+
+        <h2>4. 辅助发布渠道：DotSlash、WinGet、Homebrew</h2>
+        <p>
+          除 GitHub Release 和 npm 外，还有三个辅助发布渠道：
+        </p>
+        <ul>
+          <li><b>publish-dotslash</b>：为 <code>.github/dotslash-config.json</code> 中定义的每个平台二进制创建 DotSlash 可执行条目。DotSlash 是 Meta 开源的工具，允许单个文件包含多平台二进制 URL 引用，用户下载后自动选择匹配平台的版本。</li>
+          <li><b>winget</b>：仅在稳定版本（不含 <code>-</code> 的版本号）触发，使用 <code>vedantmgoyal9/winget-releaser</code> 自动向 <code>openai-oss-forks/winget-pkgs</code> 提交 PR，由 WinGet 社区审核合并。</li>
+          <li><b>deploy-dev-website</b>：稳定版本触发 Vercel deploy hook，更新 developers.openai.com 上的 config schema 文档。</li>
+        </ul>
+
+        <div class="practice">
+          <p><strong>场景判断：</strong>如果发布 <code>rust-v0.2.0-beta.1</code> 后，用户报告 <code>npm install -g @openai/codex@latest</code> 仍安装 0.1.0，但 <code>@openai/codex@beta</code> 已是 0.2.0-beta.1。这是正常行为还是 bug？为什么？</p>
+          <div class="answer">
+            参考答案：<b>正常行为。</b><code>npm_publish_settings</code> step 判断版本号 <code>0.2.0-beta.1</code> 不匹配纯数字正则 <code>^[0-9]+\\.[0-9]+\\.[0-9]+$</code>，也不匹配 alpha 正则 <code>^[0-9]+\\.[0-9]+\\.[0-9]+-alpha\\.[0-9]+$</code>，因此 <code>should_publish_npm=false</code>，整个 publish-npm job 被跳过。GitHub Release 会标记为 prerelease。如果用户期望 npm 发布 beta 版本，需要将版本号改为 <code>0.2.0-alpha.N</code> 格式或扩展 <code>npm_publish_settings</code> 的判断逻辑。<br>
+            还有疑问？向 agent 追问 <code>npm_publish_settings</code> step 的完整正则匹配逻辑。
+          </div>
+        </div>
+
+        <p>
+          速查：<a href="../reference/release-package-binary-flow-map.html">发布链路速查表</a>，包含每层输入/输出、关键函数和异常处理一览。
+          回到链路总览：<a href="./0001-flow-map.html">0001 发布链路地图</a>。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

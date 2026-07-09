@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 — 主成功路径：一条 ticker 的完整旅程</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<style>
+  .objective { font-size: 1.05rem; color: #333; margin: 18px 0; padding: 10px 14px; background: #f0f7ff; border-left: 3px solid #4a90d9; border-radius: 4px; }
+  .quiz { border: 1px solid #dfe5ec; border-radius: 8px; padding: 18px; margin: 24px 0; background: #f9fafc; }
+  .quiz h3 { margin-top: 0; }
+  .callout { border-left: 3px solid #e6a817; background: #fefdf5; padding: 10px 14px; margin: 16px 0; border-radius: 0 6px 6px 0; font-size: 0.94rem; }
+  .trace-num { display: inline-block; width: 22px; height: 22px; background: #0f6b8f; color: #fff; border-radius: 50%; text-align: center; font-size: 0.82rem; font-weight: 600; line-height: 22px; margin-right: 6px; }
+</style>
+</head>
+<body>
+<main>
+<div class="page">
+
+<p class="meta">L2 垂直切片 &middot; 第 2/3 节 &middot; 预计 14 分钟</p>
+
+<h1>0002 — 主成功路径：一条 ticker 的完整旅程</h1>
+
+<p class="objective"><strong>目标任务：</strong>以 <code>propagate("600519", "2026-07-08")</code> 为起点，追踪全链路中关键方法调用如何修改 AgentState，能解释每个节点返回的 dict 更新了哪些字段。</p>
+
+<p>前一节画出了 7 阶段全景图，本节沿主成功路径（所有分析师正常产报告、质量门控通过、辩论正常结束）逐个节点追踪。</p>
+
+<h2>1. 入口三段式：prepare → invoke → finalize</h2>
+
+<p>入口 <code>_run_graph()</code>（<code>trading_graph.py:398</code>）做三件事：</p>
+
+<pre><code># 1. 准备
+init_state, args, _ = self.prepare_graph_run(company_name, trade_date)
+
+# 2. 执行
+final_state = self.graph.invoke(init_state, **args)
+
+# 3. 落盘
+signal = self.finalize_graph_run(company_name, trade_date, final_state)
+return final_state, signal</code></pre>
+
+<p><code>prepare_graph_run()</code> 内部调用 <code>self.propagator.create_initial_state()</code> 构建初始 dict（见 <code>propagation.py:18</code>）。关键字段：</p>
+
+<ul>
+  <li><code>messages</code> — LangGraph 内部消息列表，以 <code>("human", company_name)</code> 开头</li>
+  <li><code>company_of_interest</code> / <code>trade_date</code> — 股票代码和交易日</li>
+  <li><span class="trace-num">报告域</span> <code>market_report</code> <code>sentiment_report</code> <code>news_report</code> <code>fundamentals_report</code> <code>policy_report</code> <code>hot_money_report</code> <code>lockup_report</code> — 全部初始化为空字符串 <code>""</code></li>
+  <li><span class="trace-num">辩论域</span> <code>investment_debate_state</code>（3 字段全空，<code>count=0</code>）+ <code>risk_debate_state</code>（9 字段全空，<code>count=0</code>）</li>
+</ul>
+
+<div class="callout"><strong>为什么初始化为空字符串？</strong>LangGraph StateGraph 使用 additive reducer，messages 会累积。而报告和辩论字段使用 overwrite reducer——每个 Analyst 节点返回的 dict 直接覆盖对应字段。初始化为 <code>""</code> 保证下游不会因 KeyError 崩溃。</div>
+
+<h2>2. 阶段 2：7 Analyst 的 Tool-Call 循环</h2>
+
+<p>第一个 Analyst（Market）从 <code>START</code> 边启动。每个 Analyst 的循环逻辑相同（以 Market 为例，<code>setup.py:150-155</code>）：</p>
+
+<pre><code>workflow.add_conditional_edges(
+    "Market Analyst",
+    self.conditional_logic.should_continue_market,
+    ["tools_market", "Msg Clear Market"],
+)
+workflow.add_edge("tools_market", "Market Analyst")</code></pre>
+
+<p><strong>循环机制：</strong>Analyst 节点执行时，LLM 判断需要获取数据 → 返回 tool_call → <code>should_continue_market()</code>（<code>conditional_logic.py:14-20</code>）检测到 <code>last_message.tool_calls</code> 非空 → 路由到 <code>tools_market</code> → ToolNode 执行工具 → 将结果消息追加到 messages → 自动回到 "Market Analyst" → LLM 再决定是继续调工具还是产研报 → 不再有 tool_call → 路由到 "Msg Clear Market" → 删除多余消息 → 进入下一个 Analyst。</p>
+
+<p>Market → Social → News → Fundamentals → Policy → HotMoney → Lockup 依次传递，最后一个 Analyst 的 Msg Clear 直接连到 "Quality Gate"。</p>
+
+<h2>3. 阶段 3-7：决策链逐步收敛</h2>
+
+<p><strong>质量门控（阶段 3）：</strong><code>quality_gate_node</code>（<code>quality_gate.py:126</code>）读取 7 个报告字段，逐份跑 <code>_hard_check_report()</code>：长度 < 200 字符 → D 级，含失败标记（如"无法获取"）→ D 级，3+ 处 <code>[数据缺失]</code> → C 级。若 D/F 级 < 4 份，追加一次 LLM 复审。最终返回 <code>{"data_quality_summary": summary}</code>。</p>
+
+<p><strong>Bull/Bear 辩论（阶段 4）：</strong>setup.py 固定从 "Quality Gate" → "Bull Researcher"。Bull 产多论点 → 条件路由检测 <code>current_response.startswith("Bull")</code> → 进 "Bear Researcher" → Bear 反驳 → 再次条件路由 → 若 count < 2*max_debate_rounds 且当前是 Bear 则回 Bull → 轮次达标后进入 "Research Manager"。</p>
+
+<p><strong>决策收敛（阶段 5→6→7）：</strong></p>
+<ul>
+  <li><strong>Research Manager</strong>（deep_thinking_llm）阅读辩论历史 → 输出 <code>ResearchPlan</code>（结构化 Schema，<code>schemas.py:61</code>）→ render 为 markdown 写入 state</li>
+  <li><strong>Trader</strong>（quick_thinking_llm）读取计划 → 输出 <code>TraderProposal</code>（<code>schemas.py:109</code>）含 entry_price / stop_loss</li>
+  <li><strong>风险三方辩论</strong>：Aggressive→Conservative→Neutral 循环辩论（最大 <code>3*max_risk_discuss_rounds</code> 轮），到期入 Portfolio Manager</li>
+  <li><strong>Portfolio Manager</strong>（deep_thinking_llm）→ <code>PortfolioDecision</code>（<code>schemas.py:171</code>）→ render 为 <code>**Rating**: X</code> 格式的 markdown</li>
+</ul>
+
+<h2>4. 终点：从 PM 决策到 5 档评级</h2>
+
+<p>LangGraph 执行到 <code>Portfolio Manager → END</code> 后，<code>graph.invoke()</code> 返回最终 state。回到 <code>_run_graph()</code> → <code>finalize_graph_run()</code>（<code>trading_graph.py:369</code>）：</p>
+
+<ol>
+  <li><code>_log_state()</code> 将 7 个报告 + 2 个辩论历史 + 决策写入 JSON 日志文件</li>
+  <li><code>memory_log.store_decision()</code> 将决策存入待处理日志（下次同 ticker 运行时做延迟反思）</li>
+  <li><code>clear_checkpoint()</code> 清除 SQLite 断点</li>
+  <li><code>process_signal()</code> → <code>SignalProcessor.process_signal()</code> → <code>parse_rating()</code>（<code>rating.py:30</code>）从 <code>**Rating**: X</code> 行提取最终评级</li>
+</ol>
+
+<p>最终返回 <code>("Buy" / "Overweight" / "Hold" / "Underweight" / "Sell")</code>——这就是整个链路从 ticker 到决策的输出。</p>
+
+<div class="quiz">
+<h3>暂停回忆</h3>
+<p>合上眼睛（或遮住上方内容），回答：</p>
+<ol>
+  <li>每个 Analyst 节点退出 tool-call 循环的条件是什么？由谁判断？</li>
+  <li>质量门控的硬检查中，最少多少字符才算合格？</li>
+  <li>Portfolio Manager 之后 LangGraph 连到哪个节点？</li>
+</ol>
+<div class="answer">
+<p><strong>参考答案：</strong>(1) <code>last_message.tool_calls</code> 为空时退出循环，由 <code>should_continue_X()</code> 方法判断并返回 <code>"Msg Clear X"</code>。(2) 200 字符（MIN_REPORT_LENGTH）。(3) END——Portfolio Manager 是链路终点，执行完毕后 LangGraph 终止。</p>
+</div>
+</div>
+
+<p style="margin-top: 24px;">下一节将探索异常路径：<a href="0003-error-path.html">0003 — 异常与边界路径</a>。回看链路全景见 <a href="0001-flow-map.html">0001-flow-map.html</a>。</p>
+
+</div>
+</main>
+</body>
+</html>

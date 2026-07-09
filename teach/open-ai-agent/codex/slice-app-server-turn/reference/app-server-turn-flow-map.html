@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>app-server Thread/Turn JSON-RPC 链路速查表</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .filetree {
+      font-family: "SF Mono", Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.75;
+      background: #fafbfc;
+      border: 1px solid #ebebeb;
+      border-radius: 8px;
+      padding: 1rem 1.2rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">参考文档 · 速查表</div>
+  <h1>App-server Thread/Turn JSON-RPC 链路速查表</h1>
+  <p class="lead">本文档是 <a href="../lessons/0001-flow-map.html">链路地图</a> 和 <a href="../lessons/0002-main-path.html">主路径详解</a> 的精炼提取，用于快速查阅方法路由、源码入口和错误码。反复查阅，不做一次性阅读。</p>
+
+  <section>
+    <h2>一、JSON-RPC 消息类型（rpc.rs）</h2>
+    <table>
+      <tr><th>类型</th><th>Rust 结构体</th><th>说明</th></tr>
+      <tr><td>Request</td><td><code>JSONRPCRequest</code></td><td>含 id、method、params、trace，期待响应</td></tr>
+      <tr><td>Notification</td><td><code>JSONRPCNotification</code></td><td>含 method、params，不期待响应</td></tr>
+      <tr><td>Response</td><td><code>JSONRPCResponse</code></td><td>含 id、result，成功响应</td></tr>
+      <tr><td>Error</td><td><code>JSONRPCError</code></td><td>含 id、error（code + message + data）</td></tr>
+    </table>
+    <p>代码注释明确：<em>"We do not do true JSON-RPC 2.0, as we neither send nor expect the 'jsonrpc': '2.0' field."</em>（<code>rpc.rs:1-2</code>）</p>
+  </section>
+
+  <section>
+    <h2>二、Thread 相关方法路由</h2>
+    <table>
+      <tr><th>方法名</th><th>Processor</th><th>源码入口</th><th>响应模式</th></tr>
+      <tr><td><code>thread/start</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:422</code></td><td>异步（fire-and-notify）</td></tr>
+      <tr><td><code>thread/resume</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:453</code></td><td>异步</td></tr>
+      <tr><td><code>thread/fork</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:472</code></td><td>异步</td></tr>
+      <tr><td><code>thread/list</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:1216</code></td><td>同步响应</td></tr>
+      <tr><td><code>thread/archive</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:491</code></td><td>同步响应 + 通知</td></tr>
+      <tr><td><code>thread/delete</code></td><td>ThreadRequestProcessor</td><td><code>thread_processor.rs:1140</code></td><td>同步响应</td></tr>
+      <tr><td><code>thread/settings/update</code></td><td>TurnRequestProcessor</td><td><code>turn_processor.rs:184</code></td><td>同步响应</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>三、Turn 相关方法路由</h2>
+    <table>
+      <tr><th>方法名</th><th>Processor</th><th>源码入口</th><th>响应模式</th></tr>
+      <tr><td><code>turn/start</code></td><td>TurnRequestProcessor</td><td><code>turn_processor.rs:155</code></td><td>同步响应 + 通知流</td></tr>
+      <tr><td><code>turn/steer</code></td><td>TurnRequestProcessor</td><td><code>turn_processor.rs:194</code></td><td>同步响应</td></tr>
+      <tr><td><code>turn/interrupt</code></td><td>TurnRequestProcessor</td><td><code>turn_processor.rs:205</code></td><td>延迟响应（等 TurnAborted）</td></tr>
+      <tr><td><code>review/start</code></td><td>TurnRequestProcessor</td><td><code>turn_processor.rs:276</code></td><td>无同步响应</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>四、message_processor 请求分发流程</h2>
+    <div class="filetree">process_request()                          ← message_processor.rs:592
+  ├── deserialize_client_request()           ← :101，JSON → ClientRequest
+  ├── handle_client_request()                ← :828
+  │     ├── Initialize 分支                  ← :840，特殊处理 initialize gate
+  │     └── dispatch_initialized_client_request()  ← :873
+  │           ├── 检查 session.initialized() ← :880
+  │           ├── 检查 experimental API      ← :884-887
+  │           └── handle_initialized_client_request()  ← :938
+  │                 └── match ClientRequest 枚举 → 各 processor
+  └── send_error() / send_response()         ← 错误或成功回传</div>
+  </section>
+
+  <section>
+    <h2>五、常见错误码</h2>
+    <table>
+      <tr><th>错误码</th><th>触发条件</th><th>源码位置</th></tr>
+      <tr><td><code>-32600</code></td><td>Invalid Request — 通用无效请求</td><td><code>error_code.rs</code> <code>invalid_request()</code></td></tr>
+      <tr><td><code>-32600</code></td><td>"Not initialized" — 在 initialize 前调用方法</td><td><code>message_processor.rs:881</code></td></tr>
+      <tr><td><code>-32600</code></td><td>"thread not found: {id}" — thread 不存在</td><td><code>turn_processor.rs:312</code></td></tr>
+      <tr><td><code>-32600</code></td><td>"thread {id} is closing" — thread 正在卸载</td><td><code>thread_lifecycle.rs:159</code></td></tr>
+      <tr><td><code>-32602</code></td><td>Invalid Params — 参数校验失败</td><td><code>error_code.rs</code> <code>invalid_params()</code></td></tr>
+      <tr><td><code>-32602</code></td><td>"Input exceeds maximum length" — 输入过长</td><td><code>turn_processor.rs:422</code></td></tr>
+      <tr><td><code>-32602</code></td><td>"permissions cannot be combined with sandbox"</td><td><code>thread_processor.rs:939</code></td></tr>
+      <tr><td><code>-32603</code></td><td>Internal Error — core 执行异常</td><td><code>error_code.rs</code> <code>internal_error()</code></td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>六、关键数据结构</h2>
+    <table>
+      <tr><th>结构体</th><th>源文件</th><th>用途</th></tr>
+      <tr><td><code>JSONRPCRequest</code></td><td><code>rpc.rs:46</code></td><td>Wire 上的请求（id + method + params + trace）</td></tr>
+      <tr><td><code>ClientRequest</code></td><td><code>common.rs</code>（宏生成）</td><td>已反序列化的类型化请求枚举</td></tr>
+      <tr><td><code>ThreadStartParams</code></td><td><code>v2/thread.rs</code></td><td>thread/start 的所有参数（model、cwd、sandbox、environments 等）</td></tr>
+      <tr><td><code>TurnStartParams</code></td><td><code>v2/turn.rs</code></td><td>turn/start 的所有参数（threadId、input、environments、collaboration_mode 等）</td></tr>
+      <tr><td><code>ThreadSettingsOverrides</code></td><td><code>codex_thread.rs:143</code></td><td>每次 turn 的临时配置覆盖</td></tr>
+      <tr><td><code>ListenerTaskContext</code></td><td><code>thread_lifecycle.rs:6</code></td><td>监听器任务所需的共享状态句柄</td></tr>
+      <tr><td><code>ConnectionSessionState</code></td><td><code>message_processor.rs:215</code></td><td>连接级会话状态（初始化、实验能力、通知 opt-out）</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>七、初始化握手序列</h2>
+    <p>客户端在调用 thread/start 或 turn/start 之前必须完成 initialize 握手：</p>
+    <div class="filetree">客户端 → 服务端：{"id":0,"method":"initialize","params":{...}}
+服务端 → 客户端：{"id":0,"result":{...}}
+客户端 → 服务端：{"method":"initialized"}        ← notification，当前仅进入日志
+
+此后才可调用 thread/start、turn/start 等业务方法。
+若跳过 initialize，dispatch_initialized_client_request()
+返回 "Not initialized"（message_processor.rs:881）。</div>
+  </section>
+
+  <section>
+    <h2>八、相关课程链接</h2>
+    <ul>
+      <li><a href="../lessons/0001-flow-map.html">链路地图 0001</a> — 完整时序图 + 7 层架构</li>
+      <li><a href="../lessons/0002-main-path.html">主路径详解 0002</a> — thread_start_inner 和 turn_start_inner 阶段分解</li>
+      <li><a href="../../module-app-server/lessons/0001-app-server-module-tour.html">L1 app-server 导览</a> — app-server 整体架构</li>
+      <li><a href="../../module-core-runtime/lessons/0001-core-runtime-module-tour.html">L1 core-runtime 导览</a> — Thread/Turn 运行时抽象</li>
+      <li><a href="../../00-overview/lessons/0001-project-map.html">L0 项目地图</a> — Codex 顶层模块总览</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
