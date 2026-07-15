@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — Agent 对话循环全链路：从 prompt() 到工具调用的完整闭环</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+  }
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+
+  .layer {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1.2rem;
+    margin: 0.8rem 0;
+  }
+  .layer strong { color: var(--accent); }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>0001 — Agent 对话循环全链路：从 prompt() 到工具调用的完整闭环</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：15 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>追踪从 <code>agent.prompt("帮我读文件")</code> 到 LLM 响应、工具调用执行、结果回传 LLM 的<strong>完整 7 步数据流</strong>。能画出事件序列图，并定位工具调用失败时异常如何沿事件管道回传。</p>
+
+<!-- ════════════ 第 1 章 ════════════ -->
+<h2>1. 入口：两条路径汇入同一循环</h2>
+
+<p>对话循环有两个入口，都在 <code>Agent</code> 类中：</p>
+
+<div class="layer">
+  <strong>prompt(text)</strong> — 新对话轮次。规范化输入 → 检查 activeRun → 调用 <code>runAgentLoop()</code>。
+</div>
+<div class="layer">
+  <strong>continue()</strong> — 恢复已有对话。检查末条消息角色（不能是 assistant） → 消费队列 → 调用 <code>runAgentLoopContinue()</code>。
+</div>
+
+<p>两条路径最终汇聚到 <code>agent-loop.ts</code> 中的相同函数族。核心入口代码：</p>
+
+<pre>// agent.ts — prompt() 的输入规范化和循环启动
+async prompt(input, images) {
+  if (this.activeRun) {
+    throw new Error("Agent is already processing...");
+  }
+  const messages = this.normalizePromptInput(input, images);
+  await this.runPromptMessages(messages);
+}
+
+private async runPromptMessages(messages, options = {}) {
+  await this.runWithLifecycle(async (signal) => {
+    await runAgentLoop(messages,
+      this.createContextSnapshot(),  // 冻结 systemPrompt + messages + tools
+      this.createLoopConfig(options), // 组装 model + 钩子 + 队列函数
+      (event) => this.processEvents(event), // 状态归约 + 监听器
+      signal,
+      this.streamFn); // 默认 streamSimple
+  });
+}</pre>
+
+<!-- ════════════ 时序图 ════════════ -->
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant U as 用户
+    participant A as Agent
+    participant RL as runLoop
+    participant LLM as LLM API
+    participant T as Tool
+
+    U->>A: prompt("读文件")
+    A->>A: normalizePromptInput + createContextSnapshot
+    A->>RL: runAgentLoop(prompts, ctx, config, emit, signal)
+
+    loop 外层 (followUp) / 内层 (tool calls + steering)
+        RL->>LLM: streamAssistantResponse(ctx, config)
+        Note over RL,LLM: transformContext? → convertToLlm → streamFn
+        LLM-->>RL: AssistantMessage {toolCall}
+
+        RL->>T: executeToolCalls → prepare → execute
+        Note over RL,T: beforeToolCall 可 block; 异常→isError=true
+        T-->>RL: ToolResultMessage[]
+        RL->>RL: drain steering → pending; drain followUp
+    end
+
+    RL-->>A: agent_end + newMessages[]
+    A-->>U: 最终响应
+</pre>
+</div>
+
+<!-- ════════════ 第 2 章 ════════════ -->
+<h2>2. 双层循环的分工与轮询时机</h2>
+
+<p><code>runLoop()</code> 是控制流的核心。外层循环处理 <strong>follow-up 消息</strong>——Agent 即将停止时才注入；内层循环处理 <strong>tool calls 和 steering 消息</strong>——在当前 assistant 回复完成后立即注入。</p>
+
+<table>
+  <tr><th>队列</th><th>轮询时机</th><th>消费模式</th><th>注入 API</th></tr>
+  <tr><td>steering</td><td>每个 turn 完成后（<code>turn_end</code> 之后）</td><td>one-at-a-time / all</td><td><code>agent.steer()</code></td></tr>
+  <tr><td>followUp</td><td>内层循环退出后（无 tool call 且无 steering）</td><td>one-at-a-time / all</td><td><code>agent.followUp()</code></td></tr>
+</table>
+
+<p>结构骨架（关键分支已标注）：</p>
+
+<pre>// agent-loop.ts — runLoop 双层 while 结构精简版
+async function runLoop(ctx, newMsgs, config, signal, emit, streamFn) {
+  let firstTurn = true;
+  let pending = (await config.getSteeringMessages?.()) || [];
+
+  while (true) {                       // 外层：followUp 循环
+    let hasMoreToolCalls = true;
+    while (hasMoreToolCalls || pending.length > 0) {
+      if (!firstTurn) emit({ type: "turn_start" });
+      else firstTurn = false;
+
+      if (pending.length > 0) { /* emit + push 每条 */ }
+
+      const msg = await streamAssistantResponse(ctx, config, signal, emit, streamFn);
+      if (msg.stopReason === "error" || msg.stopReason === "aborted") return;
+
+      const toolCalls = msg.content.filter(c => c.type === "toolCall");
+      if (toolCalls.length > 0) {
+        const batch = await executeToolCalls(ctx, msg, config, signal, emit);
+        hasMoreToolCalls = !batch.terminate;
+      } else hasMoreToolCalls = false;
+
+      emit({ type: "turn_end", message: msg, toolResults: batch?.messages ?? [] });
+      pending = (await config.getSteeringMessages?.()) || [];
+    }
+    const followUps = (await config.getFollowUpMessages?.()) || [];
+    if (followUps.length > 0) { pending = followUps; continue; }
+    break;
+  }
+  emit({ type: "agent_end", messages: newMsgs });
+}</pre>
+
+<!-- ════════════ 第 3 章 ════════════ -->
+<h2>3. LLM 调用层：消息转换与流事件分发</h2>
+
+<p><code>streamAssistantResponse()</code> 是 Agent 消息空间与 LLM 消息空间的<strong>唯一桥接点</strong>。三个关键步骤：</p>
+
+<ol>
+  <li><strong>transformContext</strong>（可选）— 在 AgentMessage[] 层面做上下文裁剪或注入</li>
+  <li><strong>convertToLlm</strong>（必需）— 将 AgentMessage[] 转为 Message[]，过滤掉 bashExecution/custom/compactionSummary 等自定义消息类型</li>
+  <li><strong>streamFn</strong> — 调用 LLM API，遍历返回的事件流，将每个 <code>text_delta</code>/<code>toolcall_start</code> 等事件转为 <code>message_update</code> 发出</li>
+</ol>
+
+<p>默认的 <code>convertToLlm</code> 只保留 role 为 user/assistant/toolResult 的消息：</p>
+
+<pre>// agent.ts — 默认的 LLM 消息转换器
+function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+  return messages.filter(
+    (message) => message.role === "user"
+             || message.role === "assistant"
+             || message.role === "toolResult",
+  );
+}</pre>
+
+<p>转换完成后，<code>streamFn</code>（默认 <code>streamSimple</code>）向 LLM 发送请求。返回的 <code>AssistantMessageEventStream</code> 被逐事件消费，每个 <code>start</code>/<code>text_delta</code>/<code>toolcall_delta</code>/<code>done</code> 事件触发对应的 <code>emit()</code> 调用，驱动 UI 层更新。</p>
+
+<!-- ════════════ 第 4 章 ════════════ -->
+<h2>4. 工具调用 Pipeline 与异常路径</h2>
+
+<p>当 LLM 返回的 <code>AssistantMessage</code> 包含 <code>toolCall</code> 内容块时，进入工具执行 pipeline。每个工具调用经过四阶段：</p>
+
+<div class="layer"><strong>prepare</strong> → 参数校验（TypeBox schema）+ beforeToolCall 钩子（可 block）</div>
+<div class="layer"><strong>execute</strong> → 调用 tool.execute()，支持 partial update 回调</div>
+<div class="layer"><strong>finalize</strong> → afterToolCall 钩子（可覆盖 content/details/isError/terminate）</div>
+<div class="layer"><strong>emit</strong> → 发放 tool_execution_end + toolResult message 事件</div>
+
+<p><strong>异常路径</strong>——工具调用可能在三处失败，每一处都产生 isError=true 的 ToolResultMessage 回传给 LLM，由 LLM 决定如何修正：</p>
+
+<pre>// agent-loop.ts — prepareToolCall 中的三条异常路径
+async function prepareToolCall(ctx, msg, toolCall, config, signal) {
+  const tool = ctx.tools?.find(t => t.name === toolCall.name);
+  if (!tool) {
+    return { kind: "immediate",      // 异常 1: 工具不存在
+      result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+      isError: true };
+  }
+  try {
+    const validatedArgs = validateToolArguments(tool, preparedToolCall);
+    if (config.beforeToolCall) {
+      const beforeResult = await config.beforeToolCall(/*...*/, signal);
+      if (beforeResult?.block) {
+        return { kind: "immediate",   // 异常 2: beforeToolCall 拦截
+          result: createErrorToolResult(beforeResult.reason
+                    || "Tool execution was blocked"),
+          isError: true };
+      }
+    }
+    return { kind: "prepared", toolCall, tool, args: validatedArgs };
+  } catch (error) {
+    return { kind: "immediate",      // 异常 3: 参数校验失败
+      result: createErrorToolResult(
+        error instanceof Error ? error.message : String(error)),
+      isError: true };
+  }
+}</pre>
+
+<p>所有 <code>kind === "immediate"</code> 的异常结果<strong>不执行</strong> tool.execute()，直接产生错误 ToolResultMessage。第四种异常是 tool.execute() 本身 throw——在 <code>executePreparedToolCall</code> 的 catch 分支中捕获，同样产生 isError=true 的结果。这意味着<strong>工具执行永远不会让 Agent 崩溃</strong>——错误总是被转为结构化的 ToolResultMessage，继续参与对话循环。</p>
+
+<!-- ════════════ 检索练习 ════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>不上翻，回答以下问题：</p>
+<ol>
+  <li>prompt() 和 continue() 最终分别调用 agent-loop.ts 中的哪个函数？</li>
+  <li>外层循环和内层循环各由什么条件触发继续执行？</li>
+  <li>LLM 调用前，AgentMessage[] 如何变成 Message[]？哪些消息类型会被过滤掉？</li>
+  <li>工具调用的四种异常路径分别发生在哪个阶段？它们有一个共同的安全保证是什么？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>prompt() 调用 <code>runAgentLoop()</code>，continue() 调用 <code>runAgentLoopContinue()</code>。两者最终都进入同一个 <code>runLoop()</code> 函数。</li>
+  <li>外层循环由 <strong>followUp 队列非空</strong> 触发继续；内层循环由 <strong>hasMoreToolCalls 为 true 或 pendingMessages（steering）非空</strong> 触发继续。</li>
+  <li>通过 <code>convertToLlm()</code> 函数转换。默认实现过滤掉非 user/assistant/toolResult 角色的消息（bashExecution、custom、branchSummary、compactionSummary 等被排除）。</li>
+  <li>四种异常：(1) 工具未找到（prepare 阶段）；(2) beforeToolCall 拦截（prepare 阶段）；(3) 参数校验失败（prepare 阶段）；(4) execute() 抛出异常（execute 阶段）。共同保证：<strong>异常永远不会让 Agent 崩溃</strong>——总是转为 isError=true 的 ToolResultMessage 回传 LLM。</li>
+</ol>
+</details>
+</div>
+
+<!-- ════════════ 参考资料 ════════════ -->
+<h3>参考资料</h3>
+<ul>
+  <li><strong>前置课程</strong>：<a href="../../module-agent/lessons/0001-agent-module-tour.html">L1-module-agent — Agent 运行时模块总览</a>（Agent 类 API 与双层循环概念）</li>
+  <li><strong>前置课程</strong>：<a href="../../module-ai/lessons/0001-ai-module-tour.html">L1-module-ai — 多 Provider 统一 LLM API 层</a>（streamSimple 与事件流机制）</li>
+  <li><strong>锚点课程</strong>：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a>（pi-agent-core 在 monorepo 中的定位）</li>
+  <li><strong>参考文档</strong>：<a href="../../module-agent/reference/agent-overview.html">agent-overview.html</a> — AgentEvent 事件类型完整枚举与接口清单</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/agent-loop.ts:95-268</code> — runAgentLoop + runLoop</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/agent.ts:334-421</code> — prompt() + continue() + 循环启动</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/types.ts:413-428</code> — AgentEvent 联合类型定义</li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对特定钩子的执行时序、队列模式（all vs one-at-a-time）的选择策略、或者如何在循环中 via signal 实现优雅中断有疑问，可以直接向 AI 教师追问。例如："如果 beforeToolCall 返回 block，LLM 能看到什么内容？"、"terminate: true 和 stopReason: 'error' 的区别是什么？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../module-agent/lessons/0001-agent-module-tour.html">← 上一节：Agent 运行时模块总览</a>
+  <a href="../../module-agent/reference/agent-overview.html">参考文档：Agent 接口速查 →</a>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 9 课 · request.ts 请求拦截器全解析</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 9 课 · request.ts 请求拦截器全解析 <span class="tag">plus-ui-vue</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：逐行读懂 <code>request.ts</code> 的请求拦截器——axios 实例创建、自定义 header 管理、防重复提交、前端 AES 加密，理解为什么每段代码这样设计。
+</div>
+
+<h2>一、为什么需要 axios 实例？</h2>
+
+<pre><code>// request.ts:97-107
+axios.defaults.headers['Content-Type'] = 'application/json;charset=utf-8';
+axios.defaults.headers['clientid'] = import.meta.env.VITE_APP_CLIENT_ID;
+
+const service = axios.create({
+  baseURL: import.meta.env.VITE_APP_BASE_API,
+  timeout: 50000,
+  transitional: { clarifyTimeoutError: true }
+});</code></pre>
+
+<p>这 10 行代码做了一个关键决策：<strong>创建独立 axios 实例，而非修改全局 axios</strong>。</p>
+
+<p>第 97-98 行是<strong>全局默认配置</strong>：所有通过 <code>axios</code> 发出的请求都会带上 <code>Content-Type</code> 和 <code>clientid</code>。注意 <code>clientid</code> 是 RuoYi 多客户端体系的核心——后端 SecurityConfig 会校验请求头中的 <code>clientid</code> 是否与 token 签发时一致。</p>
+
+<p>第 100 行 <code>axios.create</code> 创建<strong>独立实例</strong> service。这个实例有自己的拦截器，不会污染其他可能使用 axios 的地方。与第 97 行的区别：第 97 行是直接改 <code>axios.defaults</code>，影响全局；第 100 行是实例级配置。</p>
+
+<div class="why">
+💡 <b>设计思路</b>：<code>clientid</code> 设在全局默认值是「兜底策略」——即使某个请求忘了单独配置，也会带上这个字段。而后端会做二次校验，保证安全性不降级。
+</div>
+
+<h2>二、三大自定义 Header：isToken / isEncrypt / repeatSubmit</h2>
+
+<pre><code>// request.ts:115-119 (请求拦截器内部)
+const isToken = config.headers?.isToken === false;
+const isRepeatSubmit = config.headers?.repeatSubmit === false;
+const isEncrypt = config.headers?.isEncrypt === 'true';
+
+if (getToken() && !isToken) {
+  config.headers['Authorization'] = 'Bearer ' + getToken();
+}</code></pre>
+
+<p>这三个自定义 header 是<strong>前端层面的控制开关</strong>，它们不会被发送到后端——axios 拦截器读取后决定行为，然后不会传给服务器。</p>
+
+<table>
+<tr><th>Header</th><th>含义</th><th>典型使用场景</th></tr>
+<tr><td><code>isToken: false</code></td><td>不发 token</td><td>登录接口（还没 token 呢）</td></tr>
+<tr><td><code>repeatSubmit: false</code></td><td>允许重复提交</td><td>需要短时间内多次调用的接口</td></tr>
+<tr><td><code>isEncrypt: 'true'</code></td><td>请求体需 AES 加密</td><td>登录接口（密码传输）</td></tr>
+</table>
+
+<div class="side">
+⚠️ <b>注意等号的值</b>：<code>isToken === false</code> 才是「不发 token」——如果 <code>isToken</code> 是 <code>true</code> 或 <code>undefined</code>，都会发 token。这个默认值为<strong>安全优先</strong>：不显式关闭就发。
+</div>
+
+<h2>三、防重复提交：「同一请求 500ms 内不重复」</h2>
+
+<pre><code>// request.ts:132-153
+if (!isRepeatSubmit && (config.method === 'post' || config.method === 'put')) {
+  const requestObj = {
+    url: config.url,
+    data: typeof config.data === 'object' ? JSON.stringify(config.data) : config.data,
+    time: new Date().getTime()
+  };
+  const sessionObj = cache.session.getJSON('sessionObj');
+  if (sessionObj === undefined || sessionObj === null || sessionObj === '') {
+    cache.session.setJSON('sessionObj', requestObj);
+  } else {
+    if (s_data === requestObj.data && requestObj.time - s_time < 500 && s_url === requestObj.url) {
+      return Promise.reject(new Error('数据正在处理，请勿重复提交'));
+    } else {
+      cache.session.setJSON('sessionObj', requestObj);
+    }
+  }
+}</code></pre>
+
+<p>实现原理很简单：</p>
+<ol>
+<li>把当前请求的 <code>url + data + timestamp</code> 存到 sessionStorage</li>
+<li>下次请求时，比较 url 和 data 是否完全相同、时间差是否 &lt; 500ms</li>
+<li>三个条件全满足 → 认为是重复提交 → <code>Promise.reject</code></li>
+<li>否则更新缓存为新请求</li>
+</ol>
+
+<p><strong>适用场景：</strong>防止用户手抖连续点击「保存」按钮导致数据重复写入。</p>
+<p><strong>局限：</strong>只防同一个浏览器标签页内的 500ms 级重复，不防多标签页、不防恶意伪造。</p>
+
+<h2>四、前端 AES 加密：请求体加密流程</h2>
+
+<pre><code>// request.ts:155-166
+if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+  if (isEncrypt && (config.method === 'post' || config.method === 'put')) {
+    const aesKey = generateAesKey();
+    config.headers[encryptHeader] = encrypt(encryptBase64(aesKey));
+    config.data = typeof config.data === 'object'
+      ? encryptWithAes(JSON.stringify(config.data), aesKey)
+      : encryptWithAes(config.data, aesKey);
+  }
+}</code></pre>
+
+<p>加密流水线分三步：</p>
+<ol>
+<li><code>generateAesKey()</code> 生成一个随机 AES 密钥（每次请求不同）</li>
+<li>用 <strong>RSA 公钥</strong> 加密这个 AES 密钥 → 放入请求头 <code>encrypt-key</code></li>
+<li>用 AES 密钥加密整个请求体 JSON</li>
+</ol>
+
+<div class="why">
+💡 <b>为什么 AES+RSA 混合？</b> AES 对称加密快，适合加密大请求体；RSA 非对称加密慢但不需共享密钥，适合加密 AES 密钥。<strong>每次请求生成新 AES 密钥</strong>，即使某次密钥泄露也不影响其他请求。
+</div>
+
+<p>在后端，<code>CryptoFilter</code> 会读取 <code>encrypt-key</code> 请求头，用 RSA 私钥解密出 AES 密钥，再用 AES 密钥解密请求体。</p>
+
+<h3>练习：检测你的理解</h3>
+
+<div class="quiz">
+<p>❓ 登录接口调用 <code>login()</code> 时，传入的 config.headers 如何控制 token 行为？</p>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p>登录接口在 <code>api/login.ts</code> 中设置 <code>isToken: false</code>。请求拦截器读到 <code>isToken === false</code> 时，跳过 <code>Authorization</code> 头的添加——因为登录时还没有 token，带了也是无效的。同时设置 <code>isEncrypt: true</code>（触发 AES 加密密码）和 <code>repeatSubmit: false</code>（防止快速重复提交登录）。</p>
+</details>
+
+<div class="reminder">
+📖 <a href="0010.html">下一课：request.ts 响应拦截器</a> — 401 弹窗、AES 解密、错误码归一化。<br>
+🔗 相关参考：<a href="../reference/0009.html">request.ts 拦截器速查表</a><br>
+💬 有问题？向 Agent 追问："第 9 课中防重复提交的 sessionStorage 缓存，为什么不用闭包变量？"
+</div>
+
+<div class="cite">
+<p>源文件：<code>open-java/RuoYiVuePlus/ruoyi-vue/src/utils/request.ts:1-176</code></p>
+<p>课程编号：0009 · 属于主题 <code>teach/open-java/RuoYiVuePlus/authentication</code></p>
+</div>
+
+</body>
+</html>

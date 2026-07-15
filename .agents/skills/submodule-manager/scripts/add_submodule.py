@@ -28,6 +28,7 @@ CATEGORIES = {
     "open-productivity": "效率工具",
     "open-java":         "Java 企业开发",
     "open-trading":      "量化交易与金融数据",
+    "open-data":         "数据开发",
 }
 
 def run(cmd, cwd=None):

@@ -70,7 +70,7 @@ TEACH_ROOT: teach/<path>/    ← 唯一合法持久化根目录，严禁写入 .
   - {dep_goal_id}: ⏳ pending（尚未完成，但当前 goal 不依赖其结果）
 
 【锚点参考】
-L0 项目导览课: teach/<project>/00-overview/lessons/0001-project-map.html
+L0 项目导览课: teach/<project>/00-overview/lessons/000N-<slug>.html（课程命名由模型自主决定）
 L0 项目总览参考: teach/<project>/00-overview/reference/00-overview.html
 
 【关联文档路径】
@@ -169,8 +169,8 @@ goal_id: {id}
 | `输出语言` | 教学文档输出语言 | `中文` |
 | `持久化根目录` | 唯一合法写入根目录 | `teach/open-ai-agent/pi/` |
 | `主题目录` | 当前 goal 所属 teach 主题目录，必须以 `teach/` 开头 | `teach/open-java/RuoYiVuePlus/slice-auth-login-flow/` |
-| `主入口路径` | goal 的主入口文件，必须以 `teach/` 开头；不代表全部交付物 | `teach/open-java/RuoYiVuePlus/slice-auth-login-flow/lessons/0001-flow-map.html` |
-| `required_outputs` | 元文件、lesson、reference 的完整交付清单 | `lessons: [0001-flow-map.html, 0002-main-path.html]` |
+| `主入口路径` | goal 的主入口文件，必须以 `teach/` 开头；不代表全部交付物 | `teach/open-java/RuoYiVuePlus/slice-auth-login-flow/lessons/000N-<slug>.html` |
+| `required_outputs` | 元文件、lesson、reference 的完整交付清单 | 课程数量与命名由模型自主决定，如 `lessons: [0001-auth-overview.html, 0002-token-refresh.html]` |
 
 ## Subagent 执行流程
 
@@ -228,27 +228,24 @@ errors: {如失败，简述原因}
 ### L0 项目总览
 
 输出到独立 teach 主题 `teach/<project>/00-overview/`。必备产出：
-- `lessons/0001-project-map.html`：项目导览短课，帮助学习者建立全局地图。
+- `lessons/` 下至少 1 节短课：项目导览短课，帮助学习者建立全局地图。课程数量与命名由模型根据项目规模自主决定。
 - `reference/00-overview.html`：技术栈、目录、架构图、豁免清单等速查参考。
 
 ### L1 模块总览
 
 输出到独立 teach 主题 `teach/<project>/module-<slug>/`。必备产出：
-- `lessons/0001-<slug>-module-tour.html`：模块导览短课。
+- `lessons/` 下至少 1 节短课：模块导览短课。课程数量与命名由模型根据模块复杂度自主决定。
 - `reference/<slug>-overview.html`：模块职责、接口、分层、依赖速查。
 
 ### L2 垂直切片
 
-输出到独立 teach 主题 `teach/<project>/slice-<slug>/`。至少 1 节短课；复杂链路必须在同一主题目录中拆成多节短课，不得生成巨型单页。推荐结构：
-- `lessons/0001-flow-map.html`：入口点、层级顺序、数据流地图。
-- `lessons/0002-main-path.html`：主成功路径。
-- `lessons/0003-error-path.html`：异常/边界路径。
+输出到独立 teach 主题 `teach/<project>/slice-<slug>/`。至少 1 节短课；课程数量与命名由模型根据功能复杂度自主决定——模型综合源码文件数量、链路深度、逻辑复杂度和 L2 五要素覆盖需求，自行判断需要几节课、每节课聚焦什么角度。复杂链路必须在同一主题目录中拆成多节短课，不得生成巨型单页。
 - `reference/<slug>-flow-map.html`：长源码索引或流程速查（可选）。
 
 ### L3 微观 API
 
-输出到其父 L1 模块的 teach 主题 `teach/<project>/module-<slug>/`（与 L1 同目录）。产出文件为 `reference/<slug>-api.html`。注意：L3 不创建新的 teach 主题目录，而是复用 L1 已创建的 `module-<slug>/` 目录；如果该目录还没有 lesson，必须补一节 `lessons/0001-<slug>-module-tour.html` 或 `lessons/0002-<slug>-api-reading.html`，禁止 reference-only 主题。
+输出到其父 L1 模块的 teach 主题 `teach/<project>/module-<slug>/`（与 L1 同目录）。产出文件为 `reference/<slug>-api.html`。注意：L3 不创建新的 teach 主题目录，而是复用 L1 已创建的 `module-<slug>/` 目录；如果该目录还没有 lesson，必须补至少 1 节短课（课程名称由模型自主决定），禁止 reference-only 主题。
 
 ### L4 深度剖析
 
-输出到独立 teach 主题 `teach/<project>/deep-dive-<slug>/`。至少 1 节短课；复杂设计必须拆成“问题背景 / 核心机制 / 权衡与边界”等多节短课。长表格、源码索引、伪代码索引写入 `reference/`。
+输出到独立 teach 主题 `teach/<project>/deep-dive-<slug>/`。至少 1 节短课；课程数量与结构由模型根据主题复杂度自主决定。长表格、源码索引、伪代码索引写入 `reference/`。

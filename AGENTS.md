@@ -14,7 +14,7 @@
 
 ## 仓库概览
 
-`learning-open-code` 是一个**开源项目学习仓库**，通过 git submodule 方式收录 33 个优质开源项目，按功能领域分为 7 大类别。每个子模块独立管理自己的 git 历史与分支，可独立拉取更新。
+`learning-open-code` 是一个**开源项目学习仓库**，通过 git submodule 方式收录 36 个优质开源项目，按功能领域分为 8 大类别。每个子模块独立管理自己的 git 历史与分支，可独立拉取更新。
 
 ### 顶层目录结构
 
@@ -71,6 +71,10 @@ learning-open-code/
 │   ├── TradingAgents-astock/
 │   ├── Vibe-Research/
 │   └── a-stock-data/
+├── open-data/                      # 📊 数据开发（3 个项目）
+│   ├── data-agent-tutorial/
+│   ├── datanote/
+│   └── OpenBB/
 ├── teach/                          # 教学课程输出目录
 ├── self/                           # 个人研究/实验
 └── translator/                     # 翻译工作区
@@ -88,6 +92,7 @@ learning-open-code/
 | `open-productivity/` | 效率工具 | 1 |
 | `open-java/` | Java 企业开发 | 2（含多子模块） |
 | `open-trading/` | 量化交易与金融数据 | 3 |
+| `open-data/` | 数据开发 | 3 |
 
 > **说明：** `open-java/RuoYiVuePlus/` 是逻辑项目组，包含 3 个子模块（`ruoyi-vue-plus`、`ruoyi-vue`、`ruoyi-react`），它们共享同一个父目录，属于同一个 Java 全栈系统。处理时应视为一个整体逻辑项目。
 

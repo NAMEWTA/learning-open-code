@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca 开发规范、目录规范与命名规范</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <p class="meta">L1 开发规范 · 预计 15 分钟 · 基于 commit 61bd98d</p>
+        <h1>Orca 的三层规范体系</h1>
+        <p>
+          本课帮你建立 Orca 项目的规范心智模型——代码怎么写、文件放哪里、东西叫什么。读完你就能在 6000+ 源码文件中快速定位、判断代码是否合规范。
+          完整规则速查见 <a href="../reference/dev-conventions-reference.html">开发规范参考手册</a>。
+        </p>
+
+        <h2>1. 工具链：oxlint + oxfmt，没有 ESLint/Prettier</h2>
+        <p>
+          Orca 使用 oxlint 做 lint、oxfmt 做格式化，<strong>没有 .eslintrc 也没有 .prettierrc</strong>。这套 Rust 工具链比传统方案快 50-100 倍。
+        </p>
+        <div class="callout">
+          核心记忆：lint 规则定义在 <code>.oxlintrc.json</code>，格式规则定义在 <code>.oxfmtrc.json</code>，pre-commit hook 自动执行。
+        </div>
+        <table>
+          <tr><th>维度</th><th>规则</th><th>来源</th></tr>
+          <tr><td>引号</td><td>单引号 <code>'hello'</code></td><td>.oxfmtrc.json</td></tr>
+          <tr><td>分号</td><td><strong>不加分号</strong></td><td>.oxfmtrc.json</td></tr>
+          <tr><td>行宽</td><td>100 字符</td><td>.oxfmtrc.json</td></tr>
+          <tr><td>尾逗号</td><td>不使用 trailing comma</td><td>.oxfmtrc.json</td></tr>
+          <tr><td>type vs interface</td><td><strong>只用 type，禁止 interface</strong></td><td>.oxlintrc.json</td></tr>
+          <tr><td>any 类型</td><td><strong>禁止显式 any</strong>（rest args 除外）</td><td>.oxlintrc.json</td></tr>
+          <tr><td>类型导入</td><td>必须 <code>import type</code></td><td>.oxlintrc.json</td></tr>
+          <tr><td>Node 协议</td><td>必须 <code>node:fs</code> 而非 <code>fs</code></td><td>.oxlintrc.json</td></tr>
+          <tr><td>Switch</td><td>必须穷举所有分支，禁止 default fallback</td><td>.oxlintrc.json</td></tr>
+          <tr><td>行数上限</td><td>.ts 300 / .tsx 400 / .mjs 600 / test 800</td><td>.oxlintrc.json</td></tr>
+        </table>
+        <p>
+          提交前 <code>.husky/pre-commit</code> 会通过 lint-staged 对暂存文件依次执行 oxlint → oxlint-react-doctor → oxfmt。CI 中还有 <code>.d.ts</code> 守卫：<code>src/preload/</code> 和 <code>src/shared/</code> 禁止项目自有 <code>.d.ts</code>（仅允许 ambient shim）。
+        </p>
+
+        <h2>2. 目录规范：按运行环境分层的 src/</h2>
+        <p>
+          Orca 的 <code>src/</code> 不是按"功能"分，而是按<strong>运行环境</strong>分。这是理解目录结构最关键的心智模型。
+        </p>
+        <pre><code>src/
+├── main/          ← Electron 主进程（Node 环境，系统调用、IPC、daemon、PTY）
+│   ├── index.ts      入口：app 生命周期、服务装配、窗口创建
+│   ├── ipc/          IPC handler 注册 → 连接 preload 暴露的 API
+│   ├── runtime/      运行时编排：agent 生命周期、RPC 控制面
+│   ├── daemon/       后台 daemon 进程：持久化 PTY 宿主
+│   ├── git/          Git 操作封装
+│   └── ...（70+ 功能域目录，每个目录 ≤ 10 个文件）
+├── renderer/      ← Electron 渲染进程（浏览器环境，React UI）
+│   └── src/
+│       ├── App.tsx        React 根组件
+│       ├── components/    功能域组件（sidebar、terminal、agent…）
+│       ├── components/ui/ shadcn 原语（button、dialog、tabs…）
+│       ├── store/         Zustand store + slices
+│       ├── hooks/         React hooks
+│       └── assets/main.css  设计 token（规范唯一来源）
+├── preload/       ← contextBridge 安全桥（仅暴露审计过的 API）
+├── shared/        ← 纯逻辑与类型（无副作用，main + renderer + CLI 共用）
+├── cli/           ← 独立 CLI 工具（Node 环境，RuntimeClient 通信）
+├── relay/         ← SSH 远端 agent 执行器（独立 Node 进程）
+└── types/         ← 仅 ambient shim 声明（build-constants.d.ts）</code></pre>
+        <div class="callout">
+          判断法则：产生系统副作用的代码进 main，纯 UI 进 renderer，跨端共享的类型/工具进 shared，远端执行进 relay，脚本入口进 cli。
+        </div>
+
+        <h2>3. 命名规范：拒绝模糊，拥抱具体</h2>
+        <p>
+          Orca 的命名哲学只有一句话——<strong>文件名必须准确描述它包含的概念</strong>。这条来自 <code>AGENTS.md</code> 的规则被 lint 强制执行。
+        </p>
+        <table>
+          <tr><th>类别</th><th>✅ 正确</th><th>❌ 错误</th></tr>
+          <tr><td>文件</td><td><code>tab-group-state.ts</code></td><td><code>tabs-helpers.ts</code></td></tr>
+          <tr><td>文件</td><td><code>terminal-orphan-cleanup.ts</code></td><td><code>terminal-utils.ts</code></td></tr>
+          <tr><td>文件</td><td><code>agent-awake-service.ts</code></td><td><code>agent-common.ts</code></td></tr>
+          <tr><td>类</td><td><code>class AgentAwakeService</code></td><td>—</td></tr>
+          <tr><td>函数</td><td><code>detectAgentStatus()</code></td><td><code>check()</code></td></tr>
+          <tr><td>常量</td><td><code>STALE_AFTER_MS</code></td><td><code>timeout</code></td></tr>
+          <tr><td>布尔</td><td><code>isQuitting</code>、<code>hasAgentName</code></td><td><code>flag</code>、<code>state</code></td></tr>
+          <tr><td>类型</td><td><code>type AgentStatus = 'working' | 'idle'</code></td><td><code>interface IAgentStatus</code></td></tr>
+        </table>
+        <p><strong>禁用词黑名单：</strong><code>helpers</code>、<code>utils</code>、<code>common</code>、<code>misc</code>、<code>shared-stuff</code>。这些词不携带任何信息，会变成代码垃圾场。如果你发现自己想用它们，说明文件职责过多，应该拆分。</p>
+        <p><strong>命名格式约定：</strong></p>
+        <ul>
+          <li>文件：kebab-case（<code>worktree-linear-issue-link.ts</code>）</li>
+          <li>类 / React 组件 / 类型别名：PascalCase（<code>KeybindingService</code>、<code>SidebarToolbar</code>）</li>
+          <li>函数 / 变量：camelCase（<code>getAgentLabel</code>、<code>persistedUIReady</code>）</li>
+          <li>原始常量：SCREAMING_SNAKE_CASE（<code>AGENT_AWAKE_STATUS_STALE_AFTER_MS</code>）</li>
+          <li>React 组件文件：PascalCase 或 kebab-case 均可，组件名为 PascalCase</li>
+        </ul>
+
+        <h2>4. 检索练习</h2>
+        <p>凭记忆判断以下代码片段有几处违反 Orca 规范：</p>
+        <pre><code class="language-typescript">// file: src/main/agent-helpers.ts
+import { readFile } from 'fs';
+import { AgentStatus } from '../shared/types';
+
+interface AgentInfo {
+  name: string;
+  status: any;
+}
+
+export function check(info: AgentInfo): boolean {
+  if (info.status == 'working') {
+    return true;
+  }
+  return false;
+}</code></pre>
+        <div class="answer">
+          <strong>至少 6 处违规：</strong>① 文件名 <code>agent-helpers.ts</code> 用了禁用词且不描述具体概念；② 应写 <code>import { readFile } from 'node:fs'</code>；③ 应写 <code>import type { AgentStatus }</code>；④ 禁止 <code>interface</code>，应写 <code>type AgentInfo = { ... }</code>；⑤ 禁止显式 <code>any</code>，<code>status: any</code> 应改为具体联合类型；⑥ 函数名 <code>check</code> 过于模糊；⑦ 缺少分号——等一下，Orca 实际上<strong>不加分号</strong>，所以这不算违规。但 <code>==</code> 应改为 <code>===</code>（unicorn 规则会要求严格相等）。
+        </div>
+        <p>
+          课后建议通读 <a href="../reference/dev-conventions-reference.html">开发规范参考手册</a> 获取完整规则清单，并在 IDE 中安装 oxlint 插件获得实时反馈。如有疑问可向 agent 追问具体规则的适用场景。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

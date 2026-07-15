@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACP 适配器模块导览 -- 桥接架构、会话管理与事件流</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --muted: #555;
+    --accent: #6b4ce6;
+    --bg: #fefefe;
+    --code-bg: #f6f8fa;
+    --border: #e0e0e0;
+    --tag-bg: #f0ebff;
+    --tag-text: #6b4ce6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "LXGW WenKai", "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+    font-size: 17px; line-height: 1.8; color: var(--text);
+    max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: var(--bg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; font-weight: 700; }
+  h1 .sub { display: block; font-size: 0.95rem; color: var(--muted); font-weight: 400; margin-top: 0.2rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 0.7rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .intro { font-size: 1.05rem; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0 1.5rem; }
+  .tag { display: inline-block; background: var(--tag-bg); color: var(--tag-text); padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.82rem; margin-right: 0.3rem; }
+  .tags { margin: 0.5rem 0; }
+
+  code { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; margin: 0.8rem 0; }
+  pre code { background: none; padding: 0; }
+
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+
+  .practice { background: #faf5ff; border: 1px solid #e0d4f5; border-radius: 8px; padding: 1.2rem 1.2rem 0.8rem; margin: 2rem 0 1rem; }
+  .practice h3 { margin-top: 0; color: #6b4ce6; }
+  .practice ol { margin: 0.5rem 0 0 1.2rem; }
+  .practice li { margin: 0.4rem 0; }
+  details { margin: 0.6rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  details .answer { padding: 0.5rem 0 0.3rem 1rem; border-left: 2px solid #d4c4f5; margin-left: 0.3rem; }
+
+  .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>ACP 适配器模块导览
+  <span class="sub">L1 模块课程 -- 桥接架构、会话管理与事件流</span>
+</h1>
+
+<p class="meta">
+  学习目标：理解 acp_adapter/ 如何将 Hermes AIAgent 包装为标准 ACP Agent，掌握 entry -> server -> session -> events 的完整数据流 |
+  预估时长：15 分钟 |
+  前置课程：<a href="../../00-overview/lessons/0001-project-map.html">L0 Hermes Agent 项目全局地图</a> |
+  关联参考：<a href="../reference/acp-overview.html">ACP 模块参考文档</a>
+</p>
+
+<!-- ──────────── H2 1 ──────────── -->
+<h2>一、在整体架构中的位置</h2>
+
+<div class="intro">
+  <strong>acp_adapter/</strong> 是 Hermes Agent 与编辑器之间的<strong>协议桥梁</strong>。它通过 stdio 上的 JSON-RPC 传输，将内部 AIAgent 暴露为符合 ACP 标准的 Agent，使 Zed、Codex、Claude Code 等编辑器能直接调用 Hermes Agent 进行对话、执行工具和管理会话。
+</div>
+
+<div class="tags">
+  <span class="tag">11 个 .py 文件</span>
+  <span class="tag">~240 KB</span>
+  <span class="tag">acp Python SDK</span>
+  <span class="tag">stdio JSON-RPC</span>
+</div>
+
+<p>ACP 适配器在 Hermes Agent 分层架构中位于网关层与应用层之间：</p>
+
+<pre class="diagram">
+  编辑器客户端 (Zed / Codex / Claude Code)
+      │ ACP stdio JSON-RPC (stdout)
+      ▼
+  ┌───────────────────────────────────────────────────┐
+  │              ★ acp_adapter/                       │
+  │  entry.py ──► server.py (HermesACPAgent)          │
+  │                  │                                │
+  │       ┌──────────┼──────────┐                     │
+  │       ▼          ▼          ▼                     │
+  │  session.py  events.py  tools.py                  │
+  │  (会话持久化)  (事件桥接)   (工具映射)               │
+  │                                                  │
+  │  permissions.py  edit_approval.py  auth.py        │
+  │  (危险命令审批)    (编辑前置审批)     (认证方法)      │
+  └───────────────────────────────────────────────────┘
+      │ AIAgent.run_conversation() (ThreadPoolExecutor)
+      ▼
+  agent/ + tools/ + providers/  (Hermes 核心引擎)
+</pre>
+
+<p>核心设计原则：<strong>stdout 专用于 ACP JSON-RPC 帧，stderr 用于日志输出</strong>。entry.py 启动时将全部日志路由到 stderr，并通过 <code>_BenignProbeMethodFilter</code> 抑制健康检查探针产生的噪音回溯。</p>
+
+<!-- ──────────── H2 2 ──────────── -->
+<h2>二、入口与服务器启动</h2>
+
+<p><code>entry.py</code> 的 <code>main()</code> 函数是适配器入口，支持四种运行模式：<code>--version</code>、<code>--check</code>（验证 ACP 依赖）、<code>--setup</code>（交互式配置提供商）、以及默认的 ACP 服务器模式。以下为启动链路的核心代码：</p>
+
+<pre><code># entry.py — 启动 ACP 服务器（精简版）
+def main(argv=None):
+    _setup_logging()          # 路由全部日志到 stderr
+    _load_env()               # 加载 ~/.hermes/.env
+
+    project_root = str(Path(__file__).resolve().parent.parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+    import acp
+    from .server import HermesACPAgent
+
+    agent = HermesACPAgent()
+    asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
+    # acp.run_agent 创建 stdio transport，监听 stdin 上的 JSON-RPC 请求
+</code></pre>
+
+<p><code>HermesACPAgent</code> 继承 <code>acp.Agent</code>，实现了 8 个关键方法：<code>initialize</code>（握手协商能力集）、<code>authenticate</code>（凭证验证）、<code>new_session</code>/<code>load_session</code>/<code>resume_session</code>（会话生命周期）、<code>prompt</code>（核心交互）、<code>cancel</code>（中断运行）、<code>fork_session</code>（会话分叉）、<code>list_sessions</code>（会话列表）。</p>
+
+<!-- ──────────── H2 3 ──────────── -->
+<h2>三、会话管理与事件桥接</h2>
+
+<p><code>SessionManager</code>（session.py）管理 ACP 会话与 AIAgent 实例的一对一映射。每次 <code>create_session</code> 创建一个带 UUID 的 <code>SessionState</code>，内部持有 AIAgent 实例、对话历史、取消事件和运行时锁。会话通过 <code>SessionDB</code>（<code>~/.hermes/state.db</code>）持久化，进程重启后 <code>get_session</code> 自动从数据库恢复。</p>
+
+<p>AIAgent 在 <code>ThreadPoolExecutor(max_workers=4)</code> 中同步运行，而 ACP 客户端通过事件循环通信。<code>events.py</code> 提供了四个回调工厂函数，通过 <code>asyncio.run_coroutine_threadsafe</code> 实现线程安全的通知转发：</p>
+
+<table>
+  <tr><th>回调工厂</th><th>AIAgent 触发</th><th>ACP 通知</th></tr>
+  <tr><td><code>make_tool_progress_cb</code></td><td>工具开始执行</td><td><code>ToolCallStart</code></td></tr>
+  <tr><td><code>make_step_cb</code></td><td>工具执行完成</td><td><code>ToolCallProgress</code>（含 plan 更新）</td></tr>
+  <tr><td><code>make_thinking_cb</code></td><td>模型推理输出</td><td><code>AgentThoughtChunk</code></td></tr>
+  <tr><td><code>make_message_cb</code></td><td>回复文本流</td><td><code>AgentMessageChunk</code></td></tr>
+</table>
+
+<p>每个回调内部使用 <code>_send_update</code> 辅助函数，通过 <code>safe_schedule_threadsafe</code> 将协程调度到主事件循环，确保工作线程不阻塞 ACP 传输。</p>
+
+<!-- ──────────── H2 4 ──────────── -->
+<h2>四、工具映射与权限审批</h2>
+
+<p><code>tools.py</code> 维护了 <code>TOOL_KIND_MAP</code> 字典，将 Hermes 工具名映射到 ACP 的六种 <code>ToolKind</code>：</p>
+
+<pre><code># tools.py — Hermes 工具到 ACP ToolKind 的映射（核心条目）
+TOOL_KIND_MAP = {
+    "read_file": "read",      "write_file": "edit",
+    "patch": "edit",          "search_files": "search",
+    "terminal": "execute",    "process": "execute",
+    "web_search": "fetch",    "web_extract": "fetch",
+    "todo": "other",          "_thinking": "think",
+    # ... 共 30+ 个映射
+}
+</code></pre>
+
+<p><code>permissions.py</code> 将 Hermes 的危险命令审批（once / session / always / deny）桥接到 ACP 的 <code>PermissionOption</code> 体系，通过 <code>request_permission</code> 协程在编辑器中弹出审批对话框。<code>edit_approval.py</code> 更进一步，通过 <code>ContextVar</code> 将编辑审批请求器绑定到当前 ACP 会话上下文，支持三种编辑审批策略：<code>ask</code>（每次询问）、<code>workspace_session</code>（自动批准工作区编辑）、<code>session</code>（全部自动批准，敏感路径除外）。</p>
+
+<!-- ──────────── Practice ──────────── -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>尝试在脑中回答以下问题，然后展开查看参考答案：</p>
+
+<details>
+  <summary>1. acp_adapter 为什么要把日志路由到 stderr 而不是 stdout？</summary>
+  <div class="answer">
+    ACP 协议使用 stdio transport，<strong>stdout 专用于 JSON-RPC 协议帧</strong>。如果日志输出到 stdout，会破坏协议帧的解析，导致客户端无法正确读取响应。stderr 不受此限制，可安全用于日志。
+  </div>
+</details>
+
+<details>
+  <summary>2. SessionManager 如何支持进程重启后恢复会话？</summary>
+  <div class="answer">
+    SessionManager 通过 <code>SessionDB</code>（<code>~/.hermes/state.db</code>）<strong>持久化</strong>每个会话的模型配置、对话历史和工作目录。当 <code>get_session()</code> 在内存中找不到会话时，自动调用 <code>_restore()</code> 从数据库加载历史记录并重建 AIAgent 实例。
+  </div>
+</details>
+
+<details>
+  <summary>3. 为什么事件桥接需要 asyncio.run_coroutine_threadsafe？</summary>
+  <div class="answer">
+    AIAgent 在 <strong>ThreadPoolExecutor 工作线程</strong>中同步运行，而 ACP 客户端连接运行在<strong>主线程的事件循环</strong>上。直接用工作线程调用协程会导致事件循环线程安全问题。<code>run_coroutine_threadsafe</code> 将协程安全地调度到正确的事件循环中执行。
+  </div>
+</details>
+
+<p style="margin-top:1rem; color: var(--muted);">
+  如果还有不清楚的地方，随时向 agent 追问后续问题。
+</p>
+</div>
+
+<p style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.85rem; color: var(--muted);">
+  推荐延伸阅读：<a href="https://github.com/agent-client-protocol/agent-client-protocol">ACP 协议规范仓库</a> — 了解 Agent 与编辑器间的标准通信接口定义。
+</p>
+
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 10 课 · request.ts 响应拦截器：401、解密、错误处理</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  blockquote { border-left: 3px solid #ddd; margin-left: 0; padding-left: 1rem; color: #555; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 10 课 · request.ts 响应拦截器：401、解密、错误处理 <span class="tag">plus-ui-vue</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：逐行读懂响应拦截器的三段核心逻辑——<strong>AES 响应解密</strong>、<strong>HTTP 状态码分层处理（特别是 401 弹窗）</strong>、<strong>通用下载方法</strong>。理解 <code>isRelogin</code> 防重复弹窗的设计。
+</div>
+
+<h2>一、响应 AES 解密：后于请求加密的对称操作</h2>
+
+<pre><code>// request.ts:181-196
+if (import.meta.env.VITE_APP_ENCRYPT === 'true') {
+  const keyStr = res.headers[encryptHeader];    // ① 取响应头中的 RSA 加密的 AES 密钥
+  if (keyStr != null && keyStr != '') {
+    const data = res.data;
+    const base64Str = decrypt(keyStr);          // ② RSA 私钥解密 → base64
+    const aesKey = decryptBase64(base64Str.toString()); // ③ base64 解码 → AES 密钥
+    const decryptData = decryptWithAes(data, aesKey);  // ④ AES 解密 → JSON 字符串
+    res.data = JSON.parse(decryptData);         // ⑤ JSON 字符串 → JS 对象
+  }
+}</code></pre>
+
+<p>这 5 步正好与第 9 课的请求加密对称：后端 <code>CryptoFilter</code> 在响应加密模式下：生成随机 AES 密钥 → 加密响应体 → RSA 加密 AES 密钥放入响应头 → 前端此处逆向操作。</p>
+
+<div class="side">
+⚠️ <b>关键判断</b>：<code>keyStr != null && keyStr != ''</code>。如果响应头里没有 <code>encrypt-key</code>，说明后端这个接口不需要加密响应——直接透传，不做解密。这意味着<strong>加密是接口级别的可选行为</strong>，由后端 <code>@ApiEncrypt(response = true)</code> 决定。
+</div>
+
+<h2>二、HTTP 状态码的分层处理策略</h2>
+
+<pre><code>// request.ts:198-249
+const code = res.data.code || HttpStatus.SUCCESS;  // 默认成功
+
+if (code === 401) {
+  // ... 弹出重新登录对话框
+} else if (code === HttpStatus.SERVER_ERROR) {
+  ElMessage({ message: msg, type: 'error' });
+  return Promise.reject(createHandledError(msg));
+} else if (code === HttpStatus.WARN) {
+  ElMessage({ message: msg, type: 'warning' });
+  return Promise.reject(createHandledError(msg));
+} else if (code !== HttpStatus.SUCCESS) {
+  ElNotification.error({ title: msg });           // 通知
+  return Promise.reject(createHandledError(msg));
+} else {
+  return Promise.resolve(res.data);               // 正常返回
+}</code></pre>
+
+<p>这段代码体现了<strong>错误严重性分级</strong>的设计思路：</p>
+
+<table>
+<tr><th>code</th><th>组件</th><th>用户体验</th><th>设计意图</th></tr>
+<tr><td>401</td><td>ElMessageBox.confirm</td><td>模态弹窗阻塞操作</td><td>认证失败是阻断性的，用户必须处理</td></tr>
+<tr><td>500</td><td>ElMessage.error</td><td>顶部短暂提示</td><td>服务器错误用户无法处理，提醒即可</td></tr>
+<tr><td>601 (WARN)</td><td>ElMessage.warning</td><td>顶部警告提示</td><td>业务警告，用户需要注意但不阻塞</td></tr>
+<tr><td>其他错误码</td><td>ElNotification.error</td><td>右上角通知</td><td>未知错误，通知后自动消失</td></tr>
+</table>
+
+<h2>三、401 防重复弹窗：isRelogin 全局标记</h2>
+
+<pre><code>// request.ts:21, 206-236
+export const isRelogin = { show: false };  // ① 模块级单例标记
+
+if (code === 401) {
+  if (!isRelogin.show) {                   // ② 检查是否已有弹窗
+    isRelogin.show = true;                 // ③ 加锁
+    ElMessageBox.confirm('登录状态已过期...')
+      .then(() => {
+        isRelogin.show = false;            // ④ 用户点击"重新登录"，解锁
+        useUserStore().logout().then(() => { router.replace({ path: "/login" }); });
+      })
+      .catch(() => {
+        isRelogin.show = false;            // ⑤ 用户点击"取消"，解锁
+      });
+  }
+  return Promise.reject('无效的会话...');
+}</code></pre>
+
+<p>为什么需要 <code>isRelogin</code>？<strong>防止并发请求同时触发多个 401 弹窗</strong>。场景：页面加载后同时发 5 个 API 请求，token 恰好过期——没有这个标记会弹出 5 个「重新登录」对话框，用户体验极差。</p>
+
+<div class="why">
+💡 <b>设计模式</b>：这是简化的<strong>互斥锁（Mutex）</strong>模式。用 <code>{ show: false }</code> 对象包装（而非 <code>let show = false</code>），是因为需要<strong>跨模块共享引用</strong>——<code>permission.ts</code> 的路由守卫也会读写 <code>isRelogin.show</code>。
+</div>
+
+<h2>四、通用下载方法：blob 响应处理</h2>
+
+<pre><code>// request.ts:259-294
+export function download(url: string, params: any, fileName: string) {
+  downloadLoadingInstance = ElLoading.service({ text: '正在下载数据，请稍候' });
+  return service.post(url, params, {
+    transformRequest: [(params: any) => { return tansParams(params); }],
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    responseType: "blob",
+  }).then(async (resp: any) => {
+    const isLogin = blobValidate(resp);       // ① 校验 blob 是否是正常文件
+    if (isLogin) {
+      saveBlob(new Blob([resp]), fileName);   // ② 触发浏览器下载
+    } else {
+      const rspObj = JSON.parse(await blob.text()); // ③ blob 是错误 JSON
+      ElMessage.error(rspObj.msg);
+    }
+    downloadLoadingInstance?.close();
+  });
+}</code></pre>
+
+<p>关键设计点：</p>
+<ol>
+<li><code>responseType: "blob"</code> — 后端返回二进制文件流</li>
+<li><code>blobValidate(resp)</code> — 判断返回的 blob 是真的文件还是包装在 blob 里的错误 JSON</li>
+<li><code>transformRequest</code> — 覆盖默认 JSON 序列化，改成表单格式，前端文件导出通常用 POST + 表单参数</li>
+<li><code>saveBlob</code> — 创建临时 <code>&lt;a&gt;</code> 标签，设置 <code>download</code> 属性，触发浏览器下载，40 秒后释放 URL</li>
+</ol>
+
+<h3>练习：暂停回忆</h3>
+
+<div class="quiz">
+<p>❓ <code>isRelogin</code> 为什么不定义在 <code>useUserStore</code> 里用 Pinia 管理，而是用模块级对象？</p>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p>两个原因：① <code>isRelogin</code> 是纯 UI 状态（弹窗是否显示），不属于用户业务数据，放 store 里会污染业务状态；② Pinia store 需要通过 <code>useUserStore()</code> 获取实例，在 axios 拦截器（模块顶层）中使用会导致循环依赖。模块级常量无依赖、可被任何文件 import，是最简单可靠的方案。</p>
+</details>
+
+<div class="reminder">
+📖 <a href="0009.html">上节课：request.ts 请求拦截器</a> · <a href="0011.html">下一课：Pinia Store 与动态路由</a><br>
+🔗 参考：<a href="../reference/0010.html">401 状态码处理流程图</a><br>
+💬 追问 Agent："blobValidate 具体是怎么判断 blob 是否为 JSON 错误的？"
+</div>
+
+<div class="cite">
+<p>源文件：<code>open-java/RuoYiVuePlus/ruoyi-vue/src/utils/request.ts:178-297</code></p>
+</div>
+
+</body>
+</html>

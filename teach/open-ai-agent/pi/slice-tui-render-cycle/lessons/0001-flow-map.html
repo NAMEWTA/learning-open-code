@@ -1,6 +1,306 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>TUI 渲染全链路 · 短课</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.72;max-width:920px;margin:40px auto;padding:0 24px;color:#1f2937}h1{font-size:30px}h2{font-size:20px;margin-top:28px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}code,pre{background:#f6f8fa;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}.note{border-left:4px solid #2563eb;padding:10px 14px;background:#eff6ff}.practice{border-left:4px solid #16a34a;padding:10px 14px;background:#f0fdf4}</style></head><body><h1>TUI 渲染全链路</h1><p class="note">这一课只画清 TUI 渲染全链路 的入口到落地路径。先确认触发点、核心状态和错误回退。</p><h2>链路</h2><p>packages/ai、agent、coding-agent、orchestrator、tui 五包分层 是本主题的结构背景。短课只保留阅读路线，长清单放在同目录 <code>reference/</code>。</p><pre><code>├── packages/  # 912 个当前文件
-├── scripts/  # 23 个当前文件
-├── .github/  # 13 个当前文件
-├── .pi/  # 10 个当前文件
-├── AGENTS.md/  # 1 个当前文件
-├── CONTRIBUTING.md/  # 1 个当前文件</code></pre><h2>关键源码</h2><p>这里只点名少量锚点；完整文件级覆盖见 <a href="../../00-overview/reference/source-coverage.html">source-coverage.html</a>。</p><ul><li><code>open-ai-agent/pi/packages/tui/test/tui-render.test.ts</code></li><li><code>open-ai-agent/pi/packages/coding-agent/docs/tui.md</code></li><li><code>open-ai-agent/pi/packages/coding-agent/examples/extensions/built-in-tool-renderer.ts</code></li></ul><h2>阅读顺序</h2><p>先读总览参考确认职责，再沿真实文件进入实现，最后回到索引页选择相关切片或深度剖析。</p><p class="practice"><strong>练习与反馈：</strong>检索练习：说出 TUI 渲染全链路 的三段。参考答案：入口、主处理、边界反馈。</p></body></html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — TUI 差异渲染循环全链路数据流图</title>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.8rem; line-height: 1.55; border: 1px solid var(--border); }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem 0.7rem;
+    text-align: left;
+  }
+  th { background: #f6f8fa; font-weight: 600; }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+
+  .warn {
+    background: #fff8e6;
+    border-left: 4px solid #e6a700;
+    padding: 0.8rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1.5rem 0;
+    font-size: 0.9rem;
+  }
+
+  .info {
+    background: #e8f5e9;
+    border-left: 4px solid #2e7d32;
+    padding: 0.8rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1.5rem 0;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>0001 — TUI 差异渲染循环全链路数据流图</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：15 分钟</span>
+  <span>学习目标：1 个</span>
+  <span>切片：slice-tui-render-cycle</span>
+</div>
+
+<p><strong>学习目标：</strong>能画出从 <code>requestRender()</code> 到 <code>terminal.write()</code> 的完整数据流，识别每个决策分支，理解差异渲染为什么能做到无闪烁更新。</p>
+
+<!-- ═══════════════ 第 1 章 ═══════════════ -->
+<h2>1. 全链路时序图</h2>
+
+<p>下面的 Mermaid 时序图浓缩了差异渲染循环的完整数据流和所有关键决策分支。</p>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant EXT as 调用方
+    participant RQ as requestRender
+    participant SC as scheduleRender
+    participant DR as doRender
+    participant CT as Component Tree
+    participant DIFF as 差异比对
+    participant TERM as Terminal
+
+    EXT->>RQ: requestRender()
+    alt force=true
+        RQ->>DR: process.nextTick → doRender()
+    else 正常
+        RQ->>SC: process.nextTick → scheduleRender()
+        SC->>SC: delay=max(0, 16ms-elapsed)
+        SC->>DR: setTimeout(delay)
+    end
+
+    DR->>CT: render(width) → newLines
+    DR->>DR: compositeOverlays + cursor + lineResets
+
+    alt 首帧或尺寸变化
+        DR->>TERM: fullRender(清屏/不清屏)
+    else 差异渲染
+        DR->>DIFF: 逐行比对→firstChanged/lastChanged
+        alt 无变化
+            DR->>DR: 跳过，仅更新光标
+        else 溢出视口
+            DR->>TERM: 降级 fullRender
+        else 正常
+            DR->>TERM: \x1b[?2026h + 光标移动<br/>+ \x1b[2K逐行重绘 + \x1b[?2026l
+        end
+    end
+    DR->>DR: 更新 previousLines 等状态
+</pre>
+</div>
+
+<div class="info">
+<p><strong>图中关键决策点：</strong>整个 doRender() 方法实际上是一个多路选择器——首帧、尺寸变化、无变化、纯删除、溢出视口、正常差异渲染。理解每个分支的触发条件，就是理解差异渲染的核心。</p>
+</div>
+
+<!-- ═══════════════ 第 2 章 ═══════════════ -->
+<h2>2. 入口：渲染请求的节流调度</h2>
+
+<p>外部调用 <code>requestRender()</code> 时，并不会立即执行渲染。实际链路经过两层异步调度：</p>
+
+<pre>requestRender(force = false): void {
+  if (force) {
+    // 强制模式：重置所有状态，确保触发全量重绘
+    this.previousLines = [];
+    this.previousWidth = -1;  // -1 确保 widthChanged 为 true
+    this.previousHeight = -1;
+    this.renderRequested = true;
+    process.nextTick(() => {
+      if (this.stopped || !this.renderRequested) return;
+      this.renderRequested = false;
+      this.doRender();
+    });
+    return;
+  }
+  // 普通模式：标记请求，交给 scheduleRender 统一调度
+  if (this.renderRequested) return;  // 已有请求排队，跳过
+  this.renderRequested = true;
+  process.nextTick(() => this.scheduleRender());
+}</pre>
+
+<p><strong>scheduleRender</strong> 实现了 16ms 的节流窗口（<code>MIN_RENDER_INTERVAL_MS</code>），计算距上次渲染的时间差并延迟补足：</p>
+
+<pre>private scheduleRender(): void {
+  const elapsed = performance.now() - this.lastRenderAt;
+  const delay = Math.max(0, TUI.MIN_RENDER_INTERVAL_MS - elapsed);
+  this.renderTimer = setTimeout(() => {
+    this.renderRequested = false;
+    this.lastRenderAt = performance.now();
+    this.doRender();
+    if (this.renderRequested) this.scheduleRender();
+  }, delay);
+}</pre>
+
+<div class="info">
+<p><strong>为什么两次异步？</strong> <code>process.nextTick</code> 将渲染推迟到微任务末尾，合并同一宏任务内的多次调用；<code>setTimeout 16ms</code> 进一步合并短时间内的多次请求（如流式输出的高频更新），防止 CPU 过载。</p>
+</div>
+
+<!-- ═══════════════ 第 3 章 ═══════════════ -->
+<h2>3. 渲染管线：组件树到归一化行数组</h2>
+
+<p><code>doRender()</code> 被调用后的第一件事是执行渲染管线，将组件树转换为可对比的行数组。分三个阶段：</p>
+
+<h3>阶段 A：组件树渲染</h3>
+
+<p><code>this.render(width)</code> 调用的是 <code>Container.render(width)</code>（TUI 继承自 Container），递归遍历所有子组件：</p>
+
+<pre>// Container.render(width)
+render(width: number): string[] {
+  const lines: string[] = [];
+  for (const child of this.children) {
+    const childLines = child.render(width);
+    for (const line of childLines) lines.push(line);
+  }
+  return lines;
+}</pre>
+
+<p>每个叶子组件（Text、Editor、Markdown 等）返回自己的行数组，Container 将其简单拼接。</p>
+
+<h3>阶段 B：Overlay 合成</h3>
+
+<p><code>compositeOverlays()</code> 将弹窗、下拉菜单等 Overlay 的内容叠加到基础内容上。按 <code>focusOrder</code> 排序（后创建的在上层），通过 <code>compositeLineAt()</code> 将 overlay 的每一行精确拼接到目标列的指定位置。</p>
+
+<h3>阶段 C：光标提取 + 行重置</h3>
+
+<p>聚焦的 Editor 在光标位置插入 <code>\x1b_pi:c\x07</code>（<code>CURSOR_MARKER</code>——零宽度 APC 序列）。<code>extractCursorPosition()</code> 扫描可见视口找到这个标记，记录坐标后从行内容中移除。随后 <code>applyLineResets()</code> 在每行末尾追加 <code>\x1b[0m\x1b]8;;\x07</code>（<code>SEGMENT_RESET</code>），防止行间样式污染。</p>
+
+<!-- ═══════════════ 第 4 章 ═══════════════ -->
+<h2>4. 差异计算与 ANSI 序列生成</h2>
+
+<p>归一化后的 <code>newLines</code> 与 <code>previousLines</code> 进行逐行比对：</p>
+
+<pre>let firstChanged = -1, lastChanged = -1;
+const maxLines = Math.max(newLines.length, this.previousLines.length);
+for (let i = 0; i < maxLines; i++) {
+  const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
+  const newLine = i < newLines.length ? newLines[i] : "";
+  if (oldLine !== newLine) {
+    if (firstChanged === -1) firstChanged = i;
+    lastChanged = i;
+  }
+}</pre>
+
+<p>基于 <code>firstChanged</code> 和 <code>lastChanged</code>，<code>doRender()</code> 进入多路决策：</p>
+
+<table>
+  <tr><th>条件</th><th>渲染模式</th><th>原理</th></tr>
+  <tr><td><code>previousLines.length === 0</code></td><td>首帧不清屏</td><td>假设终端已干净，直接输出避免闪烁</td></tr>
+  <tr><td><code>widthChanged</code></td><td>全量重绘+清屏</td><td>宽度变化→所有行换行位置改变，比对无意义</td></tr>
+  <tr><td><code>heightChanged</code>（非 Termux）</td><td>全量重绘+清屏</td><td>高度变化导致视口偏移</td></tr>
+  <tr><td><code>firstChanged === -1</code></td><td>跳过渲染</td><td>无变化，仅更新光标</td></tr>
+  <tr><td><code>firstChanged >= newLines.length</code></td><td>只清除多余行</td><td>所有变化在已删除的行</td></tr>
+  <tr><td><code>firstChanged < prevViewportTop</code></td><td>降级全量重绘</td><td>变化区域在视口上方不可见</td></tr>
+  <tr><td>其它（正常情况）</td><td><strong>差异渲染</strong></td><td>光标移动→逐行\x1b[2K→输出新行→清除多余</td></tr>
+</table>
+
+<p><strong>差异渲染的 ANSI 缓冲区构造步骤：</strong></p>
+<ol>
+  <li>包裹 <code>\x1b[?2026h</code> ... <code>\x1b[?2026l</code> 同步输出协议</li>
+  <li>通过 <code>\x1b[nA</code> / <code>\x1b[nB</code> 移动光标到 firstChanged</li>
+  <li>每行：先 <code>\x1b[2K</code> 清行，再输出新内容</li>
+  <li>若旧内容行更多，向后 <code>\x1b[2K</code> 清除多余行</li>
+  <li>若 <code>visibleWidth(line) > width</code> → 写入崩溃日志并抛异常（安全阀）</li>
+</ol>
+
+<div class="warn">
+<p><strong>行宽溢出保护：</strong>如果某行的 <code>visibleWidth(line) > width</code>，doRender() 立即停止 TUI、写入崩溃日志 <code>~/.pi/agent/pi-crash.log</code>、抛出 Error。前面所有处理（组件 truncateToWidth、compositeLineAt sliceByColumn）都是为了不走到这一步。</p>
+</div>
+
+<!-- ═══════════════ 检索练习 ═══════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>暂停阅读，尝试回答以下问题：</p>
+<ol>
+  <li>为什么 <code>requestRender()</code> 需要两次不同的延迟（process.nextTick + setTimeout 16ms）？</li>
+  <li>终端宽度变化时为什么必须全量重绘？</li>
+  <li>差异渲染中，如果 firstChanged 行在屏幕可见区域之下，如何处理？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>process.nextTick 合并同一宏任务内的多次调用；setTimeout 16ms 合并短时间内的多次请求（如流式输出高频更新），防止 CPU 过载。</li>
+  <li>宽度变化后所有组件以新宽度重新 render()，换行位置全部改变，逐行比对没有意义——必须清屏全量重绘。</li>
+  <li>代码先移动光标到屏幕底部，通过 \r\n 滚动视口将 firstChanged 拉入可见区域，再从该位置输出变化行。</li>
+</ol>
+</details>
+</div>
+
+<h3>参考资料</h3>
+<ul>
+  <li><strong>参考文档</strong>：<a href="../../module-tui/reference/tui-overview.html">tui-overview.html</a> — pi-tui API 速查与组件目录</li>
+  <li><strong>源码入口</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/tui/src/tui.ts#L1254" target="_blank">doRender() 方法 (L1254)</a> — 差异渲染循环完整实现</li>
+  <li><strong>前导课程</strong>：<a href="../../module-tui/lessons/0001-tui-module-tour.html">L1-module-tui 模块总览</a></li>
+  <li><strong>锚点课程</strong>：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a></li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>对时序图中的任何决策分支有疑问，可以直接向 AI 教师追问。例如："appendStart 模式是什么？"、"compositeLineAt 的列级拼接怎么处理宽字符？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../module-tui/lessons/0001-tui-module-tour.html">← L1-module-tui 模块总览</a>
+  <a href="../../module-tui/reference/tui-overview.html">参考文档 →</a>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'neutral' });</script>
+
+</body>
+</html>

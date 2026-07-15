@@ -2,7 +2,7 @@
 name: submodule-manager
 description: |
   Manage git submodules for the learning-open-code mono-repo. Use when the user wants to:
-  (1) Add a new git submodule — auto-detect or specify the category (open-ai-skills/open-sdd/open-ai-agent/open-ai-desktop/open-knowledge/open-productivity/open-java),
+  (1) Add a new git submodule — auto-detect or specify the category (open-ai-skills/open-sdd/open-ai-agent/open-ai-desktop/open-knowledge/open-productivity/open-java/open-trading/open-data),
       record the tracking branch in .gitmodules, clone the repo, and update README.md index.
   (2) Sync all existing submodules to their configured branches (git fetch + checkout branch + pull).
   (3) Update the root README.md with an up-to-date index of all synced projects grouped by category.
@@ -28,6 +28,7 @@ Manage git submodules in this learning-open-code mono-repo. Every submodule live
 | 效率工具 | `open-productivity/` | Productivity tools (todo, time tracking) |
 | Java 企业开发 | `open-java/` | Java enterprise backend projects |
 | 量化交易与金融数据 | `open-trading/` | Quantitative trading, backtesting, stock data tools |
+| 数据开发 | `open-data/` | Data engineering, data tools, financial data platforms |
 
 ## Workflows
 
@@ -42,7 +43,7 @@ python3 .agents/skills/submodule-manager/scripts/add_submodule.py \
   --branch main
 ```
 
-- If `--category` is omitted, the script will prompt to choose from the 7 categories.
+- If `--category` is omitted, the script will prompt to choose from the 9 categories.
 - If `--branch` is omitted, the script auto-detects the default branch via `git ls-remote`.
 - The script writes the `branch = ...` entry into `.gitmodules` (required for sync).
 - After cloning, it runs `scripts/update_readme.py` to refresh the index.
@@ -114,8 +115,8 @@ git submodule update --init --recursive
 git submodule update --init --recursive --remote
 
 # 3. 验证
-git submodule status        # 应显示全部 33 个子模块及 commit hash
-ls open-ai-agent/           # 应有 8 个子目录，每个都有内容
+git submodule status        # 应显示全部子模块及 commit hash
+ls open-ai-agent/           # 应有多个子目录，每个都有内容
 ```
 
 #### 4.4 常见问题

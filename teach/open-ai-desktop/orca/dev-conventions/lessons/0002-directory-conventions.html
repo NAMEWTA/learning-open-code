@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca 目录结构规范</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <p class="meta">L1 目录规范 · 预计 15 分钟 · 基于 commit 61bd98d · 接续 <a href="0001-dev-conventions.html">0001 三层规范体系</a></p>
+        <h1>Orca 目录结构的五条铁律</h1>
+        <p>
+          上一课讲了 <code>src/</code> 按运行环境分层的顶层设计。本课深入每层内部，回答一个问题：<strong>当你需要在 Orca 中新建文件时，它应该放在哪、和谁做邻居？</strong>
+          完整目录地图见 <a href="../reference/directory-map.html">目录结构速查手册</a>。
+        </p>
+
+        <h2>1. 铁律一：扁平领域目录，禁止深层嵌套</h2>
+        <p>
+          Orca 不使用 <code>src/main/services/agent/status/...</code> 这种嵌套模块树。<strong>所有领域目录平铺在一层</strong>，按业务概念直接命名。
+        </p>
+        <pre><code>src/main/
+├── agent-hooks/    ← agent hook 安装与生命周期
+├── browser/        ← 浏览器标签页管理
+├── daemon/         ← 后台 daemon 进程
+├── git/            ← Git 操作
+├── ipc/            ← IPC handler 注册（180+ 文件，仍扁平）
+├── keybindings/    ← 快捷键
+├── pty/            ← 伪终端
+├── runtime/        ← 运行时编排（唯一含深嵌套的例外）
+│   └── rpc/methods/  ← ~40 个 RPC 方法，因数量过大才拆一层
+├── ssh/            ← SSH 连接
+├── terminal/       ← 终端
+└── ...（共 72 个平铺目录 + 113 个散文件）</code></pre>
+        <div class="callout">
+          心智模型：如果你在 main 下建了 <code>foo/bar/baz/</code> 三层目录，99% 的概率你违反了规范。嵌套仅用于 runtime/rpc/methods 这类"子方法数量过多必须拆分"的场景。
+        </div>
+
+        <h2>2. 铁律二：测试文件与源文件同居</h2>
+        <p>
+          测试文件 <strong>绝不放在单独的 <code>__tests__/</code> 目录</strong>，而是紧挨源文件。整个 <code>src/</code> 树只有 1 个 <code>__tests__/</code>（在 providers/ 下，属于历史遗留）。
+        </p>
+        <pre><code>src/shared/
+├── workspace-name.ts
+├── workspace-name.test.ts      ← 紧挨源文件
+├── agent-detection.ts
+├── agent-detection.test.ts     ← 紧挨源文件
+src/main/ipc/
+├── pty.ts
+├── pty.test.ts                 ← 紧挨源文件
+src/main/git/
+├── status.ts
+├── status.test.ts              ← 紧挨源文件</code></pre>
+        <p>特殊测试文件通过后缀区分的意图：</p>
+        <table>
+          <tr><th>后缀</th><th>含义</th><th>示例</th></tr>
+          <tr><td><code>.test.ts</code></td><td>单元测试</td><td><code>agent-detection.test.ts</code></td></tr>
+          <tr><td><code>.integration.test.ts</code></td><td>集成测试</td><td><code>ssh-relay-session-agent-hooks.integration.test.ts</code></td></tr>
+          <tr><td><code>.benchmark.test.ts</code></td><td>性能基准</td><td><code>store-snapshot.benchmark.test.ts</code></td></tr>
+          <tr><td><code>.repro.test.ts</code></td><td>Bug 复现</td><td><code>issue-4631-terminal-hover.repro.test.ts</code></td></tr>
+          <tr><td><code>-test-harness.ts</code></td><td>测试辅助工具（非测试本身）</td><td><code>agent-hooks/server.test.ts</code> 使用的 <code>test-harness.ts</code></td></tr>
+        </table>
+
+        <h2>3. 铁律三：index.ts 只用在这四种场景</h2>
+        <p>
+          Orca <strong>不为每个目录自动建 barrel 文件</strong>。<code>index.ts</code> 只出现在以下场景，其余目录直接从具名文件导入：
+        </p>
+        <table>
+          <tr><th>场景</th><th>示例</th><th>原因</th></tr>
+          <tr><td>进程入口</td><td><code>src/main/index.ts</code>、<code>src/cli/index.ts</code></td><td>app 生命周期、服务装配</td></tr>
+          <tr><td>聚合注册</td><td><code>runtime/rpc/methods/index.ts</code></td><td>收集 ~25 个 RPC 方法到一个数组</td></tr>
+          <tr><td>隐藏内部结构</td><td><code>ghostty/index.ts</code>、<code>warp-themes/index.ts</code></td><td>对外暴露公共 API，隐藏内部 4-5 个实现文件</td></tr>
+          <tr><td>状态组合</td><td><code>renderer/src/store/index.ts</code></td><td>Zustand create 合并 ~20 个 slice</td></tr>
+        </table>
+        <div class="callout">
+          判断法则：如果你准备新建 <code>index.ts</code> 只为了少写几个 import 路径——别建。直接按文件名导入即可。
+        </div>
+
+        <h2>4. 铁律四：components/ 分两层的唯一理由</h2>
+        <p>
+          <code>src/renderer/src/components/</code> 下只有两种目录，按<strong>是否承载业务逻辑</strong>区分：
+        </p>
+        <pre><code>components/
+├── ui/                  ← 纯 UI 原语（shadcn 风格）：button、dialog、select…
+│   │                     无业务逻辑、无 store 依赖、可跨项目复用
+│   └── （35 个文件，全是 forwardRef + cva 变体）
+├── terminal/            ← 业务领域组件：含 hooks、store 交互、xterm 绑定
+├── settings/            ← 业务领域组件：含设置持久化、账户管理
+├── agent/               ← 业务领域组件：含 agent 状态展示
+├── sidebar/             ← 业务领域组件：含项目树、拖拽、右键菜单
+└── ...（共 45 个平铺业务目录）</code></pre>
+        <p>如果你在写一个包含 <code>useAppStore</code> 或 <code>ipcRenderer</code> 调用的组件，它必须放在业务领域目录；如果是一个纯受控的按钮/弹窗/选择器，放 <code>ui/</code>。</p>
+
+        <h2>5. 铁律五：shared/ 是扁平文件池</h2>
+        <p>
+          <code>src/shared/</code> 是 Orca 最极端的扁平实践——542 个 <code>.ts</code> 文件平铺在一个目录下，<strong>除了一个 <code>network/</code> 子目录外零嵌套</strong>。
+        </p>
+        <pre><code>src/shared/
+├── agent-detection.ts           ← 文件名 = 概念名
+├── agent-detection.test.ts
+├── agent-status-types.ts
+├── browser-url.ts
+├── clipboard-text.ts
+├── constants.ts
+├── keybindings.ts
+├── remote-runtime-client.ts
+├── runtime-types.ts             (24.5 KB)
+├── telemetry-events.ts
+├── terminal-custom-themes.ts
+├── types.ts                     (138 KB — 最大文件)
+├── workspace-name.ts
+├── network/                     ← 唯一的嵌套目录（4 个文件）
+│   ├── manual-address.ts
+│   └── server-share-address.ts
+└── ...（共 542 个 .ts 文件）</code></pre>
+        <p>文件以描述性前缀自然分组（<code>terminal-*</code>、<code>git-*</code>、<code>agent-*</code>、<code>worktree-*</code>），不需要子目录。新增共享类型时，直接在 <code>shared/</code> 下建一个 <code>&lt;概念名&gt;.ts</code> 文件。</p>
+
+        <h2>6. 检索练习</h2>
+        <p>判断以下场景分别违反了几条铁律：</p>
+        <ol style="list-style-type: upper-alpha">
+          <li>你在 <code>src/main/</code> 下创建 <code>services/terminal/shell/</code> 三层目录来组织终端 shell 相关代码。</li>
+          <li>你在 <code>src/shared/</code> 下新建 <code>__tests__/</code> 目录来放 <code>agent-detection.test.ts</code>。</li>
+          <li>你在 <code>src/main/agent-hooks/</code> 下新建 <code>index.ts</code>，导出该目录所有 5 个文件的函数，方便其他模块一行 import。</li>
+        </ol>
+        <div class="answer">
+          <strong>A：违反铁律一。</strong> 三层嵌套等同于引入不必要的分类层级。应在 <code>src/main/</code> 下直接建一个 <code>terminal-shell/</code> 平铺目录。<br><br>
+          <strong>B：违反铁律二。</strong> 测试必须紧挨源文件，放在 <code>src/shared/agent-detection.test.ts</code>。<br><br>
+          <strong>C：不完全违规但不符合惯例。</strong> agent-hooks 只有 5 个导出的公共函数，每个导入方可以精确 import 所需文件，barrel 只是增加了一个需要维护的中间层。如果 agent-hooks 对外暴露的是一个复杂内部结构需要隐藏，才考虑建 index.ts（铁律三的场景 3）。
+        </div>
+        <p>
+          课后建议通读 <a href="../reference/directory-map.html">目录结构速查手册</a>，上面有每个目录的完整文件清单和职责说明。可向 agent 追问"某个具体功能应该放在哪个目录"来巩固判断力。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

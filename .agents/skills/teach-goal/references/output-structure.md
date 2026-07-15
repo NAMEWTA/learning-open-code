@@ -53,7 +53,7 @@ teach/<project>/00-overview/
 ├── NOTES.md                         # 内部便签
 ├── learning-records/                # 学习记录
 ├── lessons/
-│   └── 0001-project-map.html         # L0 短课：项目导览与学习路线
+│   └── 000N-<描述>.html             # L0 短课：项目导览（至少 1 节，数量与命名由模型自主决定）
 ├── reference/
 │   └── 00-overview.html             # L0 产出：项目总览（技术栈、架构图、目录结构、设计哲学）
 └── assets/                          # 共享组件
@@ -71,7 +71,7 @@ teach/<project>/module-<slug>/
 ├── NOTES.md
 ├── learning-records/
 ├── lessons/
-│   └── 0001-<slug>-module-tour.html  # L1 短课：模块导览
+│   └── 000N-<描述>.html              # L1 短课：模块导览（至少 1 节，数量与命名由模型自主决定）
 ├── reference/
 │   ├── <slug>-overview.html          # L1 产出：模块总览
 │   └── <slug>-api.html               # L3 产出：微观 API 参考
@@ -90,9 +90,8 @@ teach/<project>/slice-<slug>/
 ├── reference/
 │   └── <slug>-flow-map.html          # 可选：长链路速查/源码索引
 ├── lessons/
-│   ├── 0001-flow-map.html            # L2 短课：链路地图
-│   ├── 0002-main-path.html           # 可选：主路径
-│   └── 0003-error-path.html          # 可选：异常路径
+│   ├── 000N-<描述>.html              # L2 短课（至少 1 节，课程数量与拆分由模型根据功能复杂度自主决定）
+│   └── ...                           # 复杂链路拆多节短课，不预设固定课程结构
 └── assets/
 ```
 
@@ -108,8 +107,8 @@ teach/<project>/deep-dive-<slug>/
 ├── reference/
 │   └── <slug>-notes.html             # 可选：长表格/源码索引
 ├── lessons/
-│   ├── 0001-problem-frame.html       # L4 短课：问题背景
-│   └── 0002-core-mechanism.html      # 可选：核心机制
+│   ├── 000N-<描述>.html              # L4 短课（至少 1 节，课程数量与拆分由模型自主决定）
+│   └── ...                           # 复杂主题拆多节短课，不预设固定课程结构
 └── assets/
 ```
 
@@ -117,11 +116,11 @@ teach/<project>/deep-dive-<slug>/
 
 | 层级 | 内容类型 | teach 主题目录 | 必备产出 | 文件类型 |
 |------|---------|---------------|---------|---------|
-| L0 | 项目总览 | `teach/<project>/00-overview/` | `lessons/0001-project-map.html` + `reference/00-overview.html` | HTML 课程 + 参考文档 |
-| L1 | 模块总览 | `teach/<project>/module-<slug>/` | `lessons/0001-<slug>-module-tour.html` + `reference/<slug>-overview.html` | HTML 课程 + 参考文档 |
-| L2 | 垂直切片 | `teach/<project>/slice-<slug>/` | `lessons/0001-*.html` 起；复杂链路拆多课 | HTML 课程 |
+| L0 | 项目总览 | `teach/<project>/00-overview/` | `lessons/` 下至少 1 节短课（数量与命名由模型自主决定） + `reference/00-overview.html` | HTML 课程 + 参考文档 |
+| L1 | 模块总览 | `teach/<project>/module-<slug>/` | `lessons/` 下至少 1 节短课（数量与命名由模型自主决定） + `reference/<slug>-overview.html` | HTML 课程 + 参考文档 |
+| L2 | 垂直切片 | `teach/<project>/slice-<slug>/` | `lessons/` 下至少 1 节短课，课程数量与拆分由模型自主决定 | HTML 课程 |
 | L3 | 微观 API | `teach/<project>/module-<slug>/`（与 L1 同目录） | `reference/<slug>-api.html`；模块主题必须已有 lesson | HTML 参考文档 |
-| L4 | 深度剖析 | `teach/<project>/deep-dive-<slug>/` | `lessons/0001-*.html` 起；复杂主题拆多课 | HTML 课程 |
+| L4 | 深度剖析 | `teach/<project>/deep-dive-<slug>/` | `lessons/` 下至少 1 节短课，课程数量与拆分由模型自主决定 | HTML 课程 |
 
 ## 进度台账
 
@@ -164,7 +163,7 @@ teach/<project>/deep-dive-<slug>/
 
 ## 🏗️ L0 · 项目总览
 
-- **[📘 项目导览短课](00-overview/lessons/0001-project-map.html)**
+- **[📘 项目导览短课](00-overview/lessons/000N-<slug>.html)**
   > 15 分钟建立全局地图，再进入各模块。
 - **[📄 {PROJECT_NAME} 项目总览参考](00-overview/reference/00-overview.html)**
   > 技术栈：{语言 + 框架} · 架构风格：{分层/微服务/…} · {N} 个顶层模块
@@ -174,41 +173,39 @@ teach/<project>/deep-dive-<slug>/
 ## 📦 L1 · 模块总览
 
 ### module-admin — 后台管理模块
-- **[📘 模块导览短课](module-admin/lessons/0001-admin-module-tour.html)**
+- **[📘 模块导览短课](module-admin/lessons/000N-<slug>.html)**
   > 15 分钟理解模块边界、入口和主要依赖
 - **[📄 模块总览参考](module-admin/reference/admin-overview.html)**
   > 职责：RBAC 权限管理、用户 CRUD、系统配置
   > 分层：Controller → Service → Mapper → DB
 - **[🔬 API 参考 (L3)](module-admin/reference/admin-api.html)** — {N} 个公共接口
 - **关联垂直切片**：
-  - [🔪 用户登录全链路](slice-auth-login-flow/lessons/0001-flow-map.html)
-  - [🔪 角色权限校验全链路](slice-role-permission-check/lessons/0001-flow-map.html)
+  - [🔪 用户登录全链路](slice-auth-login-flow/lessons/000N-<slug>.html)
+  - [🔪 角色权限校验全链路](slice-role-permission-check/lessons/000N-<slug>.html)
 - **关联深度剖析**：
-  - [🧠 JWT 令牌刷新策略](deep-dive-jwt-refresh-strategy/lessons/0001-problem-frame.html)
+  - [🧠 JWT 令牌刷新策略](deep-dive-jwt-refresh-strategy/lessons/000N-<slug>.html)
 
 ### module-api — 对外 API 模块
-- **[📘 模块导览短课](module-api/lessons/0001-api-module-tour.html)**
+- **[📘 模块导览短课](module-api/lessons/000N-<slug>.html)**
   > 对外 API 的入口、认证和限流边界
 - **[📄 模块总览参考](module-api/reference/api-overview.html)**
   > 职责：REST API 网关、认证拦截、限流、版本管理
 - **[🔬 API 参考 (L3)](module-api/reference/api-api.html)** — {N} 个公共接口
 - **关联垂直切片**：
-  - [🔪 API 限流全链路](slice-api-rate-limit/lessons/0001-flow-map.html)
+  - [🔪 API 限流全链路](slice-api-rate-limit/lessons/000N-<slug>.html)
 
 ---
 
 ## 🔪 L2 · 垂直切片
 
 ### slice-auth-login-flow — 用户登录鉴权全链路
-- **[📘 课程 1：链路地图](slice-auth-login-flow/lessons/0001-flow-map.html)**
-  > 入口、层级顺序和关键数据流。
-- **[📘 课程 2：主路径](slice-auth-login-flow/lessons/0002-main-path.html)**
-  > 链路：前端表单 → Nginx → Gateway → AuthController → AuthService → UserMapper → MySQL → JWT 签发
-  > 所属模块：[module-admin](module-admin/reference/admin-overview.html)
-  > 关联深度剖析：[🧠 JWT 令牌刷新策略](deep-dive-jwt-refresh-strategy/lessons/0001-problem-frame.html)
+- **[📘 课程](slice-auth-login-flow/lessons/000N-<slug>.html)**
+  > 入口、层级顺序和关键数据流。复杂链路可拆多节课程。
+- **所属模块**：[module-admin](module-admin/reference/admin-overview.html)
+- **关联深度剖析**：[🧠 JWT 令牌刷新策略](deep-dive-jwt-refresh-strategy/lessons/000N-<slug>.html)
 
 ### slice-order-checkout — 下单支付全链路
-- **[📘 课程](slice-order-checkout/lessons/0001-flow-map.html)**
+- **[📘 课程](slice-order-checkout/lessons/000N-<slug>.html)**
   > 链路：购物车 → OrderController → OrderService → PayGateway → 回调 → 状态机
   > 所属模块：[module-trade](module-trade/reference/trade-overview.html)
 
@@ -217,12 +214,10 @@ teach/<project>/deep-dive-<slug>/
 ## 🧠 L4 · 深度剖析
 
 ### deep-dive-jwt-refresh-strategy — JWT 令牌刷新策略
-- **[📘 课程 1：问题背景](deep-dive-jwt-refresh-strategy/lessons/0001-problem-frame.html)**
-  > 为什么需要双令牌与刷新令牌轮转。
-- **[📘 课程 2：核心机制](deep-dive-jwt-refresh-strategy/lessons/0002-core-mechanism.html)**
-  > 主题：短令牌(15min) + 长令牌(7d) 双轨制 · 刷新令牌轮转 · Redis 黑名单
+- **[📘 课程](deep-dive-jwt-refresh-strategy/lessons/000N-<slug>.html)**
+  > 为什么需要双令牌与刷新令牌轮转。复杂主题可拆多节课程。
   > 关联模块：[module-admin](module-admin/reference/admin-overview.html)
-  > 关联切片：[🔪 用户登录全链路](slice-auth-login-flow/lessons/0001-flow-map.html)
+  > 关联切片：[🔪 用户登录全链路](slice-auth-login-flow/lessons/000N-<slug>.html)
 
 ---
 
@@ -247,7 +242,7 @@ teach/<project>/deep-dive-<slug>/
 
 ## 文件命名说明
 
-`.agents/skills/teach/SKILL.md` 默认对 lessons/ 使用递增编号命名（`0001-<slug>.html`），teach-goal 必须沿用该规则。复杂 L2 / L4 在同一主题目录内拆成多节短课，禁止生成巨型单页课程。`output_path` 仅代表该 goal 的主入口文件；完整交付物以任务单中的 `required_outputs` 和主题审计结果为准。
+`.agents/skills/teach/SKILL.md` 默认对 lessons/ 使用递增编号命名（`000N-<slug>.html`），teach-goal 沿用该规则。**课程数量与每节课的 `<slug>` 命名由模型根据实际内容自主决定**，不预设固定课程名称或数量。复杂 L2 / L4 在同一主题目录内拆成多节短课，禁止生成巨型单页课程。`output_path` 仅代表该 goal 的主入口文件；完整交付物以任务单中的 `required_outputs` 和主题审计结果为准。
 
 ## teach-goal 与 `.agents/skills/teach/SKILL.md` 的分工
 

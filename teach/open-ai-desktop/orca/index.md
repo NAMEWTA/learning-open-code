@@ -16,3 +16,4 @@
 | Orca CLI 命令执行链路 | `./slice-orca-cli-command-flow/` | 参数解析、handler、RuntimeClient 与 runtime RPC 边界 |
 | 移动端配对与会话恢复 | `./slice-mobile-pairing-flow/` | 桌面 QR、E2EE 握手、host 保存与 Resume 恢复 |
 | Relay 重连与 Grace Socket | `./deep-dive-relay-reconnect/` | Relay --connect、版本握手、grace socket 与 stale request |
+| 开发规范、目录规范与命名规范 | `./dev-conventions/` | oxlint/oxfmt 工具链、src 分层目录、文件与代码命名约定 |

@@ -167,7 +167,7 @@ while goal_queue 非空:
   ],
   "discovered_from": "L1-auth-module",
   "topic_dir": "teach/<project>/slice-auth-login-flow",
-  "output_path": "teach/<project>/slice-auth-login-flow/lessons/0001-flow-map.html",
+  "output_path": "teach/<project>/slice-auth-login-flow/lessons/000N-<slug>.html",
   "required_outputs": {
     "meta": [
       "teach/<project>/slice-auth-login-flow/MISSION.md",
@@ -175,7 +175,7 @@ while goal_queue 非空:
       "teach/<project>/slice-auth-login-flow/SNAPSHOT.md"
     ],
     "lessons": [
-      "teach/<project>/slice-auth-login-flow/lessons/0001-flow-map.html"
+      "teach/<project>/slice-auth-login-flow/lessons/000N-<slug>.html"
     ],
     "reference": []
   },

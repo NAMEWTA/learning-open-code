@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多平台消息全链路 -- 从外部消息到 Agent 响应投递</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --muted: #555;
+    --accent: #6b4ce6;
+    --bg: #fefefe;
+    --code-bg: #f6f8fa;
+    --border: #e0e0e0;
+    --tag-bg: #f0ebff;
+    --tag-text: #6b4ce6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "LXGW WenKai", "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+    font-size: 17px; line-height: 1.8; color: var(--text);
+    max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: var(--bg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; font-weight: 700; }
+  h1 .sub { display: block; font-size: 0.95rem; color: var(--muted); font-weight: 400; margin-top: 0.2rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 0.7rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .intro { font-size: 1.05rem; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0 1.5rem; }
+  .tag { display: inline-block; background: var(--tag-bg); color: var(--tag-text); padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.82rem; margin-right: 0.3rem; }
+  .tags { margin: 0.5rem 0; }
+
+  code { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; margin: 0.8rem 0; }
+  pre code { background: none; padding: 0; }
+
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.76rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+
+  .practice { background: #faf5ff; border: 1px solid #e0d4f5; border-radius: 8px; padding: 1.2rem 1.2rem 0.8rem; margin: 2rem 0 1rem; }
+  .practice h3 { margin-top: 0; color: #6b4ce6; }
+  .practice ol { margin: 0.5rem 0 0 1.2rem; }
+  .practice li { margin: 0.4rem 0; }
+  details { margin: 0.6rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  details .answer { padding: 0.5rem 0 0.3rem 1rem; border-left: 2px solid #d4c4f5; margin-left: 0.3rem; }
+
+  .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>多平台消息全链路
+  <span class="sub">L2 垂直切片 -- 从 Telegram/Discord 消息到 Agent 响应投递</span>
+</h1>
+
+<p class="meta">
+  学习目标：掌握一条外部消息从平台接入到 Agent 响应回投的完整路径，能画出五层时序图 |
+  预估时长：15 分钟 |
+  前置知识：<a href="../../module-gateway/lessons/0001-gateway-module-tour.html">L1-gateway 网关三层架构</a>、<a href="../../module-agent-core/lessons/0001-agent-core-module-tour.html">L1-agent-core 对话循环</a> |
+  关联参考：<a href="../../module-gateway/reference/gateway-overview.html">网关速查手册</a>
+</p>
+
+<!-- ════════════════ H2-1：入口点 ════════════════ -->
+<h2>一、入口点：消息从哪里来</h2>
+
+<div class="intro">
+  每条消息的旅程始于一个<strong>外部平台用户</strong>在 Telegram、Discord 等聊天工具中发送一条文本。平台 API 将这条消息推送到 Hermes Agent 的网关层，由适配器接收并标准化为 <code>MessageEvent</code>。
+</div>
+
+<div class="tags">
+  <span class="tag">24 平台</span>
+  <span class="tag">MessageEvent</span>
+  <span class="tag">SessionSource</span>
+</div>
+
+<p>入口的核心数据结构是两个 dataclass：</p>
+
+<table>
+  <tr><th>数据结构</th><th>位置</th><th>职责</th></tr>
+  <tr>
+    <td><code>MessageEvent</code></td>
+    <td><code>base.py:1716</code></td>
+    <td>标准化入站消息：text, message_type, media_urls, reply_to_message_id</td>
+  </tr>
+  <tr>
+    <td><code>SessionSource</code></td>
+    <td><code>session.py:147</code></td>
+    <td>消息来源上下文：platform, chat_id, thread_id, user_id, scope_id</td>
+  </tr>
+</table>
+
+<p><strong>两种接收模式：</strong></p>
+<ol>
+  <li><strong>直连模式</strong> — 适配器直接连接平台 API（如 Telegram Bot API 通过长轮询拉取更新），内置于 <code>base.py</code> 各子类中</li>
+  <li><strong>中继模式</strong> — 适配器通过 WebSocket 连接 Team Gateway Connector，由 connector 统一对接多平台，见 <code>relay/ws_transport.py</code></li>
+</ol>
+
+<!-- ════════════════ H2-2：五层穿线 ════════════════ -->
+<h2>二、五层穿线：消息走过的每一站</h2>
+
+<div class="intro">
+  消息在网关内部依次经过五层。下方的时序图按调用顺序列出了每一层的关键方法，从上到下即为消息流动的时间线。
+</div>
+
+<div class="diagram">
+  外部用户（Telegram/Discord）
+    │
+    ▼
+① 平台适配层  BasePlatformAdapter.connect()
+    │           轮询/WS 接收 → 构建 MessageEvent
+    │           set_message_handler() 注册回调
+    ▼
+② 中继路由层  RelayAdapter.connect() → RelayTransport.connect()
+    │           WS handshake → descriptor 能力协商
+    │           _on_inbound() 将 inbound 帧转交 handler
+    ▼
+③ Agent 处理   message_handler(event) → run_agent()
+    │           conversation_loop 消费消息 → LLM 生成响应
+    ▼
+④ 投递路由层  DeliveryRouter.deliver(content, targets)
+    │           解析投递目标 → 选择适配器 → _deliver_to_platform()
+    ▼
+⑤ 平台发送层  adapter.send(chat_id, content, metadata)
+              平台 API 调用 → 消息送达用户
+</div>
+
+<p><strong>关键代码片段：消息从接收到投递的交界面。</strong> 以下展示了 <code>deliver()</code> 中如何将 Agent 响应发回平台：</p>
+
+<pre><code># gateway/delivery.py — DeliveryRouter.deliver() 核心循环
+async def deliver(self, content, targets, job_id=None, ...):
+    results = {}
+    for target in targets:
+        # 跳过已知死目标（被踢出群、用户注销）
+        if target.chat_id and self.dead_targets.is_dead(
+            target.platform.value, target.chat_id
+        ):
+            results[target.to_string()] = {
+                "success": False, "skipped": "dead_target"
+            }
+            continue
+        if target.platform == Platform.LOCAL:
+            result = self._deliver_local(content, job_id, ...)
+        else:
+            result = await self._deliver_to_platform(
+                target, content, metadata
+            )
+</code></pre>
+
+<p>上例中 <code>_deliver_to_platform()</code> 会先检查超大内容截断（<code>MAX_PLATFORM_OUTPUT = 4000</code>），过滤空响应防循环（<code>_is_silence_narration()</code>），再调用 <code>adapter.send()</code> 完成真正的平台投递。</p>
+
+<pre><code># gateway/delivery.py — _deliver_to_platform() 关键防护
+# 超大内容：先保存完整文件，再截断加脚注
+if len(content) > MAX_PLATFORM_OUTPUT:
+    saved_path = self._save_full_output(content, job_id)
+    footer = f"\n\n... [truncated, full output saved to {saved_path}]"
+    content = content[:4000 - len(footer)] + footer
+
+# 防循环：丢弃空/静默响应（*(silent)*, 🔇, "."）
+if self._filter_silence_narration_enabled() and _is_silence_narration(content):
+    return {"success": True, "filtered": "silence_narration"}
+
+# 真正发送
+result = await adapter.send(target.chat_id, content, metadata=send_metadata)
+</code></pre>
+
+<!-- ════════════════ H2-3：异常路径 ════════════════ -->
+<h2>三、异常路径：投递失败的四级回退</h2>
+
+<div class="intro">
+  当消息无法投递到指定目标时（群组被删除、bot 被踢出、用户注销），<code>DeliveryRouter</code> 不会让消息丢失，而是依次尝试四级回退策略，确保至少有一份输出留存。
+</div>
+
+<p><strong>DeliveryTarget 解析的四级目标格式：</strong></p>
+
+<pre><code># gateway/delivery.py — DeliveryTarget.parse() 四级目标解析
+# 格式 1："telegram:123456"     → 指定平台+聊天ID（显式目标）
+# 格式 2："telegram"            → 仅平台名，使用 Home Channel
+# 格式 3："origin"              → 回到消息来源会话
+# 格式 4："local"               → 仅保存本地文件，不推送到任何平台
+
+@classmethod
+def parse(cls, target: str, origin=None) -> "DeliveryTarget":
+    if target_lower == "origin":
+        return cls(platform=origin.platform, chat_id=origin.chat_id,
+                   thread_id=origin.thread_id, is_origin=True)
+    if target_lower == "local":
+        return cls(platform=Platform.LOCAL)
+    if ":" in target_stripped:
+        platform_str, chat_id, thread_id = ...  # 解析 platform:chat:thread
+        return cls(platform=Platform(platform_str), chat_id=chat_id,
+                   thread_id=thread_id, is_explicit=True)
+    # 仅平台名 → 使用 Home Channel
+    return cls(platform=Platform(target_lower))
+</code></pre>
+
+<p><strong>投递失败处理链条：</strong></p>
+<ol>
+  <li><strong>死目标跳过</strong> — <code>DeadTargetRegistry.is_dead()</code> 记录已知不可达目标（群解散、bot 被踢），直接标记 skipped 而不浪费 API 调用</li>
+  <li><strong>发送异常捕获</strong> — <code>_deliver_to_platform</code> 抛出的异常被外层 <code>try/except</code> 捕获，并调用 <code>_classify_dead_from_error_text()</code> 判断是否应将此目标标记为死目标</li>
+  <li><strong>Telegram DM Topic 恢复</strong> — 当检测到 <code>thread not found</code> 错误时，自动调用 <code>ensure_dm_topic(force_create=True)</code> 重建已删除的私聊主题，然后重试发送</li>
+  <li><strong>本地兜底</strong> — 当所有平台投递失败时，可通过将 target 设为 <code>"local"</code> 确保内容写入 <code>~/.hermes/cron/output/</code> 磁盘文件</li>
+</ol>
+
+<!-- ════════════════ H2-4：延伸阅读 ════════════════ -->
+<h2>四、延伸阅读与交叉链接</h2>
+
+<table>
+  <tr><th>主题</th><th>课程</th><th>关注点</th></tr>
+  <tr>
+    <td>Gateway 三层架构</td>
+    <td><a href="../../module-gateway/lessons/0001-gateway-module-tour.html">L1-gateway 模块总览</a></td>
+    <td>平台适配 → 中继路由 → 投递 的全局架构</td>
+  </tr>
+  <tr>
+    <td>Agent 对话循环</td>
+    <td><a href="../../module-agent-core/lessons/0001-agent-core-module-tour.html">L1-agent-core 模块总览</a></td>
+    <td>消息进入 agent 后的处理流程</td>
+  </tr>
+  <tr>
+    <td>定时任务投递</td>
+    <td><a href="../../slice-cron-scheduled-task/lessons/0001-flow-map.html">L2-cron-scheduled-task</a></td>
+    <td>同一 DeliveryRouter 在定时任务场景的应用</td>
+  </tr>
+  <tr>
+    <td>网关速查手册</td>
+    <td><a href="../../module-gateway/reference/gateway-overview.html">reference/gateway-overview</a></td>
+    <td>Home Channel 配置、24 平台适配器清单</td>
+  </tr>
+</table>
+
+<p>如果你想深入某个环节——比如 RelayTransport 的 WebSocket 帧协议，或者 Telegram 适配器的 DM Topic 管理——可以直接向我追问，我会在后续课程中展开。</p>
+
+<!-- ════════════════ 练习 ════════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<ol>
+  <li>
+    <strong>暂停回忆</strong>：不翻看上文，在脑中画出消息从 Telegram 用户发出一条 "/help" 到收到 bot 回复 "可用命令：..." 所经过的五层，写出每层的核心类名。
+    <details>
+      <summary>点击查看参考答案</summary>
+      <div class="answer">
+        Telegram API → ① <code>BasePlatformAdapter</code>（接收、构建 MessageEvent）→
+        ② <code>RelayAdapter / RelayTransport</code>（WebSocket 传输、handler 回调）→
+        ③ <code>run_agent() → conversation_loop</code>（Agent 处理）→
+        ④ <code>DeliveryRouter.deliver()</code>（目标解析、选择适配器）→
+        ⑤ <code>adapter.send(chat_id, content)</code>（调用平台 API 发回用户）
+      </div>
+    </details>
+  </li>
+  <li>
+    <strong>判断题</strong>：当投递目标群组已被删除时，DeliveryRouter 每收到一条消息都会重试发送到该群，直到管理员手动清理配置。这个说法对吗？
+    <details>
+      <summary>点击查看参考答案</summary>
+      <div class="answer">
+        <strong>错。</strong> DeliveryRouter 内置了 <code>DeadTargetRegistry</code>：首次发送失败后会将目标标记为 dead，后续对该目标的投递直接跳过（返回 skipped: "dead_target"），不会重复浪费 API 调用。只有当之后某次发送成功时才会自动清除 dead 标记（self-healing）。
+      </div>
+    </details>
+  </li>
+  <li>
+    <strong>小型任务</strong>：在源码中找到 <code>HomeChannel</code> 的定义位置（<code>gateway/config.py</code>），查看 Telegram 和 Discord 的默认 Home Channel 是如何配置的。思考：如果用户没有配置 Home Channel，纯平台名 "telegram" 作为投递目标时会怎样？
+  </li>
+</ol>
+</div>
+
+</body>
+</html>

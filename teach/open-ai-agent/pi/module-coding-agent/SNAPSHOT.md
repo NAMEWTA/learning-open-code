@@ -5,162 +5,125 @@
   - **Git Commit**：`2e4ad6a09423002f58b9a5dc2749f7db7929d0f0`
   - **短 Commit**：`2e4ad6a`
   - **分支**：`main`
-- **快照时间**：2026-07-07T16:25:11+08:00
+- **快照时间**：2026-07-09T15:15:43+08:00
 
 ## 课程引用的源文件
 
 | 源文件路径 | 用途 | 关键度 |
 |-----------|------|--------|
-| `*.ts` | 课程分析引用 | 🟡 辅助 |
-| `armin.ts` | 课程分析引用 | 🟡 辅助 |
-| `assistant-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `bash-execution.ts` | 课程分析引用 | 🟡 辅助 |
+| `**/*.test.ts` | 课程分析引用 | 🟡 辅助 |
+| `agent-session-runtime.ts` | 课程分析引用 | 🟡 辅助 |
+| `agent-session-services.ts` | 课程分析引用 | 🟡 辅助 |
+| `agent-session.ts` | 课程分析引用 | 🟡 辅助 |
+| `ansi.ts` | 课程分析引用 | 🟡 辅助 |
+| `args.ts` | 课程分析引用 | 🟡 辅助 |
+| `auth-guidance.ts` | 课程分析引用 | 🟡 辅助 |
+| `auth-storage.ts` | 课程分析引用 | 🟡 辅助 |
+| `bash-executor.ts` | 课程分析引用 | 🟡 辅助 |
 | `bash.ts` | 课程分析引用 | 🟡 辅助 |
-| `bordered-loader.ts` | 课程分析引用 | 🟡 辅助 |
-| `branch-summary-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `compaction-summary-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `config-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `countdown-timer.ts` | 课程分析引用 | 🟡 辅助 |
-| `custom-editor.ts` | 课程分析引用 | 🟡 辅助 |
-| `custom-entry.ts` | 课程分析引用 | 🟡 辅助 |
-| `custom-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `daxnuts.ts` | 课程分析引用 | 🟡 辅助 |
-| `dynamic-border.ts` | 课程分析引用 | 🟡 辅助 |
-| `earendil-announcement.ts` | 课程分析引用 | 🟡 辅助 |
+| `changelog.ts` | 课程分析引用 | 🟡 辅助 |
+| `child-process.ts` | 课程分析引用 | 🟡 辅助 |
+| `cli.ts` | 课程分析引用 | 🟡 辅助 |
+| `clipboard-native.ts` | 课程分析引用 | 🟡 辅助 |
+| `clipboard.ts` | 课程分析引用 | 🟡 辅助 |
+| `config.ts` | 课程分析引用 | 🟡 辅助 |
+| `core/export-html/vendor/*.js` | 课程分析引用 | 🟡 辅助 |
+| `core/extensions/types.ts` | 课程分析引用 | 🟡 辅助 |
+| `defaults.ts` | 课程分析引用 | 🟡 辅助 |
+| `deprecation.ts` | 课程分析引用 | 🟡 辅助 |
+| `diagnostics.ts` | 课程分析引用 | 🟡 辅助 |
+| `dist/cli.js` | 课程分析引用 | 🟡 辅助 |
 | `edit-diff.ts` | 课程分析引用 | 🟡 辅助 |
 | `edit.ts` | 课程分析引用 | 🟡 辅助 |
-| `extension-editor.ts` | 课程分析引用 | 🟡 辅助 |
-| `extension-input.ts` | 课程分析引用 | 🟡 辅助 |
-| `extension-selector.ts` | 课程分析引用 | 🟡 辅助 |
+| `events.ts` | 课程分析引用 | 🟡 辅助 |
+| `exif-orientation.ts` | 课程分析引用 | 🟡 辅助 |
 | `file-mutation-queue.ts` | 课程分析引用 | 🟡 辅助 |
+| `file-processor.ts` | 课程分析引用 | 🟡 辅助 |
 | `find.ts` | 课程分析引用 | 🟡 辅助 |
-| `first-time-setup.ts` | 课程分析引用 | 🟡 辅助 |
-| `footer.ts` | 课程分析引用 | 🟡 辅助 |
+| `footer-data-provider.ts` | 课程分析引用 | 🟡 辅助 |
+| `frontmatter.ts` | 课程分析引用 | 🟡 辅助 |
+| `fs-watch.ts` | 课程分析引用 | 🟡 辅助 |
+| `git.ts` | 课程分析引用 | 🟡 辅助 |
 | `grep.ts` | 课程分析引用 | 🟡 辅助 |
+| `highlight.js` | 课程分析引用 | 🟡 辅助 |
+| `html.ts` | 课程分析引用 | 🟡 辅助 |
+| `http-dispatcher.ts` | 课程分析引用 | 🟡 辅助 |
+| `image-convert.ts` | 课程分析引用 | 🟡 辅助 |
+| `image-process.ts` | 课程分析引用 | 🟡 辅助 |
+| `image-resize-core.ts` | 课程分析引用 | 🟡 辅助 |
+| `image-resize-worker.ts` | 课程分析引用 | 🟡 辅助 |
+| `image-resize.ts` | 课程分析引用 | 🟡 辅助 |
 | `index.ts` | 课程分析引用 | 🟡 辅助 |
-| `interactive-mode.ts` | 课程分析引用 | 🟡 辅助 |
-| `keybinding-hints.ts` | 课程分析引用 | 🟡 辅助 |
-| `login-dialog.ts` | 课程分析引用 | 🟡 辅助 |
-| `model-search.ts` | 课程分析引用 | 🟡 辅助 |
-| `model-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `oauth-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/CHANGELOG.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/README.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/compaction.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/containerization.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/custom-provider.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/development.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/docs.json` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/extensions.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/index.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/json.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/keybindings.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/models.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/packages.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/prompt-templates.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/providers.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/quickstart.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/rpc.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/sdk.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/security.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/session-format.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/sessions.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/settings.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/shell-aliases.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/skills.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/terminal-setup.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/termux.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/themes.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/tmux.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/tui.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/usage.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/docs/windows.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/README.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/README.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/auto-commit-on-exit.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/bash-spawn-hook.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/bookmark.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/border-status-editor.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/built-in-tool-renderer.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/claude-rules.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/pi/packages/coding-agent/examples/extensions/commands.ts` | 课程分析引用 | 🟡 辅助 |
-| `output-accumulator.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/agent/test/harness/truncate.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/src/core/compaction/` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/src/core/extensions/` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/src/core/tools/` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/src/modes/interactive/` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/bash-close-hang-windows.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/edit-tool-legacy-input.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/edit-tool-no-full-redraw.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/file-mutation-queue.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/image-resize-callers.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/path-utils.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/suite/agent-session-bash-persistence.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/suite/regressions/3302-find-path-glob.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/suite/regressions/5303-bash-output-truncation.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `packages/coding-agent/test/tools.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `path-utils.ts` | 课程分析引用 | 🟡 辅助 |
+| `initial-message.ts` | 课程分析引用 | 🟡 辅助 |
+| `interactive/components/` | 课程分析引用 | 🟡 辅助 |
+| `interactive/interactive-mode.ts` | 课程分析引用 | 🟡 辅助 |
+| `json.ts` | 课程分析引用 | 🟡 辅助 |
+| `keybindings.ts` | 课程分析引用 | 🟡 辅助 |
+| `list-models.ts` | 课程分析引用 | 🟡 辅助 |
+| `main.ts` | 课程分析引用 | 🟡 辅助 |
+| `messages.ts` | 课程分析引用 | 🟡 辅助 |
+| `migrations.ts` | 课程分析引用 | 🟡 辅助 |
+| `mime.ts` | 课程分析引用 | 🟡 辅助 |
+| `model-registry.ts` | 课程分析引用 | 🟡 辅助 |
+| `model-resolver.ts` | 课程分析引用 | 🟡 辅助 |
+| `modes/interactive/assets/*.png` | 课程分析引用 | 🟡 辅助 |
+| `modes/interactive/theme/*.json` | 课程分析引用 | 🟡 辅助 |
+| `open-browser.ts` | 课程分析引用 | 🟡 辅助 |
+| `output-guard.ts` | 课程分析引用 | 🟡 辅助 |
+| `package-manager.ts` | 课程分析引用 | 🟡 辅助 |
+| `package.json` | 课程分析引用 | 🟡 辅助 |
+| `paths.ts` | 课程分析引用 | 🟡 辅助 |
+| `photon.ts` | 课程分析引用 | 🟡 辅助 |
+| `pi-user-agent.ts` | 课程分析引用 | 🟡 辅助 |
+| `print-mode.ts` | 课程分析引用 | 🟡 辅助 |
+| `project-trust.ts` | 课程分析引用 | 🟡 辅助 |
+| `prompt-templates.ts` | 课程分析引用 | 🟡 辅助 |
+| `provider-attribution.ts` | 课程分析引用 | 🟡 辅助 |
 | `read.ts` | 课程分析引用 | 🟡 辅助 |
-| `render-utils.ts` | 课程分析引用 | 🟡 辅助 |
-| `scoped-models-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `session-selector-search.ts` | 课程分析引用 | 🟡 辅助 |
-| `session-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `settings-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `show-images-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `skill-invocation-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `src/**/*.spec.ts` | 课程分析引用 | 🟡 辅助 |
-| `status-indicator.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/agent-session-auto-compaction-queue.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/agent-session-compaction.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/compaction-extensions-example.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/compaction-extensions.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/compaction-serialization.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/compaction-summary-reasoning.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/compaction.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/extensions-discovery.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/extensions-input-event.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/extensions-runner.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/git-merge-and-resolve-extension.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/interactive-mode-compaction.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/plan-mode-extension.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/agent-session-compaction.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/agent-session-model-extension.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/regressions/5080-signal-shutdown-extension-cleanup.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/suite/regressions/pre-prompt-compaction-no-continue.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `test/trigger-compact-extension.test.ts` | 课程分析引用 | 🟡 辅助 |
-| `theme-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `theme/theme-controller.ts` | 课程分析引用 | 🟡 辅助 |
-| `theme/theme.ts` | 课程分析引用 | 🟡 辅助 |
-| `thinking-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `tool-definition-wrapper.ts` | 课程分析引用 | 🟡 辅助 |
-| `tool-execution.ts` | 课程分析引用 | 🟡 辅助 |
-| `tree-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `trust-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `user-message-selector.ts` | 课程分析引用 | 🟡 辅助 |
-| `user-message.ts` | 课程分析引用 | 🟡 辅助 |
-| `visual-truncate.ts` | 课程分析引用 | 🟡 辅助 |
+| `resolve-config-value.ts` | 课程分析引用 | 🟡 辅助 |
+| `resource-loader.ts` | 课程分析引用 | 🟡 辅助 |
+| `rpc-entry.ts` | 课程分析引用 | 🟡 辅助 |
+| `rpc/jsonl.ts` | 课程分析引用 | 🟡 辅助 |
+| `rpc/rpc-client.ts` | 课程分析引用 | 🟡 辅助 |
+| `rpc/rpc-mode.ts` | 课程分析引用 | 🟡 辅助 |
+| `rpc/rpc-types.ts` | 课程分析引用 | 🟡 辅助 |
+| `runner.ts` | 课程分析引用 | 🟡 辅助 |
+| `session-cwd.ts` | 课程分析引用 | 🟡 辅助 |
+| `session-manager.ts` | 课程分析引用 | 🟡 辅助 |
+| `session-picker.ts` | 课程分析引用 | 🟡 辅助 |
+| `settings-manager.ts` | 课程分析引用 | 🟡 辅助 |
+| `shell.ts` | 课程分析引用 | 🟡 辅助 |
+| `slash-commands.ts` | 课程分析引用 | 🟡 辅助 |
+| `sleep.ts` | 课程分析引用 | 🟡 辅助 |
+| `source-info.ts` | 课程分析引用 | 🟡 辅助 |
+| `startup-ui.ts` | 课程分析引用 | 🟡 辅助 |
+| `syntax-highlight.ts` | 课程分析引用 | 🟡 辅助 |
+| `system-prompt.ts` | 课程分析引用 | 🟡 辅助 |
+| `telemetry.ts` | 课程分析引用 | 🟡 辅助 |
+| `timings.ts` | 课程分析引用 | 🟡 辅助 |
+| `tools-manager.ts` | 课程分析引用 | 🟡 辅助 |
+| `truncate.ts` | 课程分析引用 | 🟡 辅助 |
+| `trust-manager.ts` | 课程分析引用 | 🟡 辅助 |
+| `utils/` | 课程分析引用 | 🟡 辅助 |
+| `utils/highlight-js-lib-index.d.ts` | 课程分析引用 | 🟡 辅助 |
+| `version-check.ts` | 课程分析引用 | 🟡 辅助 |
+| `windows-self-update.ts` | 课程分析引用 | 🟡 辅助 |
+| `wrapper.ts` | 课程分析引用 | 🟡 辅助 |
 | `write.ts` | 课程分析引用 | 🟡 辅助 |
 
 ## 已生成课程
 
 | 编号 | 课程文件 | 描述 |
 |------|---------|------|
-| 0001-coding-agent-module-tour | `lessons/0001-coding-agent-module-tour.html` | 编程 Agent CLI 模块 · 短课 |
+| 0001-coding-agent-module-tour | `lessons/0001-coding-agent-module-tour.html` | 0001 - pi-coding-agent 模块总览 |
 
 ## 参考资料
 
-- `reference/coding-agent-api.html` — 编程 Agent CLI 模块 API 速查
-- `reference/coding-agent-overview.html` — 编程 Agent CLI 模块 总览参考
-- `reference/compaction-extensions-api.html` — L3 微观 API：上下文压缩与扩展系统 — Pi Coding Agent
-- `reference/interactive-mode-api.html` — L3 微观 API：交互模式 TUI 组件系统 — Pi Agent Harness
-- `reference/tools-api.html` — pi coding-agent — 工具实现层 API 参考 (L3 微观)
+- `reference/coding-agent-overview.html` — pi-coding-agent 模块总览 — 参考文档
 
 ## 快照摘要
 - 课程数：1
-- 引用源文件数：132
+- 引用源文件数：99
 - 学习记录数：0
-- 参考资料数：5
+- 参考资料数：1
 - 资产文件数：0

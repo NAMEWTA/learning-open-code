@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — 工具执行全链路：从 ToolName 注册到 bash/read/edit/write 的完整调用链</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+    --warn-bg: #fff8e1;
+    --warn-border: #f0c040;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+  }
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+
+  .layer {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1.2rem;
+    margin: 0.8rem 0;
+  }
+  .layer strong { color: var(--accent); }
+
+  .warn {
+    background: var(--warn-bg);
+    border-left: 4px solid var(--warn-border);
+    padding: 0.8rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>0001 — 工具执行全链路</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：15 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>追踪从 <code>_buildRuntime()</code> 创建工具定义，到 LLM 返回 <code>tool_use</code>，再到具体工具 <code>execute()</code> 的 <strong>完整 6 阶段数据流</strong>。能画出 mermaid 时序图，定位四类异常路径的捕获点，并理解每个工具的 <code>Operations</code> 可插拔接口如何支持远程代理。</p>
+
+<!-- ════════════ 第 1 章 ════════════ -->
+<h2>1. 阶段零：工具注册与激活</h2>
+
+<p>工具调用发生之前，必须先完成注册。入口在 <code>AgentSession._buildRuntime()</code>：</p>
+
+<div class="layer"><strong>Step 1</strong> — 调用 <code>createAllToolDefinitions(cwd, options)</code> 生成 7 个内置工具的 ToolDefinition 对象，存入 <code>_baseToolDefinitions</code> Map。</div>
+<div class="layer"><strong>Step 2</strong> — 创建 ExtensionRunner，加载扩展中的自定义工具。</div>
+<div class="layer"><strong>Step 3</strong> — 调用 <code>_refreshToolRegistry()</code> 合并三层工具（base + custom + extension），通过 allowlist/denylist 过滤，用 <code>wrapRegisteredTools</code> 统一包装为 AgentTool[]，最终写入 <code>agent.state.tools</code>。</div>
+
+<p>关于 <code>ToolName</code> 类型：</p>
+
+<pre>// tools/index.ts — 7 个标准工具名
+export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+
+// 三个分组策略
+createCodingToolDefinitions(cwd)  → [read, bash, edit, write]  // 默认激活
+createReadOnlyToolDefinitions(cwd) → [read, grep, find, ls]    // 只读模式
+createAllToolDefinitions(cwd)     → Record&lt;ToolName, ToolDef&gt;  // 全部可用</pre>
+
+<!-- ════════════ 时序图 ════════════ -->
+<h2>2. 完整时序图：从 LLM 返回 tool_use 到结果回传</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant LLM as LLM API
+    participant RL as runLoop
+    participant ET as executeToolCalls
+    participant HK as beforeToolCall
+    participant T as Tool.execute()
+    participant HK2 as afterToolCall
+
+    LLM-->>RL: tool_use content block
+    RL->>ET: executeToolCalls()
+
+    loop 每个 toolCall
+        ET->>ET: prepareToolCall
+        Note over ET: ①查找工具 ②TypeBox校验 ③beforeToolCall钩子
+        alt 工具不存在/校验失败/被block
+            ET-->>ET: kind="immediate" + isError
+        else kind="prepared"
+            ET->>HK: beforeToolCall拦截检查
+            ET->>T: tool.execute(id, args, signal)
+            T-->>ET: {content, details}
+            ET->>HK2: afterToolCall(可覆盖结果)
+        end
+        ET->>ET: 构建ToolResultMessage
+        ET-->>RL: emit tool_execution_* + message_*
+    end
+
+    RL->>RL: 结果加入消息历史 → 下一轮LLM调用
+</pre>
+</div>
+
+<!-- ════════════ 第 3 章 ════════════ -->
+<h2>3. 沿途每一层：ToolDefinition → AgentTool → execute()</h2>
+
+<h3>3.1 包装层：ToolDefinition → AgentTool</h3>
+
+<p>每个工具先定义为 <code>ToolDefinition</code>（面向扩展系统的富接口），再通过 <code>wrapToolDefinition()</code> 转为 <code>AgentTool</code>（面向 Agent 运行时的精简接口）：</p>
+
+<pre>// tool-definition-wrapper.ts — 适配层
+export function wrapToolDefinition(
+  definition: ToolDefinition,
+  ctxFactory?: () => ExtensionContext,
+): AgentTool {
+  return {
+    name: definition.name,
+    description: definition.description,
+    parameters: definition.parameters,
+    executionMode: definition.executionMode,
+    execute: (id, params, signal, onUpdate) =>
+      definition.execute(id, params, signal, onUpdate, ctxFactory?.()),
+  };
+}</pre>
+
+<p>关键设计：<code>ctxFactory</code> 延迟创建 ExtensionContext，只在工具真正执行时才注入，避免无谓的上下文创建。</p>
+
+<h3>3.2 钩子层：beforeToolCall / afterToolCall</h3>
+
+<p>在 <code>AgentSession._installAgentToolHooks()</code> 中安装，位于 <code>prepareToolCall</code> 和 <code>executePreparedToolCall</code> 之间：</p>
+
+<pre>// agent-session.ts — 工具钩子安装
+this.agent.beforeToolCall = async ({ toolCall, args }) => {
+  const runner = this._extensionRunner;
+  if (!runner.hasHandlers("tool_call")) return undefined;
+  return await runner.emitToolCall({
+    type: "tool_call",
+    toolName: toolCall.name,
+    toolCallId: toolCall.id,
+    input: args,
+  });
+  // 返回值中 {block: true, reason: "..."} 可拦截执行
+};
+
+this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+  // 可覆盖 result.content / result.details / isError
+  const hookResult = await runner.emitToolResult({...});
+  return hookResult ? {
+    content: hookResult.content,
+    details: hookResult.details,
+    isError: hookResult.isError ?? isError,
+  } : undefined;
+};</pre>
+
+<h3>3.3 工具层：四种核心工具的 execute() 模式</h3>
+
+<p>每个工具共享相同的结构骨架——<code>Operations</code> 可插拔接口 + <code>execute()</code> 实现：</p>
+
+<table>
+  <tr><th>工具</th><th>核心操作</th><th>Operations 接口</th><th>关键安全机制</th></tr>
+  <tr>
+    <td><strong>read</strong></td>
+    <td>文件读取（文本/图片）</td>
+    <td><code>readFile</code> + <code>access</code> + <code>detectImageMimeType</code></td>
+    <td>offset/limit 分页、truncateHead 字节+行数双重截断、文件权限检查</td>
+  </tr>
+  <tr>
+    <td><strong>bash</strong></td>
+    <td>命令执行</td>
+    <td><code>exec(command, cwd, {onData, signal, timeout, env})</code></td>
+    <td>spawn detached 进程树、timeout 超时自动 kill、AbortSignal 优雅中断</td>
+  </tr>
+  <tr>
+    <td><strong>write</strong></td>
+    <td>文件创建/覆盖</td>
+    <td><code>writeFile</code> + <code>mkdir</code></td>
+    <td>file-mutation-queue 串行化、自动创建父目录、abort 后不释放队列锁</td>
+  </tr>
+  <tr>
+    <td><strong>edit</strong></td>
+    <td>精确字符串替换</td>
+    <td><code>readFile</code> + <code>writeFile</code> + <code>access(R_OK|W_OK)</code></td>
+    <td>每个 edit.oldText 必须唯一且不重叠、BOM 剥离与行尾规范化、diff/patch 生成用于展示</td>
+  </tr>
+</table>
+
+<p><code>Operations</code> 接口是 Pi 工具系统的<strong>核心扩展点</strong>。默认使用本地文件系统和本地 shell，但通过传入自定义 Operations，你可以让同一套工具代码操作远程文件系统或 SSH 会话，而无需修改工具的核心逻辑。</p>
+
+<!-- ════════════ 第 4 章 ════════════ -->
+<h2>4. 异常路径全景</h2>
+
+<p>工具执行有<strong>四个异常捕获点</strong>，每个都产生 <code>isError=true</code> 的 ToolResultMessage 回传 LLM：</p>
+
+<table>
+  <tr><th>异常类型</th><th>发生阶段</th><th>捕获位置</th><th>LLM 看到的内容</th></tr>
+  <tr>
+    <td><strong>工具未找到</strong></td>
+    <td>prepareToolCall</td>
+    <td><code>ctx.tools.find()</code> 返回 undefined</td>
+    <td><code>"Tool xxx not found"</code></td>
+  </tr>
+  <tr>
+    <td><strong>参数校验失败</strong></td>
+    <td>prepareToolCall</td>
+    <td><code>validateToolArguments()</code> throw</td>
+    <td>TypeBox 校验错误信息</td>
+  </tr>
+  <tr>
+    <td><strong>beforeToolCall 拦截</strong></td>
+    <td>prepareToolCall</td>
+    <td><code>beforeResult?.block === true</code></td>
+    <td><code>beforeResult.reason \|\| "Tool execution was blocked"</code></td>
+  </tr>
+  <tr>
+    <td><strong>execute() 自身异常</strong></td>
+    <td>execution</td>
+    <td><code>executePreparedToolCall</code> 的 catch</td>
+    <td>工具内部 error.message（如 "Permission denied"、"File not found"）</td>
+  </tr>
+</table>
+
+<div class="warn">
+<strong>安全保证：</strong>四种异常路径共享同一个设计原则——异常永远<strong>不</strong>让 Agent 崩溃。所有错误都被转为结构化的 <code>ToolResultMessage {isError: true, content: [...]}</code>，插入消息历史，下一轮 LLM 调用时可以看到错误内容并尝试修正。
+</div>
+
+<p>以 bash 工具的超时和 abort 为例，看 error.message 约定：</p>
+
+<pre>// bash.ts — 结构化错误消息约定
+if (err.message === "aborted") {
+  throw new Error(appendStatus(text, "Command aborted"));
+}
+if (err.message.startsWith("timeout:")) {
+  const timeoutSecs = err.message.split(":")[1];
+  throw new Error(appendStatus(text,
+    `Command timed out after ${timeoutSecs} seconds`));
+}
+// 普通错误原样抛出
+throw err;</pre>
+
+<p>注意：bash 工具<strong>先完成输出收集</strong>（<code>finishOutput()</code>）再抛出错误。这样即使命令超时，LLM 仍能看到命令已经产生的部分输出。</p>
+
+<!-- ════════════ 检索练习 ════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>闭上眼回想，不上翻，回答以下问题：</p>
+<ol>
+  <li>从 <code>_buildRuntime()</code> 到 Agent 拿到可用工具列表，经历了哪三个步骤？</li>
+  <li><code>wrapToolDefinition()</code> 的 ctxFactory 参数为什么设计为延迟调用（函数而非直接传值）？</li>
+  <li>Operations 接口的意义是什么？举一个 read 工具中 Operations 的使用场景。</li>
+  <li>bash 工具的超时和 abort 处理为什么先收集完输出再 throw？这给 LLM 带来了什么好处？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>三步：(1) <code>createAllToolDefinitions(cwd)</code> 生成 7 个内置 ToolDefinition；(2) 创建 ExtensionRunner 加载扩展工具；(3) <code>_refreshToolRegistry()</code> 合并三层工具 → 过滤 → 包装为 AgentTool → 写入 agent.state.tools。</li>
+  <li>延迟调用避免了在工具注册阶段（而非执行阶段）创建 ExtensionContext。扩展可能未完全初始化，或 Context 依赖运行时状态（如当前工作目录），延迟到 execute 时调用能拿到最新状态。</li>
+  <li>Operations 是可插拔操作接口，允许替换底层实现而不改工具核心逻辑。例如 read 工具的默认 <code>defaultReadOperations.readFile</code> 使用本地 <code>fs.readFile</code>，但传入自定义 <code>operations.readFile</code> 可以实现从远程服务器读取文件。</li>
+  <li>先收集完输出再 throw，确保即使命令失败（超时/abort），<b>部分输出</b> 仍能写入 ToolResultMessage 的 text content。LLM 看到错误的同时也能看到命令的部分输出，有助于 LLM 做出更准确的修正决策。</li>
+</ol>
+</details>
+</div>
+
+<!-- ════════════ 参考资料 ════════════ -->
+<h3>参考资料</h3>
+<ul>
+  <li><strong>前置课程</strong>：<a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">L1-module-coding-agent — pi-coding-agent 模块总览</a>（7 个标准工具名称与目录结构）</li>
+  <li><strong>前置课程</strong>：<a href="../../slice-agent-loop/lessons/0001-flow-map.html">L2-slice-agent-loop — Agent 对话循环全链路</a>（executeToolCalls 在双层循环中的调用位置）</li>
+  <li><strong>锚点课程</strong>：<a href="../../00-overview/lessons/0001-project-map.html">L0 项目总览</a>（coding-agent 包在 monorepo 中的定位）</li>
+  <li><strong>参考文档</strong>：<a href="../reference/tool-execution-reference.html">tool-execution-reference.html</a> — 工具接口速查与源码索引</li>
+  <li><strong>源码入口</strong>：<code>packages/coding-agent/src/core/tools/index.ts</code> — ToolName 类型与工厂函数</li>
+  <li><strong>源码入口</strong>：<code>packages/coding-agent/src/core/agent-session.ts:2338-2429</code> — _refreshToolRegistry</li>
+  <li><strong>源码入口</strong>：<code>packages/coding-agent/src/core/agent-session.ts:2431-2483</code> — _buildRuntime</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/agent-loop.ts</code> — executeToolCalls (permission 拒绝见 prepare 阶段)</li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对 "并行模式下 beforeToolCall 和 afterToolCall 的执行顺序"、"executionMode 如何影响工具调度"、或 "如何为自定义工具实现 Operations 接口" 有疑问，可以直接向 AI 教师追问。例如："如果我写了一个 SSH 的 BashOperations，beforeToolCall 钩子还能拦截吗？"、"文件不存在时 read 工具的 execute() 各步骤是什么样的？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../slice-agent-loop/lessons/0001-flow-map.html">← 上一节：Agent 对话循环全链路</a>
+  <a href="../reference/tool-execution-reference.html">参考文档：工具接口速查 →</a>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

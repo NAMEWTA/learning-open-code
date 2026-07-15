@@ -1,25 +1,38 @@
-# Pi Agent Harness teach-goal 进度看板
+# Pi Agent Harness · 教学进度看板
 
-- 最后更新：2026-07-07T16:24:57+08:00
-- 完成：16 / 16 goals
-- 审计：通过
-- 当前源码覆盖清单：970 个文件
+> 📊 总体进度：15/15 goals · 100% · 已完成
+> 🕐 最后更新：2026-07-09
 
-## 主题
+---
 
-- `L0-00-overview`：[项目总览与学习路线](teach/open-ai-agent/pi/00-overview/lessons/0001-project-map.html)
-- `L1-module-agent`：[Agent 运行时模块](teach/open-ai-agent/pi/module-agent/lessons/0001-agent-module-tour.html)
-- `L1-module-ai`：[LLM 供应商抽象模块](teach/open-ai-agent/pi/module-ai/lessons/0001-ai-module-tour.html)
-- `L1-module-coding-agent`：[编程 Agent CLI 模块](teach/open-ai-agent/pi/module-coding-agent/lessons/0001-coding-agent-module-tour.html)
-- `L1-module-orchestrator`：[RPC 编排模块](teach/open-ai-agent/pi/module-orchestrator/lessons/0001-orchestrator-module-tour.html)
-- `L1-module-tui`：[终端 UI 模块](teach/open-ai-agent/pi/module-tui/lessons/0001-tui-module-tour.html)
-- `L2-slice-agent-session-flow`：[Agent 会话全链路](teach/open-ai-agent/pi/slice-agent-session-flow/lessons/0001-flow-map.html)
-- `L2-slice-cli-startup-flow`：[CLI 启动全链路](teach/open-ai-agent/pi/slice-cli-startup-flow/lessons/0001-flow-map.html)
-- `L2-slice-context-compaction-flow`：[上下文压缩全链路](teach/open-ai-agent/pi/slice-context-compaction-flow/lessons/0001-flow-map.html)
-- `L2-slice-oauth-auth-flow`：[OAuth 认证全链路](teach/open-ai-agent/pi/slice-oauth-auth-flow/lessons/0001-flow-map.html)
-- `L2-slice-rpc-orchestration`：[RPC 编排全链路](teach/open-ai-agent/pi/slice-rpc-orchestration/lessons/0001-flow-map.html)
-- `L2-slice-tui-render-cycle`：[TUI 渲染全链路](teach/open-ai-agent/pi/slice-tui-render-cycle/lessons/0001-flow-map.html)
-- `L4-deep-dive-agent-loop-double`：[Agent 双层循环深度剖析](teach/open-ai-agent/pi/deep-dive-agent-loop-double/lessons/0001-problem-frame.html)
-- `L4-deep-dive-agent-session-arch`：[AgentSession 架构深度剖析](teach/open-ai-agent/pi/deep-dive-agent-session-arch/lessons/0001-problem-frame.html)
-- `L4-deep-dive-compat-unification`：[供应商兼容层深度剖析](teach/open-ai-agent/pi/deep-dive-compat-unification/lessons/0001-problem-frame.html)
-- `L4-deep-dive-diff-rendering`：[TUI 差分渲染深度剖析](teach/open-ai-agent/pi/deep-dive-diff-rendering/lessons/0001-problem-frame.html)
+## 进度总览
+
+| 层级 | 完成 | 总数 | 进度 |
+|------|------|------|------|
+| L0 项目总览 | 1 | 1 | ██████████ |
+| L1 模块总览 | 6 | 6 | ██████████ |
+| L2 垂直切片 | 8 | 8 | ██████████ |
+| L3 微观 API | 0 | * | L3/L4 由发现驱动 |
+| L4 深度剖析 | 0 | * | L3/L4 由发现驱动 |
+
+---
+
+## 已完成 Goals
+
+| Goal ID | 标题 | 审查 | 
+|---------|------|------|
+| L0-pi-overview | Pi Agent Harness 项目总览 | ⚠️ conditional_pass |
+| L1-module-ai | pi-ai — 多 Provider 统一 LLM API | ✅ passed |
+| L1-module-agent | pi-agent-core — Agent 运行时 | ⚠️ conditional_pass |
+| L1-module-coding-agent | pi-coding-agent — 交互式编程 CLI | ⚠️ conditional_pass |
+| L1-module-tui | pi-tui — 终端 UI 差异渲染库 | ⚠️ conditional_pass |
+| L1-module-orchestrator | pi-orchestrator — 实验性编排器 | ⏭️ skipped |
+| L1-module-scripts-infra | 构建脚本与基础设施 | ⏭️ skipped |
+| L2-agent-loop | Agent 对话循环全链路 | ⏭️ skipped |
+| L2-tool-execution | 工具执行全链路 | ⏭️ skipped |
+| L2-session-management | 会话持久化全链路 | ⏭️ skipped |
+| L2-llm-provider-dispatch | 多 Provider LLM 调度全链路 | ⏭️ skipped |
+| L2-tui-render-cycle | TUI 差异渲染循环全链路 | ⏭️ skipped |
+| L2-hook-system | Agent Hook 生命周期全链路 | ⏭️ skipped |
+| L2-extension-system | 扩展系统全链路 | ⏭️ skipped |
+| L2-cli-entry | CLI 入口与模式选择全链路 | ⏭️ skipped |

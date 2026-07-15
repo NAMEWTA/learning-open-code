@@ -14,7 +14,7 @@
 
 ## 每个垂直切片主题必须覆盖 5 要素
 
-这些要素不要求塞进同一节课。复杂链路必须拆成同一 `slice-*` 主题下的多节短课。
+这些要素不要求塞进同一节课，由模型根据实际情况分配到各节课程中。复杂链路必须拆成同一 `slice-*` 主题下的多节短课。
 
 1. **入口点**：HTTP 路由 / CLI 命令 / 事件监听 / UI 事件处理等，附真实代码片段
 2. **沿途每一层**：中间件 → Controller → Service → Repository/DAO → 外部依赖（DB、缓存、消息队列、第三方 API），每节课只展开少量关键层
@@ -52,20 +52,19 @@ sequenceDiagram
 
 ## 命名规范
 
-每个垂直切片是一个独立 teach 主题目录 `slice-<功能-slug>/`，课程文件沿用 `.agents/skills/teach/SKILL.md` 的编号命名。
+每个垂直切片是一个独立 teach 主题目录 `slice-<功能-slug>/`，课程文件沿用 `.agents/skills/teach/SKILL.md` 的编号命名（`000N-<slug>.html`）。
 
 - `<功能-slug>`：短横线命名的功能英文简述（如 `auth-login-flow`、`order-checkout-flow`）
-- 简单切片至少生成 `lessons/0001-flow-map.html`
-- 复杂切片拆成 `lessons/0001-flow-map.html`、`lessons/0002-main-path.html`、`lessons/0003-error-path.html` 等多节短课
+- **课程数量与 `<slug>` 命名由模型根据功能复杂度自主决定**，不预设固定课程名称或数量
 - 长源码索引、接口列表、状态表放入 `reference/<功能-slug>-flow-map.html`
 - 任务单中的 `output_path` 只是主入口，不代表全部交付物
 
 ## L2 垂直切片的内容生成
 
-垂直切片作为 teach 主题产出，**subagent 必须 Read 并激活 `.agents/skills/teach/SKILL.md`**，按短课合约生成一组可完成的 HTML 课程。teach-goal 在任务单中提供：
+垂直切片作为 teach 主题产出，**subagent 必须 Read 并激活 `.agents/skills/teach/SKILL.md`**，按短课合约生成一组可完成的 HTML 课程。课程数量与拆分由模型根据源码复杂度自主决定。teach-goal 在任务单中提供：
 - 垂直切片涉及的所有源码文件及行号
 - 层级顺序（如"路由 → 中间件 → Service → DAO → 数据库"）
 - 必须覆盖的异常路径
 - 关联的 L1/L3 文档路径
 
-如果任务单涉及源码超过 3 个文件或链路超过 4 个阶段，subagent 必须先拆 lesson manifest，再逐节生成短课。
+模型综合以上信息，自行判断需要几节短课以及每节课聚焦什么角度。如果涉及源码超过 3 个文件或链路超过 4 个阶段，通常需要多节短课。

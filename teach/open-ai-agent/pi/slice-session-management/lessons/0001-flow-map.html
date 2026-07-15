@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 - 会话持久化全链路地图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+    --warn-bg: #fff8e6;
+    --warn-border: #e6a817;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .filetree {
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+  }
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  .layer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .layer {
+    padding: 0.7rem 1rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .layer:last-child { border-bottom: none; }
+  .layer-num {
+    width: 28px; height: 28px;
+    background: var(--accent); color: #fff;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; font-weight: 700; flex-shrink: 0;
+  }
+  .layer-info { flex: 1; }
+  .layer-name { font-weight: 600; font-size: 0.95rem; }
+  .layer-desc { font-size: 0.82rem; color: var(--muted); }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+
+  .warn {
+    background: var(--warn-bg);
+    border-left: 4px solid var(--warn-border);
+    padding: 0.8rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>0001 — 会话持久化全链路地图</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：14 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>理解一条 Agent 消息从 <code>agent.prompt()</code> 到 JSONL 磁盘文件的<strong>完整数据流</strong>——穿越 Session 树、存储引擎、仓库索引、以及上下文压缩这四层，并能说出每层的职责和关键数据结构。</p>
+
+<!-- ═══════════════ 第 1 章：全链路概览 ═══════════════ -->
+<h2>1. 四层架构与入口点</h2>
+
+<p>会话持久化链路从上到下分为四层。入口是 <code>Agent.prompt()</code> 触发消息生成后，由 harness 调用 <code>session.appendMessage()</code>：</p>
+
+<div class="layer-stack">
+  <div class="layer">
+    <div class="layer-num">1</div>
+    <div class="layer-info">
+      <div class="layer-name">Session 树（session.ts）</div>
+      <div class="layer-desc">将 AgentMessage 包装为 SessionTreeEntry，挂到 parentId 链表上。提供 appendMessage / appendCompaction / moveTo 等操作。</div>
+    </div>
+  </div>
+  <div class="layer">
+    <div class="layer-num">2</div>
+    <div class="layer-info">
+      <div class="layer-name">存储引擎（jsonl-storage.ts / memory-storage.ts）</div>
+      <div class="layer-desc">实现 SessionStorage 接口。JSONL 引擎逐行追加到文件，内存引擎存入数组。LeafEntry 追踪当前位置。</div>
+    </div>
+  </div>
+  <div class="layer">
+    <div class="layer-num">3</div>
+    <div class="layer-info">
+      <div class="layer-name">仓库层（jsonl-repo.ts / memory-repo.ts）</div>
+      <div class="layer-desc">管理会话生命周期：create/open/list/delete/fork。cwd 编码为目录名，时间戳+sessionId 组成文件名。</div>
+    </div>
+  </div>
+  <div class="layer">
+    <div class="layer-num">4</div>
+    <div class="layer-info">
+      <div class="layer-name">上下文压缩（compaction.ts）</div>
+      <div class="layer-desc">当 token 超阈值时，摘要旧消息并注入 compaction entry，保持上下文窗口可控。</div>
+    </div>
+  </div>
+</div>
+
+<p><strong>入口点：</strong>Agent 主循环在每轮对话完成后调用 <code>session.appendMessage()</code>（第 1 层），将产生的 AgentMessage 写入会话树。随后在下一轮开始前检查是否需要压缩（第 4 层）。</p>
+
+<!-- ═══════════════ 调用时序图 ═══════════════ -->
+<h3>完整调用时序</h3>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant Agent as Agent (agent.ts)
+    participant Session as Session (session.ts)
+    participant Storage as JsonlSessionStorage
+    participant FS as FileSystem
+    participant Compaction as Compaction (compaction.ts)
+    participant LLM as LLM API
+
+    Agent->>Session: appendMessage(msg)
+    Session->>Storage: createEntryId()
+    Storage-->>Session: id (UUIDv7 尾 8 位)
+    Session->>Storage: appendEntry(MessageEntry)
+    Storage->>FS: appendFile(jsonl, JSON line)
+    Note over Storage: Leaf 自动前移
+
+    Agent->>Agent: 检查上下文 token 数
+    Agent->>Compaction: prepareCompaction(pathEntries)
+    Compaction->>Compaction: findCutPoint() 选择切点
+    Compaction-->>Agent: CompactionPreparation
+
+    alt 需要压缩
+        Agent->>Compaction: compact(prep, models, model)
+        Compaction->>LLM: 发送摘要请求
+        LLM-->>Compaction: 结构化摘要
+        Compaction-->>Agent: summary + firstKeptEntryId
+        Agent->>Session: appendCompaction(summary, ...)
+        Session->>Storage: appendEntry(CompactionEntry)
+        Storage->>FS: appendFile(jsonl, JSON line)
+    end
+</pre>
+</div>
+
+<!-- ═══════════════ 第 2 章：JSONL 存储引擎 ═══════════════ -->
+<h2>2. JSONL 存储引擎</h2>
+
+<p>JSONL 文件的第一行永远是 <strong>SessionHeader</strong>（type 为 <code>"session"</code>，version 固定为 3），后续每行是一个 SessionTreeEntry。LeafEntry 是特殊的"指针"条目——它不包含业务数据，只记录当前会话树走到了哪个节点。</p>
+
+<h3>JsonlSessionStorage 核心方法</h3>
+
+<table>
+  <tr><th>方法</th><th>触发时机</th><th>磁盘操作</th></tr>
+  <tr><td><code>static create()</code></td><td>新建会话</td><td>writeFile：写入 SessionHeader 行</td></tr>
+  <tr><td><code>static open()</code></td><td>打开已有会话</td><td>readTextFile：解析全部行到内存</td></tr>
+  <tr><td><code>appendEntry()</code></td><td>每次消息/事件写入</td><td>appendFile：追加一行 JSON</td></tr>
+  <tr><td><code>setLeafId()</code></td><td>分支切换 (moveTo)</td><td>appendFile：追加 LeafEntry 行</td></tr>
+  <tr><td><code>getPathToRoot()</code></td><td>构建上下文 / Fork</td><td>纯内存：沿 parentId 回溯</td></tr>
+</table>
+
+<p>关键设计：<strong>内存缓存</strong>。open() 时将整个 JSONL 文件解析到内存的 <code>byId</code> Map 和 <code>entries</code> 数组中。后续所有读操作（getEntry、getPathToRoot、findEntries）都是 O(1) 内存查询，不读磁盘。写操作（appendEntry）同步更新内存缓存并追加磁盘。</p>
+
+<div class="warn">
+<strong>异常路径：JSONL 解析错误。</strong>如果 JSONL 文件损坏（非 JSON 行、缺少 type 字段、version 不匹配），<code>parseHeaderLine()</code> 和 <code>parseEntryLine()</code> 会抛出 <code>SessionError("invalid_session")</code> 或 <code>SessionError("invalid_entry")</code>。仓库层的 <code>list()</code> 方法在枚举会话目录时会捕获 <code>invalid_session</code> 错误并跳过损坏文件，保证其他会话不受影响。
+</div>
+
+<!-- ═══════════════ 第 3 章：仓库层 ═══════════════ -->
+<h2>3. 仓库层：会话生命周期管理</h2>
+
+<p>JsonlSessionRepo 管理磁盘上的会话目录结构：</p>
+
+<div class="filetree">
+~/.pi/sessions/
+└── --Users-wta-projects-myapp--/       ← cwd 编码为目录名
+    ├── 2026-07-09T10-30-00-000Z_abc123.jsonl
+    ├── 2026-07-09T11-15-00-000Z_def456.jsonl
+    └── 2026-07-09T14-00-00-000Z_ghi789.jsonl
+</div>
+
+<p><strong>cwd 编码规则：</strong><code>encodeCwd()</code> 将路径中的 <code>/</code>、<code>\</code>、<code>:</code> 替换为 <code>-</code>，前后加 <code>--</code>。例如 <code>/Users/wta/myapp</code> 变为 <code>--Users-wta-myapp--</code>。这保证了不同项目目录的会话隔离。</p>
+
+<p><strong>Fork 操作</strong>是仓库层最复杂的操作。它不复制 JSONL 文件，而是创建新文件并写入从根到 fork 点的所有条目。核心逻辑在 <code>repo-utils.ts</code> 的 <code>getEntriesToFork()</code>：</p>
+
+<pre>// 简化逻辑：getEntriesToFork 的三种路径
+// 1. 不指定 entryId → 返回全部 entries（完整拷贝）
+// 2. position="before" → 找到 entryId 对应的 user message，取其 parentId
+//    然后沿 parentId 回溯到根
+// 3. position="at" → 以 entryId 自身为终点回溯到根</pre>
+
+<p><strong>双后端设计：</strong>InMemorySessionRepo 与 JsonlSessionRepo 实现相同的 SessionRepo 接口，差异仅在于存储介质（Map vs 文件系统）。两者共享 <code>repo-utils.ts</code> 中的 createSessionId、toSession、getEntriesToFork 等工具函数，确保行为一致性。</p>
+
+<!-- ═══════════════ 第 4 章：上下文压缩 ═══════════════ -->
+<h2>4. 上下文压缩链路</h2>
+
+<p>当上下文 token 数超过 <code>contextWindow - reserveTokens</code>（默认 reserveTokens=16384）时触发压缩。压缩流程分三步：</p>
+
+<h3>4.1 判断是否需要压缩</h3>
+
+<pre>// compaction.ts — shouldCompact
+export function shouldCompact(
+  contextTokens: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): boolean {
+  if (!settings.enabled) return false;
+  return contextTokens > contextWindow - settings.reserveTokens;
+}</pre>
+
+<p>Token 估算优先使用 provider 返回的 <code>usage</code> 字段（精确值），兜底使用字符数 / 4 的启发式估算（<code>estimateTokens()</code>）。</p>
+
+<h3>4.2 选择切点</h3>
+
+<p><code>findCutPoint()</code> 从消息列表尾部向前累积 token，当累积量达到 <code>keepRecentTokens</code>（默认 20000）时，向前搜索最近的合法切点。合法切点包括 user message、assistant message、branch_summary 等，但排除 toolResult（不能在工具结果中间切断）。</p>
+
+<p>如果切点落在一个轮次中间（非 user message 开头），<code>isSplitTurn=true</code>，此时轮次前半部分需要单独的 turn prefix 摘要。</p>
+
+<h3>4.3 生成摘要并写入</h3>
+
+<p><code>generateSummary()</code> 将待摘要消息序列化为文本（通过 <code>serializeConversation()</code>），发送给 LLM 生成结构化摘要。摘要格式包含 Goal、Progress、Key Decisions、Next Steps 等字段。如果有前次压缩，使用 UPDATE_SUMMARIZATION_PROMPT 增量更新而非重新生成。</p>
+
+<p>最终 <code>compact()</code> 将摘要文本、文件操作列表（read/modified files）格式化为 <code>CompactionResult</code>，由 harness 调用 <code>session.appendCompaction()</code> 写入会话树。</p>
+
+<!-- ═══════════════ 检索练习 ═══════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>不看上文，回答以下问题：</p>
+<ol>
+  <li>会话持久化的四层架构分别是什么？每层的核心职责？</li>
+  <li>LeafEntry 的作用是什么？它和 SessionTreeEntry 的其他类型有何不同？</li>
+  <li>如果 JSONL 文件第一行的 version 字段不是 3，会发生什么？</li>
+  <li>Fork 操作是复制整个 JSONL 文件吗？实际实现是怎样的？</li>
+  <li>压缩的触发条件公式是什么？合法切点排除哪种条目类型？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>Session 树（消息→条目包装）、存储引擎（JSONL/内存读写）、仓库层（CRUD + 目录管理）、上下文压缩（token 管理 + 摘要生成）。</li>
+  <li>LeafEntry 是会话位置的"指针"，targetId 指向当前活跃节点。其他条目承载业务数据（消息、压缩摘要等），LeafEntry 只记录"走到的位置"，不参与上下文构建。</li>
+  <li><code>parseHeaderLine()</code> 抛出 <code>SessionError("invalid_session", "unsupported session version")</code>，仓库层 <code>list()</code> 会跳过该文件。</li>
+  <li>不是复制文件。是创建新 JSONL 文件，写入从根到 fork 点的条目（通过 getPathToRoot 回溯 parentId 链），新文件的 parentSession 指向源文件路径。</li>
+  <li>触发条件：<code>contextTokens > contextWindow - reserveTokens</code>（默认 reserveTokens=16384）。合法切点排除 toolResult 条目，因为不能在工具结果中间切断轮次。</li>
+</ol>
+</details>
+</div>
+
+<!-- ═══════════════ 参考资料 ═══════════════ -->
+<h3>参考资料</h3>
+<ul>
+  <li><strong>前置课程</strong>：<a href="../../module-agent/lessons/0001-agent-module-tour.html">L1-module-agent：pi-agent-core 模块总览</a> — 回顾 harness 五层架构中 session/ 和 compaction/ 的位置</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/harness/session/jsonl-storage.ts</code> — JSONL 存储引擎（304 行）</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/harness/session/jsonl-repo.ts</code> — JSONL 仓库 CRUD（177 行）</li>
+  <li><strong>源码入口</strong>：<code>packages/agent/src/harness/compaction/compaction.ts</code> — 压缩核心逻辑（753 行）</li>
+  <li><strong>类型定义</strong>：<code>packages/agent/src/harness/types.ts</code> — SessionTreeEntry 联合类型（11 种）、SessionStorage/SessionRepo 接口</li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对任何概念有疑问，可以直接向 AI 教师追问。例如："buildSessionContext 如何处理 compaction entry？"、"UUIDv7 为什么取尾部 8 位作为短 ID？"、"memory-storage 和 jsonl-storage 的代码重复度有多高？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../module-agent/lessons/0001-agent-module-tour.html">← L1：pi-agent-core 模块总览</a>
+  <a href="../reference/session-storage-api.html">参考文档：SessionStorage API →</a>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

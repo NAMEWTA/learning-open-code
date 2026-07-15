@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>定时任务全链路 -- 从自然语言 cron 到多平台投递</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --muted: #555;
+    --accent: #2563eb;
+    --bg: #fefefe;
+    --code-bg: #f6f8fa;
+    --border: #e0e0e0;
+    --tag-bg: #eff6ff;
+    --tag-text: #2563eb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "LXGW WenKai", "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+    font-size: 17px; line-height: 1.8; color: var(--text);
+    max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: var(--bg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; font-weight: 700; }
+  h1 .sub { display: block; font-size: 0.95rem; color: var(--muted); font-weight: 400; margin-top: 0.2rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 0.7rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .intro { font-size: 1.05rem; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0 1.5rem; }
+  .tag { display: inline-block; background: var(--tag-bg); color: var(--tag-text); padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.82rem; margin-right: 0.3rem; }
+  .tags { margin: 0.5rem 0; }
+
+  code { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; margin: 0.8rem 0; }
+  pre code { background: none; padding: 0; }
+
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+
+  .practice { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 1.2rem 1.2rem 0.8rem; margin: 2rem 0 1rem; }
+  .practice h3 { margin-top: 0; color: #2563eb; }
+  .practice ol { margin: 0.5rem 0 0 1.2rem; }
+  .practice li { margin: 0.4rem 0; }
+  details { margin: 0.6rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  details .answer { padding: 0.5rem 0 0.3rem 1rem; border-left: 2px solid #bfdbfe; margin-left: 0.3rem; }
+
+  .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  .warn { background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 0.8rem 1rem; margin: 0.8rem 0; font-size: 0.92rem; }
+  .warn strong { color: #dc2626; }
+
+  table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 0.3rem 0.5rem; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>定时任务全链路
+  <span class="sub">L2 垂直切片 -- 从自然语言 cron 到多平台投递的完整调用时序</span>
+</h1>
+
+<p class="meta">
+  学习目标：追踪一条 cron 指令穿越 NL 解析、表达式计算、持久化、调度心跳、Agent 执行、守护扫描、多平台投递七阶段的完整链路 |
+  预估时长：15 分钟 |
+  前置课程：<a href="../../module-cron/lessons/0001-cron-module-tour.html">L1 定时任务调度</a>、
+  <a href="../../module-gateway/lessons/0001-gateway-module-tour.html">L1 消息网关</a>
+</p>
+
+<!-- ═══════════ H2-1 ═══════════ -->
+<h2>一、全链路七阶段总览</h2>
+
+<div class="intro">
+  用户在聊天窗口输入 <code>/cron every 30m 查下 BTC 价格</code>，这 40 个字符最终变成一条穿越七个模块、经历两层安全扫描、抵达 Telegram/Discord/Slack 等 19+ 平台之一的可靠消息。下面按时间线追踪全链路。
+</div>
+
+<div class="tags">
+  <span class="tag">7 个阶段</span>
+  <span class="tag">5 个源文件</span>
+  <span class="tag">垂直切片</span>
+  <span class="tag">NL→Expression→Persist→Tick→Execute→Guard→Deliver</span>
+</div>
+
+<h3>链路时序图</h3>
+
+<div class="diagram">用户: "/cron every 30m 查下 BTC 价格"
+  │
+  ▼ [阶段1: NL Cron 解析]  cron/jobs.py:parse_schedule()
+  │    "every 30m" → {"kind":"interval","minutes":30}
+  │
+  ▼ [阶段2: Expression 计算]  cron/jobs.py:compute_next_run()
+  │    now + 30min → "2026-07-09T15:30:00+08:00" 存入 next_run_at
+  │
+  ▼ [阶段3: 持久化]  cron/jobs.py:create_job()
+  │    ┌─ check_gateway_lifecycle(prompt)  ← 第1道防线：阻断自杀命令
+  │    └─ jobs.json 写入 + 原子替换（atomic_replace）
+  │
+  ▼ [阶段4: 调度心跳]  cron/scheduler.py:tick()
+  │    ┌─ 文件锁 (.tick.lock) 防多进程并发
+  │    ├─ get_due_jobs() → 到期判定 + 时区迁移修复 + 追赶折叠
+  │    ├─ advance_next_run() → 预前进，防崩溃重入
+  │    └─ 双线程池分区 dispatch → 并行池 + 顺序池
+  │
+  ▼ [阶段5: Agent 执行]  cron/scheduler.py:run_job()
+  │    ┌─ no_agent 短路 → 脚本 stdout 直出
+  │    ├─ _build_job_prompt() → 拼装 skill + script + context_from
+  │    ├─ _scan_assembled_cron_prompt() ← 第2道防线：注入扫描
+  │    └─ AIAgent 构造 + 模型推理 → final_response
+  │
+  ▼ [阶段6: 守护扫描]  (嵌入阶段3和阶段5)
+  │    ┌─ lifecycle_guard.py    → 创建时阻断 gateway restart/stop/kill
+  │    └─ _scan_assembled_cron_prompt → 运行时扫描 skill 注入载荷
+  │
+  ▼ [阶段7: 投递]  cron/scheduler.py:_deliver_result()
+       ┌─ 解析 deliver 目标 (origin/local/telegram:chat_id/all)
+       ├─ live adapter 优先 → DeliveryRouter 路由
+       ├─ standalone asyncio 回退 → 新线程回退 → 解释器关闭跳过
+       └─ mirror_to_session 写入会话记录</div>
+
+<table>
+  <tr><th>阶段</th><th>入口函数</th><th>源文件</th><th>关键决策</th></tr>
+  <tr><td>1. NL 解析</td><td><code>parse_schedule()</code></td><td>cron/jobs.py</td><td>识别 kind: once/interval/cron</td></tr>
+  <tr><td>2. 表达式计算</td><td><code>compute_next_run()</code></td><td>cron/jobs.py</td><td>croniter.get_next() 或 now+interval</td></tr>
+  <tr><td>3. 持久化</td><td><code>create_job()</code></td><td>cron/jobs.py</td><td>lifecycle_guard 阻断 + 原子写</td></tr>
+  <tr><td>4. 调度心跳</td><td><code>tick()</code></td><td>cron/scheduler.py</td><td>文件锁 + 双线程池 + 预前进</td></tr>
+  <tr><td>5. Agent 执行</td><td><code>run_job()</code></td><td>cron/scheduler.py</td><td>no_agent 短路 / AIAgent 推理</td></tr>
+  <tr><td>6. 守护扫描</td><td><code>check_gateway_lifecycle()</code></td><td>cron/lifecycle_guard.py</td><td>创建时 4 分支正则 + 运行时注入扫描</td></tr>
+  <tr><td>7. 投递</td><td><code>_deliver_result()</code></td><td>cron/scheduler.py</td><td>四级回退 + dead-target 自愈</td></tr>
+</table>
+
+<!-- ═══════════ H2-2 ═══════════ -->
+<h2>二、调度心跳与双线程池并行模型</h2>
+
+<div class="intro">
+  <code>tick()</code> 每 60 秒由 <code>InProcessCronScheduler</code> 的守护线程触发。它不直接执行任务——而是将到期作业<strong>火后即忘</strong>（fire-and-forget）地提交到两个持久化线程池，立即返回，绝不阻塞心跳循环。
+</div>
+
+<h3>双线程池分区策略</h3>
+
+<p>作业按 <code>workdir</code> 字段分为两组，分别进入不同的线程池：</p>
+
+<div class="diagram">due_jobs
+  │
+  ├─ workdir 有值 → sequential_pool (max_workers=1)
+  │   原因：workdir 作业通过 os.environ["TERMINAL_CWD"]
+  │   修改进程级全局状态，必须串行执行
+  │
+  └─ workdir 为空 → parallel_pool (max_workers 可配)
+      原因：无 workdir 的作业不修改全局状态，可安全并发
+      隔离手段：_terminal_cwd_lock (写优先读写锁)</div>
+
+<p>关键代码——tick() 的分区调度核心（<code>cron/scheduler.py:3489-3572</code>）：</p>
+
+<pre><code># 1. 按 workdir 分区
+sequential_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
+parallel_jobs   = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
+
+# 2. 顺序池：env 突变作业串行排队（不阻塞 ticker）
+if sequential_jobs:
+    seq_pool = _get_sequential_pool()  # 持久化，max_workers=1
+    for job in sequential_jobs:
+        fut = _submit_with_guard(job, seq_pool)
+
+# 3. 并行池：无 workdir 作业并发执行
+if parallel_jobs:
+    pool = _get_parallel_pool(_max_workers)  # 持久化，可配并发度
+    for job in parallel_jobs:
+        fut = _submit_with_guard(job, pool)
+
+# 4. 异步模式：fire-and-forget，不等待结果
+#    sync 模式（测试/手动 tick）：concurrent.futures.as_completed() 等待全部</code></pre>
+
+<p>设计的核心洞察：两个线程池都是<strong>持久化的</strong>（模块级单例），跨 tick 复用。一个耗时 15 分钟的 fixer 作业不会阻塞后续 60 秒心跳中其他作业的调度——它运行在自己的线程里，而 ticker 早已返回等待下一秒。</p>
+
+<p>此外，<code>_submit_with_guard</code> 通过 <code>_running_job_ids</code> 集合防止同一作业被重复提交——如果前一次 tick 的作业仍在运行，新 tick 会跳过它。</p>
+
+<!-- ═══════════ H2-3 ═══════════ -->
+<h2>三、守护防线：双层阻断机制</h2>
+
+<div class="intro">
+  两条防线在<strong>不同时间点</strong>阻断不同威胁。理解它们的差异是定位"作业被拒绝"问题的关键。
+</div>
+
+<h3>第 1 道防线：创建时 lifecycle_guard</h3>
+
+<p>在 <code>create_job()</code> 中调用 <code>check_gateway_lifecycle(prompt, script)</code>，用四分支正则匹配 shell 级 gateway 自杀命令（<code>cron/lifecycle_guard.py:48-66</code>）：</p>
+
+<pre><code>_GATEWAY_LIFECYCLE_PATTERN = re.compile(r"(?i)"
+    # 分支 A: hermes gateway restart|stop
+    r"(?:hermes\s+gateway\s+(?:restart|stop))"
+    # 分支 B: launchctl kickstart|unload|... hermes[.-]?gateway
+    r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart)"
+    r"\b[^\n]*\bhermes[.\-]?gateway)"
+    # 分支 C: systemctl restart|stop|start ... hermes[.-]?gateway
+    r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)"
+    r"\b[^\n]*\bhermes[.\-]?gateway)"
+    # 分支 D: pkill / kill 目标为 hermes gateway 进程
+    r"|(?:p?kill\b[^\n]*\bhermes\b[^\n]*\bgateway)"
+    r"|(?:p?kill\b[^\n]*\bgateway\b[^\n]*\bhermes)"
+)</code></pre>
+
+<div class="warn">
+  <strong>异常路径示例：</strong>如果 cron prompt 为 "每天晚上重启 gateway 以清理内存"，<code>create_job()</code> 会抛出 <code>GatewayLifecycleBlocked</code>，作业<strong>不会被创建</strong>。这防止了 #30719 描述的 SIGTERM-respawn 死循环——cron 触发 gateway restart → gateway 死亡 → supervisor 复活 gateway → 恢复会话 → 再次触发 restart。
+</div>
+
+<h3>第 2 道防线：运行时 prompt injection 扫描</h3>
+
+<p>在 <code>_build_job_prompt()</code> 拼装完 prompt + skill + script 输出后，调用 <code>_scan_assembled_cron_prompt()</code>。这填补了 #3968 漏洞：创建时只扫描用户 prompt，但 skill 内容在运行时才从磁盘加载，恶意 skill 可携带注入载荷抵达非交互式（自动审批工具调用）的 cron agent。</p>
+
+<p>两套模式自适应选择：无 skill/数据注入时使用<strong>严格模式</strong>（阻断裸命令）；有注入内容时使用<strong>宽松模式</strong>（仅阻断明确的注入指令，不可见 Unicode 清洗而非阻断）。</p>
+
+<h3>投递四级回退链</h3>
+
+<p>执行完毕后的 <code>_deliver_result()</code> 并非简单发送——它有四级回退（<code>cron/scheduler.py:1308-1876</code>）：</p>
+
+<pre><code># 级别 1：live adapter（网关运行时，支持 E2EE）
+if runtime_adapter and loop.is_running():
+    router._deliver_to_platform(target, text, metadata)
+    # 失败 → 进入回退
+
+# 级别 2：standalone asyncio.run()
+asyncio.run(_send_to_platform(...))
+# RuntimeError（已有运行中的 loop）→ 进入回退
+
+# 级别 3：新线程中 asyncio.run()
+pool.submit(asyncio.run, _send_to_platform(...))
+# 解释器关闭中 → 进入回退
+
+# 级别 4：优雅跳过
+if _interpreter_shutting_down():
+    logger.warning("delivery skipped — interpreter shutting down")</code></pre>
+
+<p>这个回退链确保：网关正常时走加密通道（E2EE 可行）；网关未运行时走 HTTP API；极端情况下优雅降级而非崩溃。</p>
+
+<!-- ═══════════ H2-4 ═══════════ -->
+<h2>四、练习与交叉链接</h2>
+
+<div class="practice">
+<h3>检索练习</h3>
+<ol>
+  <li><strong>填空题：</strong>tick() 将作业分为两组——有 workdir 的进入 ____ 池，无 workdir 的进入 ____ 池。</li>
+  <li><strong>判断题：</strong>lifecycle_guard 在作业<em>创建时</em>和<em>运行时</em>各扫描一次。（ ）</li>
+  <li><strong>思考题：</strong>如果 <code>_deliver_result()</code> 在 level 2 (asyncio.run) 抛出了 RuntimeError，但此时解释器正在关闭，会发生什么？跟踪代码给出答案。</li>
+</ol>
+
+<details>
+  <summary>点击查看参考答案</summary>
+  <div class="answer">
+    <p><strong>1.</strong> sequential（顺序池，max_workers=1）；parallel（并行池）。</p>
+    <p><strong>2.</strong> 错误。lifecycle_guard 仅在 <code>create_job()</code> 创建时扫描；运行时由 <code>_scan_assembled_cron_prompt()</code> 负责注入扫描，这是两个独立机制。</p>
+    <p><strong>3.</strong> 代码在 <code>except RuntimeError</code> 分支中调用 <code>_interpreter_shutting_down(run_err)</code> 检测，若命中则跳过投递并记录 warning，不会进入新线程回退，也不会崩溃。</p>
+  </div>
+</details>
+</div>
+
+<h3>交叉链接</h3>
+
+<table>
+  <tr><th>关联主题</th><th>路径</th><th>与本课关系</th></tr>
+  <tr><td>L1 定时任务调度</td><td><a href="../../module-cron/lessons/0001-cron-module-tour.html">module-cron</a></td><td>本课的前置知识，讲解三大文件架构和 croniter 集成</td></tr>
+  <tr><td>L1 消息网关</td><td><a href="../../module-gateway/lessons/0001-gateway-module-tour.html">module-gateway</a></td><td>DeliveryRouter 的承载层，19+ 平台适配器架构</td></tr>
+  <tr><td>L2 Agent 对话全链路</td><td><a href="../../slice-agent-conversation-loop/lessons/0001-flow-map.html">slice-agent-conversation-loop</a></td><td>run_job 内部构造 AIAgent 后的六阶段对话流程</td></tr>
+  <tr><td>L2 多平台消息全链路</td><td><a href="../../slice-multi-platform-message/lessons/0001-flow-map.html">slice-multi-platform-message</a></td><td>投递阶段 DeliveryRouter 的完整路由逻辑</td></tr>
+</table>
+
+<p style="margin-top:1.5rem; color: var(--muted); font-size:0.9rem;">
+  有任何不清楚的地方？向 Agent 追问，它可以深入讲解任一段代码的细节。
+</p>
+
+</body>
+</html>

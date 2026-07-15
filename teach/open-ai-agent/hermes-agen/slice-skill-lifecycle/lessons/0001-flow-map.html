@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技能生命周期全链路 — 从任务完成到自改进</title>
+<style>
+  :root {
+    --text: #1a1a1a; --muted: #555; --accent: #6b4ce6;
+    --bg: #fefefe; --code-bg: #f6f8fa; --border: #e0e0e0;
+    --tag-bg: #f0ebff; --tag-text: #6b4ce6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "LXGW WenKai", "Noto Serif SC", Georgia, serif;
+    font-size: 17px; line-height: 1.8; color: var(--text);
+    max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: var(--bg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; font-weight: 700; }
+  h1 .sub { display: block; font-size: 0.95rem; color: var(--muted); font-weight: 400; margin-top: 0.2rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 0.7rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .intro { font-size: 1.05rem; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0 1.5rem; }
+  .tag { display: inline-block; background: var(--tag-bg); color: var(--tag-text); padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.82rem; margin-right: 0.3rem; }
+  code { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; margin: 0.8rem 0; }
+  pre code { background: none; padding: 0; }
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+  .practice { background: #faf5ff; border: 1px solid #e0d4f5; border-radius: 8px; padding: 1.2rem 1.2rem 0.8rem; margin: 2rem 0 1rem; }
+  .practice h3 { margin-top: 0; color: #6b4ce6; }
+  .practice ol { margin: 0.5rem 0 0 1.2rem; }
+  .practice li { margin: 0.4rem 0; }
+  details { margin: 0.6rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  details .answer { padding: 0.5rem 0 0.3rem 1rem; border-left: 2px solid #d4c4f5; margin-left: 0.3rem; }
+  .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+  .warn { background: #fff8e6; border: 1px solid #e6d498; border-radius: 6px; padding: 0.8rem 1rem; margin: 1rem 0; font-size: 0.92rem; }
+  .warn strong { color: #b8860b; }
+  table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>技能生命周期全链路
+  <span class="sub">L2 垂直切片 — 从任务完成到技能创建到自改进</span>
+</h1>
+
+<p class="meta">
+  学习目标：掌握技能从诞生到归档的 6 阶段全链路 |
+  预估时长：15 分钟 |
+  前置课程：<a href="../../module-skills/lessons/0001-skills-module-tour.html">L1 技能系统模块巡礼</a>、
+  <a href="../../module-agent-core/lessons/0001-agent-core-module-tour.html">L1 Agent 核心引擎</a>
+</p>
+
+<div class="intro">
+  <strong>核心问题：</strong>一个对话中 agent 自动创建了技能，7 天后策展器如何决定它的命运？本课从 <code>skill_provenance.py</code> 的 79 行起点出发，纵穿 curator 状态机、usage 遥测、归档保护，打通技能生命周期全链路。
+</div>
+
+<!-- ═══════════════ 第一章 ═══════════════ -->
+<h2>一、触发入口：谁在写技能？</h2>
+
+<p>技能生命周期始于一次写入操作，但<strong>写入者的身份决定了技能后续是否被 curator 管理</strong>。这一分界由 <code>tools/skill_provenance.py</code> 实现——整个链路中最短（79 行）却最关键的文件。</p>
+
+<pre><code># tools/skill_provenance.py (核心片段)
+_write_origin: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "skill_write_origin",
+    default="foreground",      # 默认：用户直接操作
+)
+
+BACKGROUND_REVIEW = "background_review"
+
+def is_background_review() -> bool:
+    return get_current_write_origin() == BACKGROUND_REVIEW
+
+# 在 curator fork 中设置（agent/curator.py:1905）：
+review_agent._memory_write_origin = "background_review"</code></pre>
+
+<p>当 <code>skill_manage(action='create')</code> 被调用时，tool handler 检查 <code>is_background_review()</code>：</p>
+
+<table>
+  <tr><th>写入来源</th><th>ContextVar 值</th><th>技能标记</th><th>curator 行为</th></tr>
+  <tr><td>用户对话 / CLI / gateway</td><td><code>foreground</code></td><td>用户技能</td><td><strong>永不触碰</strong></td></tr>
+  <tr><td>curator 后台 fork</td><td><code>background_review</code></td><td><code>mark_agent_created()</code></td><td>进入状态机管理</td></tr>
+</table>
+
+<p class="warn"><strong>设计意图：</strong>用户明确要求创建技能 = 用户财产，curator 无权处置。只有 agent 自改进过程中自动生成的技能才进入策展流程。这是整个系统的安全边界。</p>
+
+<!-- ═══════════════ 第二章 ═══════════════ -->
+<h2>二、策展器激活：三重门控</h2>
+
+<p>curator 不会在每次对话后立即运行。入口 <code>maybe_run_curator()</code>（curator.py:1958）由 session-start hook 在 agent 空闲时调用，经过三重门控：</p>
+
+<pre><code># agent/curator.py — should_run_now() 门控逻辑（简化）
+def should_run_now(state, config) -> bool:
+    if not config.curator_enabled:       # 门控 1：总开关
+        return False
+    if state.paused:                     # 门控 2：用户暂停
+        return False
+    if idle_seconds < min_idle_hours * 3600:  # 门控 3：空闲不足
+        return False
+    if hours_since_last_run < interval_hours: # 门控 4：间隔未到
+        return False
+    return True
+
+# 默认值：interval_hours=168 (7天), min_idle_hours=2</code></pre>
+
+<p>首次安装后，curator 不会立即运行——它会将 <code>last_run_at</code> 种子化为当前时间，延期一个完整 interval，防止 <code>hermes update</code> 后的第一次后台 tick 就自动 curate。</p>
+
+<!-- ═══════════════ 第三章 ═══════════════ -->
+<h2>三、确定性状态机：五层保护</h2>
+
+<p>curator 运行分两阶段：Stage 1 是<strong>纯确定性状态机</strong>（无需 LLM），Stage 2 是 LLM consolidate（默认<strong>关闭</strong>）。Stage 1 的核心是 <code>apply_automatic_transitions()</code>，它遍历所有 curator-managed 技能，按以下规则流转：</p>
+
+<pre><code># agent/curator.py — apply_automatic_transitions() 核心循环（简化）
+for skill in curator_managed_skills:
+    # 保护层 1：pinned 技能永不自动转换
+    if skill.pinned: continue
+    # 保护层 2：cron job 引用的技能视为 "in use"
+    if is_cron_referenced(skill.name): continue
+    # 保护层 3：PROTECTED_BUILTIN_SKILLS（如 "plan"）
+    if skill.name in PROTECTED_BUILTIN_SKILLS: continue
+
+    days_inactive = (now - skill.last_activity).days
+    if days_inactive >= 90:               # 归档阈值
+        archive_skill(skill.name)         # → 移到 .archive/
+    elif days_inactive >= 30:             # 陈旧阈值
+        set_state(skill.name, STALE)      # → 标记陈旧
+    elif skill.state == STALE:
+        set_state(skill.name, ACTIVE)     # → 重新激活</code></pre>
+
+<p>状态机保护机制共五层：</p>
+
+<table>
+  <tr><th>保护层</th><th>触发条件</th><th>行为</th></tr>
+  <tr><td>1. Pinned</td><td><code>skill.pinned == True</code></td><td>跳过所有自动转换</td></tr>
+  <tr><td>2. Cron 引用</td><td>cron job 依赖此技能</td><td>视为活跃使用中</td></tr>
+  <tr><td>3. <code>PROTECTED_BUILTIN_SKILLS</code></td><td>技能名为 "plan"</td><td>永不归档、永不合并</td></tr>
+  <tr><td>4. is_agent_created 检查</td><td>非 agent 创建的技能</td><td>根本不进入遍历列表</td></tr>
+  <tr><td>5. Pre-mutation Snapshot</td><td>curator 运行前</td><td>完整备份技能库</td></tr>
+</table>
+
+<div class="warn"><strong>异常路径示例：</strong>假设 curator 尝试归档 <code>plan</code> 技能——它首先被第 3 层拦截（<code>PROTECTED_BUILTIN_SKILLS</code> 集合包含 "plan"），即使用户未 pin、即使 <code>prune_builtins=True</code>，也不可归档。否则 <code>/plan</code> slash command 将变成 "Unknown command"，这是一个 load-bearing 保护。</div>
+
+<!-- ═══════════════ 第四章 ═══════════════ -->
+<h2>四、全链路时序图</h2>
+
+<div class="diagram">┌─────────────────────────────────────────────────────────────────┐
+│                    技能生命周期 6 阶段时序                          │
+│                                                                   │
+│  [1] Task Complete                                                │
+│      agent 在对话中完成任务                                        │
+│      │                                                            │
+│      ▼                                                            │
+│  [2] Curator 检测 (maybe_run_curator)                              │
+│      三重门控: enabled? unpaused? idle>2h? interval>7d?            │
+│      │                        │                                   │
+│      ▼ (通过)                 ▼ (不通过 → 延期)                    │
+│  [3] 确定性状态转换 (apply_automatic_transitions)                  │
+│      ├─ archive: 90天+ 无活动 → .archive/                         │
+│      ├─ stale:   30天+ 无活动 → 标记陈旧                           │
+│      └─ reactivate: 恢复使用 → 恢复活跃                            │
+│      │                                                            │
+│      ▼                                                            │
+│  [4] LLM Consolidate (可选, 默认关闭)                              │
+│      forked AIAgent → 合并/删除/创建 umbrella 技能                 │
+│      │                                                            │
+│      ▼                                                            │
+│  [5] 报告写入 (_write_run_report)                                  │
+│      run.json + REPORT.md → ~/.hermes/logs/curator/               │
+│      │                                                            │
+│      ▼                                                            │
+│  [6] 状态持久化                                                    │
+│      更新 .curator_state / .usage.json / cron 引用                 │
+└─────────────────────────────────────────────────────────────────┘</div>
+
+<p>整个链路由 6 个文件协作完成，按涉及顺序排列：</p>
+
+<div class="diagram">tools/skill_provenance.py    ← 79行, ContextVar 分界
+tools/skill_usage.py          ← 948行, 遥测 + 归档 + 保护列表
+agent/curator.py              ← 1977行, 状态机 + 编排
+  ├── should_run_now()        ← 门控
+  ├── apply_automatic_...     ← 确定性状态机
+  ├── run_curator_review()    ← 主编排器
+  └── _write_run_report()     ← 报告持久化
+~/.hermes/skills/.usage.json  ← 技能遥测侧车
+~/.hermes/skills/.archive/    ← 归档目录</div>
+
+<p>关键交叉链接：技能格式与来源发现见 <a href="../../module-skills/lessons/0001-skills-module-tour.html">L1 技能系统模块巡礼</a>；curator 在对话循环中的触发时机见 <a href="../../module-agent-core/lessons/0001-agent-core-module-tour.html">L1 Agent 核心引擎</a>。</p>
+
+<!-- ═══════════════ 练习 ═══════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<ol>
+  <li><strong>填空题：</strong>ContextVar <code>_write_origin</code> 的默认值是 ______，curator fork 中设置为 ______。</li>
+  <li><strong>判断题：</strong>用户通过 CLI 对话让 agent 创建的技能，7 天后会被 curator 归档。</li>
+  <li><strong>场景题：</strong>一个 agent 自建技能 35 天未使用，curator 运行后它处于什么状态？如果又过了 60 天呢？</li>
+</ol>
+
+<details>
+  <summary>点击查看参考答案</summary>
+  <div class="answer">
+    <p><strong>1.</strong> <code>"foreground"</code>；<code>"background_review"</code></p>
+    <p><strong>2. 错误。</strong>用户前台创建的技能不会被 <code>mark_agent_created()</code>，curator 的遍历列表只包含 agent-created 技能，用户技能不受影响。</p>
+    <p><strong>3.</strong> 35 天 → <code>STALE</code>（超过 30 天阈值）；再 60 天（累计 95 天）→ <code>ARCHIVED</code>（超过 90 天阈值，移至 <code>.archive/</code>）。</p>
+  </div>
+</details>
+</div>
+
+<p style="margin-top: 2rem; color: var(--muted); font-size: 0.85rem;">
+  学完本课后，可向 agent 追问："帮我查看我的 ~/.hermes/skills/.usage.json 里有哪些 agent-created 技能"、"我想手动 pin 一个技能防止被归档，怎么做？"、"curator 的 consolidate 通道如果开启会怎样合并技能？"
+</p>
+
+</body>
+</html>

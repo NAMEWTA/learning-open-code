@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 对话全链路 — CLI 输入到 LLM 响应的完整请求路径</title>
+<style>
+  :root {
+    --text: #1a1a1a;
+    --muted: #555;
+    --accent: #c2410c;
+    --bg: #fefefe;
+    --code-bg: #f6f8fa;
+    --border: #e0e0e0;
+    --tag-bg: #fff7ed;
+    --tag-text: #c2410c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "LXGW WenKai", "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+    font-size: 17px; line-height: 1.8; color: var(--text);
+    max-width: 720px; margin: 0 auto; padding: 2.5rem 1.5rem; background: var(--bg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: 0.3rem; font-weight: 700; }
+  h1 .sub { display: block; font-size: 0.95rem; color: var(--muted); font-weight: 400; margin-top: 0.2rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 0.7rem; padding-bottom: 0.3rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 1.2rem 0 0.4rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .intro { font-size: 1.05rem; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0 1.5rem; }
+  .tag { display: inline-block; background: var(--tag-bg); color: var(--tag-text); padding: 0.1rem 0.5rem; border-radius: 3px; font-size: 0.82rem; margin-right: 0.3rem; }
+  .tags { margin: 0.5rem 0; }
+
+  code { font-family: "SF Mono", "Fira Code", Consolas, monospace; font-size: 0.85rem; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; margin: 0.8rem 0; }
+  pre code { background: none; padding: 0; }
+
+  .diagram { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; line-height: 1.55; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+
+  .filetree { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.75; background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; margin: 0.8rem 0; }
+
+  .practice { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 1.2rem 1.2rem 0.8rem; margin: 2rem 0 1rem; }
+  .practice h3 { margin-top: 0; color: #c2410c; }
+  .practice ol { margin: 0.5rem 0 0 1.2rem; }
+  .practice li { margin: 0.4rem 0; }
+  details { margin: 0.6rem 0; }
+  details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  details .answer { padding: 0.5rem 0 0.3rem 1rem; border-left: 2px solid #fed7aa; margin-left: 0.3rem; }
+
+  .meta { color: var(--muted); font-size: 0.82rem; margin-bottom: 1.5rem; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  table { border-collapse: collapse; margin: 0.8rem 0; font-size: 0.88rem; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; }
+  th { background: var(--code-bg); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Agent 对话全链路
+  <span class="sub">L2 垂直切片 -- 从 CLI 输入到 LLM 响应的一条完整请求路径</span>
+</h1>
+
+<p class="meta">
+  学习目标：追踪一条用户消息穿越六个阶段到达 LLM 并返回的完整调用链 |
+  预估时长：15 分钟 |
+  前置课程：<a href="../../module-agent-core/lessons/0001-agent-core-module-tour.html">L1 Agent 核心引擎</a>、
+  <a href="../../module-agent-entry/lessons/0001-agent-entry-module-tour.html">L1 Agent 入口层</a> |
+  关联 L1：<a href="../../module-tools/lessons/0001-tools-module-tour.html">L1 工具层</a>
+</p>
+
+<!-- ──────────── H2 1 ──────────── -->
+<h2>一、全链路六阶段总览</h2>
+
+<div class="intro">
+  一条用户消息在 Hermes Agent 中<strong>不经过任何"魔法"</strong>——它严格穿越六个阶段，每个阶段有明确的入口函数和数据变换。理解这条链路，就掌握了 Agent 的"血液循环系统"。
+</div>
+
+<div class="tags">
+  <span class="tag">6 个阶段</span>
+  <span class="tag">调用链深度 ~10 层</span>
+  <span class="tag">核心文件 ~13K 行</span>
+  <span class="tag">L2 垂直切片</span>
+</div>
+
+<p>下图给出了从终端键入一条消息到最终回复的完整阶段划分：</p>
+
+<pre class="diagram">
+用户输入 ──▶ 阶段1: CLI入口 (cli.py)
+                Fire解析 → AIAgent构建(60+参数) → _run_agent()
+                │
+                ▼
+            阶段2: 前置准备 (conversation_loop.py L518)
+                build_turn_context():
+                  _restore_or_build_system_prompt()  恢复/构建提示词
+                  _sanitize_surrogates()            消息清洗
+                │
+                ▼
+            阶段3: 对话主循环
+                while api_call_count &lt; max_iterations:
+                  → 中断检测 → 预算检查 → _perform_api_call()
+                  → api_mode路由(anthropic/codex/bedrock)
+                  → tool_calls分发 → tool_executor执行
+                  → 结果回填messages → 继续循环或context_compressor压缩
+                终止条件: 纯文本回复/预算耗尽/用户中断/错误
+                │
+                ▼
+            阶段4: LLM API调用 (chat_completion_helpers.py)
+                build_api_kwargs() → interruptible_api_call()
+                  · 后台线程发起HTTP请求(可中断+超时检测)
+                  · 流式/非流式双路径(stream_callback决定)
+                │
+                ▼
+            阶段5: 响应构建 (chat_completion_helpers.py L879)
+                build_assistant_message():
+                  提取reasoning → 剥离&lt;think&gt;标签
+                  → 清洗surrogates → 脱敏 → 标准化dict
+                │
+                ▼
+            阶段6: 后处理
+                context_compressor: token超限时压缩历史+生成摘要
+                memory_manager: 同步MemoryProvider插件
+                curator: 检查是否触发技能自动学习
+</pre>
+
+<!-- ──────────── H2 2 ──────────── -->
+<h2>二、关键代码入口：三个阶段的核心签名</h2>
+
+<p>以下三个函数是链路中最关键的"接缝"——它们连接了相邻阶段，理解它们的参数和返回值就能追踪完整数据流。</p>
+
+<h3>1. 入口：run_conversation() 的 prologue 阶段</h3>
+
+<pre><code># agent/conversation_loop.py L518
+def run_conversation(
+    agent,                          # AIAgent 实例（来自 run_agent.py）
+    user_message: str,              # 用户原始输入文本
+    system_message: str = None,     # 自定义系统提示词（可选）
+    conversation_history: List[Dict] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+) -> Dict[str, Any]:
+    """一次完整对话回合，含工具循环。"""
+
+    # ── 阶段 2：回合前置准备 ──
+    _ctx = build_turn_context(
+        agent, user_message, system_message,
+        conversation_history, task_id, stream_callback, ...,
+        restore_or_build_system_prompt=_restore_or_build_system_prompt,
+    )
+    # _ctx 解包出: messages, active_system_prompt, turn_id,
+    #             _plugin_user_context, effective_task_id 等
+
+    # ── 阶段 3：主循环 ──
+    while (api_call_count &lt; agent.max_iterations
+           and agent.iteration_budget.remaining &gt; 0):
+        # 中断检测 → 预算消耗 → _perform_api_call → 工具分发
+        ...
+    # 返回 {"final_response": ..., "messages": ..., "completed": ...}
+</code></pre>
+
+<h3>2. API 调用：build_api_kwargs() 的多 Provider 路由</h3>
+
+<pre><code># agent/chat_completion_helpers.py L606
+def build_api_kwargs(agent, api_messages: list) -> dict:
+    """根据 api_mode 路由到不同 Provider 的请求构建器。"""
+
+    if agent.api_mode == "anthropic_messages":
+        _transport = agent._get_transport()
+        anthropic_msgs = agent._prepare_anthropic_messages_for_api(api_messages)
+        return _transport.build_kwargs(model=agent.model, messages=anthropic_msgs, ...)
+
+    if agent.api_mode == "bedrock_converse":
+        _bt = agent._get_transport()
+        return _bt.build_kwargs(model=agent.model, messages=api_messages, ...)
+
+    if agent.api_mode == "codex_responses":
+        _ct = agent._get_transport()
+        _msgs = agent._prepare_messages_for_non_vision_model(api_messages)
+        # xAI schema 清洗: strip_pattern_and_format + strip_slash_enum
+        return _ct.build_kwargs(model=agent.model, input=_msgs, ...)
+</code></pre>
+
+<h3>3. 响应组装：build_assistant_message() 的内容清洗</h3>
+
+<pre><code># agent/chat_completion_helpers.py L879
+def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
+    """从 API 响应构建标准化的 assistant 消息 dict。"""
+
+    reasoning_text = agent._extract_reasoning(assistant_message)
+    # 兜底：从 &lt;think&gt; 标签提取 reasoning（部分模型嵌入在 content 中）
+    if not reasoning_text:
+        think_blocks = re.findall(r'&lt;think&gt;(.*?)&lt;/think&gt;', content, re.DOTALL)
+
+    _san_content = _sanitize_surrogates(assistant_message.content)
+    _san_content = agent._strip_think_blocks(_san_content)  # 剥离冗余标签
+    _san_content = redact_sensitive_text(_san_content)       # 脱敏处理
+
+    return {"role": "assistant", "content": _san_content,
+            "reasoning": reasoning_text, "finish_reason": finish_reason}
+</code></pre>
+
+<!-- ──────────── H2 3 ──────────── -->
+<h2>三、调用时序图</h2>
+
+<p>下方 ASCII 时序图聚焦一次 <strong>正常工具调用回合</strong>（用户请求 → 模型要求查文件 → 工具执行 → 模型回复）的完整时间线：</p>
+
+<pre class="diagram">
+CLI / Gateway          AIAgent              ConversationLoop     ChatHelpers       Provider API      ToolExecutor
+    │                     │                       │                   │                  │                │
+    │── run_conversation()─▶                       │                   │                  │                │
+    │                     │── build_turn_context()─▶                   │                  │                │
+    │                     │   restore/build prompt│                   │                  │                │
+    │                     │   sanitize messages   │                   │                  │                │
+    │                     │◀──── _ctx 解包 ───────│                   │                  │                │
+    │                     │                       │                   │                  │                │
+    │                     │    (loop iteration 1) │                   │                  │                │
+    │                     │                       │── build_api_kwargs()──▶               │                │
+    │                     │                       │◀──── api_kwargs ────│                  │                │
+    │                     │                       │── _perform_api_call() ──▶              │                │
+    │                     │                       │   interruptible_api_call()              │                │
+    │                     │                       │                   │── POST /chat ────▶ │                │
+    │                     │                       │                   │◀─ stream chunks ───│                │
+    │                     │                       │◀── response ──────│                  │                │
+    │                     │                       │                   │                  │                │
+    │                     │                       │── build_assistant_message()──▶          │                │
+    │                     │                       │◀── assistant msg ──│                  │                │
+    │                     │                       │                   │                  │                │
+    │                     │   (检测到 tool_calls) │                   │                  │                │
+    │                     │                       │─── handle_function_call() ───────────────────────────▶ │
+    │                     │                       │◀── tool result ────────────────────────────────────── │
+    │                     │                       │                   │                  │                │
+    │                     │    (loop iteration 2) │                   │                  │                │
+    │                     │                       │── build_api_kwargs() (含 tool result) ──▶             │
+    │                     │                       │── _perform_api_call() ──▶              │                │
+    │                     │                       │◀── final text ─────│                  │                │
+    │                     │                       │                   │                  │                │
+    │◀── {"final_response":..., "completed":True} ──│                   │                  │                │
+</pre>
+
+<p>注意三个关键时序点：(1) <code>build_turn_context()</code> 仅在回合开始时执行一次；(2) 每次 API 调用都经过 <code>build_api_kwargs()</code> 重新组装请求参数（因为 messages 列表在工具结果回填后已变化）；(3) 工具结果回填到 messages 后，下一次循环迭代自动携带上下文。</p>
+
+<!-- ──────────── H2 4 ──────────── -->
+<h2>四、异常路径：Provider 故障链式切换</h2>
+
+<div class="intro">
+  当 LLM Provider 返回错误（429 限流、5xx 服务端错误、401 认证过期），对话循环<strong>不会直接失败</strong>——它会触发 <code>try_activate_fallback()</code> 沿 fallback 链逐个切换 Provider，并在切换后同步模型身份到系统提示词。
+</div>
+
+<h3>故障切换流程</h3>
+
+<pre class="diagram">
+_perform_api_call()
+    │
+    ▼
+  API 返回错误（HTTP 429 / 503 / 401）
+    │
+    ▼
+  classify_api_error() → FailoverReason.rate_limit / auth / server_error
+    │
+    ▼
+  try_activate_fallback(reason)           ← chat_completion_helpers.py L1172
+    │
+    ├── _fallback_index 递增
+    ├── 跳过 unavailable_fallback_keys（已标记不可用的条目）
+    ├── 跳过与当前 provider+model 相同的条目（去重）
+    ├── 检查本地可用性 (network / OAuth / credentials)
+    │
+    ▼
+  切换成功?
+    ├── Yes → rewrite_prompt_model_identity() 改写系统提示词中的 Model/Provider 行
+    │         → _sync_failover_system_message() 同步到当前 api_messages
+    │         → 返回 True，重试循环使用新 Provider 重新发起 API 调用
+    │
+    └── No (链耗尽) → 设置 _FALLBACK_EXHAUSTED_COOLDOWN_S (5s) 冷却
+                      → 返回 False → 循环终止，turn 标记为 failed
+</pre>
+
+<p><strong>关键设计点：</strong>切换 Provider 时必须同步系统提示词中的 <code>Model:</code> / <code>Provider:</code> 身份声明行——否则用户会在同一对话中看到"我是 GPT-5"随即变成"我是 Claude"，产生困惑。这是 <code>_sync_failover_system_message()</code> (conversation_loop.py L492) 的职责。</p>
+
+<p>故障切换中的另一条异常路径：<strong>内容策略拦截（content_policy_blocked）</strong>——当模型 HTTP 200 返回了 refusal 而非正常回复，或其他 Provider 返回了内容审核拒绝，<code>_content_policy_blocked_result()</code> (conversation_loop.py L467) 直接构建失败结果，<strong>不触发重试</strong>——因为相同 prompt 会被再次拒绝，无意义。</p>
+
+<!-- ──────────── 练习 ──────────── -->
+<div class="practice">
+<h3>检索练习</h3>
+
+<ol>
+  <li><strong>暂停回忆：</strong>一条用户消息进入系统后，依次经过哪六个阶段？不翻看上文，在心中默念一遍。</li>
+
+  <li><strong>判断题：</strong>每次 API 调用时，<code>build_turn_context()</code> 都会重新执行。
+    <details>
+      <summary>点击查看答案</summary>
+      <div class="answer">
+        <strong>错误。</strong><code>build_turn_context()</code> 仅在 <code>run_conversation()</code> 开头执行一次（阶段 2），负责回合前置准备。后续每次 API 重试调用的是 <code>build_api_kwargs()</code>（阶段 4），它根据最新的 messages 列表重新组装请求参数。
+      </div>
+    </details>
+  </li>
+
+  <li><strong>判断题：</strong>Provider 故障切换时，<code>try_activate_fallback()</code> 总会立即切换到下一个 Provider，直到链耗尽。
+    <details>
+      <summary>点击查看答案</summary>
+      <div class="answer">
+        <strong>不完全正确。</strong>在切换前有三层过滤：(1) 跳过已标记为 unavailable 的条目；(2) 跳过与当前 provider+model+base_url 相同的条目（防止同 Provider 循环重试）；(3) 检查本地可用性（网络、OAuth、凭证）。只有当这三层过滤都通过，才会真正切换。
+      </div>
+    </details>
+  </li>
+
+  <li><strong>向 Agent 追问：</strong>如果你在调试时发现 <code>api_call_count</code> 始终为 1 但返回了最终文本，这说明什么？是否存在工具调用？</li>
+</ol>
+</div>
+
+<p style="margin-top:2rem; font-size:0.85rem; color: var(--muted);">
+  下一课推荐：<a href="../../slice-tool-execution-approval/lessons/0001-flow-map.html">L2 工具执行与审批全链路</a> — 深入工具分发、权限守卫与安全闸门 |
+  交叉参考：<a href="../../module-agent-core/reference/agent-core-overview.html">agent-core 参考文档</a>、
+  <a href="../../module-agent-entry/reference/agent-entry-overview.html">agent-entry 参考文档</a>
+</p>
+
+</body>
+</html>

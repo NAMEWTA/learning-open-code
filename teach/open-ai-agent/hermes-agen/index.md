@@ -4,27 +4,21 @@
 
 | 主题 | 路径 | 描述 |
 |------|------|------|
-| 项目总览与学习路线 | `./00-overview/` | 按最新目录建立架构地图、学习路线、源码覆盖清单与豁免范围。 |
-| Agent 核心引擎模块 | `./module-agent-core/` | 讲清 Agent 核心引擎模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| Agent 入口模块 | `./module-agent-entry/` | 讲清 Agent 入口模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 辅助客户端模块 | `./module-auxiliary-client/` | 讲清 辅助客户端模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| CLI 交互模块 | `./module-cli/` | 讲清 CLI 交互模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 上下文压缩模块 | `./module-context-compressor/` | 讲清 上下文压缩模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 凭证与供应商池模块 | `./module-credential-pool/` | 讲清 凭证与供应商池模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 定时任务模块 | `./module-cron/` | 讲清 定时任务模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 部署与打包模块 | `./module-deploy/` | 讲清 部署与打包模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 桌面入口模块 | `./module-desktop/` | 讲清 桌面入口模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 消息网关模块 | `./module-gateway/` | 讲清 消息网关模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 网关平台适配模块 | `./module-gateway-platforms/` | 讲清 网关平台适配模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 看板与任务视图模块 | `./module-kanban/` | 讲清 看板与任务视图模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| MCP 与 ACP 协议模块 | `./module-mcp-acp/` | 讲清 MCP 与 ACP 协议模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 供应商与插件模块 | `./module-providers-plugins/` | 讲清 供应商与插件模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| Skills 系统模块 | `./module-skills/` | 讲清 Skills 系统模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 状态与日志模块 | `./module-state/` | 讲清 状态与日志模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| tools | `./module-tools/` | 讲清 tools 的目录边界、入口文件、关键依赖和公共接口。 |
-| 终端 UI 模块 | `./module-tui/` | 讲清 终端 UI 模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| Web 前端模块 | `./module-web/` | 讲清 Web 前端模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| Agent 对话全链路 | `./slice-agent-conversation/` | 按入口、主路径、边界路径梳理 Agent 对话全链路。 |
-| CLI 启动全链路 | `./slice-cli-startup/` | 按入口、主路径、边界路径梳理 CLI 启动全链路。 |
-| 网关消息投递全链路 | `./slice-gateway-message/` | 按入口、主路径、边界路径梳理 网关消息投递全链路。 |
-| 工具执行全链路 | `./slice-tool-execution/` | 按入口、主路径、边界路径梳理 工具执行全链路。 |
+| 项目总览 | `./00-overview/` | Hermes Agent 架构全景、目录地图、设计哲学与源码入口导航 |
+| Agent 核心引擎 | `./module-agent-core/` | 对话循环、工具执行、记忆管理、上下文压缩四层核心架构 |
+| Agent 入口层 | `./module-agent-entry/` | CLI启动、主运行循环、状态持久化、日志与配置系统 |
+| 消息网关 | `./module-gateway/` | 多平台消息路由、适配器三层架构与投递系统 |
+| 工具层 | `./module-tools/` | 终端/浏览器/委托工具、三层安全审批、AST自注册机制 |
+| 技能系统 | `./module-skills/` | SKILL.md规范、Skills Hub七源联合发现、策展器生命周期管理 |
+| CLI 框架 | `./module-cli-framework/` | argparse命令树、子命令Builder插件化、三层配置优先级与Shell补全 |
+| 插件系统 | `./module-plugins/` | 四源五态插件架构、PluginManager加载链路、20+Hook生命周期与Provider注册 |
+| 模型提供商层 | `./module-providers/` | ProviderProfile声明式抽象、注册中心与30+提供商插件发现机制 |
+| 定时任务调度 | `./module-cron/` | croniter自然语言定时、双线程池调度、lifecycle_guard安全防护 |
+| 终端 UI | `./module-tui/` | React+Ink TUI 双进程架构、JSON-RPC 通信与交互系统 |
+| Agent Client Protocol | `./module-acp/` | ACP协议桥接架构、会话持久化、事件流转发与权限审批 |
+| Web 仪表盘 | `./module-web/` | FastAPI+SPA前后端分离、插件系统、14个API端点族 |
+| Agent 对话全链路 | `./slice-agent-conversation-loop/` | CLI到LLM响应的六阶段完整请求路径、Provider故障链式切换 |
+| 工具执行与审批全链路 | `./slice-tool-execution-approval/` | Tool Call→Registry→三层安全闸门→Execute的完整链路 |
+| 技能生命周期全链路 | `./slice-skill-lifecycle/` | 从任务完成到技能创建、策展器状态机到归档保护的全链路 |
+| 多平台消息全链路 | `./slice-multi-platform-message/` | 外部消息→Platform Adapter→Relay→Agent→Delivery全链路 |
+| 定时任务全链路 | `./slice-cron-scheduled-task/` | NL解析→表达式→持久化→调度→执行→守护→投递七阶段完整追踪 |

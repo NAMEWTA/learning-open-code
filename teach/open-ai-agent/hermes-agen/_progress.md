@@ -1,33 +1,39 @@
-# Hermes Agent teach-goal 进度看板
+# Hermes Agent · 教学文档生成进度
 
-- 最后更新：2026-07-07T16:24:57+08:00
-- 完成：24 / 24 goals
-- 审计：通过
-- 当前源码覆盖清单：5896 个文件
+> 📊 总体进度：9/13 goals done · 69% · L1 阶段收尾（最后 4 个审查中）
+> 🕐 最后更新：2026-07-09
 
-## 主题
+## 按层级统计
 
-- `L0-00-overview`：[项目总览与学习路线](teach/open-ai-agent/hermes-agen/00-overview/lessons/0001-project-map.html)
-- `L1-module-agent-core`：[Agent 核心引擎模块](teach/open-ai-agent/hermes-agen/module-agent-core/lessons/0001-agent-core-module-tour.html)
-- `L1-module-agent-entry`：[Agent 入口模块](teach/open-ai-agent/hermes-agen/module-agent-entry/lessons/0001-agent-entry-module-tour.html)
-- `L1-module-auxiliary-client`：[辅助客户端模块](teach/open-ai-agent/hermes-agen/module-auxiliary-client/lessons/0001-auxiliary-client-module-tour.html)
-- `L1-module-cli`：[CLI 交互模块](teach/open-ai-agent/hermes-agen/module-cli/lessons/0001-cli-module-tour.html)
-- `L1-module-context-compressor`：[上下文压缩模块](teach/open-ai-agent/hermes-agen/module-context-compressor/lessons/0001-context-compressor-module-tour.html)
-- `L1-module-credential-pool`：[凭证与供应商池模块](teach/open-ai-agent/hermes-agen/module-credential-pool/lessons/0001-credential-pool-module-tour.html)
-- `L1-module-cron`：[定时任务模块](teach/open-ai-agent/hermes-agen/module-cron/lessons/0001-cron-module-tour.html)
-- `L1-module-deploy`：[部署与打包模块](teach/open-ai-agent/hermes-agen/module-deploy/lessons/0001-deploy-module-tour.html)
-- `L1-module-desktop`：[桌面入口模块](teach/open-ai-agent/hermes-agen/module-desktop/lessons/0001-desktop-module-tour.html)
-- `L1-module-gateway`：[消息网关模块](teach/open-ai-agent/hermes-agen/module-gateway/lessons/0001-gateway-module-tour.html)
-- `L1-module-gateway-platforms`：[网关平台适配模块](teach/open-ai-agent/hermes-agen/module-gateway-platforms/lessons/0001-gateway-platforms-module-tour.html)
-- `L1-module-kanban`：[看板与任务视图模块](teach/open-ai-agent/hermes-agen/module-kanban/lessons/0001-kanban-module-tour.html)
-- `L1-module-mcp-acp`：[MCP 与 ACP 协议模块](teach/open-ai-agent/hermes-agen/module-mcp-acp/lessons/0001-mcp-acp-module-tour.html)
-- `L1-module-providers-plugins`：[供应商与插件模块](teach/open-ai-agent/hermes-agen/module-providers-plugins/lessons/0001-providers-plugins-module-tour.html)
-- `L1-module-skills`：[Skills 系统模块](teach/open-ai-agent/hermes-agen/module-skills/lessons/0001-skills-module-tour.html)
-- `L1-module-state`：[状态与日志模块](teach/open-ai-agent/hermes-agen/module-state/lessons/0001-state-module-tour.html)
-- `L1-module-tools`：[tools](teach/open-ai-agent/hermes-agen/module-tools/lessons/0001-tools-module-tour.html)
-- `L1-module-tui`：[终端 UI 模块](teach/open-ai-agent/hermes-agen/module-tui/lessons/0001-tui-module-tour.html)
-- `L1-module-web`：[Web 前端模块](teach/open-ai-agent/hermes-agen/module-web/lessons/0001-web-module-tour.html)
-- `L2-slice-agent-conversation`：[Agent 对话全链路](teach/open-ai-agent/hermes-agen/slice-agent-conversation/lessons/0001-flow-map.html)
-- `L2-slice-cli-startup`：[CLI 启动全链路](teach/open-ai-agent/hermes-agen/slice-cli-startup/lessons/0001-flow-map.html)
-- `L2-slice-gateway-message`：[网关消息投递全链路](teach/open-ai-agent/hermes-agen/slice-gateway-message/lessons/0001-flow-map.html)
-- `L2-slice-tool-execution`：[工具执行全链路](teach/open-ai-agent/hermes-agen/slice-tool-execution/lessons/0001-flow-map.html)
+| 层级 | 完成 | 总数 | 进度 |
+|------|------|------|------|
+| L0 项目总览 | 1 | 1 | ✅ 100% |
+| L1 模块总览 | 8 | 12 | 🔄 最后 4 个审查中 |
+| L2 垂直切片 | 0 | - | ⏳ 审查完成后提取 |
+| L3 微观 API | 0 | - | ⏳ 待 L2 |
+| L4 深度剖析 | 0 | - | ⏳ 待触发 |
+
+## L1 模块完成清单
+
+| # | Goal | 状态 | 审查 |
+|---|------|------|------|
+| 1 | agent-core — Agent 核心引擎 | ✅ done | conditional_pass |
+| 2 | agent-entry — Agent 入口层 | ✅ done | conditional_pass |
+| 3 | gateway — 消息网关 | ✅ done | conditional_pass |
+| 4 | tools — 工具层 | ✅ done | conditional_pass |
+| 5 | skills — 技能系统 | ✅ done | conditional_pass |
+| 6 | cli-framework — CLI 框架 | ✅ done | conditional_pass |
+| 7 | plugins — 插件系统 | ✅ done | conditional_pass |
+| 8 | providers — 模型提供商 | ✅ done | conditional_pass |
+| 9 | cron — 定时任务调度 | 🔄 审查中 | — |
+| 10 | tui — 终端 UI | 🔄 审查中 | — |
+| 11 | acp — Agent Client Protocol | 🔄 审查中 | — |
+| 12 | web — Web 仪表盘 | 🔄 审查中 | — |
+
+## 下阶段计划
+
+L1 全部完成后将：
+1. 运行覆盖率终检，扫描未被引用的源文件
+2. 从 L1 产出提取 L2 垂直切片 goal
+3. 生成 L3 微观 API 参考
+4. 触发 L4 深度剖析（高复杂度函数）

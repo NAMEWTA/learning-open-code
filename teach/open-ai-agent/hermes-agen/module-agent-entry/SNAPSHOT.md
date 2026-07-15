@@ -5,28 +5,27 @@
   - **Git Commit**：`830165473e0920c2baf8c2a6863976edb0c52943`
   - **短 Commit**：`8301654`
   - **分支**：`main`
-- **快照时间**：2026-07-07T16:25:11+08:00
+- **快照时间**：2026-07-09T15:28:15+08:00
 
 ## 课程引用的源文件
 
 | 源文件路径 | 用途 | 关键度 |
 |-----------|------|--------|
-| `open-ai-agent/hermes-agen/hermes_cli/SNAPSHOT.md` | 课程分析引用 | 🟡 辅助 |
+| `$HERMES_HOME/config.yaml` | 课程分析引用 | 🟡 辅助 |
 
 ## 已生成课程
 
 | 编号 | 课程文件 | 描述 |
 |------|---------|------|
-| 0001-agent-entry-module-tour | `lessons/0001-agent-entry-module-tour.html` | Agent 入口模块 · 短课 |
+| 0001-agent-entry-module-tour | `lessons/0001-agent-entry-module-tour.html` | Agent 入口层 — 启动链路与状态管理 |
 
 ## 参考资料
 
-- `reference/agent-entry-api.html` — Agent 入口模块 API 速查
-- `reference/agent-entry-overview.html` — Agent 入口模块 总览参考
+- `reference/agent-entry-overview.html` — Agent 入口层 — 速查手册
 
 ## 快照摘要
 - 课程数：1
 - 引用源文件数：1
 - 学习记录数：0
-- 参考资料数：2
+- 参考资料数：1
 - 资产文件数：0

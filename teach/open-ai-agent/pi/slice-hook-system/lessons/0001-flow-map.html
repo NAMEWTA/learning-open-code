@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — Agent Hook 生命周期全链路地图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff; --text: #1a1a1a; --muted: #666; --accent: #2563eb;
+    --border: #e5e7eb; --code-bg: #f6f8fa; --warn-bg: #fff8e6;
+    --warn-border: #e6a817; --info-bg: #f0f7ff;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem; }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+    font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+  .filetree { font-family: "SF Mono", Consolas, monospace; font-size: 0.82rem; line-height: 1.75;
+    background: #fafbfc; border: 1px solid #ebebeb; border-radius: 8px; padding: 1rem 1.2rem;
+    white-space: pre; overflow-x: auto; }
+  .diagram { background: #fafbfc; border: 1px solid var(--border); border-radius: 8px;
+    padding: 1rem 1.2rem; margin: 1rem 0; text-align: center; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 0.55rem 0.75rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .layer-stack { display: flex; flex-direction: column; gap: 0; margin: 1rem 0;
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .layer { padding: 0.7rem 1rem; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 0.75rem; }
+  .layer:last-child { border-bottom: none; }
+  .layer-num { width: 28px; height: 28px; background: var(--accent); color: #fff;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; font-weight: 700; flex-shrink: 0; }
+  .layer-info { flex: 1; }
+  .layer-name { font-weight: 600; font-size: 0.95rem; }
+  .layer-desc { font-size: 0.82rem; color: var(--muted); }
+  .strategy-card { background: var(--info-bg); border-left: 4px solid var(--accent);
+    padding: 0.8rem 1rem; border-radius: 0 8px 8px 0; margin: 0.6rem 0; }
+  .strategy-card code { background: #dbeafe; }
+  .practice { background: #f0f7ff; border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 2rem 0; }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+  .warn { background: var(--warn-bg); border-left: 4px solid var(--warn-border);
+    padding: 0.8rem 1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .nav { display: flex; justify-content: space-between; margin-top: 3rem;
+    padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+  .tag { display: inline-block; font-size: 0.75rem; padding: 0.1rem 0.45rem;
+    border-radius: 4px; margin-right: 0.3rem; font-weight: 600; }
+  .tag-session { background: #dcfce7; color: #166534; }
+  .tag-agent { background: #dbeafe; color: #1e40af; }
+  .tag-tool { background: #fef3c7; color: #92400e; }
+  .tag-model { background: #f3e8ff; color: #6b21a8; }
+  .tag-input { background: #ffe4e6; color: #9f1239; }
+  .tag-resource { background: #e0f2fe; color: #075985; }
+</style>
+</head>
+<body>
+
+<h1>0001 — Agent Hook 生命周期全链路地图</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：14 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>理解一个 Hook 事件从 <code>pi.on()</code> 注册到 handler 执行完毕的完整链路——穿越 types.ts（契约）、loader.ts（注册）、runner.ts（执行）三层，区分 6 种专用 emit 方法的执行策略差异。</p>
+
+<!-- ═══════════════ 第 1 章：三层架构 ═══════════════ -->
+<h2>1. 三层架构与入口点</h2>
+
+<p>Hook 系统分布在三个文件中，形成声明→注册→执行三层架构。链路有两个入口——写扩展时的 <code>pi.on("event", handler)</code>（注册入口），运行时 Agent 循环调用 <code>runner.emit(event)</code>（触发入口）。</p>
+
+<div class="filetree">
+packages/coding-agent/src/core/extensions/
+├── types.ts    ← 契约层（1639 行）
+│   ExtensionEvent 联合类型、on() 重载、Result 类型
+├── loader.ts   ← 注册层（700 行）
+│   createExtensionAPI() 实现 on()、jiti 加载、factory 调用
+└── runner.ts   ← 执行层（1171 行）
+    ExtensionRunner 类、emit 分发、异常捕获与上报
+</div>
+
+<div class="layer-stack">
+  <div class="layer">
+    <div class="layer-num">1</div>
+    <div class="layer-info">
+      <div class="layer-name">types.ts — 契约层</div>
+      <div class="layer-desc">定义 31 种 Event 接口、Result 接口、ExtensionHandler 泛型、ExtensionAPI.on() 的 31 个重载签名。</div>
+    </div>
+  </div>
+  <div class="layer">
+    <div class="layer-num">2</div>
+    <div class="layer-info">
+      <div class="layer-name">loader.ts — 注册层</div>
+      <div class="layer-desc">createExtensionAPI() 中 <code>on(event, handler)</code> 将 handler 追加到 extension.handlers Map。loadExtension() 执行 factory(api) 触发注册。</div>
+    </div>
+  </div>
+  <div class="layer">
+    <div class="layer-num">3</div>
+    <div class="layer-info">
+      <div class="layer-name">runner.ts — 执行层</div>
+      <div class="layer-desc">ExtensionRunner 持有所有 Extension 对象。Agent 生命周期在关键节点调用 runner.emit() 或专用方法分发事件。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 第 2 章：时序图 + 事件分类 ═══════════════ -->
+<h2>2. 调用时序与事件分类</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant Ext as Extension 模块
+    participant Ldr as loader.ts
+    participant API as ExtensionAPI
+    participant Run as runner.ts
+    participant Caller as Agent 生命周期
+    participant Hdlr as Handler
+
+    Note over Ext,Ldr: 注册阶段
+    Caller->>Ldr: discoverAndLoadExtensions()
+    Ldr->>Ldr: createExtensionRuntime()<br/>actions=throwing stub
+    loop 每个扩展
+        Ldr->>Ext: jiti → factory(api)
+        Ext->>API: pi.on("tool_call", handler)
+        API->>API: ext.handlers.get(e)?.push(handler)
+    end
+    Ldr-->>Caller: {extensions, errors, runtime}
+
+    Note over Caller,Hdlr: 绑定 + 运行
+    Caller->>Run: new ExtensionRunner()<br/>bindCore(actions) → 替换 stub
+    Caller->>Run: emit({type:"tool_call", toolName:"bash"})
+    loop 每个扩展
+        loop 每个 handler
+            Run->>Hdlr: handler(event, ctx)
+            Hdlr-->>Run: {block: true}
+            alt block
+                Run-->>Caller: 短路返回
+            end
+        end
+    end
+</pre>
+</div>
+
+<p>ExtensionEvent 联合类型包含 31 种事件，按生命周期阶段分为 6 大类：</p>
+
+<table>
+  <tr><th>分类</th><th>代表性事件</th><th>emit 方式</th><th>策略</th></tr>
+  <tr>
+    <td><span class="tag tag-resource">Resource</span></td>
+    <td>project_trust, resources_discover</td>
+    <td>专用函数</td>
+    <td>首个决策 / 收集合并</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-session">Session</span></td>
+    <td>session_start/shutdown, session_before_* ×4, session_compact/tree/info_changed</td>
+    <td>emit() 通用</td>
+    <td>before_* 支持 cancel 短路</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-agent">Agent</span></td>
+    <td>before_agent_start, context, before_provider_request, agent_start/end, turn_start/end, message_start/update/end</td>
+    <td>混合：通用 + 4 种专用</td>
+    <td>链式修改 / 合并结果</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-tool">Tool</span></td>
+    <td>tool_call/result, tool_execution_start/update/end, user_bash</td>
+    <td>3 种专用 emit</td>
+    <td>block 短路 / 链式修改</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-model">Model</span></td>
+    <td>model_select, thinking_level_select</td>
+    <td>emit() 通用</td>
+    <td>通知型（无返回值）</td>
+  </tr>
+  <tr>
+    <td><span class="tag tag-input">Input</span></td>
+    <td>input</td>
+    <td>emitInput()</td>
+    <td>transform 链 / handled 短路</td>
+  </tr>
+</table>
+
+<div class="warn">
+<strong>关键区分：</strong>emit() 通用方法处理大部分事件，但 6 种核心事件拥有专用 emit 方法——其返回值和短路逻辑无法用统一签名表达。
+</div>
+
+<!-- ═══════════════ 第 3 章：执行策略 ═══════════════ -->
+<h2>3. 六种专用 emit 方法策略</h2>
+
+<p>通用 <code>emit()</code> 核心逻辑：遍历扩展 → 匹配 handler → 逐个调用 → 捕获异常。session_before_* 事件中任一 handler 返回 <code>{cancel: true}</code> 立即短路。</p>
+
+<div class="strategy-card">
+<strong>emitContext(messages)</strong> — 链式修改。handler 返回替换后的 messages 数组，后续 handler 收到累积修改结果。核心用 <code>structuredClone</code> 保护原始数组，支持 AbortSignal 中断。
+</div>
+
+<div class="strategy-card">
+<strong>emitToolCall(event)</strong> — block 短路。handler 返回 <code>{block: true}</code> 则工具调用被阻止。<code>event.input</code> 为 mutable，handler 可直接修改参数。
+</div>
+
+<div class="strategy-card">
+<strong>emitToolResult(event)</strong> — 链式修改。handler 可部分覆写 <code>content</code> / <code>details</code> / <code>isError</code>，后续 handler 看到累积结果。
+</div>
+
+<div class="strategy-card">
+<strong>emitMessageEnd(event)</strong> — 链式替换 + role 校验。handler 替换整个 message 但必须保持原 role。若 role 不一致，记录 ExtensionError 并丢弃该结果。
+</div>
+
+<div class="strategy-card">
+<strong>emitBeforeAgentStart(...)</strong> — 收集 + 链式。多个 handler 的 message 结果收集为数组，systemPrompt 链式传递。ctx.getSystemPrompt() 被覆写为返回当前链式结果。
+</div>
+
+<div class="strategy-card">
+<strong>emitInput(text, ...)</strong> — transform / handled 短路。返回 <code>{action:"transform", text}</code> 替换文本，<code>{action:"handled"}</code> 短路跳过内置处理。
+</div>
+
+<h3>session_before_* 短路逻辑</h3>
+<pre>// runner.ts — emit() 核心循环
+for (const handler of handlers) {
+  const handlerResult = await handler(event, ctx);
+  if (this.isSessionBeforeEvent(event) && handlerResult) {
+    result = handlerResult;
+    if (result.cancel) {
+      return result; // 立即停止，跳过后续 handler
+    }
+  }
+}</pre>
+
+<!-- ═══════════════ 第 4 章：执行策略 + 异常路径 ═══════════════ -->
+<h2>4. 异常路径与防御机制</h2>
+
+<h3>4.1 Handler 抛出异常</h3>
+<p>所有 emit 方法用 try/catch 包裹 handler 调用。异常被包装为 <code>ExtensionError{extensionPath, event, error, stack}</code>，通过 <code>emitError()</code> 通知 errorListeners。<strong>单个 handler 崩溃不影响后续 handler 执行。</strong></p>
+
+<pre>// runner.ts — 异常处理模式
+try {
+  const handlerResult = await handler(event, ctx);
+} catch (err) {
+  this.emitError({
+    extensionPath: ext.path, event: event.type,
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
+}</pre>
+
+<h3>4.2 运行时未初始化 (Throwing Stub)</h3>
+<p>loader.ts 创建的 <code>ExtensionRuntime</code> 中所有 action 方法（sendMessage、setModel 等）初始化为 throwing stub。在 factory(api) 执行期间若调用它们，抛出 <code>"Extension runtime not initialized"</code>。bindCore() 注入真实实现后替换所有 stub。</p>
+
+<h3>4.3 Stale 扩展实例</h3>
+<p>reload / newSession / fork / switchSession 后，旧 ExtensionRunner 调用 <code>invalidate()</code> 设置 staleMessage。此后对旧 ctx 的任何访问触发 <code>assertActive()</code> 抛出异常，防止在已销毁上下文中执行操作。</p>
+
+<!-- ═══════════════ 检索练习 ═══════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>不看上文，回答以下问题：</p>
+<ol>
+  <li>Hook 系统的三层架构分别是什么文件？每层核心职责？</li>
+  <li>为什么 6 种事件需要专用 emit 方法而非统一 emit()？</li>
+  <li>session_before_compact 的 handler 返回 cancel=true 后，后续 handler 还会执行吗？</li>
+  <li>emitMessageEnd 中 handler 将 message.role 从 "assistant" 改为 "user" 会发生什么？</li>
+  <li>ExtensionRuntime 的 action 方法初始化为 throwing stub 的原因？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>types.ts（契约层：Event/Result 类型和 API 签名）、loader.ts（注册层：实现 on() 收集 handler）、runner.ts（执行层：ExtensionRunner 分发事件）。</li>
+  <li>因为返回值类型和短路逻辑不同——emitContext 链式替换 messages、emitToolCall block 短路、emitToolResult 部分覆写、emitMessageEnd 需 role 校验、emitBeforeAgentStart 收集多条消息、emitInput transform/handled 短路。统一 emit() 只能表达"遍历→调用→忽略返回值"。</li>
+  <li>不会。cancel=true 时立即 return，短路跳过当前扩展后续 handler 及后续扩展所有 handler。</li>
+  <li>runner 记录 ExtensionError（"message_end handlers must return a message with the same role"），丢弃该结果，继续使用上一个有效 message。</li>
+  <li>因为 factory(api) 在 loader 阶段执行，此时 SessionManager、Model 等核心对象尚未就绪。bindCore() 在 runner 初始化时注入真实实现。</li>
+</ol>
+</details>
+</div>
+
+<!-- ═══════════════ 参考资料 ═══════════════ -->
+<h3>参考资料</h3>
+<ul>
+  <li><strong>前置</strong>：<a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">L1-module-coding-agent 模块总览</a></li>
+  <li><strong>前置</strong>：<a href="../../slice-extension-system/lessons/0001-flow-map.html">L2-slice-extension-system 扩展加载</a></li>
+  <li><strong>源码</strong>：<code>packages/coding-agent/src/core/extensions/types.ts</code> — ExtensionEvent 联合（L1002-L1025）、on() 重载（L1152-L1191）</li>
+  <li><strong>源码</strong>：<code>packages/coding-agent/src/core/extensions/loader.ts</code> — createExtensionAPI() 中 on()（L221-L225）、createExtensionRuntime()（L160-L206）</li>
+  <li><strong>源码</strong>：<code>packages/coding-agent/src/core/extensions/runner.ts</code> — emit() 通用分发（L766-L798）、6 种专用 emit（L800-L1170）</li>
+  <li><strong>官方</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md">extensions.md</a></li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对任何概念有疑问，可以直接向 AI 教师追问。例如："context 事件为什么需要 structuredClone？"、"如果两个扩展对同一个 tool_call 分别返回 block 和非 block，哪个生效？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">← L1：pi-coding-agent 模块总览</a>
+  <a href="../../slice-extension-system/lessons/0001-flow-map.html">L2：扩展系统全链路 →</a>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

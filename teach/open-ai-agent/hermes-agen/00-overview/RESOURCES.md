@@ -1,16 +1,21 @@
-# 资源清单
+# Hermes Agent 项目总览 资源
 
-## 源码与项目文档
+## 知识
 
-- 源项目：`open-ai-agent/hermes-agen`
-- 主题目录：`teach/open-ai-agent/hermes-agen/00-overview`
-- 课程规范：`.agents/skills/teach/SKILL.md`
-- 总覆盖清单：`../00-overview/reference/source-coverage.html`
-- 源码锚点：`open-ai-agent/hermes-agen/apps/desktop/src/app/chat/sidebar/projects/overview-row.tsx`
-- 源码锚点：`open-ai-agent/hermes-agen/ui-tui/packages/hermes-ink/src/ink/components/ErrorOverview.tsx`
-- 源码锚点：`open-ai-agent/hermes-agen/website/docs/user-guide/features/overview.md`
-- 源码锚点：`open-ai-agent/hermes-agen/website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/overview.md`
+- [README.md — Hermes Agent 官方说明](https://github.com/NousResearch/hermes-agent)
+  项目定位、核心特性（自学习闭环、多平台、定时任务、子代理并行）、快速安装。适用场景：任何对项目整体认知的需求。
+- [AGENTS.md — AI 编码协作指南](https://github.com/NousResearch/hermes-agent/blob/main/AGENTS.md)
+  架构概览、设计哲学（窄腰模型、prompt 缓存神圣不可侵犯）、贡献准则、Footprint Ladder 决策框架。适用场景：理解项目设计意图与代码规范。
+- [pyproject.toml — 依赖与构建配置](https://github.com/NousResearch/hermes-agent/blob/main/pyproject.toml)
+  完整的依赖清单（含精确版本锁定策略）、可选扩展、构建系统配置。适用场景：了解技术栈组成与安全策略。
+- [官方架构文档](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture)
+  项目结构、agent 循环、关键类的官方介绍。适用场景：与本地源码对照学习。
 
-## 空白
+## 智慧（社区）
 
-未额外引用外部社区资料；本轮重新梳理以当前工作区源码和项目内文档为事实来源。
+- [Discord — Nous Research](https://discord.gg/NousResearch)
+  Hermes Agent 的官方社区，包含开发讨论、问题反馈、技能分享。适用场景：实战问题求助与社区互动。
+- [GitHub Issues](https://github.com/NousResearch/hermes-agent/issues)
+  项目问题追踪，是理解真实使用场景和设计决策的窗口。适用场景：观察社区反馈和已知问题。
+- [Skills Hub — agentskills.io](https://agentskills.io)
+  Agent Skills 开放标准社区。适用场景：了解技能生态和可复用组件。

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 16 课 · StpInterface 权限回调：SaPermissionImpl 详解</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+</style>
+</head>
+<body>
+
+<h1>第 16 课 · StpInterface 权限回调：SaPermissionImpl 详解 <span class="tag">plus-backend</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：理解 Sa-Token 的 <code>StpInterface</code> 回调机制——什么时候被调用、谁来调、为什么这样设计。重点分析 <code>SaPermissionImpl</code> 的<strong>双源权限加载策略</strong>（本地缓存优先 → 降级到数据库查询）和 loginId 格式解析。
+</div>
+
+<h2>一、StpInterface：一个接口，两个方法，Sa-Token 自动回调</h2>
+
+<pre><code>// Sa-Token 框架定义（非本项目代码）
+public interface StpInterface {
+    List&lt;String&gt; getPermissionList(Object loginId, String loginType);
+    List&lt;String&gt; getRoleList(Object loginId, String loginType);
+}
+
+// SaTokenConfig.java:38-41 — 注册实现
+@Bean
+public StpInterface stpInterface() {
+    return new SaPermissionImpl();   // Spring Bean 注入
+}</code></pre>
+
+<p>这个接口实现了<strong>策略模式/回调模式</strong>：Sa-Token 框架定义了"我需要权限列表"的协议，但不关心你怎么获取。你的实现可以查数据库、调微服务、读缓存——只要返回 <code>List&lt;String&gt;</code> 即可。</p>
+
+<p><strong>调用时机：</strong> 每当代码中调用 <code>StpUtil.checkPermission("system:user:list")</code> 或使用 <code>@SaCheckPermission</code> 注解时，Sa-Token 内部会回调 <code>stpInterface.getPermissionList(loginId, loginType)</code> 获取当前用户的完整权限列表，然后做 <code>contains()</code> 判断。</p>
+
+<div class="side">
+⚠️ <b>性能注意</b>：StpInterface 的 <code>getPermissionList</code> 在<strong>每次权限校验时都会调用</strong>（除非配置了缓存）。RuoYi 的优化策略是：登录时把权限预加载到 LoginUser 对象 → Session 缓存 → <code>getPermissionList</code> 优先从 LoginUser 的字段读取，不查数据库。
+</div>
+
+<h2>二、SaPermissionImpl 的双源策略</h2>
+
+<pre><code>// SaPermissionImpl.java:56-72
+private List&lt;String&gt; resolvePermissionList(
+    Object loginId,
+    Function&lt;LoginUser, Collection&lt;String&gt;&gt; localExtractor,   // ①
+    BiFunction&lt;PermissionService, Long, Collection&lt;String&gt;&gt; remoteExtractor // ②
+) {
+    LoginUser loginUser = LoginHelper.getLoginUser();  // ③ 尝试从当前 Token-Session 获取
+    if (ObjectUtil.isNull(loginUser) || !loginUser.getLoginId().equals(loginId)) {
+        // ④ Session 中没有或 loginId 不匹配 → 降级查数据库
+        PermissionService permissionService = SpringUtils.getBean(PermissionService.class);
+        return new ArrayList&lt;&gt;(remoteExtractor.apply(permissionService, resolveUserId(loginId)));
+    }
+    // ⑤ Session 中有且匹配 → 直接空返回（权限已在 LoginUser 里）
+    Collection&lt;String&gt; permissionList = localExtractor.apply(loginUser);
+    if (CollUtil.isNotEmpty(permissionList)) {
+        return new ArrayList&lt;&gt;(permissionList);
+    }
+    return new ArrayList&lt;&gt;();
+}</code></pre>
+
+<p>这是一个<strong>两级回退（fallback）</strong>策略：</p>
+
+<div class="flow">需要权限列表
+  │
+  ├─ ① 取当前 Token-Session 中的 LoginUser
+  │    ├─ 有 → loginId 匹配？
+  │    │    ├─ 匹配 → 从 LoginUser.getMenuPermission() / getRolePermission() 取 → 返回
+  │    │    └─ 不匹配 → 走远程查询（②）
+  │    └─ 没有 → 走远程查询（②）
+  │
+  └─ ② 远程查询
+       └─ SpringUtils.getBean(PermissionService.class)
+            └─ permissionService.getMenuPermission(userId) / getRolePermission(userId)</pre>
+
+<div class="why">
+💡 <b>为什么需要 loginId 匹配检查？</b> 因为 Sa-Token 支持"以他人身份查询权限"的场景（如管理员查看某用户的权限），此时传入的 <code>loginId</code> 可能不是当前请求用户的。如果直接返回当前 LoginUser 的权限就错了。这个检查保证了<strong>跨用户查询时的正确性</strong>。
+</div>
+
+<h2>三、loginId 格式：userId 的提取逻辑</h2>
+
+<pre><code>// SaPermissionImpl.java:93-100
+private Long resolveUserId(Object loginId) {
+    String loginIdStr = loginId.toString();      // 例如："sys_user:1"
+    int separatorIndex = loginIdStr.indexOf(':');
+    if (separatorIndex &lt; 0 || separatorIndex == loginIdStr.length() - 1) {
+        throw new ServiceException("登录ID格式错误");
+    }
+    return Long.parseLong(loginIdStr.substring(separatorIndex + 1));  // 提取 "1" → 1L
+}</code></pre>
+
+<p>RuoYi 的 <code>loginId</code> 格式为 <code>用户类型:用户ID</code>，例如 <code>sys_user:1</code>。这个设计服务于多用户体系——<code>sys_user</code> 是后台用户，还可能有 <code>app_user</code>（App 用户）。<code>resolveUserId</code> 通过冒号分割提取出纯数字 userId，用于数据库查询。</p>
+
+<h2>四、设计启示：SPI 扩展点模式</h2>
+
+<p>这套设计的精华在于<strong>扩展点</strong>（Extension Point）：</p>
+<ol>
+<li>Sa-Token 定义 <code>StpInterface</code> 作为扩展契约</li>
+<li>你的项目通过 Spring Bean 注入自己的实现</li>
+<li>框架在需要时<strong>自动发现并回调</strong>你的实现</li>
+<li>实现可以被替换——比如切换到 OAuth2 或 LDAP，只需改一个 Bean，整个系统的鉴权调用方零改动</li>
+</ol>
+
+<p>这与 Java SPI、Spring Boot AutoConfiguration 设计哲学一致：<strong>定义接口 → 允许替换 → 约定优于配置</strong>。</p>
+
+<h3>练习：代码追踪</h3>
+
+<div class="quiz">
+<p>❓ 如果 <code>LoginHelper.getLoginUser()</code> 返回 null，但 <code>PermissionService</code> 的 Spring Bean 也不存在——SaPermissionImpl 会怎样？</p>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p>会先进入 <code>getPermissionService()</code>（第 79-85 行），catch 异常后返回 null。然后回到 <code>resolvePermissionList</code>（第 61-64 行），判断 <code>permissionService != null</code> 为 false，跳过远程查询，直接抛出 <code>ServiceException("PermissionService 实现类不存在")</code>。这是防御性编程的体现——每个分支都有异常处理。</p>
+</details>
+
+<div class="reminder">
+📖 <a href="0015.html">上节课：强制下线</a> · <a href="0017.html">下一课：前后端白名单与 @SaIgnore</a><br>
+💬 追问 Agent："如果我想让 SaPermissionImpl 加一层 Redis 缓存来避免每次都查 LoginUser，怎么改？"
+</div>
+
+<div class="cite">
+<p>源文件：<code>ruoyi-common-satoken/.../core/service/SaPermissionImpl.java</code>、<code>ruoyi-common-satoken/.../config/SaTokenConfig.java</code></p>
+</div>
+
+</body>
+</html>

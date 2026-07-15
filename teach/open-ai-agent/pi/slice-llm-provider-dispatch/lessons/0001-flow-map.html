@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 — LLM 请求全链路调度流图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+
+  .layer-badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 0.3rem;
+    vertical-align: middle;
+  }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>0001 — LLM 请求全链路调度流图</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：14 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<div class="goal-heading"><strong>学习目标</strong></div>
+<p>能画出从 <code>builtinModels()</code> 创建 Models 集合到 <code>streamSimple()</code> 返回流式响应的<strong>完整调用链路时序图</strong>，说出每一层的入口函数、关键数据结构和认证解析的三种来源。</p>
+
+<!-- ──────────── 第 1 章 链路全景 ──────────── -->
+<h2>1. 链路全景：6 层 9 步</h2>
+
+<p>一条 LLM 请求从初始化到收到首个 token 需要经过 <strong>6 个逻辑层</strong>：</p>
+
+<ol>
+  <li><span class="layer-badge">L0</span> <strong>集合初始化</strong> — <code>builtinModels()</code> 创建 Models 并注册 35 个 Provider</li>
+  <li><span class="layer-badge">L1</span> <strong>模型查找</strong> — <code>getModel(provider, id)</code> 从 Provider 的模型列表中匹配</li>
+  <li><span class="layer-badge">L2</span> <strong>认证解析</strong> — <code>resolveProviderAuth()</code> 依次查询 override、credential store、环境变量</li>
+  <li><span class="layer-badge">L3</span> <strong>Provider 调度</strong> — <code>provider.streamSimple()</code> 根据 <code>model.api</code> 分发到正确的 SDK</li>
+  <li><span class="layer-badge">L4</span> <strong>懒加载</strong> — <code>lazyApi()</code> 动态 <code>import()</code> SDK 模块，<code>lazyStream()</code> 同步返回流</li>
+  <li><span class="layer-badge">L5</span> <strong>流式传输</strong> — SDK 发起 HTTP 请求，逐 chunk 推入 <code>AssistantMessageEventStream</code></li>
+</ol>
+
+<p>关键洞察：<strong>认证解析是全链路中唯一可能异步失败的环节</strong>。Provider 调度和懒加载虽然也是异步的，但失败后会通过 <code>lazyStream</code> 转为流错误事件，不会抛异常。</p>
+
+<!-- ──────────── 第 2 章 时序图 ──────────── -->
+<h2>2. Mermaid 时序图</h2>
+
+<p>下图追踪一次 <code>models.streamSimple(gptModel, ctx)</code> 调用的完整路径。实线箭头为同步调用，虚线为异步。</p>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant App as 调用方
+    participant Models as ModelsImpl
+    participant Provider as Provider
+    participant Auth as resolveProviderAuth
+    participant Api as lazyApi/SDK
+    participant Stream as EventStream
+
+    App->>Models: streamSimple(model, ctx, opts)
+    Models->>Provider: requireProvider(model)
+    rect rgb(255, 245, 230)
+        Note over Models,Auth: 认证解析
+        Models->>Auth: resolveProviderAuth(provider, model, store, ctx)
+        alt stored credential
+            Auth-->>Models: AuthResult(key) ✓
+        else env var
+            Auth-->>Models: AuthResult(key) ✓
+        else 无凭证
+            Auth-->>Models: undefined (未配置)
+        end
+    end
+    alt 认证成功
+        Models->>Models: applyAuth() 合并 apiKey/headers
+        Models->>Provider: streamSimple(model, ctx, opts)
+        Provider->>Api: dispatch → lazyApi → import SDK
+        Api-->>Stream: yield chunk_1 ... chunk_n
+        Stream-->>App: AsyncIterable 事件
+    else 认证失败
+        Auth-->>Models: ModelsError("auth")
+        Models->>Stream: push error event
+        Stream-->>App: {type:"error"}
+    end
+</pre>
+</div>
+
+<p><strong>图中关键决策点</strong>：</p>
+<ul>
+  <li><strong>认证优先级</strong>：request override > stored credential > env var。不会在存储凭证过期后静默降级到环境变量。</li>
+  <li><strong>OAuth 特殊路径</strong>：如果凭证类型是 OAuth 且已过期，会在 <code>credentialStore.modify()</code> 内部加锁刷新 token，刷新失败抛出 <code>ModelsError("oauth")</code>。</li>
+  <li><strong>Provider 未配置</strong>：返回 <code>undefined</code> 而非抛异常，上层可在 status UI 中显示"未配置"而非红色错误。</li>
+</ul>
+
+<!-- ──────────── 第 3 章 关键代码 ──────────── -->
+<h2>3. 三个关键节点</h2>
+
+<h3>节点 1：streamSimple 的调度入口</h3>
+<p><code>ModelsImpl.streamSimple()</code> 是整个链路的调度枢纽——找 Provider、解析认证、委托执行，三步走：</p>
+
+<pre>// packages/ai/src/models.ts — ModelsImpl.streamSimple
+streamSimple(model, context, options) {
+  return lazyStream(model, async () => {
+    const provider = this.requireProvider(model);       // ① 找 Provider
+    const { requestModel, requestOptions } =
+      await this.applyAuth(model, options);              // ② 异步认证
+    return provider.streamSimple(
+      requestModel, context, requestOptions);            // ③ 委托执行
+  });
+}</pre>
+
+<p>注意外层 <code>lazyStream()</code> 保证了函数<strong>同步返回</strong>一个 EventStream，而认证和 SDK 调用在后台异步执行。这就是 Pi 对上层 Agent 运行时"无等待"的关键设计。</p>
+
+<h3>节点 2：认证解析三路分支</h3>
+<p><code>resolveProviderAuth()</code> 按优先级查询三种认证来源，每种失败的处理方式不同：</p>
+
+<pre>// packages/ai/src/auth/resolve.ts — resolveProviderAuth（简化）
+export async function resolveProviderAuth(provider, model, credentials, ctx, overrides?) {
+  // ① 最高优先级：请求级 override
+  if (overrides?.apiKey !== undefined && provider.auth.apiKey) {
+    return resolveApiKey(ctx, provider.auth.apiKey, model,
+      { type: "api_key", key: overrides.apiKey });
+  }
+  // ② 次优先级：持久化存储
+  const stored = await readCredential(credentials, provider.id);
+  if (stored) {
+    if (stored.type === "oauth") return resolveStoredOAuth(...);
+    if (stored.type === "api_key") return resolveApiKey(...);
+    return undefined;
+  }
+  // ③ 兜底：环境变量 / AWS profile / ADC 文件
+  return provider.auth.apiKey
+    ? resolveApiKey(ctx, provider.auth.apiKey, model, undefined)
+    : undefined;
+}</pre>
+
+<h3>节点 3：lazyStream 同步返回的秘密</h3>
+<p><code>lazyStream</code> 创建外层 EventStream 后立即返回，setup 函数的 Promise 在后台执行：</p>
+
+<pre>// packages/ai/src/api/lazy.ts — lazyStream
+export function lazyStream(model, setup) {
+  const outer = new AssistantMessageEventStream();   // 同步创建
+  setup()
+    .then(inner => forwardStream(outer, inner))       // 成功：转发事件
+    .catch(error => {
+      outer.push({ type: "error", ... });              // 失败：推送错误事件
+      outer.end(errorMessage);
+    });
+  return outer;  // 立即返回，不等 setup 完成
+}</pre>
+
+<!-- ──────────── 第 4 章 异常路径 ──────────── -->
+<h2>4. 异常路径：认证失败全追踪</h2>
+
+<p>认证失败是链路中最常见的异常。以下追踪一次 <strong>API Key 未配置且环境变量为空</strong> 的完整错误传播路径：</p>
+
+<ol>
+  <li><strong>触发点</strong>：<code>resolveApiKey()</code> 中 <code>apiKey.resolve({model, ctx, credential: undefined})</code> 被调用</li>
+  <li><strong>envApiKeyAuth.resolve()</strong> 检查 credential.key → 无；遍历 envVars → <code>ctx.env("OPENAI_API_KEY")</code> → undefined</li>
+  <li><strong>返回 undefined</strong> — 注意这里<strong>不抛异常</strong>，因为 Provider 未配置是合法状态</li>
+  <li><strong>applyAuth()</strong> 收到 <code>auth === undefined</code>，不做任何合并，原样返回 model 和 options</li>
+  <li><strong>请求到达 SDK</strong>，SDK 在发起 HTTP 请求时发现无 apiKey → SDK 自身抛出认证错误</li>
+  <li><strong>lazyStream 的 .catch()</strong> 捕获错误 → 构造 <code>{type:"error", stopReason:"error"}</code> 事件推入外层流</li>
+  <li><strong>上层 Agent</strong> 收到 error 事件 → 在 TUI 中显示"认证失败"或"请配置 API Key"</li>
+</ol>
+
+<div class="practice">
+<h3>为什么不在 resolveApiKey 中直接抛异常？</h3>
+<p>设计意图：返回 <code>undefined</code> 表示"Provider 未配置"（用户还没设置 Key），这是一个<strong>预期状态</strong>，status UI 应显示灰色而不是红色。而 <code>ModelsError("auth")</code> 表示"认证过程本身出错"（如 credential store 读写失败），这才是需要报红的异常。两种情况的严重程度不同。</p>
+</div>
+
+<!-- ──────────── 检索练习 ──────────── -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>不看上文，回答以下问题：</p>
+<ol>
+  <li>从 builtinModels() 到 streamSimple() 一共经过哪 6 个逻辑层？每层的入口函数是什么？</li>
+  <li>resolveProviderAuth 的三种认证来源的优先级顺序是什么？OAuth token 过期后如何刷新？</li>
+  <li>lazyStream() 为什么要同步返回 EventStream？如果 setup 失败，错误如何传递给调用方？</li>
+  <li>Provider 未配置（无 API Key）和认证过程出错（如 store 读写失败）在错误处理上有什么不同？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>L0 集合初始化 (builtinModels/setProvider) → L1 模型查找 (getModel) → L2 认证解析 (resolveProviderAuth) → L3 Provider 调度 (provider.streamSimple) → L4 懒加载 (lazyApi/lazyStream) → L5 流式传输 (SDK.streamSimple)。</li>
+  <li>优先级：request override apiKey > credential store > env var。OAuth 过期后，credentialStore.modify() 内部加锁，重新检查过期状态，调用 oauth.refresh() 刷新，成功后持久化新 token。</li>
+  <li>同步返回让上层 Agent 不需要 await 就能拿到流对象，可以立即开始迭代。setup 失败时，.catch() 构造 error 事件推入外层流，调用方通过迭代流自然会收到错误。</li>
+  <li>未配置返回 undefined（预期状态，UI 灰色）；认证过程出错抛出 ModelsError（异常状态，UI 红色）。前者在 status 检查时处理，后者在流中作为 error 事件传播。</li>
+</ol>
+</details>
+</div>
+
+<!-- ──────────── 参考资料 ──────────── -->
+<h3>参考资料</h3>
+<ul>
+  <li><strong>参考文档</strong>：<a href="../reference/llm-dispatch-flow.html">llm-dispatch-flow.html</a> — 源码入口索引、API 签名速查表、错误码对照</li>
+  <li><strong>上游课程</strong>：<a href="../../module-ai/lessons/0001-ai-module-tour.html">L1 module-ai — pi-ai 模块总览</a></li>
+  <li><strong>源码入口</strong>：<code>packages/ai/src/models.ts</code> — Models / Provider 接口定义和 streamSimple 实现</li>
+  <li><strong>源码入口</strong>：<code>packages/ai/src/providers/all.ts</code> — builtinModels() 入口和 35 个 Provider 注册</li>
+  <li><strong>源码入口</strong>：<code>packages/ai/src/auth/resolve.ts</code> — resolveProviderAuth 认证解析逻辑</li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对任何概念有疑问，可以直接向 AI 教师追问。例如："lazyStream 的 forwardStream 是怎么把 AsyncIterable 事件转发到 EventStream 的？"、"OAuth token 的 double-checked locking 为什么需要加锁？"</p>
+</div>
+
+<div class="nav">
+  <a href="../../module-ai/lessons/0001-ai-module-tour.html">← L1 module-ai 课程</a>
+  <a href="../reference/llm-dispatch-flow.html">参考文档：调度流详情 →</a>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

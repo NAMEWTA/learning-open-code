@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 - 扩展系统加载与执行全链路</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .filetree {
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+  }
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+
+  .warning {
+    background: #fff8e1;
+    border-left: 4px solid #e6a700;
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1.5rem 0;
+  }
+  .warning h3 { margin-top: 0; color: #b8860b; }
+
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+
+  .callout {
+    background: #f0fdf4;
+    border-left: 4px solid #16a34a;
+    padding: 0.8rem 1rem;
+    border-radius: 0 6px 6px 0;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>0001 — 扩展系统加载与执行全链路</h1>
+
+<div class="meta">
+  <span>层级：L2 垂直切片</span>
+  <span>预计时长：14 分钟</span>
+  <span>学习目标：1 个</span>
+  <span>父模块：L1-module-coding-agent</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>理解 Pi 扩展系统从<strong>声明到运行时注入</strong>的完整链路 —— 掌握扩展发现、加载、类型校验、能力注册、事件触发的六个阶段，能画出全链路时序图并识别关键异常路径。</p>
+
+<!-- ════════════ 第 1 章 扩展系统五能力回顾 ════════════ -->
+<h2>1. 扩展能力速览</h2>
+<p>
+  Pi 扩展是 TypeScript 模块，通过默认导出 <code>(pi: ExtensionAPI) =&gt; void</code> 的工厂函数来注册能力。
+  一个扩展可以同时拥有以下五种能力中的任意组合：
+</p>
+
+<table>
+  <tr><th>能力</th><th>API 方法</th><th>运行时存储位置</th></tr>
+  <tr><td>Hook 事件监听</td><td><code>pi.on(event, handler)</code></td><td><code>extension.handlers</code>（Map）</td></tr>
+  <tr><td>LLM 可调用工具</td><td><code>pi.registerTool(def)</code></td><td><code>extension.tools</code>（Map）</td></tr>
+  <tr><td>斜杠指令</td><td><code>pi.registerCommand(name, opts)</code></td><td><code>extension.commands</code>（Map）</td></tr>
+  <tr><td>自动补全提供者</td><td><code>pi.ui.addAutocompleteProvider(factory)</code></td><td>TUI 组件内部</td></tr>
+  <tr><td>UI 组件（页脚/编辑器/Widget）</td><td><code>pi.ui.setFooter/setEditor/setWidget</code></td><td>TUI 渲染树</td></tr>
+</table>
+
+<p>
+  其中前三种（Hook/Tool/Command）是核心，它们的注册数据存储在 <code>Extension</code> 对象的 Map 中，供运行时遍历。后两种直接注入 TUI 渲染管线。
+</p>
+
+<!-- ════════════ 第 2 章 全链路时序图 ════════════ -->
+<h2>2. 全链路时序图</h2>
+
+<p>以下 Mermaid 时序图展示了从 Pi 启动到扩展事件回调的完整六阶段链路：</p>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant CLI as CLI
+    participant Loader as loader.ts
+    participant Jiti as jiti
+    participant Ext as 扩展
+    participant Runner as runner.ts
+    participant Agent as Agent会话
+
+    Note over CLI,Agent: 阶段1-2: 发现与加载
+    CLI->>Loader: discoverAndLoadExtensions()
+    Loader->>Loader: 三层扫描 + createExtensionRuntime()
+    loop 每个扩展
+        Loader->>Jiti: jiti.import(path)
+        Jiti-->>Loader: factory函数
+        Loader->>Ext: factory(api)
+        Ext->>Ext: pi.on/registerTool/registerCommand
+    end
+
+    Note over CLI,Agent: 阶段3: 绑定
+    CLI->>Runner: new ExtensionRunner(extensions)
+    CLI->>Runner: bindCore(actions, ctxActions)
+    Runner->>Runner: 替换stub → 刷新Provider
+
+    Note over CLI,Agent: 阶段4-6: 运行时事件
+    Agent->>Runner: emit(session_start/turn_start/...)
+    Runner->>Ext: handler(event, ctx)
+    Agent->>Runner: emitContext(messages)
+    Agent->>Runner: emitToolCall/emitToolResult
+    Agent->>Runner: emitBeforeProviderRequest
+</pre>
+</div>
+
+<div class="callout">
+  <strong>关键设计：两阶段初始化</strong> —— loader 创建 <code>ExtensionRuntime</code> 时，action 方法（sendMessage、setModel 等）都是 throwing stub，因为此时会话、模型注册表等核心组件尚未就绪。只有 <code>runner.bindCore()</code> 调用后，stub 才被替换为真实实现。这确保了扩展加载阶段（factory 执行时）不会意外调用未就绪的 API。
+</div>
+
+<!-- ════════════ 第 3 章 发现规则详解 ════════════ -->
+<h2>3. 发现规则详解</h2>
+
+<p><code>discoverExtensionsInDir(dir)</code> 按以下优先级扫描指定目录：</p>
+
+<ol>
+  <li><strong>直接 <code>.ts</code> / <code>.js</code> 文件</strong> → 作为扩展入口加载</li>
+  <li><strong>子目录中的 <code>index.ts</code> / <code>index.js</code></strong> → 加载该入口文件</li>
+  <li><strong>子目录中的 <code>package.json</code>（含 <code>pi.extensions</code> 字段）</strong> → 加载字段声明的入口文件，同时其 <code>node_modules</code> 对外部依赖可见（如 sandbox、with-deps 示例）</li>
+</ol>
+
+<p><strong>不递归</strong>：仅扫描一层目录。复杂扩展包必须通过 <code>package.json</code> 的 <code>pi.extensions</code> 字段声明入口。</p>
+
+<div class="filetree">
+with-deps/                ← 目录名不限制
+├── package.json          ← pi.extensions: ["./index.ts"]
+├── node_modules/         ← 扩展的独立依赖
+└── index.ts              ← 默认导出的工厂函数
+</div>
+
+<p>示例中 <code>with-deps/package.json</code> 的 <code>pi</code> 字段：</p>
+
+<pre>{
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}</pre>
+
+<p>在 Bun binary 模式下使用 <code>virtualModules</code>（预打包的 pi 包），Node.js 开发模式下使用 <code>alias</code>（解析到 monorepo 本地路径），确保扩展能 import <code>@earendil-works/pi-coding-agent</code> 等包。</p>
+
+<!-- ════════════ 第 4 章 运行时事件分发 ════════════ -->
+<h2>4. 运行时事件分发</h2>
+
+<p><code>ExtensionRunner</code> 提供两类事件分发方法：</p>
+
+<table>
+  <tr><th>方法</th><th>处理的事件</th><th>特殊行为</th></tr>
+  <tr><td><code>emit(event)</code></td><td>通用事件（session_start、turn_start 等 15+ 种）</td><td>session_before_* 事件支持 <code>cancel</code> 短路</td></tr>
+  <tr><td><code>emitToolCall(event)</code></td><td><code>tool_call</code></td><td>handler 可返回 <code>{ block: true }</code> 阻止执行</td></tr>
+  <tr><td><code>emitToolResult(event)</code></td><td><code>tool_result</code></td><td>handler 可逐字段修改 content/details/isError</td></tr>
+  <tr><td><code>emitContext(messages)</code></td><td><code>context</code></td><td><strong>链式替换</strong>：每个 handler 接收前一个的输出；支持 AbortSignal</td></tr>
+  <tr><td><code>emitBeforeProviderRequest(payload)</code></td><td><code>before_provider_request</code></td><td>链式替换请求 payload</td></tr>
+  <tr><td><code>emitBeforeAgentStart(...)</code></td><td><code>before_agent_start</code></td><td>收集 messages 数组 + 链式替换 systemPrompt</td></tr>
+  <tr><td><code>emitMessageEnd(event)</code></td><td><code>message_end</code></td><td>链式替换消息体；验证 role 不变</td></tr>
+</table>
+
+<p>通用 <code>emit()</code> 的核心逻辑：</p>
+
+<pre>async emit(event) {
+  const ctx = this.createContext(); // 延迟求值的上下文
+  for (const ext of this.extensions) {
+    for (const handler of ext.handlers.get(event.type) ?? []) {
+      try {
+        const result = await handler(event, ctx);
+        if (this.isSessionBeforeEvent(event) && result?.cancel) {
+          return result; // 短路：停止后续 handler
+        }
+      } catch (err) {
+        this.emitError({ ... }); // 通知监听器，不影响其他 handler
+      }
+    }
+  }
+}</pre>
+
+<div class="warning">
+  <h3>异常路径：扩展加载失败</h3>
+  <p>两种失败场景：</p>
+  <ol>
+    <li><strong>模块加载失败</strong>（jiti.import 抛异常、factory 不是函数）→ 错误写入 <code>LoadExtensionsResult.errors</code>，该扩展被跳过，不影响其他扩展</li>
+    <li><strong>handler 执行异常</strong>（运行时抛错）→ <code>emitError()</code> 通知监听器（通常打印 warning 到控制台），不中断其他 handler，<strong>也不中断 Agent 主流程</strong></li>
+  </ol>
+  <p>此外，session 替换或 reload 后，旧的 <code>pi</code>/<code>ctx</code> 引用通过 <code>assertActive()</code> 检查变为 stale，再次调用会抛出明确错误信息，防止使用过期上下文。</p>
+</div>
+
+<!-- ════════════ 检索练习 ════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<p>不看上文，尝试回答：</p>
+<ol>
+  <li>扩展发现的三个优先级是什么？<code>package.json</code> 中的 <code>pi.extensions</code> 字段起什么作用？</li>
+  <li>为什么 <code>createExtensionRuntime()</code> 先创建 throwing stub，再由 <code>bindCore()</code> 替换？</li>
+  <li><code>emitContext()</code> 和通用 <code>emit()</code> 的核心区别是什么？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>三个优先级：项目本地 <code>.pi/extensions/</code> → 全局 <code>~/.pi/extensions/</code> → 显式配置路径。<code>pi.extensions</code> 字段声明扩展包的入口文件列表，同时使 <code>node_modules</code> 对外部依赖可见。</li>
+  <li>扩展加载阶段（factory 执行时），会话、模型注册表等核心组件尚未就绪。stub 确保在此期间调用 action API 会立即抛出明确错误，避免静默失败。bindCore 后才注入真实实现。</li>
+  <li><code>emitContext()</code> 是<strong>链式替换</strong>模式 —— 每个 handler 接收前一个 handler 修改后的 messages 数组；通用 <code>emit()</code> 中每个 handler 接收相同的原始 event。此外 emitContext 支持 AbortSignal 中断。</li>
+</ol>
+</details>
+</div>
+
+<!-- ════════════ 交叉链接 ════════════ -->
+<h3>交叉链接</h3>
+<ul>
+  <li><strong>前置课程</strong>：<a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">L1-module-coding-agent</a> — 扩展系统在 coding-agent 模块中的位置和五种能力介绍</li>
+  <li><strong>关联切片</strong>：<a href="../../slice-hook-system/lessons/0001-flow-map.html">L2-hook-system</a> — Agent Hook 生命周期系统，扩展 Hook 事件类型的具体使用场景</li>
+  <li><strong>关联切片</strong>：<a href="../../slice-cli-entry/lessons/0001-flow-map.html">L2-cli-entry</a> — CLI 入口如何解析 <code>-e</code> 参数并传递给 loader</li>
+</ul>
+
+<h3>参考资料</h3>
+<ul>
+  <li><strong>源码</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts" target="_blank">types.ts</a> — ExtensionAPI 完整接口定义</li>
+  <li><strong>源码</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/loader.ts" target="_blank">loader.ts</a> — 发现与加载实现</li>
+  <li><strong>源码</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/runner.ts" target="_blank">runner.ts</a> — ExtensionRunner 实现</li>
+  <li><strong>示例</strong>：<a href="https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions" target="_blank">80+ 扩展示例</a> — sandbox/with-deps/subagent 等</li>
+  <li><strong>阅读材料</strong>：<a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/README.md" target="_blank">扩展开发官方指南</a></li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>如果你对任何概念有疑问，可以直接向 AI 教师追问。例如："jiti 和 Node.js 原生 loader 有什么区别？"、"ExtensionRuntime 的 assertActive 机制如何检测 stale 引用？"</p>
+</div>
+
+<div class="nav">
+  <span><a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">← L1-module-coding-agent</a></span>
+  <span><a href="../../slice-hook-system/lessons/0001-flow-map.html">L2-hook-system →</a></span>
+</div>
+
+<script>mermaid.initialize({ startOnLoad: true, theme: 'default' });</script>
+</body>
+</html>

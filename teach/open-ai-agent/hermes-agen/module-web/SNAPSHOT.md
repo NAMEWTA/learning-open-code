@@ -5,47 +5,43 @@
   - **Git Commit**：`830165473e0920c2baf8c2a6863976edb0c52943`
   - **短 Commit**：`8301654`
   - **分支**：`main`
-- **快照时间**：2026-07-07T16:25:11+08:00
+- **快照时间**：2026-07-09T15:28:15+08:00
 
 ## 课程引用的源文件
 
 | 源文件路径 | 用途 | 关键度 |
 |-----------|------|--------|
-| `open-ai-agent/hermes-agen/apps/shared/src/websocket-url.ts` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/datagen-config-examples/web_research.yaml` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/creative/baoyu-comic/references/layouts/webtoon.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/creative/hyperframes/references/website-to-video.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/SKILL.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/references/bypass-techniques.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/references/exploitation-techniques.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/references/scope-enforcement.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/references/vuln-taxonomy.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/templates/authorization.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/templates/exploitation-queue.json` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/security/web-pentest/templates/pentest-report.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/web-development/DESCRIPTION.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/web-development/cloudflare-temporary-deploy/SKILL.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/optional-skills/web-development/page-agent/SKILL.md` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/plugins/web/brave_free/plugin.yaml` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/plugins/web/ddgs/plugin.yaml` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/plugins/web/exa/plugin.yaml` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/plugins/web/firecrawl/plugin.yaml` | 课程分析引用 | 🟡 辅助 |
-| `open-ai-agent/hermes-agen/plugins/web/parallel/plugin.yaml` | 课程分析引用 | 🟡 辅助 |
+| `/api/*` | 课程分析引用 | 🟡 辅助 |
+| `/api/analytics` | 课程分析引用 | 🟡 辅助 |
+| `/api/config` | 课程分析引用 | 🟡 辅助 |
+| `/api/cron` | 课程分析引用 | 🟡 辅助 |
+| `/api/dashboard/plugins` | 课程分析引用 | 🟡 辅助 |
+| `/api/env` | 课程分析引用 | 🟡 辅助 |
+| `/api/mcp` | 课程分析引用 | 🟡 辅助 |
+| `/api/messaging/*` | 课程分析引用 | 🟡 辅助 |
+| `/api/model/*` | 课程分析引用 | 🟡 辅助 |
+| `/api/sessions` | 课程分析引用 | 🟡 辅助 |
+| `/api/skills` | 课程分析引用 | 🟡 辅助 |
+| `/api/status` | 课程分析引用 | 🟡 辅助 |
+| `/api/system/*` | 课程分析引用 | 🟡 辅助 |
+| `/api/tools/toolsets` | 课程分析引用 | 🟡 辅助 |
+| `api.ts` | 课程分析引用 | 🟡 辅助 |
+| `src/App.tsx` | 课程分析引用 | 🟡 辅助 |
+| `src/plugins/` | 课程分析引用 | 🟡 辅助 |
 
 ## 已生成课程
 
 | 编号 | 课程文件 | 描述 |
 |------|---------|------|
-| 0001-web-module-tour | `lessons/0001-web-module-tour.html` | Web 前端模块 · 短课 |
+| 0001-web-module-tour | `lessons/0001-web-module-tour.html` | Web 仪表盘模块导览 -- FastAPI 后端 + SPA 前端管理界面 |
 
 ## 参考资料
 
-- `reference/web-api.html` — Web 前端模块 API 速查
-- `reference/web-overview.html` — Web 前端模块 总览参考
+- `reference/web-overview.html` — Web 仪表盘模块参考 — 速查手册
 
 ## 快照摘要
 - 课程数：1
-- 引用源文件数：20
+- 引用源文件数：17
 - 学习记录数：0
-- 参考资料数：2
+- 参考资料数：1
 - 资产文件数：0

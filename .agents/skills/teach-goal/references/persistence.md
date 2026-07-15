@@ -47,13 +47,13 @@
 | Wiki 导航 | `teach/<path>/00-index.md` | `teach/open-ai-agent/pi/00-index.md` |
 | 项目索引 | `teach/<path>/index.md` | `teach/open-ai-agent/pi/index.md` |
 | 主题级 | `teach/<path>/<topic>/` | `teach/open-ai-agent/pi/00-overview/` |
-| L0 主入口 | `teach/<path>/00-overview/lessons/0001-project-map.html` | — |
+| L0 主入口 | `teach/<path>/00-overview/lessons/000N-<slug>.html` | 至少 1 节，命名由模型自主决定 |
 | L0 参考 | `teach/<path>/00-overview/reference/00-overview.html` | — |
-| L1 主入口 | `teach/<path>/module-<slug>/lessons/0001-<slug>-module-tour.html` | — |
+| L1 主入口 | `teach/<path>/module-<slug>/lessons/000N-<slug>.html` | 至少 1 节，命名由模型自主决定 |
 | L1 参考 | `teach/<path>/module-<slug>/reference/<slug>-overview.html` | — |
-| L2 主入口 | `teach/<path>/slice-<slug>/lessons/0001-*.html` | — |
+| L2 主入口 | `teach/<path>/slice-<slug>/lessons/000N-<slug>.html` | 至少 1 节，命名由模型自主决定 |
 | L3 参考 | `teach/<path>/module-<slug>/reference/<slug>-api.html` | — |
-| L4 主入口 | `teach/<path>/deep-dive-<slug>/lessons/0001-*.html` | — |
+| L4 主入口 | `teach/<path>/deep-dive-<slug>/lessons/000N-<slug>.html` | 至少 1 节，命名由模型自主决定 |
 
 **任务单中的 `output_path` 只是主入口路径**，完整交付物以 `required_outputs` 为准。subagent 不得自行改目录；若需要拆成多节短课，必须写入同一主题目录下的 `lessons/000N-*.html`，并在回报中列出 `lesson_manifest`。
 

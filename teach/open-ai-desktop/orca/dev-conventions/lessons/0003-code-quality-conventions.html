@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orca 代码质量规范：注释、错误处理与跨平台</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <article class="page">
+        <p class="meta">L1 代码质量规范 · 预计 15 分钟 · 基于 commit 61bd98d · 接续 <a href="0001-dev-conventions.html">0001</a> <a href="0002-directory-conventions.html">0002</a></p>
+        <h1>Orca 的代码质量三支柱：注释、错误、跨平台</h1>
+        <p>
+          前两课讲了怎么写代码、放哪里、叫什么。本课讲三个影响代码可维护性的深层约定：注释怎么写、错误怎么处理、平台差异怎么隔离。
+          完整速查见 <a href="../reference/dev-conventions-reference.html#code-quality">参考手册代码质量章节</a>。
+        </p>
+
+        <h2>1. 注释铁律：只写"为什么"，不写"是什么"</h2>
+        <p>
+          Orca 的注释哲学极其精简——<strong>一行 <code>// Why:</code> 解释非显而易见的决策原因</strong>。绝不复述代码做了什么。
+        </p>
+        <pre><code>// ✅ 正确：解释约束原因
+// Why: forward-slash UNC roots need win32 ops; POSIX joins collapse //Server to /Server.
+const pathOps = isWindowsAbsolutePathLike(root) ? win32Path : posixPath
+
+// Why 5 minutes: GC runs ~10s after startup. Without an age guard,
+// GC would delete its freshly-created history directory (TOCTOU race).
+const HISTORY_GC_MIN_AGE_MS = 5 * 60 * 1000
+
+// Why: quitAndInstall is a side effect. React StrictMode double-invokes
+// render functions — calling it inline would trigger a double-install.
+const handleQuitAndInstall = useCallback(() => quitAndInstall(), [])</code></pre>
+        <div class="callout">
+          记忆公式：<code>// Why: &lt;非显而易见的约束/安全/trade-off 原因&gt;。</code> 不超过两行。如果你发现自己写了三行解释，说明这段代码需要拆分而非加注释。
+        </div>
+        <p><strong>注释的三种合法形态：</strong></p>
+        <table>
+          <tr><th>形态</th><th>用途</th><th>示例</th></tr>
+          <tr><td><code>// Why:</code></td><td>解释非显而易见的决策</td><td><code>// Why: /d disables AutoRun so background spawns can't inherit side effects</code></td></tr>
+          <tr><td><code>/** 一句话 */</code></td><td>导出函数的用途描述（JSDoc）</td><td><code>/** Resolve the shell kind from a shell binary path. */</code></td></tr>
+          <tr><td><code>// ─── Section ───</code></td><td>长文件内部的视觉分隔线</td><td><code>// ─── Garbage Collection ───</code></td></tr>
+        </table>
+        <p><strong>绝对不写：</strong>复述代码的注释（如 <code>// increment counter</code>）、机制叙述（如 <code>// first we check if x is null, then we...</code>）、设计文档引用（<code>// see design doc section 3.2</code>）。</p>
+
+        <h2>2. 错误处理：每个领域管理自己的 Error 类</h2>
+        <p>
+          Orca <strong>没有集中式的错误基类或 <code>errors/</code> 目录</strong>。每个领域在需要时自行定义 Error 类，遵循统一模板：
+        </p>
+        <pre><code>// 模板：所有自定义 Error 类都这样写
+export class RemoteRuntimeClientError extends Error {
+  readonly code: string                    // ← 必有字段
+
+  constructor(code: string, message: string) {  // ← 参数签名固定
+    super(message)
+    this.name = 'RemoteRuntimeClientError'       // ← 必须设置 name
+    this.code = code
+  }
+}</code></pre>
+        <p>项目中至少存在 20+ 个这样的 Error 类：<code>BrowserError</code>、<code>DaemonProtocolError</code>、<code>SessionNotFoundError</code>、<code>CredentialDecryptionError</code>、<code>JiraApiError</code>、<code>StreamProtocolError</code>、<code>RelayVersionMismatchError</code>……</p>
+        <p><strong>每种 Error 类通常伴随一个类型守卫函数</strong>，用于调用方安全判断：</p>
+        <pre><code>export function isClipboardTextTooLargeError(error: unknown): boolean {
+  return error instanceof ClipboardTextTooLargeError
+}
+export function isPermissionError(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'PERMISSION_DENIED'
+}</code></pre>
+        <div class="callout">
+          判断法则：需要根据错误类型做不同处理 → 定义 Error 子类 + 守卫函数。不需要区分 → 直接用 <code>throw new Error('描述')</code>。
+        </div>
+
+        <h2>3. 跨平台：运行时检测 + 依赖注入，禁止文件后缀分裂</h2>
+        <p>
+          Orca 同时支持 macOS、Linux、Windows。但<strong>没有 <code>.mac.ts</code>、<code>.win.ts</code>、<code>.linux.ts</code> 文件后缀</strong>。所有平台逻辑通过三种方式管理：
+        </p>
+        <table>
+          <tr><th>策略</th><th>适用场景</th><th>示例</th></tr>
+          <tr><td><strong>领域文件分离</strong></td><td>整个功能仅在某平台存在</td><td><code>win32-utils.ts</code>、<code>linux-lid-sleep-assertion.ts</code>、<code>macos-system-sleep-assertion.ts</code></td></tr>
+          <tr><td><strong>运行时 <code>process.platform</code></strong></td><td>同功能不同平台有分支</td><td><code>if (process.platform === 'win32') { ... }</code></td></tr>
+          <tr><td><strong>依赖注入 platform 参数</strong></td><td>需要测试不同平台分支</td><td><code>constructor({ platform = process.platform })</code>，测试可传 <code>'darwin'</code></td></tr>
+        </table>
+        <p><strong>路径处理特别规则：</strong>涉及跨平台路径的文件需要同时导入 <code>posix</code> 和 <code>win32</code>，通过路径形状检测（而非 <code>process.platform</code>）选择操作：</p>
+        <pre><code>import * as posixPath from 'node:path/posix'
+import * as win32Path from 'node:path/win32'
+
+function getPathOps(p: string): typeof posixPath {
+  return isWindowsAbsolutePathLike(p) ? win32Path : posixPath
+}</code></pre>
+        <p><strong>快捷键规则（AGENTS.md 明文规定）：</strong></p>
+        <ul>
+          <li>键盘事件：<code>navigator.userAgent.includes('Mac')</code> 判断 <code>metaKey</code> vs <code>ctrlKey</code></li>
+          <li>Electron 菜单：统一使用 <code>CmdOrCtrl</code></li>
+          <li>UI 快捷键标签：Mac 显示 <code>⌘</code>/<code>⇧</code>，其他平台显示 <code>Ctrl+</code>/<code>Shift+</code></li>
+        </ul>
+
+        <h2>4. 检索练习</h2>
+        <p>以下代码片段在 Orca 项目中有几处不符合规范？</p>
+        <pre><code class="language-typescript">// Check if the user is on Windows and handle accordingly
+// First we get the platform, then we check if it equals 'win32',
+// and if so we call the Windows-specific handler
+function handlePlatformSpecific(filePath: string) {
+  if (process.platform === 'win32') {
+    // Call win32 handler
+    return handleWin32(filePath)
+  } else if (process.platform === 'darwin') {
+    return handleDarwin(filePath)
+  }
+  // For linux, we just use the default path
+  return filePath
+}</code></pre>
+        <div class="answer">
+          <strong>至少 3 处不符合：</strong><br>
+          ① 第一个注释 "Check if the user is on Windows and handle accordingly" 是复述代码——应删除。代码本身已经自解释。<br>
+          ② 第二段注释 "First we get the platform..." 是机制叙述——应删除。如果这里有非显而易见的约束（如为什么要区分处理），才应该用 <code>// Why:</code> 解释。<br>
+          ③ <code>// Call win32 handler</code> 和 <code>// For linux, we just use the default path</code> 是废话注释——应删除。<br>
+          ④ 没有违反跨平台规范本身（运行时用 <code>process.platform</code> 是可接受的），但如果需要测试不同平台分支，应该用依赖注入模式。<br>
+          ⑤ 函数名 <code>handlePlatformSpecific</code> 太模糊——应改为具体描述（如 <code>resolveShellPathForPlatform</code>）。<br>
+          <strong>总结：Orca 的注释哲学是"少即是多"。如果代码已经说清楚了，加注释反而是噪音。</strong>
+        </div>
+        <p>
+          课后建议浏览 <a href="../reference/dev-conventions-reference.html">规则速查手册</a> 和
+          <a href="../reference/directory-map.html">目录速查手册</a>，它们已包含本次补充的代码质量规范。后续如需深入 React 组件/状态管理/测试规范，可以向 agent 追问。
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

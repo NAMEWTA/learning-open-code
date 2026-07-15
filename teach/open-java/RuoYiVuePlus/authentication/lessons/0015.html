@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 15 课 · 强制下线：NOT_LOGIN_EXCEPTION 状态码与验签链路</title>
+<style>
+  body { max-width: 760px; margin: 2rem auto; padding: 0 1.1rem; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.75; color: #1a1a1a; background: #fcfcfc; }
+  h1 { font-size: 1.7rem; margin-top: 0.5rem; line-height: 1.3; }
+  h2 { font-size: 1.25rem; margin-top: 2.3rem; padding-bottom: 0.3rem; border-bottom: 2px solid #f0f0f0; }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: #2c3e50; }
+  code { background: #f0f2f5; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #c0341d; font-family: "SF Mono", Consolas, monospace; }
+  pre { background: #1e2127; color: #e6e6e6; padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .mission { background: linear-gradient(135deg, #f3f8ff, #eef4ff); border: 1px solid #d6e4ff; padding: 0.8rem 1rem; border-radius: 8px; font-size: 0.92rem; margin: 1.2rem 0; }
+  .mission b { color: #1d6fd6; }
+  .why { background: #f0fbf4; border-left: 3px solid #34c759; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  .side { background: #fffbea; border-left: 3px solid #f0c000; padding: 0.6rem 1rem; border-radius: 0 6px 6px 0; margin: 1.2rem 0; font-size: 0.9rem; }
+  details { background: #f7f9fc; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.7rem 1rem; margin: 0.8rem 0; }
+  summary { cursor: pointer; font-weight: 600; color: #2c3e50; }
+  .quiz { background: #fff; border: 1px solid #e3e8ef; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.6rem 0; }
+  .quiz p { font-weight: 600; margin: 0.6rem 0; }
+  .cite { font-size: 0.85rem; color: #888; margin-top: 2.5rem; border-top: 1px solid #eee; padding-top: 0.6rem; }
+  .reminder { background: #f5f5f5; padding: 0.8rem 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: 0.9rem; }
+  .nav { margin-top: 2rem; font-size: 0.88rem; color: #aaa; }
+  .tag { display:inline-block; background:#eef4ff; color:#1d6fd6; font-size:0.72rem; padding:0.1rem 0.5rem; border-radius:4px; vertical-align:middle; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.84rem; margin: 0.8rem 0; }
+  th, td { border: 1px solid #e0e0e0; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f4f6f8; }
+  .flow { font-family: "SF Mono", Consolas, monospace; font-size: 0.8rem; background: #fafbfc; border: 1px dashed #d0d7de; border-radius: 8px; padding: 1rem 1.2rem; white-space: pre; overflow-x: auto; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>第 15 课 · 强制下线：NotLoginException 状态码与验签链路 <span class="tag">plus-backend</span></h1>
+
+<div class="mission">
+🎯 <b>本节目标</b>：理解「强制下线」从触发到前端感知的完整链路——管理员点击下线 → Sa-Token 标记 token 状态 → 用户下次请求时 <code>SaTokenDao</code> 检测到异常状态 → <code>NotLoginException</code> 携带类型码 → <code>SaTokenExceptionHandler</code> 转换为人性化文案。
+</div>
+
+<h2>一、三种"下线"的区分</h2>
+
+<p>用户看到的都是"你被下线了"，但技术上有三种不同的触发路径：</p>
+
+<table>
+<tr><th>场景</th><th>NotLoginException type</th><th>触发动作</th><th>前端看到</th></tr>
+<tr><td>Token 过期</td><td><code>TOKEN_TIMEOUT</code></td><td>TLL 到期自动清除</td><td>"登录已过期"</td></tr>
+<tr><td>顶号下线（BE_REPLACED）</td><td><code>BE_REPLACED</code></td><td>同一账号新登录时，旧 token 被标记</td><td>"已在其他设备登录"</td></tr>
+<tr><td>管理员强制踢出（KICK_OUT）</td><td><code>KICK_OUT</code></td><td>管理后台调用 <code>StpUtil.kickout(loginId)</code></td><td>"已被管理员强制下线"</td></tr>
+<tr><td>Token 冻结</td><td><code>TOKEN_FREEZE</code></td><td>安全策略触发</td><td>"登录已过期"</td></tr>
+</table>
+
+<h2>二、Sa-Token 的 Token 状态标记机制</h2>
+
+<p>Sa-Token 在 Redis 中存储的 token 数据结构（简化版）：</p>
+
+<div class="flow">Key: "Authorization:login:token:{tokenValue}"
+Value: {
+  "loginId": "sys_user:1",
+  "loginType": "login",
+  "tokenValue": "xxxxx",
+  "isActive": true,        ← 关键字段
+  "createTime": 1234567890,
+  "timeout": 2592000
+}</div>
+
+<p>当管理员调用 <code>StpUtil.kickout(loginId)</code> 时：</p>
+<ol>
+<li>找到此 <code>loginId</code> 关联的所有 token（一个用户可能有多个设备登录）</li>
+<li>逐个执行 <code>StpUtil.logoutByTokenValue(tokenValue)</code> — 从 Redis 中删除 token 记录</li>
+<li>或者标记 <code>isActive = false</code>（取决于配置）</li>
+</ol>
+
+<p>下次该 token 的请求到达 <code>SecurityConfig</code> 拦截器 → <code>StpUtil.checkLogin()</code> 从 Redis 中查找 token → 发现不存在或 <code>isActive = false</code> → 抛出 <code>NotLoginException</code>，其 <code>getType()</code> 返回 <code>KICK_OUT</code>。</p>
+
+<div class="why">
+💡 <b>配置驱动</b>：<code>application.yml:93</code> 配置 <code>is-concurrent: true</code>（允许并发登录）意味着不会自动 BE_REPLACED。如果想启用自动顶号，设为 <code>false</code> 并配置 <code>is-share: false</code>。RuoYi 当前的设置是：允许多端登录，但只要管理员手动踢出就会标记 KICK_OUT。
+</div>
+
+<h2>三、SaTokenExceptionHandler：状态码 → 用户提示</h2>
+
+<pre><code>// SaTokenExceptionHandler.java:44-56
+@ExceptionHandler(NotLoginException.class)
+public R&lt;Void&gt; handleNotLoginException(NotLoginException e, HttpServletRequest request) {
+    String msg = switch (e.getType()) {
+        case NotLoginException.TOKEN_TIMEOUT,
+             NotLoginException.TOKEN_FREEZE -&gt; "登录已过期，请重新登录";
+        case NotLoginException.BE_REPLACED   -&gt; "当前账号已在其他设备登录，您已被强制下线";
+        case NotLoginException.KICK_OUT      -&gt; "账号已被管理员强制下线";
+        default                              -&gt; "登录状态异常，请重新登录";
+    };
+    return R.fail(HttpStatus.HTTP_UNAUTHORIZED, msg);
+}</code></pre>
+
+<p>这使用了 Java 17 的新 <strong>switch 表达式</strong>语法。不同类型码对应不同的用户提示：</p>
+
+<ul>
+<li><code>TOKEN_TIMEOUT</code> 和 <code>TOKEN_FREEZE</code> 合并处理——都提示"登录已过期"</li>
+<li><code>BE_REPLACED</code>（顶号）和 <code>KICK_OUT</code>（管理员踢）分开了——用户需要知道是谁把自己下线的</li>
+<li><code>default</code> 兜底——未知异常类型不暴露技术细节</li>
+</ul>
+
+<p>前端收到 401 + msg 后，<code>request.ts</code> 的响应拦截器弹出 <code>ElMessageBox.confirm</code>："登录状态已过期，您可以继续留在该页面，或者重新登录"。</p>
+
+<h2>四、设计启示：异常驱动的状态机</h2>
+
+<p>Sa-Token 采用了<strong>异常驱动的状态验证</strong>模式，而非"先检查返回值"。这有三个好处：</p>
+<ol>
+<li><strong>全局异常处理器统一处理</strong>，Controller 代码零侵入</li>
+<li><strong>类型码携带语义</strong>（BE_REPLACED / KICK_OUT / TIMEOUT），前端可以根据不同码做不同 UI</li>
+<li><strong>Filter 层/Interceptor 层/Service 层任何地方</strong>都能感知到状态异常，不需要层层传递返回值</li>
+</ol>
+
+<h3>练习：场景分析</h3>
+
+<div class="quiz">
+<p>❓ 用户 A 在 Chrome 登录了系统。管理员在后台点击「强退」按钮。用户 A 正在操作页面，此时点击了一个菜单——他会看到什么？整个链路有几个关键步骤？</p>
+</div>
+
+<details>
+<summary>点击查看答案</summary>
+<p>链路：① 管理员 → POST /monitor/online/强退 → <code>StpUtil.kickout(userA_loginId)</code> → Redis 中 userA 的 token 被标记/删除；② 用户 A 点击菜单 → 前端发请求 → <code>SecurityConfig</code> 拦截器 → <code>StpUtil.checkLogin()</code> → 从 Redis 查不到 token → 抛 <code>NotLoginException(KICK_OUT)</code>；③ <code>SaTokenExceptionHandler</code> 捕获 → 返回 <code>R.fail(401, "账号已被管理员强制下线")</code>；④ 前端 <code>request.ts</code> 响应拦截器检测到 401 → 弹出"登录已过期"提示并引导重新登录。</p>
+</details>
+
+<div class="reminder">
+📖 <a href="0014.html">上节课：Sa-Token Session 模型</a> · <a href="0016.html">下一课：StpInterface 与 SaPermissionImpl</a><br>
+💬 追问 Agent："如果想在被踢下线时用 WebSocket 实时通知前端（而不是等下次请求），可以怎么实现？"
+</div>
+
+<div class="cite">
+<p>源文件：<code>ruoyi-common-satoken/.../handler/SaTokenExceptionHandler.java</code>、<code>ruoyi-common-security/.../config/SecurityConfig.java</code>、<code>application.yml:89-94</code></p>
+</div>
+
+</body>
+</html>

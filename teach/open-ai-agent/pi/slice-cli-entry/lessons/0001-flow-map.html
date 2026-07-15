@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 - CLI 入口与模式选择全链路</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #fff;
+    --text: #1a1a1a;
+    --muted: #666;
+    --accent: #2563eb;
+    --border: #e5e7eb;
+    --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+
+  .filetree {
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.75;
+    background: #fafbfc;
+    border: 1px solid #ebebeb;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    white-space: pre;
+    overflow-x: auto;
+  }
+
+  .diagram {
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+  }
+  th {
+    background: #f6f8fa;
+    font-weight: 600;
+  }
+
+  .practice {
+    background: #f0f7ff;
+    border-left: 4px solid var(--accent);
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 2rem 0;
+  }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+
+  .warn {
+    background: #fff7ed;
+    border-left: 4px solid #f59e0b;
+    padding: 1rem 1.2rem;
+    border-radius: 0 8px 8px 0;
+    margin: 1.5rem 0;
+  }
+
+  .nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.9rem;
+  }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+
+  .stage-num {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 1.6rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    margin-right: 0.4rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>0001 - CLI 入口与模式选择全链路</h1>
+
+<div class="meta">
+  <span>模块：pi-coding-agent</span>
+  <span>层级：L2 垂直切片</span>
+  <span>预计时间：12 分钟</span>
+  <span>依赖：<a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">L1-module-coding-agent</a></span>
+</div>
+
+<p><strong>学习目标：</strong>追踪从终端输入 <code>pi</code> 到 Agent 会话启动的完整代码路径，理解 9 阶段启动管线的每一层职责，以及 interactive / print / RPC 三种模式的分发决策逻辑。</p>
+
+<h2>1. 入口文件骨架</h2>
+
+<p>用户执行 <code>pi</code> 命令时，Node.js 根据 <code>package.json</code> 的 <code>"bin"</code> 字段定位到两个入口之一：</p>
+
+<div class="filetree">packages/coding-agent/src/
+├── cli.ts            ← 主入口（#!/usr/bin/env node）
+├── rpc-entry.ts      ← RPC 入口（#!/usr/bin/env node）
+├── main.ts           ← 共享主流程 main(args)
+└── cli/
+    ├── args.ts       ← parseArgs + printHelp
+    ├── startup-ui.ts ← shouldRunFirstTimeSetup + showStartupSelector
+    └── session-picker.ts  ← selectSession (--resume 的 TUI 选择器)</div>
+
+<p><code>cli.ts</code>（11 行）只做三件事：设置进程标题、抑制 Node 内部 <code>emitWarning</code> 防止污染 TUI、配置 HTTP dispatcher、然后调用 <code>main(process.argv.slice(2))</code>。<code>rpc-entry.ts</code> 与它几乎相同，唯一区别是在 argv 前插入 <code>--mode rpc</code>，供 orchestrator 通过子进程启动。</p>
+
+<h2>2. 9 阶段启动管线</h2>
+
+<div class="diagram">
+<div class="mermaid">
+sequenceDiagram
+    participant CLI as cli.ts / rpc-entry.ts
+    participant Main as main()
+    participant Args as parseArgs()
+    participant SM as SessionManager
+    participant RT as createRuntime
+    participant MR as ModelRegistry
+    participant Mode as InteractiveMode / runPrintMode / runRpcMode
+
+    CLI->>Main: main(argv) / main([--mode rpc, ...])
+    Main->>Main: ① 离线模式 / Windows 自更新清理
+    Main->>Main: ② handlePackageCommand (install/remove/update)
+    Main->>Args: ③ parseArgs(args) → {help, model, session, ...}
+    Main->>Main: ④ 速出路径: --version / --export / --help / --list-models
+    Main->>Main: ⑤ resolveAppMode() → interactive|print|rpc|json
+    Main->>Main: ⑥ 首次启动? → showFirstTimeSetup(TUI 主题/遥测)
+    Main->>SM: ⑦ createSessionManager() → 新建/恢复/fork/打开
+    Main->>RT: ⑧ createRuntime 工厂 → SettingsManager + ResourceLoader + ModelRegistry
+    Main->>MR: ⑨ resolveModelScope() + buildSessionOptions()
+    alt interactive 模式
+        Main->>Mode: new InteractiveMode(runtime).run()
+    else print/json 模式
+        Main->>Mode: runPrintMode(runtime, {mode, messages})
+    else rpc 模式
+        Main->>Mode: runRpcMode(runtime)
+    end
+</div>
+</div>
+
+<h2>3. 关键环节详解</h2>
+
+<h3><span class="stage-num">3</span> 参数解析</h3>
+<p><code>parseArgs()</code> 使用一个 <code>for</code> 循环遍历 <code>process.argv.slice(2)</code>，用 if-else 链匹配 50+ 个标志。解析结果存入 <code>Args</code> 接口：</p>
+<ul>
+  <li><strong>运行模式</strong>：<code>--mode rpc|json|text</code>、<code>-p / --print</code></li>
+  <li><strong>模型选择</strong>：<code>--provider</code>、<code>--model</code>、<code>--models</code>、<code>--thinking</code>、<code>--api-key</code></li>
+  <li><strong>会话控制</strong>：<code>--continue</code>、<code>--resume</code>、<code>--session</code>、<code>--session-id</code>、<code>--fork</code>、<code>--no-session</code></li>
+  <li><strong>工具控制</strong>：<code>-t / --tools</code>、<code>-xt / --exclude-tools</code>、<code>-nt / --no-tools</code></li>
+  <li><strong>扩展与资源</strong>：<code>-e / --extension</code>、<code>--skill</code>、<code>--theme</code>、<code>--system-prompt</code></li>
+</ul>
+<p>无法识别的 <code>--flag</code> 不会被丢弃，而是进入 <code>unknownFlags: Map</code>，留待扩展系统自省。</p>
+
+<h3><span class="stage-num">5</span> 模式决策</h3>
+<p><code>resolveAppMode()</code> 是 4 行函数，逻辑清晰：</p>
+<pre>function resolveAppMode(parsed, stdinIsTTY, stdoutIsTTY): AppMode {
+  if (parsed.mode === "rpc")   return "rpc";
+  if (parsed.mode === "json")  return "json";
+  if (parsed.print || !stdinIsTTY || !stdoutIsTTY) return "print";
+  return "interactive";
+}</pre>
+<p>优先级：<code>rpc</code> &gt; <code>json</code> &gt; <code>print</code> &gt; <code>interactive</code>。管道输入（<code>echo "..." | pi</code>）会自动将 interactive 降级为 print。</p>
+
+<h3><span class="stage-num">7</span> 会话恢复四种策略</h3>
+<table>
+  <tr><th>标志</th><th>行为</th><th>失败处理</th></tr>
+  <tr><td><code>--continue</code></td><td>打开当前 cwd 下最近一次会话</td><td>无历史时创建新会话</td></tr>
+  <tr><td><code>--resume</code></td><td>弹出 TUI 选择器浏览所有会话</td><td>用户取消则退出</td></tr>
+  <tr><td><code>--session &lt;id&gt;</code></td><td>按 ID 前缀匹配：先本地 → 后全局</td><td>找不到则报错退出</td></tr>
+  <tr><td><code>--fork &lt;id&gt;</code></td><td>复制已有会话到新会话（保留历史）</td><td>源不存在则报错退出</td></tr>
+</table>
+
+<h3><span class="stage-num">8</span> 运行时工厂闭包</h3>
+<p><code>createRuntime</code> 是 main() 内部定义的异步工厂函数。它被 <code>createAgentSessionRuntime()</code> 包装后，在首次启动和会话重载（session reload）时各执行一次。工厂内部完成：</p>
+<ol>
+  <li>根据 <code>parsed</code> 构建 <code>ResourceLoaderOptions</code>（扩展路径、skills、themes、context files）</li>
+  <li>调用 <code>createAgentSessionServices()</code> 创建 SettingsManager / ModelRegistry / ResourceLoader</li>
+  <li>加载扩展、收集启动诊断（settings 错误、扩展加载失败）</li>
+  <li>解析 <code>--models</code> 为 <code>ScopedModel[]</code>，构建 <code>CreateAgentSessionOptions</code></li>
+  <li>处理 <code>--api-key</code> 的运行时注入</li>
+  <li>调用 <code>createAgentSessionFromServices()</code> 生成 Agent 实例</li>
+</ol>
+
+<h3>异常路径：三种典型启动失败</h3>
+
+<div class="warn">
+<ul>
+  <li><strong>无可用模型</strong>：print/json 模式下 <code>session.model === undefined</code> → 输出 "No models available" 提示并 <code>exit(1)</code></li>
+  <li><strong>扩展加载失败</strong>：诊断中包含 "Failed to load extension" → 打印错误 + "Start without extensions using pi -ne" 提示后 <code>exit(1)</code></li>
+  <li><strong>会话 cwd 缺失</strong>：全局会话没有关联工作目录 → interactive 模式弹出选择器让用户选择 cwd，非 interactive 模式直接报错 <code>MissingSessionCwdError</code></li>
+</ul>
+</div>
+
+<h2>4. 练习与下一步</h2>
+
+<div class="practice">
+<h3>检索练习</h3>
+<p><strong>问题 1：</strong> 执行 <code>echo "列出文件" | pi</code> 时，<code>resolveAppMode()</code> 返回什么？为什么？</p>
+<p><strong>问题 2：</strong> <code>--session abc123</code> 和 <code>--session-id abc123</code> 在本地已存在该会话时的行为有何不同？（提示：阅读 <code>createSessionManager()</code>）</p>
+<p><strong>问题 3：</strong> <code>createRuntime</code> 工厂闭包为什么会在会话重载时被再次调用？什么场景触发重载？</p>
+<p style="margin-top: 1rem; color: var(--muted); font-size: 0.85rem;">（暂停思考，写下你的答案，然后继续阅读参考答案。）</p>
+
+<h3>参考答案</h3>
+<p><strong>A1：</strong> 返回 <code>"print"</code>。因为 <code>process.stdin.isTTY</code> 为 <code>false</code>（管道输入），触发 <code>!stdinIsTTY</code> 分支。即使原本是 interactive，管道输入也会降级为 print。</p>
+<p><strong>A2：</strong> <code>--session abc123</code> 支持前缀模糊匹配（<code>startsWith</code>），且找不到时会搜索全局项目；<code>--session-id abc123</code> 要求精确匹配，找不到且没有其他会话标志冲突时，会创建新会话（ID 由 SessionManager.create 的 id 选项控制）。</p>
+<p><strong>A3：</strong> <code>createAgentSessionRuntime()</code> 的设计支持 session reload——当 Agent 运行过程中需要重新初始化（如切换模型、重载配置），会再次调用工厂创建新的 AgentSession。这避免了 main() 中硬编码一次性初始化逻辑。</p>
+</div>
+
+<p style="font-size: 1.1rem; font-weight: 600; color: var(--accent); margin-top: 2rem;">下一步建议</p>
+<p>理解启动管线后，建议深入以下课程：</p>
+<ul>
+  <li><a href="../../slice-agent-loop/lessons/0001-flow-map.html">Agent 对话循环全链路</a> — InteractiveMode 内部的 prompt→LLM→tool 闭环</li>
+  <li><a href="../../slice-session-management/lessons/0001-flow-map.html">会话持久化全链路</a> — SessionManager 的 JSONL 存储与上下文压缩</li>
+  <li><a href="../../slice-llm-provider-dispatch/lessons/0001-flow-map.html">多 Provider LLM 调度全链路</a> — ModelRegistry 与 Provider 选择细节</li>
+  <li><a href="../../slice-tui-render-cycle/lessons/0001-flow-map.html">TUI 差异渲染循环</a> — startStartupTui 背后的渲染机制</li>
+</ul>
+<p>有任何疑问？向 AI 教师追问 <code>--thinking</code> 的优先级规则、<code>authStorage</code> 的 token 来源顺序、或 <code>project-trust</code> 的交互流程。</p>
+
+<p style="margin-top: 1.5rem; font-size: 0.85rem; color: var(--muted);">
+  主要参考来源：<code>packages/coding-agent/src/cli.ts</code>、<code>main.ts</code>、<code>cli/args.ts</code> — 直接源码阅读
+</p>
+
+<div class="nav">
+  <span>← 上一课：<a href="../../module-coding-agent/lessons/0001-coding-agent-module-tour.html">pi-coding-agent 模块总览</a></span>
+  <span>下一课：<a href="../../slice-agent-loop/lessons/0001-flow-map.html">Agent 对话循环全链路</a> →</span>
+</div>
+
+<script>
+mermaid.initialize({ startOnLoad: true, theme: 'default' });
+</script>
+</body>
+</html>

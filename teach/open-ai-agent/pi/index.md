@@ -4,19 +4,32 @@
 
 | 主题 | 路径 | 描述 |
 |------|------|------|
-| 项目总览与学习路线 | `./00-overview/` | 按最新目录建立架构地图、学习路线、源码覆盖清单与豁免范围。 |
-| Agent 运行时模块 | `./module-agent/` | 讲清 Agent 运行时模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| LLM 供应商抽象模块 | `./module-ai/` | 讲清 LLM 供应商抽象模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 编程 Agent CLI 模块 | `./module-coding-agent/` | 讲清 编程 Agent CLI 模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| RPC 编排模块 | `./module-orchestrator/` | 讲清 RPC 编排模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| 终端 UI 模块 | `./module-tui/` | 讲清 终端 UI 模块 的目录边界、入口文件、关键依赖和公共接口。 |
-| Agent 会话全链路 | `./slice-agent-session-flow/` | 按入口、主路径、边界路径梳理 Agent 会话全链路。 |
-| CLI 启动全链路 | `./slice-cli-startup-flow/` | 按入口、主路径、边界路径梳理 CLI 启动全链路。 |
-| 上下文压缩全链路 | `./slice-context-compaction-flow/` | 按入口、主路径、边界路径梳理 上下文压缩全链路。 |
-| OAuth 认证全链路 | `./slice-oauth-auth-flow/` | 按入口、主路径、边界路径梳理 OAuth 认证全链路。 |
-| RPC 编排全链路 | `./slice-rpc-orchestration/` | 按入口、主路径、边界路径梳理 RPC 编排全链路。 |
-| TUI 渲染全链路 | `./slice-tui-render-cycle/` | 按入口、主路径、边界路径梳理 TUI 渲染全链路。 |
-| Agent 双层循环深度剖析 | `./deep-dive-agent-loop-double/` | 围绕 Agent 双层循环深度剖析 拆解设计动机、核心机制与取舍。 |
-| AgentSession 架构深度剖析 | `./deep-dive-agent-session-arch/` | 围绕 AgentSession 架构深度剖析 拆解设计动机、核心机制与取舍。 |
-| 供应商兼容层深度剖析 | `./deep-dive-compat-unification/` | 围绕 供应商兼容层深度剖析 拆解设计动机、核心机制与取舍。 |
-| TUI 差分渲染深度剖析 | `./deep-dive-diff-rendering/` | 围绕 TUI 差分渲染深度剖析 拆解设计动机、核心机制与取舍。 |
+| 项目总览 | `./00-overview/` | Pi 的 monorepo 架构、5 个核心包职责、技术栈与设计哲学 |
+
+| pi-ai 模块总览 | `./module-ai/` | 多 Provider 统一 LLM API 层架构、exports 接口与内部分层 |
+
+| Agent 运行时 | `./module-agent/` | pi-agent-core 架构总览：Agent 类 API、主循环、消息队列与事件系统 |
+
+| pi-coding-agent 模块总览 | `./module-coding-agent/` | 交互式编程 CLI 内部分层、工具体系、扩展机制与 SDK 使用 |
+
+| pi-tui 模块总览 | `./module-tui/` | 终端 UI 差异渲染库：组件系统、Markdown 解析、东亚字符宽度布局 |
+
+| pi-orchestrator 模块总览 | `./module-orchestrator/` | 实验性多实例编排器：IPC 协议、子进程 RPC、Radius 云服务集成 |
+
+| 构建脚本与基础设施 | `./module-scripts-infra/` | 质量门禁、锁文件生成、版本发布与 CI/CD 流水线的分层架构 |
+
+| Agent 对话循环全链路 | `./slice-agent-loop/` | 从 prompt() 到 LLM 响应再到工具调用的完整闭环：双层循环控制流与事件时序 |
+
+| 工具执行全链路 | `./slice-tool-execution/` | 从 ToolName 注册到 bash/read/edit/write 的完整 6 阶段调用链 |
+
+| 会话持久化全链路 | `./slice-session-management/` | JSONL 存储/内存仓库/上下文压缩：从 Agent 对话到磁盘的完整数据流 |
+
+| 多 Provider LLM 调度全链路 | `./slice-llm-provider-dispatch/` | 从 builtinModels 到 streamSimple 的完整数据流追踪 |
+
+| TUI 差异渲染循环 | `./slice-tui-render-cycle/` | 从 requestRender 到终端像素：节流调度、组件树渲染、差异比对、ANSI 序列生成 |
+
+| Agent Hook 生命周期 | `./slice-hook-system/` | 31种事件订阅、三层架构与6种emit执行策略全链路 |
+
+| 扩展系统加载与执行全链路 | `./slice-extension-system/` | 从 package.json 声明到自定义工具/Hook 注入的六阶段全链路 |
+
+| CLI 入口与模式选择全链路 | `./slice-cli-entry/` | 从 pi 命令到 Agent 会话启动的 9 阶段管线与三种模式分发 |
