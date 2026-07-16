@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 — 事件系统的拦截链设计：如何实现灵活又不失控？</title>
+<style>
+  :root {
+    --bg: #fff; --text: #1a1a1a; --muted: #666; --accent: #2563eb;
+    --border: #e5e7eb; --code-bg: #f6f8fa;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 16px; line-height: 1.75; color: var(--text);
+    max-width: 800px; margin: 2rem auto; padding: 0 1.5rem;
+  }
+  h1 { font-size: 1.75rem; border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: var(--accent); }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; }
+  .meta { font-size: 0.85rem; color: var(--muted); margin-bottom: 2rem; }
+  .meta span { margin-right: 1.5rem; }
+  code { background: var(--code-bg); padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 8px; overflow-x: auto;
+        font-size: 0.82rem; line-height: 1.6; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 0.55rem 0.75rem; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  .practice { background: #f0f7ff; border-left: 4px solid var(--accent); padding: 1rem 1.2rem;
+              border-radius: 0 8px 8px 0; margin: 2rem 0; }
+  .practice h3 { margin-top: 0; color: var(--accent); }
+  .callout { background: #f0fdf4; border-left: 4px solid #16a34a; padding: 0.8rem 1rem;
+             border-radius: 0 6px 6px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .goal-heading { font-size: 1.3rem; font-weight: 600; margin-top: 1.5rem; color: var(--accent); }
+  .nav { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem;
+         border-top: 1px solid var(--border); font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>0003 — 事件系统的拦截链设计：如何实现灵活又不失控？</h1>
+
+<div class="meta">
+  <span>层级：L3 深度实现</span>
+  <span>预计时长：14 分钟</span>
+  <span>学习目标：1 个</span>
+  <span>前置：0002-三层架构</span>
+</div>
+
+<div class="goal-heading">学习目标</div>
+<p>理解扩展系统 <strong>7 种事件分发策略</strong> 的差异——为什么不是所有事件都用同一个 <code>emit()</code>，以及 <strong>链式替换、短路取消、错误隔离</strong> 三种模式如何组合出既灵活又安全的拦截体系。</p>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<h2>1. 通用 emit()：遍历 + try-catch + 短路</h2>
+
+<p>这是最基础的事件分发模式，处理 session_start、turn_start、agent_end 等不涉及数据修改的事件。</p>
+
+<pre>async emit&lt;TEvent extends RunnerEmitEvent&gt;(event: TEvent) {
+  const ctx = this.createContext();
+  for (const ext of this.extensions) {
+    const handlers = ext.handlers.get(event.type) ?? [];
+    for (const handler of handlers) {
+      try {
+        const result = await handler(event, ctx);
+        // session_before_* 事件特有：handler 返回 cancel = true 则短路
+        if (this.isSessionBeforeEvent(event) &amp;&amp; result?.cancel) {
+          return result;
+        }
+      } catch (err) {
+        this.emitError({ extensionPath: ext.path, event: event.type, error: ... });
+        // ← 关键：不抛出，不影响后续 handler
+      }
+    }
+  }
+}</pre>
+
+<p>这里有三个关键设计决策：</p>
+<ul>
+  <li><strong>所有扩展共享同一个 ctx</strong>：ctx 是延迟求值的，所以所有 handler 看到的都是当前的 Agent 状态</li>
+  <li><strong>try-catch 包裹每个 handler，不包裹整个循环</strong>：一个 handler 抛异常，不影响同扩展的其他 handler，也不影响其他扩展</li>
+  <li><strong>session_before_* 的 cancel 短路</strong>：一旦有扩展说 "cancel"，立即停止遍历——后面的扩展不再收到事件</li>
+</ul>
+
+<div class="callout">
+  <strong>设计精妙之处：</strong> cancel 短路不是 "抛异常"，而是 "正常 return"。这很重要——cancel 是预期行为，不应该污染错误日志。异常路径和预期路径分离，让错误追踪变得干净。
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<h2>2. 链式替换：emitContext / emitBeforeProviderRequest / emitMessageEnd</h2>
+
+<p>这三类事件的核心区别在于：handler 不仅"观察"事件，还"修改"事件数据，且 <strong>后一个 handler 接收前一个 handler 修改后的结果</strong>。</p>
+
+<pre>// 以 emitContext 为例——每个 handler 都可能修改 messages 数组
+async emitContext(messages: AgentMessage[], signal?: AbortSignal) {
+  let current = messages;
+  for (const ext of this.extensions) {
+    for (const handler of ext.handlers.get("context") ?? []) {
+      if (signal?.aborted) break;
+      const result = await handler({ type: "context", messages: current }, ctx);
+      if (result?.messages) {
+        current = result.messages;  // ← 链式替换！
+      }
+    }
+  }
+  return current; // ← 返回最终版本
+}</pre>
+
+<p>这种模式让多个扩展可以"管道式"地处理数据：</p>
+<ul>
+  <li>扩展 A 注入一段系统指令到 messages</li>
+  <li>扩展 B 看到的是 A 修改后的 messages，再追加自己的上下文</li>
+  <li>扩展 C 裁剪掉敏感信息</li>
+</ul>
+
+<p><strong>顺序很重要！</strong> 扩展按加载顺序（也是 <code>extensions</code> 数组的顺序）执行。项目本地的扩展先加载，全局扩展后加载，所以全局扩展能"看到"本地扩展的修改结果。</p>
+
+<table>
+  <tr><th>事件</th><th>链式替换的数据</th><th>特殊约束</th></tr>
+  <tr><td><code>context</code></td><td><code>messages</code> 数组</td><td>支持 AbortSignal 中断</td></tr>
+  <tr><td><code>before_provider_request</code></td><td><code>payload</code>（发给 LLM 的 HTTP body）</td><td>任意替换，无类型约束</td></tr>
+  <tr><td><code>message_end</code></td><td><code>message</code> 对象</td><td>替换后必须保持原 role 不变</td></tr>
+  <tr><td><code>before_agent_start</code></td><td><code>systemPrompt</code> 字符串</td><td>还收集 messages 数组</td></tr>
+</table>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<h2>3. 阻断修改：tool_call / tool_result / user_bash</h2>
+
+<p>这三类事件 handler 可以决定 <strong>是否阻止</strong> 或 <strong>如何修改</strong> 工具的执行。</p>
+
+<h3>tool_call — 阻止执行或修改参数</h3>
+<pre>pi.on("tool_call", async (event, ctx) => {
+  if (event.toolName === "bash" &amp;&amp; event.input.command?.includes("rm -rf")) {
+    return { block: true, reason: "危险操作已拦截" };
+  }
+  // 也可以修改参数（mutable!）
+  if (event.toolName === "write" &amp;&amp; event.input.filePath?.includes(".env")) {
+    event.input.filePath = event.input.filePath + ".backup";
+  }
+});</pre>
+
+<p><strong>关键设计：</strong> <code>event.input</code> 是<strong>可变的</strong>——handler 可以直接修改它。后续 handler 看到的是前一个 handler 修改后的 input。<strong>没有重新校验</strong>——这是有意为之，允许扩展绕过原始 schema 校验实现自己的逻辑。</p>
+
+<h3>tool_result — 修改工具输出</h3>
+<pre>pi.on("tool_result", async (event, ctx) => {
+  // 拦截敏感信息
+  if (event.toolName === "bash") {
+    event.content = event.content.map(c => ({
+      ...c,
+      text: c.text?.replace(/API_KEY=\w+/g, "API_KEY=***")
+    }));
+    return { content: event.content };  // 返回修改后的内容
+  }
+});</pre>
+
+<h3>user_bash — 替换 bash 执行器</h3>
+<pre>pi.on("user_bash", async (event, ctx) => {
+  // 扩展可以完全接管 bash 执行
+  return {
+    operations: myCustomBashOperations,  // 自定义执行器
+    // 或者直接返回结果，跳过执行
+    // result: { stdout: "cached result", stderr: "", exitCode: 0 }
+  };
+});</pre>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<h2>4. 错误隔离的三层防护</h2>
+
+<p>Pi 的错误处理不是"一个 try-catch 包住所有"，而是分三层：</p>
+
+<table>
+  <tr><th>层级</th><th>范围</th><th>行为</th></tr>
+  <tr><td>单个 handler</td><td>try-catch 包裹每个 handler</td><td>捕获后 emitError 通知监听器，继续下一个 handler</td></tr>
+  <tr><td>单个扩展</td><td>for 循环遍历扩展的 handlers</td><td>一个扩展的 handler 失败，不影响其他扩展</td></tr>
+  <tr><td>整个事件</td><td>事件分发完成后</td><td>Agent 主流程不中断——扩展错误永远不会导致 Agent 崩溃</td></tr>
+</table>
+
+<pre>// emitError 的实现——通知所有注册的错误监听器
+emitError(error: ExtensionError): void {
+  for (const listener of this.errorListeners) {
+    listener(error);  // 通常是 console.warn，在 TUI 中可能是通知
+  }
+}</pre>
+
+<div class="callout">
+  <strong>为什么不在 handler 失败时阻断事件？</strong>
+  因为无法判断失败是"故意的"还是"意外的"。如果扩展 A 的 bug 导致它抛异常，不应该阻止扩展 B 正常工作。这叫 <strong>fail-open</strong> 策略——宁可让一个异常 handler 被跳过，也不能让整个拦截链失效。
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<div class="practice">
+<h3>检索练习</h3>
+<ol>
+  <li><code>context</code> 事件的链式替换和 <code>session_before_switch</code> 的 cancel 短路，有什么区别？</li>
+  <li>为什么 <code>tool_call</code> 事件中修改 <code>event.input</code> 后不做重新校验？</li>
+  <li>如果扩展 A 的 <code>tool_call</code> handler 抛异常，扩展 B 的同一个事件 handler 还会执行吗？</li>
+</ol>
+<details>
+<summary>点击查看参考答案</summary>
+<ol>
+  <li>链式替换是"数据管道"——每个 handler 修改数据并传递给下一个。cancel 短路是"否决权"——一个 handler 说 cancel，整个操作中止，后续 handler 不执行。前者用于数据转换，后者用于权限控制。</li>
+  <li>这是有意设计——允许扩展在参数校验之后、执行之前对参数做二次处理。例如：扩展可以把相对路径转绝对路径，或者把简写命令展开为完整命令。重新校验会阻止这类合法操作。</li>
+  <li>会。try-catch 只包裹单个 handler，不包裹整个遍历循环。扩展 A 的异常被捕获并 emitError 后，循环继续执行扩展 B 的 handler。</li>
+</ol>
+</details>
+</div>
+
+<h3>交叉链接</h3>
+<ul>
+  <li><strong>前置</strong>：<a href="0002-architecture-runtime.html">0002-三层架构</a> — ctx 的延迟求值机制</li>
+  <li><strong>衔接</strong>：<a href="0004-module-loading.html">0004-扩展模块动态加载机制</a> — 扩展是如何被找到并加载的</li>
+  <li><strong>关联</strong>：<a href="../../slice-hook-system/lessons/0001-flow-map.html">L2-hook-system</a> — Agent Hook 系统的 emit 策略对比</li>
+</ul>
+
+<div class="practice">
+  <p><strong>提示：</strong>想深入了解某个特定事件的处理逻辑？可以追问："before_agent_start 的 emitBeforeAgentStart 方法中，多个扩展返回的 messages 和 systemPrompt 是如何合并的？"</p>
+</div>
+
+<div class="nav">
+  <span><a href="0002-architecture-runtime.html">← 0002-三层架构</a></span>
+  <span><a href="0004-module-loading.html">0004-模块加载机制 →</a></span>
+</div>
+
+</body>
+</html>

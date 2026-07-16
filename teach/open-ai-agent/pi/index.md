@@ -13,6 +13,7 @@
 | pi-coding-agent 模块总览 | `./module-coding-agent/` | 交互式编程 CLI 内部分层、工具体系、扩展机制与 SDK 使用 |
 
 | pi-tui 模块总览 | `./module-tui/` | 终端 UI 差异渲染库：组件系统、Markdown 解析、东亚字符宽度布局 |
+| pi-tui 嵌入使用指南 | `./embedding-guide/` | 独立安装、自定义组件编写、Overlay 弹窗、差分渲染嵌入式集成实战 |
 
 | pi-orchestrator 模块总览 | `./module-orchestrator/` | 实验性多实例编排器：IPC 协议、子进程 RPC、Radius 云服务集成 |
 
@@ -30,6 +31,14 @@
 
 | Agent Hook 生命周期 | `./slice-hook-system/` | 31种事件订阅、三层架构与6种emit执行策略全链路 |
 
-| 扩展系统加载与执行全链路 | `./slice-extension-system/` | 从 package.json 声明到自定义工具/Hook 注入的六阶段全链路 |
+| 扩展系统加载与执行全链路 | `./slice-extension-system/` | 六阶段全链路 + 三层架构设计原理 + 事件拦截链 + 模块加载 + 工具包装管线（5 节课） |
 
 | CLI 入口与模式选择全链路 | `./slice-cli-entry/` | 从 pi 命令到 Agent 会话启动的 9 阶段管线与三种模式分发 |
+
+## TUI 主题交叉引用
+
+pi-tui 有三个互补主题，建议按此顺序学习：
+
+1. **`module-tui/`**（L1）— 模块总览：知道 pi-tui 是什么、有哪些模块、架构如何
+2. **`slice-tui-render-cycle/`**（L2）— 渲染循环追踪：深入 doRender 内部实现细节
+3. **`embedding-guide/`**（L3）— 嵌入使用实战：独立安装、编写组件、集成到自己的项目

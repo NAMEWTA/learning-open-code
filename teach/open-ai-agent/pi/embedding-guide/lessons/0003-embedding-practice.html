@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 — pi-tui 嵌入使用实战</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>0003 — pi-tui 嵌入使用实战</h1>
+
+<div class="meta">
+  <span>层级：L3 微观 API</span>
+  <span>预计时长：15 分钟</span>
+  <span>学习目标：1 个</span>
+</div>
+
+<p><strong>学习目标：</strong>能独立安装 pi-tui、创建最小 TUI 应用、使用内置组件、编写自定义 Component、使用 Overlay 弹窗。</p>
+
+<!-- ──────────── 第 1 章 ──────────── -->
+<h2>1. 最小可运行示例</h2>
+
+<p>安装与三步启动：</p>
+
+<pre>npm install @earendil-works/pi-tui</pre>
+
+<pre>import { TUI, Text, ProcessTerminal, matchesKey } from "@earendil-works/pi-tui";
+
+// ① 创建终端传输层
+const terminal = new ProcessTerminal();
+
+// ② 创建 TUI 实例
+const tui = new TUI(terminal);
+
+// ③ 添加组件
+tui.addChild(new Text("你好，pi-tui！"));
+
+// ④ 拦截 Ctrl+C（raw mode 下不会自动 SIGINT）
+tui.addInputListener((data) => {
+  if (matchesKey(data, "ctrl+c")) {
+    tui.stop();
+    process.exit(0);
+  }
+});
+
+// ⑤ 启动渲染循环
+tui.start();</pre>
+
+<p>运行这段代码，终端进入 raw mode，显示 "你好，pi-tui！"，按 Ctrl+C 退出。这就是 pi-tui 的最小骨架——<strong>Terminal + TUI + Component + InputListener</strong>。</p>
+
+<!-- ──────────── 第 2 章 ──────────── -->
+<h2>2. 内置组件速览</h2>
+
+<p>pi-tui 提供了 13 个内置组件，以下是嵌入式开发最常用的 4 个：</p>
+
+<table>
+  <tr><th>组件</th><th>用途</th><th>关键方法</th></tr>
+  <tr>
+    <td><code>Text</code></td>
+    <td>显示多行文本，自动换行</td>
+    <td><code>setText(str)</code>、<code>setCustomBgFn(fn)</code></td>
+  </tr>
+  <tr>
+    <td><code>Input</code></td>
+    <td>单行文本输入</td>
+    <td><code>getValue()</code>、<code>setValue(str)</code>、<code>onSubmit</code></td>
+  </tr>
+  <tr>
+    <td><code>Editor</code></td>
+    <td>多行文本编辑器</td>
+    <td><code>getText()</code>、<code>setText(str)</code>、<code>onSubmit</code></td>
+  </tr>
+  <tr>
+    <td><code>Box</code></td>
+    <td>容器，加内边距和背景色</td>
+    <td><code>addChild(c)</code>、<code>setBgFn(fn)</code></td>
+  </tr>
+</table>
+
+<pre>// 组合使用示例
+import { Box, Input, Text } from "@earendil-works/pi-tui";
+
+const box = new Box(2, 1, (s) => `\x1b[44m${s}\x1b[0m`); // 蓝底
+box.addChild(new Text("请输入你的名字："));
+const input = new Input();
+input.onSubmit = (name) => {
+  box.addChild(new Text(`你好，${name}！`));
+};
+box.addChild(input);
+tui.addChild(box);
+tui.setFocus(input);</pre>
+
+<!-- ──────────── 第 3 章 ──────────── -->
+<h2>3. 编写自定义 Component</h2>
+
+<p>实现 <code>Component</code> 接口只需三个方法。以下是一个带缓存的进度条组件：</p>
+
+<pre>import type { Component } from "@earendil-works/pi-tui";
+import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
+
+class ProgressBar implements Component {
+  private percent = 0;
+  private cachedPercent = -1;
+  private cachedLines: string[] = [];
+
+  setPercent(p: number) { this.percent = Math.max(0, Math.min(100, p)); }
+
+  invalidate() { this.cachedPercent = -1; }
+
+  render(width: number): string[] {
+    if (this.percent === this.cachedPercent) return this.cachedLines;
+
+    const barWidth = Math.max(10, width - 12);
+    const filled = Math.round((this.percent / 100) * barWidth);
+    const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+    let line = ` [${bar}] ${this.percent}%`;
+
+    // 必须截断到 width，否则 TUI 崩溃
+    if (visibleWidth(line) > width) {
+      line = truncateToWidth(line, width);
+    }
+    line = line.padEnd(width);
+
+    this.cachedPercent = this.percent;
+    this.cachedLines = [line];
+    return this.cachedLines;
+  }
+}</pre>
+
+<p><strong>三条铁律：</strong></p>
+<ol>
+  <li><code>render()</code> 返回的<strong>每一行</strong>必须 <code>visibleWidth ≤ width</code></li>
+  <li>内部应做<strong>缓存</strong>：状态未变时返回缓存数组，避免无谓的逐行比对开销</li>
+  <li>调用 <code>invalidate()</code> 清除缓存，通常由外部在主题或数据变更时触发</li>
+</ol>
+
+<!-- ──────────── 第 4 章 ──────────── -->
+<h2>4. Overlay 弹窗实战</h2>
+
+<p>Overlay 是 pi-tui 的模态层系统——在现有内容之上叠加组件，不替换底层内容：</p>
+
+<pre>import { Text, Box } from "@earendil-works/pi-tui";
+
+function showConfirmDialog(tui: TUI, message: string) {
+  const dialog = new Box(2, 1);
+  dialog.addChild(new Text(message));
+  dialog.addChild(new Text("按 Enter 确认，Esc 取消"));
+
+  const handle = tui.showOverlay(dialog, {
+    anchor: "center",
+    width: "60%",
+    maxHeight: "30%",
+  });
+
+  // overlay 自动获得焦点，按 Esc 关闭
+  return handle;
+}</pre>
+
+<p>Overlay 关键配置：<code>anchor</code>（9 种锚点位置）、<code>width/height</code>（支持百分比如 <code>"50%"</code>）、<code>nonCapturing</code>（设为 true 时不抢焦点）、<code>visible()</code>（根据终端尺寸动态显示/隐藏）。</p>
+
+<div class="warning">
+  <strong>⚠️ 注意：</strong>Overlay 的 <code>hide()</code> 是永久移除，<code>setHidden(true/false)</code> 是临时隐藏/显示。如果需要可恢复的弹窗，用 <code>setHidden()</code> + <code>focus()</code>。
+</div>
+
+<!-- ──────────── 练习 ──────────── -->
+<div class="practice">
+<h3>✍️ 动手练习</h3>
+<p>编写一个 <code>Clock</code> 组件：</p>
+<ul>
+  <li>实现 <code>Component</code> 接口</li>
+  <li><code>render(width)</code> 返回一行，显示当前时间（如 <code>"🕐 15:04:05"</code>）</li>
+  <li>使用 <code>setInterval</code> 每秒更新并调用 <code>tui.requestRender()</code></li>
+  <li>确保行宽不超过 width，做好缓存</li>
+</ul>
+<details>
+<summary>点击查看参考答案</summary>
+<pre>class Clock implements Component {
+  private time = "";
+  private cachedTime = "";
+  private cachedLines: string[] = [];
+
+  constructor(private tui: TUI) {
+    setInterval(() => {
+      this.time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      this.tui.requestRender();
+    }, 1000);
+  }
+
+  invalidate() { this.cachedTime = ""; }
+
+  render(width: number): string[] {
+    if (this.time === this.cachedTime) return this.cachedLines;
+    let line = `🕐 ${this.time}`;
+    if (visibleWidth(line) > width) line = truncateToWidth(line, width);
+    line = line.padEnd(width);
+    this.cachedTime = this.time;
+    this.cachedLines = [line];
+    return this.cachedLines;
+  }
+}</pre>
+</details>
+</div>
+
+<div class="nav">
+  <a href="0002-diff-render-engine.html">← 上一课：差分渲染引擎深度解析</a>
+  <span></span>
+</div>
+
+</body>
+</html>
