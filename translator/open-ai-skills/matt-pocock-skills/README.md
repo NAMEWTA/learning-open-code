@@ -22,22 +22,64 @@
 
 [订阅 Newsletter](https://www.aihero.dev/s/skills-newsletter)
 
-## 快速开始（30 秒设置）
+## 安装（30 秒设置）
 
-1. 运行 skills.sh 安装器：
+两条路，两种理念。**The [Claude Code plugin](https://code.claude.com/docs/en/plugins)** 把整套技能作为一个受管理的、只读的捆绑包安装，在我发布更新时自动更新 —— 你是订阅而不是 fork。**[skills.sh](https://skills.sh/mattpocock/skills)** 把可编辑的 skill 文件复制进你的项目，让你可以修改它们、变成你自己的。选一个 —— 两个都装会让你每个 skill 都有两份。
+
+### 1. 获取技能
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+```bash
+claude plugins install mattpocock-skills
+```
+
+或者，在会话内部：
+
+```
+/plugin install mattpocock-skills
+```
+
+它在 Claude Code 的官方市场中，所以不需要预先添加任何东西，更新会自动到达。
+
+</details>
+
+<details>
+<summary><strong>Codex 及其他 agent</strong></summary>
 
 ```bash
 npx skills@latest add mattpocock/skills
 ```
 
-2. 选择你想要的 skill，以及想将它们安装到哪些编码 agent 上。**确保选择 `/setup-matt-pocock-skills`**。
+选择你想要的 skill，以及想将它们安装到哪些编码 agent 上。**安装器让你选择要带走哪些 skill —— 确保 `setup-matt-pocock-skills` 是其中之一。**
 
-3. 在你的 agent 中运行 `/setup-matt-pocock-skills`。它会：
-   - 询问你想使用哪个 issue tracker（GitHub、Linear 或本地文件）
-   - 询问你在分类票据时使用什么标签（`/triage` 使用标签）
-   - 询问你想将我们创建的文档保存在哪里
+原生 Codex 插件在路线图上 —— 见 [`.agents/adr/0002-ship-as-a-claude-code-plugin.md`](./.agents/adr/0002-ship-as-a-claude-code-plugin.md)。
 
-4. 好了——你已经准备好了。
+</details>
+
+<details>
+<summary><strong>动手派</strong></summary>
+
+使用同一个安装器，在任何 agent 上 —— 包括 Claude Code：
+
+```bash
+npx skills@latest add mattpocock/skills
+```
+
+它把技能作为你拥有并可编辑的普通文件写入仓库。没有任何东西会在你背后更新；想要我的最新变更时，用 `npx skills update` 拉取。
+
+</details>
+
+### 2. 运行 `/setup-matt-pocock-skills`
+
+在你的 agent 中，每个仓库运行一次。它会：
+
+- 询问你想使用哪个 issue tracker（GitHub、Linear 或本地文件）
+- 询问你在分类票据时使用什么标签（`/triage` 使用标签）
+- 询问你想将我们创建的文档保存在哪里
+
+### 3. 好了——你已经准备好了。
 
 ## 这些 Skill 为什么存在
 
@@ -113,7 +155,7 @@ npx skills@latest add mattpocock/skills
 
 我构建了一个 **[`/tdd`](./skills/engineering/tdd/SKILL.md) skill**，你可以插入到任何项目中。它鼓励红-绿-重构循环，并为 agent 提供了大量关于什么构成好的测试和坏的测试的指导。
 
-对于调试，我还构建了一个 **[`/diagnosing-bugs`](./skills/engineering/diagnosing-bugs/SKILL.md)** skill，将最佳调试实践包装成一个简单的循环。
+对于调试，我还构建了一个 **[`/diagnosing-bugs`](./skills/engineering/diagnosing-bugs/SKILL.md)** skill，将最佳调试实践包装成一个纪律化的循环，逐阶段把关。
 
 ### #4：我们构建了一个泥球
 
@@ -133,7 +175,7 @@ npx skills@latest add mattpocock/skills
 
 - [`/to-spec`](./skills/engineering/to-spec/SKILL.md) 在创建 spec 之前询问你将涉及哪些模块
 
-关键的是，[`/improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) 帮助你拯救已经变成泥球的代码库。我建议每隔几天在你的代码库上运行一次。
+关键的是，[`/improve-codebase-architecture`](./skills/engineering/improve-codebase-architecture/SKILL.md) 普查代码库寻找深化机会，并把候选方案交到你手上。我建议每隔几天在你的代码库上运行一次。它是普查，不是救援：在一个真正老旧的代码库上它会找到真正的候选，但它不会替你解开那团泥。
 
 ### 总结
 
@@ -157,17 +199,19 @@ npx skills@latest add mattpocock/skills
 - **[to-spec](./skills/engineering/to-spec/SKILL.md)** — 将当前对话转化为 spec 并发布到 issue tracker。无需访谈——只是综合你已经讨论过的内容。
 - **[to-tickets](./skills/engineering/to-tickets/SKILL.md)** — 将任何计划、spec 或对话分解为一组 tracer-bullet 票据，每个声明其阻塞边界——作为本地文件中的文本写入，或作为真实 tracker 上的原生阻塞链接。
 - **[implement](./skills/engineering/implement/SKILL.md)** — 构建 spec 或票据集描述的工作，在预先约定的 seam 处驱动 `/tdd`，并在提交前以 `/code-review` 收尾。
-- **[wayfinder](./skills/engineering/wayfinder/SKILL.md)** — 规划一大块工作，超过一个 agent 会话所能容纳的量，作为 issue tracker 上的共享调查票据地图——一次解决一个，直到通往目的地的路径清晰。
+- **[wayfinder](./skills/engineering/wayfinder/SKILL.md)** — 规划一大块工作，超过一个 agent 会话所能容纳的量，作为 issue tracker 上的共享决策票据地图——一次解决一个，直到通往目的地的路径清晰。
 
 **模型调用**
 
-- **[prototype](./skills/engineering/prototype/SKILL.md)** — 构建一次性原型来回答设计问题——用于状态/逻辑问题的可运行终端应用，或多种可从同一路由切换的截然不同的 UI 变体。
-- **[diagnosing-bugs](./skills/engineering/diagnosing-bugs/SKILL.md)** — 用于困难 bug 和性能回归的规范化诊断循环：重现 → 最小化 → 假设 → 插桩 → 修复 → 回归测试。
+- **[prototype](./skills/engineering/prototype/SKILL.md)** — 构建一次性原型来回答设计问题——用于状态/逻辑问题的单一可共享 HTML 文件，或多种可从同一路由切换的截然不同的 UI 变体。
+- **[diagnosing-bugs](./skills/engineering/diagnosing-bugs/SKILL.md)** — 用于困难 bug 和性能回归的规范化诊断循环：构建一个在此 bug 上变红的反馈回路 → 最小化 → 假设 → 插桩 → 修复 → 回归测试。
 - **[research](./skills/engineering/research/SKILL.md)** — 针对高可信度的主要来源调查问题，并将发现捕获为仓库中的带引用 Markdown 文件，作为后台 agent 运行。
 - **[tdd](./skills/engineering/tdd/SKILL.md)** — 使用红-绿-重构循环的测试驱动开发。一次一个垂直切片地构建功能或修复 bug。
 - **[domain-modeling](./skills/engineering/domain-modeling/SKILL.md)** — 主动构建和打磨项目的领域模型——对照词汇表挑战术语、用边界场景压力测试、内联更新 `CONTEXT.md` 和 ADR。
 - **[codebase-design](./skills/engineering/codebase-design/SKILL.md)** — 设计深层模块的共享准则和词汇：大量行为放在小接口背后，置于清晰的 seam 处，通过该接口可测试。
-- **[code-review](./skills/engineering/code-review/SKILL.md)** — 从固定点开始的 diff 双轴审查：**标准**（是否遵循仓库的编码标准，加上 Fowler 气味基线？）和 **Spec**（是否忠实实现了原始 issue/PRD？），作为并行子 agent 运行，互不污染。
+- **[code-review](./skills/engineering/code-review/SKILL.md)** — 从固定点开始的 diff 双轴审查：**标准**（是否遵循仓库的编码标准，加上 Fowler 气味基线？）和 **Spec**（是否忠实实现了原始 issue/spec？），作为并行子 agent 运行，互不污染。
+- **[resolving-merge-conflicts](./skills/engineering/resolving-merge-conflicts/SKILL.md)** — 逐块处理进行中的 git merge 或 rebase 冲突，依据意图解决——追溯到每一侧的原始来源——然后完成该操作——绝不 `--abort`。
+- **[wizard](./skills/engineering/wizard/SKILL.md)** — 生成一个交互式 bash 向导，引导人工用户完成只有他们能执行的步骤：配置基础设施、设置凭据或 CI secrets、操作陌生的第三方后台、执行一次性迁移或切换。
 
 ### 生产力
 
@@ -175,11 +219,13 @@ npx skills@latest add mattpocock/skills
 
 **用户调用**
 
-- **[grill-me](./skills/productivity/grill-me/SKILL.md)** — 接受对计划或设计 relentless 的访谈，直到决策树的每个分支都被解决。
+- **[grill-me](./skills/productivity/grill-me/SKILL.md)** — 接受对计划或设计 relentless 的访谈，直到设计树的每个分支都被解决。
 - **[handoff](./skills/productivity/handoff/SKILL.md)** — 将当前对话压缩为交接文档，以便另一个 agent 可以继续工作。
 - **[teach](./skills/productivity/teach/SKILL.md)** — 在多个会话中向用户教授新 skill 或概念，使用当前目录作为有状态的教学工作区。
-- **[writing-great-skills](./skills/productivity/writing-great-skills/SKILL.md)** — 编写和编辑 skill 的参考：使 skill 可预测的词汇和原则。
+- **[to-questionnaire](./skills/productivity/to-questionnaire/SKILL.md)** — 把一个你无法独立回答的决策，转化为一份交给唯一能回答之人的 Markdown 问卷——异步填写，或在会议中一起完成。它盘问的是"发送"（发给谁、你需要回什么），而不是主题。
+- **[wait-what](./skills/productivity/wait-what/SKILL.md)** — 消息没说到点的那一刻就触发它。agent 会带着你缺失的上下文、用简单的语言、使用你的 `CONTEXT.md` 词汇表重新阐述。
 
 **模型调用**
 
-- **[grilling](./skills/productivity/grilling/SKILL.md)** — relentlessly 访谈用户关于计划或设计，直到决策树的每个分支都被解决。`grill-me` 和 `grill-with-docs` 背后的可复用循环。
+- **[grilling](./skills/productivity/grilling/SKILL.md)** — relentlessly 访谈用户关于计划、决策或想法，直到设计树的每个分支都被解决。`grill-me`、`grill-with-docs`、`triage`、`wayfinder` 和 `improve-codebase-architecture` 背后的可复用访谈原语。
+- **[writing-for-agents](./skills/productivity/writing-for-agents/SKILL.md)** — 为 agent 撰写文档：skills、AGENTS.md/CLAUDE.md，以及任何 agent 通过指针到达的文档。

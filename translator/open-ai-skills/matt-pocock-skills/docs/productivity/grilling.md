@@ -1,37 +1,87 @@
-快速开始：
-
-```bash
-npx skills add mattpocock/skills --skill=grilling
-```
-
-```bash
-npx skills update grilling
-```
-
-[源代码](https://github.com/mattpocock/skills/tree/main/skills/productivity/grilling)
-
 ## 功能说明
 
-`grilling` 是在你构建之前对计划或设计进行压力测试的不留情面的面试。它沿着设计树逐分支深入，逐一解决决策之间的依赖关系，直到你和 Agent 达成共识。
+`grilling` 是一个面试循环,在任何人动手之前对计划、决策或想法做压力测试。它把对象映射成一棵**设计树**——每个决策都分出挂在其上的子决策——然后逐分支盘问你,直到没有任何东西在沉默中被假定。
 
-它每次只问**一个问题**并等待你的回答，然后再问下一个——绝不会批量提问，那会让人无所适从。每个问题都附带 Agent 自己的推荐答案，而任何代码库能够解答的问题，它都会自行探索而不是来问你。在你确认已达成共识之前，它不会开始执行计划。
+它不会一次只问一个问题,也不会一次性把所有问题都抛出来。每一**轮**都会问整个**前沿**:所有前提已满足的决策,仅此而已。两个问题如果相互依赖,绝不会出现在同一轮里——一个依赖某个尚未回答的问题的问题,属于更靠后的轮次。你的回答定下决策,前沿向外推进,下一轮再问被解锁的那些问题。13 个问题通常分三轮左右问完,而不是 13 轮。
 
 ## 何时使用
 
-输入 `/grilling`，或者当任务适合时 Agent 会自动使用它——这是底层原语，不只是用户专属入口。
+输入 `/grilling`,或者当任务合适时,[Agent](https://www.aihero.dev/ai-coding-dictionary/agent) 会自己调用它。它是问询家族里唯一一个模型调用的[技能](https://www.aihero.dev/ai-coding-dictionary/skill),这就是为什么你很少亲手输入它:通常是你输入的那个技能在替你运行它。
 
-当你感觉某个计划或设计还有薄弱环节、希望在写代码之前让它们暴露出来时，就是使用它的时机。在实践中，你通常是通过它的两个封装器来调用它，而不是直接按名称调用：进行普通面试会话使用 [grill-me](https://aihero.dev/skills-grill-me)；希望会话过程中同时生成 ADR 和术语表，则使用 [grill-with-docs](https://aihero.dev/skills-grill-with-docs)。
+直接输入 `/grilling` 得到的是纯粹的面试,仅此而已。当你要的不止这些时:
 
-## 设计树
+| 你的情况 | 该用哪个 |
+| --- | --- |
+| 你不在工作目录里 | [grill-me](https://aihero.dev/skills-grill-me) — 同样的[会话](https://www.aihero.dev/ai-coding-dictionary/session),只是换了个名字,Agent 永远不会自己触发它 |
+| 你在工作目录里 | [grill-with-docs](https://aihero.dev/skills-grill-with-docs) — 同样的会话,并且边进行边写 `CONTEXT.md` 和 ADR |
+| 一次会话装不下的大工程 | [wayfinder](https://aihero.dev/skills-wayfinder) — 它绘制地图,并在决策工单里运行问询 |
+| 靠对话解决不了的问题——事物应该长什么样、什么感觉 | [prototype](https://aihero.dev/skills-prototype) — 先做一次性版本,再回来 |
+| 你自己的技能需要一个面试流程 | 从它内部调用 `/grilling`,而不是另写一套面试 |
 
-心智模型是一棵**设计树**：每个计划都会分支为若干决策，而决策之间又相互依赖。`grilling` 一次只深入树中的一个节点，因此早期的回答可能会重塑后续问题的走向。这就是问题一个接一个按依赖顺序出现的原因——并行倾泻大量问题会丢失那种使面试最终收敛于共识的结构。
+## 轮、前沿,以及谁来做决定
 
-## 刻意抽离
+整个技能靠三个概念撑起来。
 
-`grilling` 是面试技术的**单一事实来源**，被抽离为一个由模型自动调用的**原语**，这样每个需要面试的技能都可以使用它，而不用各自重新发明一套。[grill-me](https://aihero.dev/skills-grill-me) 和 [grill-with-docs](https://aihero.dev/skills-grill-with-docs) 是它的两个用户调用型入口，但 [improve-codebase-architecture](https://aihero.dev/skills-improve-codebase-architecture) 和 [triage](https://aihero.dev/skills-triage) 也会借助它来对自己的决策进行压力测试。
+**设计树**是对象的模型:决策上挂着决策。**前沿**是所有前提都已满足的决策集合——也是当前唯一能诚实提出的问题。**一轮**就是一个前沿,完整地问,完整地答。
 
-将这项技术集中在一个地方，意味着当你只想要面试本身——不需要其封装器附加的 ADR 撰写或工单整理——你也可以直接使用它。
+在一轮里,每个问题都以固定形态出现:以 `❓` 开头编号并带标题,然后是正文,最后是 Agent 的推荐答案,单独占一行、以 `➡️` 开头。正是这种形态让一轮可以按编号作答——「1 同意,2 选第二个选项,3 不同意,原因是……」——而不是把问题原样复述回去。这个格式有一个已知的小毛病:推荐答案有时会跟问题的措辞*唱反调*,于是同意推荐答案等于对问题答「否」。遇到这种情况,就照推荐答案答,并说明缘由。
+
+设计的另一半是事实与决策的区分。事实是技能自己的事:当某个前沿问题需要[环境](https://www.aihero.dev/ai-coding-dictionary/environment)才能确定的东西时,它会派一个[子 Agent](https://www.aihero.dev/ai-coding-dictionary/subagent) 去查,而不是来问你。它不会为这个阻塞——只有位于运行中的探索下游的问题才会等待。决策是你的,它必须等。一个运行 `grilling` 却自己替你做决策的 Agent,是破坏了技能,而不是在宽松地诠释它。前沿清空时会话结束,而且在你说双方已达成共识之前,它不会把商定的事付诸实施。
+
+诚实的局限:前沿是 Agent 的判断,不是算出来的图。它可能把两个问题放进同一轮,之后才发现其中一个答案本该改变另一个。除了明说之外没有别的防线——你指出后,下一轮会重开受影响的分支。
+
+## 哪些在这里,哪些在外层包装里
+
+这一页讲的是机制。大家最常想要的东西,文档在上一层。
+
+| 问题 | 在哪里解答 |
+| --- | --- |
+| 树、前沿、轮次、问题格式、事实与决策 | 这里 |
+| 会话该跑多久、遇到靠对话答不了的问题怎么办、怎么避免一路点头 | [grill-me](https://aihero.dev/skills-grill-me) |
+| 什么会被写进 `CONTEXT.md`,什么会变成 ADR | [grill-with-docs](https://aihero.dev/skills-grill-with-docs) |
+
+## 常见问题
+
+**我能改回一次只问一个问题吗?**
+可以,而且相当多用户就是这么做的。把它加进你的全局 `CLAUDE.md`:
+
+```
+When grilling, ask one question at a time.
+```
+
+以轮为单位的默认确实有争议。阅读慢的人、用第二语言工作的人、以及把顺序格式当作专注脚手架的人,都报告说一次一个的节奏对他们更好;这个退出选项是被支持的,而不是被容忍的。
+
+**`/batch-grill-me` 去哪了?**
+并进这个技能了。以轮为单位提问曾短暂作为独立技能发布,然后并入 `grilling` 本身,于是所有建立在原语之上的东西——`grill-me`、`grill-with-docs`、`triage`、`wayfinder`——一下子就都有了。没有要安装的 `batch-grill-me`,也没有单独的顺序技能;上面那行 `CLAUDE.md` 就是回到一次一个的途径。
+
+**一次问一整轮,肯定会丢掉我前面的回答引出的问题,不是吗?**
+这是对轮次设计最常见的反对意见,前沿就是答案:一轮里只会有互不依赖的问题,所以轮内任何回答都不可能推翻轮内另一个问题。回答依然会重塑下游的一切——下一轮是重新算出来的,不是预先写好的。你损失的比「一次性问所有问题」听上去小,又比「什么都不损失」大:参见上文前沿的局限。
+
+**它问题问完了,然后开始动手构建了。**
+为此存在一个确认关卡:技能在前沿清空时并未结束,只有当你说理解已达成共识时才结束。较弱较快的[模型](https://www.aihero.dev/ai-coding-dictionary/model)依然会破坏它——在低推理强度或非前沿模型上报告最多,它们把「盘问到共识」塌缩成两三个问题加一个大纲。如果你的模型也这样,可靠的修法是在你自己的 `AGENTS.md` 或 `CLAUDE.md` 里加一行,让 Agent 未经许可不得实现。
+
+**它自己回答了问题,而不是来问我。**
+那是运行中的 bug,不是预期行为,也正是技能文本里把事实与决策分开的原因。它最常出现在另一个技能以「解决这个工单」的框架运行 `grilling` 时,周围的任务读起来像在授权它继续推进。同一约束也是没有异步模式的原因:有人要过一个变体——读一个 GitHub issue,然后贴出一份汇总决策备忘录——那是另一个技能,因为一场没人回答的问询产出的只是 Agent 的意见,不是你的。
+
+**我能限制问题数量吗?**
+不能,上限是被刻意排除在外的。有的计划需要三个问题,有的需要五十个;固定上限要么截断棘手的场景,要么在简单场景里显得随意。用自然语言引导才是设计好的控制方式——告诉它收尾,或者就此打住、按现状接受方案。如果会话跑得非常久,原因通常是范围太大;把工作拆开,逐个盘问。
+
+**我只装了 `grill-me`,却什么都没发生。**
+`grill-me` 是个一行技能,全部内容就是「运行一场 `/grilling` 会话」,所以它需要这个技能也装好。`grill-with-docs` 同理,它额外还需要 [domain-modeling](https://aihero.dev/skills-domain-modeling)。整套安装能避免这类问题;选择性安装就意味着原语也得一起装。
+
+**`grill-with-docs` 跑了,但它从来没加载 `grilling`。**
+一个真实存在且未修复的粗糙边缘,在多个[宿主环境](https://www.aihero.dev/ai-coding-dictionary/harness)和模型上都有报告:一个技能点名另一个技能,并不能可靠地让后者被加载,而 `grill-with-docs` 点名的有两个。症状是一次把所有问题都问出来、不附带任何推荐——那是模型在即兴发挥面试,而不是在运行这个技能。直接问 Agent 是否加载了 `grilling` 和 `domain-modeling`,通常能救回来。
+
+## 效果如何判断
+
+- 一轮以编号列表到达,每个问题带一行以 `➡️` 开头的推荐,你可以按编号答完一整轮。
+- 轮内没有任何问题需要先回答轮内另一个问题。
+- 后面的轮次会问第一轮问不出来的事。
+- 它会自己去查事实——读文件、派子 Agent——而不是把能查到的东西拿来问你。
+- 后台进行的研究不会拖住整轮;只有依赖它的问题才等待。
+- 最后它会停下来,请你确认理解已达成共识,而不是直接开始干活。
+- 问题数居高不下,轮数却保持在低位。
 
 ## 在系统中的位置
 
-`grilling` 是主构建链路之下的面试**原语**：[grill-with-docs](https://aihero.dev/skills-grill-with-docs) 在 [to-spec](https://aihero.dev/skills-to-spec) 撰写规范之前运行它来打磨上下文。当你不确定哪个入口适合时，[ask-matt](https://aihero.dev/skills-ask-matt) 会为你导航。
+`grilling` 是一个**原语**,不是安排进日程的步骤:它是面试技法的唯一事实来源,收在一处,这样每个需要面试的技能都会伸手来用它,而不是另造一个。[grill-me](https://aihero.dev/skills-grill-me) 和 [grill-with-docs](https://aihero.dev/skills-grill-with-docs) 是它的两个用户调用前门,`grill-with-docs` 是主构建链的起点,排在 [to-spec](https://aihero.dev/skills-to-spec) 之前。[wayfinder](https://aihero.dev/skills-wayfinder) 用它推进决策工单,[triage](https://aihero.dev/skills-triage) 用它把一个含糊的报告盘问成可执行的,而 [improve-codebase-architecture](https://aihero.dev/skills-improve-codebase-architecture) 在你选定一个候选要深化时,用它遍历整棵树。不确定哪个入口合适时,[ask-matt](https://aihero.dev/skills-ask-matt) 会为你导航。

@@ -1,11 +1,11 @@
 # 问题跟踪器：本地 Markdown
 
-该仓库的 Issues 和 PRD 以 markdown 文件形式存储在 `.scratch/` 中。
+该仓库的 Issues 和 specs 以 markdown 文件形式存储在 `.scratch/` 中。
 
 ## 约定
 
 - 每个功能一个目录：`.scratch/<feature-slug>/`
-- PRD 为 `.scratch/<feature-slug>/PRD.md`
+- spec 为 `.scratch/<feature-slug>/spec.md`
 - 实现 issue 为 `.scratch/<feature-slug>/issues/<NN>-<slug>.md`，从 `01` 开始编号
 - 分类状态记录为每个 issue 文件顶部附近的 `Status:` 行（参见 `triage-labels.md` 中的角色字符串）
 - 评论和对话历史追加到文件底部 `## Comments` 标题下

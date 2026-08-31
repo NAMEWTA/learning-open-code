@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # 将仓库中的所有 skill 链接到每个 agent harness 使用的本地 skill 目录：
 #   - ~/.claude/skills  — Claude Code
-#   - ~/.agents/skills  — pi 和其他遵循 Agent-Skills 标准的 harness
+#   - ~/.agents/skills  — Codex 和其他遵循 Agent Skills 标准的 harness
 # 每个条目是指向此仓库的符号链接，因此只需 `git pull` 即可
 # 保持已安装 skill 的最新状态。
 

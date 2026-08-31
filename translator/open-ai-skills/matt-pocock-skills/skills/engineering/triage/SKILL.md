@@ -73,7 +73,7 @@ Triage 期间发布到 issue tracker 的每条评论或 issue **必须**以此�
 
 3. **验证声明。** 在任何质询之前，检查声明是否成立。对于 bug，按报告者的步骤复现。对于 PR，确认 diff 做了它声称做的事情 —— checkout 它，运行相关测试或命令。报告结果：已确认（含代码路径）、未通过、或细节不足（强烈的 `needs-info` 信号）。已确认的验证会产生更强的 agent 摘要。
 
-4. **质询（如需要）。** 如果请求需要充实，同时运行 `/grilling` 和 `/domain-modeling` 技能 —— 逐个问题地进行质询，随着决策落地内联更新 `CONTEXT.md`/ADR。
+4. **质询（如需要）。** 如果请求需要充实，同时运行 `/grilling` 和 `/domain-modeling` 技能 —— 一轮问题一轮问题地进行质询，随着决策落地内联更新 `CONTEXT.md`/ADR。
 
 5. **应用结果：**
    - `ready-for-agent` —— 发布 agent 摘要评论（[AGENT-BRIEF.md](AGENT-BRIEF.md)）。

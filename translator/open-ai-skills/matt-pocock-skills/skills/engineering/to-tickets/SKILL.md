@@ -59,33 +59,27 @@ Issue tracker 和 triage 标签词汇表应已提供给你 —— 如果没有�
 
 发布已批准的 tickets。**如何**发布取决于 `/setup-matt-pocock-skills` 配置的 tracker —— 无论哪种方式 tickets 都相同，只有阻塞边的形式不同：
 
-- **本地文件** → 在仓库根目录写入一个 `tickets.md`，按依赖顺序排列所有 tickets（阻塞者在前），每个 ticket 的"被阻塞于"列出它所依赖的标题。使用下面的文件模板。
+- **本地文件** → 在 `.scratch/<feature-slug>/issues/<NN>-<slug>.md` 下为每个 ticket 写入一个文件，从 `01` 开始按依赖顺序编号（阻塞者在前）。每个文件的"被阻塞于"列出它所依赖的编号/标题。使用下面的 per-ticket 文件模板 —— 每个 ticket 一个文件，绝不合并成一个单一文件。
 - **真实 issue tracker（GitHub、Linear 等）** → 按依赖顺序（阻塞者在前）为每个 ticket 发布一个 issue，以便每个 ticket 的阻塞边可以引用真实标识符。使用平台的原生阻塞/子 issue 关系（如果有的话）；否则将每个 ticket 的"被阻塞于"设置为阻塞它的 issues。除非另有指示，应用 `ready-for-agent` triage 标签 —— 这些 tickets 在构造上就是 agent 可领取的。
+
+处理**前沿**：所有阻塞者都完成的 tickets。对于纯线性链，这意味着从上到下。
 
 不要关闭或修改任何父 issue。
 
-<tickets-file-template>
+<local-ticket-template>
 
-# Tickets：<工作的简短名称>
-
-一句话总结这些 tickets 构建的内容。如果有来源 spec，引用它。
-
-从**前沿**开始工作：找到所有阻塞边已完成的 tickets。对于纯线性链，这意味着从上到下。
-
-## <Ticket 标题>
+# <NN> — <Ticket 标题>
 
 **要构建什么：** 此 ticket 使哪些端到端行为可用，从用户视角 —— 不是逐层实现清单。
 
-**被阻塞于：** 阻碍此 ticket 的 tickets 标题，或"无 —— 可立即开始"。
+**被阻塞于：** 阻碍此 ticket 的 tickets 编号/标题，或"无 —— 可立即开始"。
+
+**状态：** ready-for-agent
 
 - [ ] 验收标准 1
 - [ ] 验收标准 2
 
-## <Ticket 标题>
-
-...
-
-</tickets-file-template>
+</local-ticket-template>
 
 <issue-template>
 
@@ -109,5 +103,3 @@ Issue tracker 和 triage 标签词汇表应已提供给你 —— 如果没有�
 </issue-template>
 
 无论哪种形式，避免具体文件路径或代码片段 —— 它们会很快过时。例外：如果原型产生了一个代码片段，它比文字更精确地编码了一个决策（状态机、reducer、schema、类型结构），将其内联并简要注明来自原型。精简到富含决策的部分 —— 不是可运行的演示，只是关键部分。
-
-使用 `/implement` 逐个处理前沿上的 tickets，ticket 之间清空上下文。

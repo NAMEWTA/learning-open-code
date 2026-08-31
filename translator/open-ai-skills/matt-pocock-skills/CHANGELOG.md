@@ -1,5 +1,145 @@
 # mattpocock-skills
 
+## 1.2.2
+
+### 补丁变更
+
+- [#766](https://github.com/mattpocock/skills/pull/766) [`4aaccb5`](https://github.com/mattpocock/skills/commit/4aaccb58d40559d7e3c59a029b2290ae5ba538de) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 让 `writing-for-agents` 在 Codex 中恢复模型可调用。
+
+  - 从 `agents/openai.yaml` 中移除 `policy.allow_implicit_invocation: false`。Codex 将该技能从模型可见的技能列表中过滤掉了，所以它的 description 无法触发它——只有显式提及 `$writing-for-agents` 才有效。
+  - 更新过时的 `interface.display_name` 和 `interface.short_description`，它们仍指向旧的 `writing-great-skills` 技能。
+  - 将该技能从 `README.md` 和 `skills/productivity/README.md` 的**用户调用**列表移至**模型调用**列表。
+
+## 1.2.0
+
+### 次要变更
+
+- [#551](https://github.com/mattpocock/skills/pull/551) [`697d4ce`](https://github.com/mattpocock/skills/commit/697d4ce9742da558fd1ba6697c8e9775e2e302dd) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 在每个技能的 Claude Code frontmatter 旁边添加 Codex 元数据，使整套技能无需生成副本即可在两个 harness 中工作。
+
+  - 在每个 `SKILL.md` 旁添加一个 `agents/openai.yaml`，包含 Codex UI 元数据（`interface.display_name`、`interface.short_description`）。
+  - 用 `policy.allow_implicit_invocation: false` 标记每个用户调用的技能——这是 `disable-model-invocation: true` 的 Codex 对应物——让 Codex 将其排除在隐式调用之外，同时显式 `$skill` 调用仍然有效。
+  - 在 `.agents/invocation.md`、`CLAUDE.md` 和推广分类的 README 中记录双 harness 调用模型。
+  - 添加 `AGENTS.md` 作为 `CLAUDE.md` 的符号链接，让 Codex 读取相同的仓库指令。
+
+- [#593](https://github.com/mattpocock/skills/pull/593) [`0f2bdbd`](https://github.com/mattpocock/skills/commit/0f2bdbdb06220d2df3718b8f0483157c6c8a8600) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 将 **`to-questionnaire`** 从 `in-progress/` 毕业到 **Productivity** 分类，随插件发布。它把一个你无法独立回答的决策，转化为一份交给唯一能回答之人的 Markdown 问卷——异步填写，或在会议中一起完成。
+
+  它的标志性动作是盘问"**发送**"而非主题：常规的 grilling 会话盘问主题，而这恰恰是你无法回答的部分，所以访谈只问问卷发给谁、你需要回什么，然后把每个问题对准两者之间的差距。
+
+  现已接入为推广技能——插件条目、顶层 + Productivity README 的**用户调用**列表、`docs/productivity/to-questionnaire.md` 文档页，以及 `ask-matt` 中把它定位为 `/grill-me` 之反面的独立路由（挖掘别人，而不是自己）。
+
+- [#680](https://github.com/mattpocock/skills/pull/680) [`b3376f8`](https://github.com/mattpocock/skills/commit/b3376f8d39848dd08572ec2667da4739a67c8c04) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 将 **`wizard`** 从 `in-progress/` 毕业到 **Engineering** 分类，随插件发布——并使其成为模型调用。它生成一个交互式 bash 脚本，引导人工用户完成手动流程——第三方设置、一次性迁移、A→B 状态转换——打开每个 URL、说明要点击什么、捕获这些值，并写入 `.env` 文件和 GitHub Actions secrets。
+
+  令人愉悦的用户体验已由附带的 `template.sh` 预解决（剩余时间估算的进度显示、确认关卡、包括 WSL 在内的跨平台 URL 打开、隐藏的密钥输入、幂等的 `.env` 追加更新、优雅降级的 `gh secret`/`gh variable` 写入、收尾的跳过摘要）。`STAGES` 标记上方的所有内容都是一个从不手工编辑的固定库——技能的工作只在于界定流程范围并编写其**阶段**。
+
+  属于 Engineering 而非 Productivity：它读取 `.env*`、`docker-compose*`、框架配置以及 `.github/workflows/` 中的每个 `secrets.*`/`vars.*` 引用来界定自身范围，写入 CI secrets，并用 `bash -n` 和 `shellcheck` 验证其输出。
+
+  因为它是模型调用的，agent 一碰到只有人类能执行的步骤就能去取用它，而不是把编号指令倾倒进聊天里指望你照着做。输入 `/wizard` 与以前完全一样——模型调用只会*增加* agent 的触达。description 被写成决定它何时触发的指针：它产出什么、四个触发分支（配置基础设施、设置凭据或 CI secrets、操作陌生的第三方后台、一次性迁移或切换），以及一个明确的非触发条件——不要为 agent 自己能完成的步骤调用它。agent 能做的活，就该 agent 做；向导是为那些你不会交给 agent 的点击、审批和后台操作准备的。写任何一行之前的阶段列表确认，现在同时充当 agent 在构建中途触发它时的提案。
+
+  现已接入为推广技能——插件条目、顶层 + Engineering README 的**模型调用**列表、`docs/engineering/wizard.md` 文档页，以及 `ask-matt` 中"只有人类能执行的步骤"的独立路由。模型调用也使它脱离了 [#693](https://github.com/mattpocock/skills/issues/693) 的影响范围——该 issue 将用户调用的技能从 Claude 桌面和网页界面的列表中剔除。
+
+- [#763](https://github.com/mattpocock/skills/pull/763) [`77d207e`](https://github.com/mattpocock/skills/commit/77d207ef03219cc603e2832e1159cbdd1c91818e) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 围绕两个理念重塑 **`prototype`** 技能：演示是**一个可共享的 HTML 文件**，原型是**一手资料**。
+
+  逻辑分支现在产出一个自包含的文件（纯 HTML/CSS/JS，无构建、无服务器），而不是终端应用——非开发者可以双击打开它，用自己的领域语言驱动它：一个带标签的状态面板、始终可用的自由点击按钮，以及一组带标签的**引导式演练**，每个都是一个场景，下方列出按顺序要按的按钮。可移植的纯逻辑模块仍然会提升进真实代码；HTML 外壳才是一次性的。
+
+  一次性不再意味着删除。原型在回答完问题后不再被移除，而是作为可运行证据捕获在 main 之外的一条临时分支（`prototype/<name>`）上，并在实现 issue 上留下指向它的上下文指针——这样 main 分支只保留已验证的决策，而探索仍然可寻。答案（结论 + 问题）仍然持久地记录在 issue/ADR/commit 中。
+
+- [#536](https://github.com/mattpocock/skills/pull/536) [`42a5b70`](https://github.com/mattpocock/skills/commit/42a5b70fcacc7baff1977b13f3919fb2f63af14e) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 将整套技能作为原生 **Claude Code 插件**发布，收录于 Claude Code 的官方市场。你现在可以把推广技能订阅为受管理的、只读的捆绑包，而不是复制可编辑的文件：
+
+  ```bash
+  claude plugins install mattpocock-skills
+  ```
+
+  或者，在会话内部：
+
+  ```
+  /plugin install mattpocock-skills
+  ```
+
+  不需要预先添加任何市场——官方市场默认配置。
+
+  `.claude-plugin/plugin.json` 携带完整的插件元数据（version、description、author、license、keywords）和推广技能的明确列表。`skills.sh` 仍然是通用安装器（也是 Codex 和其他 harness 当前的路）；原生 Codex 插件推迟——原因见 `.agents/adr/0002-ship-as-a-claude-code-plugin.md`。
+
+- [#751](https://github.com/mattpocock/skills/pull/751) [`355fa74`](https://github.com/mattpocock/skills/commit/355fa7420b418af838998f7ec4365ceda1c8dfcc) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 添加 **`wait-what`** —— 一个针对模型啰嗦的单字纠正。消息没说到点的那一刻输入它，agent 就会重新阐述：一点背景、ASD-STE100 简化技术英语，以及你 `CONTEXT.md` 中的通用语言。用户调用，三行长。
+
+  机制就是名字本身。精简类技能因膨胀而失败——一份 400 行的技能仍然让模型啰嗦——所以这个技能是一个精确的引导词，仅此而已。描述*输出*的名字（`/tldr`、`/no-fluff`）会让模型裁剪词语、让你更迷惑；命名*听者*的状态则同时索要两半——更少的词**和**你缺失的背景。它还复用你全局 `CLAUDE.md` 中已有的引导词，所以技能、`CLAUDE.md` 和每个 `CONTEXT.md` 伸手够向相同的 token。
+
+  它修复一条消息；它不预防下一条。行话的解药是用 `/grill-with-docs` 预先建立的共享语言；这是你在还没有共享语言时的求助对象。
+
+- [#763](https://github.com/mattpocock/skills/pull/763) [`77d207e`](https://github.com/mattpocock/skills/commit/77d207ef03219cc603e2832e1159cbdd1c91818e) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 把 `/wayfinder` 的工作单元命名为**决策票据（decision ticket）**，并用子 agent 烧掉 research 票据。
+
+  人们一直把 wayfinder 票据读成普通的*实现*票据——要执行的一个构建切片——而 wayfinder 把它们用作**决策票据**：解决结果是一个决策的问题。技能描述和它的开篇现在引入该术语（并说明什么使它成为决策票据），`ask-matt` / engineering README 的介绍和文档页也同步——而一旦术语确立，"ticket" 仍是日常用词。`CONTEXT.md` 把 **Decision ticket** 记录为领域术语，因此"避免：ticket"的指引不再与 wayfinder 对这个词的刻意使用相矛盾。
+
+  Research 票据不再停放在单独启动的会话中。Research 仍然是真正的票据类型——它是下游决策所依赖的真正的共享阻塞项，而这个依赖正是前沿的阻塞边要呈现的东西。变化的是它的解决方式：因为 research 是 AFK 的，绘制地图不会停下来读它。创建票据后，绘图会话为每个 research 票据派一个 `/research` 子 agent 并行烧掉它，把发现捕获到一条一次性的 `research/<name>` 分支上并留下上下文指针。Research 票据是"每个会话一个票据"的唯一例外。
+
+- [#763](https://github.com/mattpocock/skills/pull/763) [`77d207e`](https://github.com/mattpocock/skills/commit/77d207ef03219cc603e2832e1159cbdd1c91818e) 感谢 [@mattpocock](https://github.com/mattpocock)！ - **破坏性变更：** 将 **`writing-great-skills`** 重命名为 **`writing-for-agents`**，重构它，并添加一个新引导词。
+
+  该参考现在覆盖 agent 消费的任何文档——skills、`AGENTS.md` / `CLAUDE.md`、通过指针到达的文档——而不只是技能。`GLOSSARY.md` 并入 `SKILL.md`（每个术语一个权威论述；`_Avoid_` 同义词列表和独立的 Predictability 定义已移除）；仅技能相关的机制（frontmatter、模型调用 vs 用户调用、路由技能、按调用方式拆分）披露到新的 `SKILL-MECHANICS.md`。该技能现在是**模型调用**：在创建或编辑技能、修改 `AGENTS.md`/`CLAUDE.md` 时触发。`ask-matt` 的指针已更新。请以新名字重新安装；旧名字已消失（无别名）。
+
+  精简章节增加了**缓存（cache）**。单一事实来源现在延伸到文档之外、进入环境——`package.json` 脚本、配置文件、目录布局、`--help` 输出本身就是权威的，所以重述它们的文档就是一次查询的缓存，只有当查询昂贵时才值得负担。正面目标：缓存 agent 无法通过查找得到的东西（不成文的约定、选择背后的原因、任何配置都不会招认的坑），把"一个文件一条命令"式的查找留给环境，在那里它们不会过期。
+
+- [#533](https://github.com/mattpocock/skills/pull/533) [`45afd80`](https://github.com/mattpocock/skills/commit/45afd8074a8b7de5fe073845d080fa9dd6c429fa) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 给 **`improve-codebase-architecture`** 技能的探索步骤添加 YAGNI 范围过滤器。它不再均匀扫描整个仓库，而是把范围限定到变更实际落地的地方：如果你指明方向就采用它，否则读取最近约 20 条 commit 消息，把探索偏向积极开发的路径。没人碰的代码中的深化机会，是一次你永远不会兑现的重构——杠杆只在你还持续编辑的地方才有回报——所以报告不再整理仓库的休眠角落。
+
+### 补丁变更
+
+- [#763](https://github.com/mattpocock/skills/pull/763) [`77d207e`](https://github.com/mattpocock/skills/commit/77d207ef03219cc603e2832e1159cbdd1c91818e) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 打磨 `/ask-matt` —— 路由器现在覆盖阶段边界、两个 wayfinder 常见错误，以及两个它从未提及的技能。
+
+  **阶段边界。** **阶段（phase）** 是会话内的一块工作——访谈、实现、QA——而两者之间的边界就是你决定如何处理已构建上下文的地方。两行的 `Crossing sessions` 部分被一棵携带全部五个选项的决策树取代（**continue**、`/clear`、`/handoff`、**subagent**、`/compact`），推理披露在新的 `PHASE-BOUNDARIES.md` 中。随之而来三个修复：
+
+  - **`/handoff` 被过度推销了。** 它读起来像上下文窗口之间的通用桥梁。它其实很窄：只有当有东西必须*移动*时你才需要它——新的 harness、新的目录、同事，或阶段中途分叉的旁路任务。它买到的是可移植性。
+  - **`/compact` 是默认，不是第一伸手可及处。** 它在树的底部，排在它上面四个更廉价或更精确的问题之后。从那里开始，会产生一个对摘要压平了什么自信地搞错的会话。
+  - **两个分支完全缺失。** **Continue** 是最先要排除的选项——它是唯一让对话保持为一手资料、而非其摘要的选项——而 **subagent** 处理任何范围足够紧、可以 AFK 运行的东西。
+
+  上下文卫生的逃生口现在说 `/compact` 而不是 `/handoff`（同一 harness、同一目录、在边界处——handoff 条款不适用），智能区间数字从约 120k 更新为约 150k token。
+
+  **Wayfinder 路由。** 人们对这个最重、认知负担最大的流程最常犯的两个错误：
+
+  - **过度伸手。** 它比一次单独的 grill 更慢更密集，所以被标记为最重的流程，专为真正装不进一个会话的想法保留——范围明确的功能属于 `/grill-with-docs`，而不是这里。
+  - **在交接处迷失方向。** 当地图清晰时，wayfinder 是交接，不是构建：在 `/to-spec` 处汇入主流程（它把地图上相互关联的决策折叠成可构建的计划），而不是把地图直接绕进 `/implement`。直接进 `/implement` 只用于结果真的很小的工作。
+
+  **缺失的路由。** `/grilling` 和 `/resolving-merge-conflicts` 完全不在路由器中，现在它们在里面了，而 `grill-me` 与 `grill-with-docs` 的分界是你是否在某个工作目录中。
+
+- [#502](https://github.com/mattpocock/skills/pull/502) [`44eed54`](https://github.com/mattpocock/skills/commit/44eed545186ffd0263e8004867750b80cfddd215) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 让 `/setup-matt-pocock-skills` 更友好，并使本地 markdown tracker 与当前规范对齐。
+
+  - **Triage 标签**现在只在 `triage` 技能已安装时才询问，且是单个推荐"是"的问题（"保留默认的 triage 标签？"），而不是覆盖式盘问。当 `triage` 未安装时，该节——以及 `docs/agents/triage-labels.md`——都被跳过。
+  - **外部 PR 作为请求渠道**不再是设置问题。GitHub/GitLab 模板仍然携带该标志，默认关闭；用户之后可以在 `docs/agents/issue-tracker.md` 中翻转它。
+  - **领域文档**默认单上下文，无需询问；只有当仓库显示 monorepo 信号时才提供多上下文。
+  - **本地 markdown 票据**现在是 `.scratch/<feature>/issues/<NN>-<slug>.md` 下每个票据一个文件——绝不是合并的单一 `tickets.md`。`/to-tickets` 和本地 issue-tracker 模板现在一致，spec 文件是 `spec.md`（不是 `PRD.md`），与 `/to-spec` 匹配。
+
+  `setup-matt-pocock-skills` 和 `to-tickets` 的文档页已重新同步。
+
+- [#532](https://github.com/mattpocock/skills/pull/532) [`170ad48`](https://github.com/mattpocock/skills/commit/170ad48655825783d0193e850e31a9aac957bb95) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 为通用用途改写 **`grilling`**。它的 description 和正文不再把访谈限定在软件计划上："this plan" → "this"、"enact the plan" → "act on it"、"exploring the codebase" → "exploring the environment"。技巧不变；现在它读起来是对任何计划、决策或想法的压力测试。
+
+- [#593](https://github.com/mattpocock/skills/pull/593) [`a4b2009`](https://github.com/mattpocock/skills/commit/a4b2009a1a3ac9575506c10b4c84f08f9bba7a38) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 将 **`grilling`** 从一次一个问题重构为逐轮进行。它现在映射决策树，并在单个编号轮次中问完整条**前沿**——每个前置条件已确定的问题——然后根据用户的回答重新计算前沿，再问下一轮。同样的 13 个问题在约 3 轮内完成，而不是 13 轮。环境能回答的事实被派发给后台子 agent，因此研究从不阻塞轮次：只有正在进行的探索下游的问题才等它。当前沿为空时会话结束。
+
+  一轮中的每个问题都以一个固定形态发出——`❓ **Q1** - **<标题>**`，然后是正文（散文或多个选项），再在独立的 `➡️` 行给出推荐。一轮读起来像一份可扫描的编号列表，每个推荐与问题视觉分离，所以你可以按编号回答，而不是把问题复述回去。
+
+  `grill-me`、`grill-with-docs` 和 `triage` 也逐轮运行前沿——`triage` 的 grill 步骤和 `grilling` 的 Codex `short_description` 现在如此表述，而不是描述旧的节奏。一次一个问题的退出开关（全局 `CLAUDE.md` 中的一行）不变。
+
+- [#752](https://github.com/mattpocock/skills/pull/752) [`c66bdee`](https://github.com/mattpocock/skills/commit/c66bdeeee002d81e3f8b21403c07f9a0d7bea6da) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 从仓库中移除六个技能。它们都不在 Claude Code 插件中，但六个都能通过 [skills.sh](https://skills.sh/mattpocock/skills) 安装——它服务于仓库中的每个技能——所以这就是离开该列表的内容，以及每一个的去向。
+
+  四个退役技能，每一个都已被做得更好的技能吸收：
+
+  - **`ubiquitous-language`** → **`/domain-modeling`**，它构建并维护整个领域模型，而不是从一次对话中倾倒一份词汇表。
+  - **`design-an-interface`** → **`/codebase-design`**。没有任何损失："设计两次"技巧——并行子 agent 生成截然不同的设计，源自 Ousterhout——作为 `DESIGN-IT-TWICE.md` 随该技能发布。
+  - **`qa`** → **`/triage`** 和 **`/to-tickets`**。
+  - **`request-refactor-plan`** → **`/to-spec`** 和 **`/improve-codebase-architecture`**。
+
+  还有两个从来只属于我——绑定在我自己的机器上，从不是为别人准备的。`personal/` 分类随它们一起消失：
+
+  - **`edit-article`**
+  - **`obsidian-vault`**，它硬编码了一条指向我自己 Obsidian 库的路径。
+
+  `skills/deprecated/` 作为一个分类保留，现在为空。`skills/in-progress/` 不变，现在被如实描述：一个 beta 频道，有意公开，通过 skills.sh 一次安装一个技能。
+
+- [#734](https://github.com/mattpocock/skills/pull/734) [`a2f9333`](https://github.com/mattpocock/skills/commit/a2f9333669ff53db762c87ecda5a15442060a3be) 感谢 [@mattpocock](https://github.com/mattpocock)！ - 完成 `to-prd` → `to-spec` 重命名："spec" 现在是发布文本中的唯一术语。
+
+  - **`to-spec`** 不再以"你可能知道这份文档叫 PRD"开头——该括注已从技能及其文档页中移除。本地 markdown tracker 模板也删除了同样的措辞保留。
+  - **`code-review`** 在其 frontmatter description、双轴摘要和 spec 来源搜索顺序中，谈论的是原始 issue/spec 而不是 issue/PRD。两个 README 已重新同步。
+  - **GitHub 和 GitLab tracker 模板**现在写着"此仓库的 Issues 和 specs 以 GitHub/GitLab issues 的形式存在"——本地模板更新时它们还停留在"PRDs"，于是过时术语传播到了写入它们的每个仓库。
+  - **`docs/engineering/research.md`** 指向 `https://aihero.dev/skills-to-prd`，这是重命名后技能的死链；现在像其他 19 个文档页一样链接 `to-spec`。
+
+  CHANGELOG 和现有 changesets 在记录重命名本身的地方仍然使用 PRD 一词，这是正确的。
+
 ## 1.1.0
 
 ### 次要变更

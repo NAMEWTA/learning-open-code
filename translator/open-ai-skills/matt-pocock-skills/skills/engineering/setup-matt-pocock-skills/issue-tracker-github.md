@@ -1,6 +1,6 @@
 # 问题跟踪器：GitHub
 
-该仓库的 Issues 和 PRD 以 GitHub issues 形式存在。所有操作使用 `gh` CLI。
+该仓库的 Issues 和 specs 以 GitHub issues 形式存在。所有操作使用 `gh` CLI。
 
 ## 约定
 

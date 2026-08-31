@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 在摘要中包含一个"建议技能"部分，建议代理应调用的技能。
 
-不要重复已在其他制品（PRD、计划、ADR、issue、commit、diff）中捕获的内容。改用路径或 URL 引用它们。
+不要重复已在其他制品（spec、计划、ADR、issue、commit、diff）中捕获的内容。改用路径或 URL 引用它们。
 
 脱敏处理任何敏感信息，如 API 密钥、密码或个人身份信息——摘要将成为代理的提示词。
 

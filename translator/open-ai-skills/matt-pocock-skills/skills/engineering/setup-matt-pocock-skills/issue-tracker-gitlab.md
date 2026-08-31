@@ -1,6 +1,6 @@
 # 问题跟踪器：GitLab
 
-该仓库的 Issues 和 PRD 以 GitLab issues 形式存在。所有操作使用 [`glab`](https://gitlab.com/gitlab-org/cli) CLI。
+该仓库的 Issues 和 specs 以 GitLab issues 形式存在。所有操作使用 [`glab`](https://gitlab.com/gitlab-org/cli) CLI。
 
 ## 约定
 

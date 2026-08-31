@@ -1,56 +1,99 @@
-快速开始：
-
-```bash
-npx skills add mattpocock/skills --skill=to-tickets
-```
-
-```bash
-npx skills update to-tickets
-```
-
-[Source](https://github.com/mattpocock/skills/tree/main/skills/engineering/to-tickets)
-
 ## 功能说明
 
-`to-tickets` 将计划、规范或当前对话拆分为一组 **ticket**——每个都是一个曳光弹式的垂直切片——并发布到你配置的追踪器中，每个 ticket 都会声明阻塞它的那些 ticket。
+`to-tickets` 把一个计划、一份 [规格](https://www.aihero.dev/ai-coding-dictionary/spec) 或你正在进行的对话拆成你 issue 追踪器上的一组 **[ticket](https://www.aihero.dev/ai-coding-dictionary/ticket)**。每个 ticket 声明它的**阻塞边**——它开始之前必须完成的那些其他 ticket。
 
-每个 ticket 都是一个**曳光弹**——一个贯穿所有集成层的薄*垂直*切片（schema、API、UI、测试），永远不是一个只触及单层的水平切片。一个已完成的切片可以独立演示或验证，这使得每个 ticket 都可以安全地交给一个 Agent 处理。
+每个 ticket 都是一颗**曳光弹**：一条穿过变更每一层——schema、API、UI、测试——的狭窄但完整的路径，落地那一刻就能独立演示。正是这个约束让它与显而易见的拆活方式——一次切一层、最后集成——行为不同。它还把每个 ticket 切成恰好塞进一个全新 [上下文窗口](https://www.aihero.dev/ai-coding-dictionary/context-window) 的大小，因为拾起 ticket 的将是一场从没见过你规格的 [会话](https://www.aihero.dev/ai-coding-dictionary/session)。
 
 ## 何时使用
 
-输入 `/to-tickets` 来调用它——Agent 不会自己触发它。
+输入 `/to-tickets` 来调用它——[Agent](https://www.aihero.dev/ai-coding-dictionary/agent) 不会自行调用。
 
-当你已经有了共识的计划或已写成的规范，并希望将其拆分为 ticket 时使用它。将对话内容指向它，或者传入规范或 issue 引用，它会先抓取正文和评论。如果该变更还没有写成规范，先产出一份规范——此时应使用 [to-spec](https://aihero.dev/skills-to-spec)。
+| 你在哪里 | 跑什么 |
+| --- | --- |
+| 你有一份规格 issue，构建横跨多次会话 | `/to-tickets`，或 `/to-tickets #<spec_issue>` |
+| 计划只存在于对话里，从没写过 | `/to-tickets` 直接读线程——不需要规格 |
+| 整个变更装得进一个上下文窗口 | [implement](https://aihero.dev/skills-implement)——跳过 tickets |
+| 什么都没决定 | [grill-with-docs](https://aihero.dev/skills-grill-with-docs)，然后 [to-spec](https://aihero.dev/skills-to-spec) |
+| 一张 [wayfinder](https://aihero.dev/skills-wayfinder) 地图已清空 | 先 [to-spec](https://aihero.dev/skills-to-spec) 把地图塌缩，再 `/to-tickets` |
+
+`to-tickets` 产出的 tickets 天生就是 Agent 就绪的。不要对它们跑 [triage](https://aihero.dev/skills-triage)——triage 是给从别人那里来的工作用的。
 
 ## 前置条件
 
-`to-tickets` 会发布到你的问题追踪器，因此 [setup-matt-pocock-skills](https://aihero.dev/skills-setup-matt-pocock-skills) 必须先为当前仓库配置好追踪器及其分类标签词汇。在真实追踪器上，它在发布时会应用 `ready-for-agent` 标签。
+`to-tickets` 发布进一个追踪器，所以 [setup-matt-pocock-skills](https://aihero.dev/skills-setup-matt-pocock-skills) 必须为这个仓库配置了一个，连同 triage 标签词汇。两种都行：GitHub 或 Linear 这样的真实追踪器，或 `.scratch/` 下的本地 markdown 文件——后者开箱即用。
 
-## 一份产物，两种读法
+## 曳光弹，而非层
 
-阻塞关系是核心所在。它们让同一组 ticket 根据追踪器的不同有两种理解方式：
+**水平**切片交付变更的一层。在每一层都落地之前什么都不能工作，而每个 ticket 的验收标准不得不伸手去够另一个 ticket 拥有的工作。**垂直**切片——曳光弹——一次性交付一条穿过所有层的窄路径，所以它可以单独验证，并拥有它评分的一切。
 
-- **本地文件** → 仓库根目录下一个单一的 `tickets.md`，阻塞关系以文本形式写出。你从上到下手工推进，全程保持参与。
-- **真实追踪器（GitHub、Linear）** → 每个 ticket 一个 issue，阻塞关系以原生阻塞链接（或子 issue）表达。任何阻塞项已全部完成的 ticket 处于**前沿**位置，可以被领取——因此可以同时运行多个 Agent。
+这是人们破坏得最频繁的规则，后果有据可查。一个团队跑了一个按层切片——语料、生产者、聚合器、选择器——的 26 个 ticket 堆栈，每个已关闭 ticket 大约花了二十次 Agent 运行，其中约四分之三是返工。他们自己的事后复盘把每一个失败类别都追溯回水平切片，而不是实现。
 
-阻塞边关系在 ticket 中是固定的，无论什么介质；介质只决定是否有人并行地基于它们自动行动。`to-tickets` 产出的是这份产物——你如何运行它（手工顺序推进，或并行舰队）由你决定。
+发布任何东西之前会发生两件事。`to-tickets` 寻找预重构——"让变更变容易，再做容易的变更"——并把那项工作排在最先。然后它把拆解作为编号列表呈现并就它考你：粒度对吗、阻塞边真实吗、有什么该合并或拆分。在你批准之前，没有东西到达追踪器，而那次考问正是推回去的地方。
 
-## 垂直切片，而非水平切片
+## 阻塞边
 
-整个技能围绕一个核心区别展开。**水平**切片交付变更的一层——所有 schema，或所有 API——在所有层落地之前，什么都不能工作。**垂直**切片，即曳光弹，一次性交付一条贯穿*所有*层的窄路径，完成的那一刻即可演示。
+边是这份工件的核心。它们随追踪器不同有两种读法：
 
-在拆分之前，`to-tickets` 会寻找预重构——"先让变更变得容易，再做容易的变更"——并将这项工作排在最前面。然后，在发布任何内容之前，它会就拆分方案询问你（粒度、阻塞边、什么该合并或拆分），并在发布时优先发布阻塞项，以便每个 ticket 的"被阻塞于"能引用真实的 ticket。
+| 追踪器 | 边住在哪里 | 你怎么推进它们 |
+| --- | --- | --- |
+| 本地 markdown | `.scratch/<feature>/issues/<NN>-<slug>.md` 下每个 ticket 一个文件里的文本，阻塞项优先编号 | 从上到下，手工 |
+| 真实追踪器（GitHub、Linear） | 原生阻塞链接，或追踪器支持时的子 issue | 任何阻塞项都完成的 ticket 位于**前沿**，可以被领取 |
+
+无论哪种方式，边都住在 ticket 里。介质只决定是否有东西能并行地基于它们行动。`to-tickets` 产出工件；运行它——一次一个会话，或一支舰队——是你的工作，不是 skill 的。
 
 ## 宽幅重构的例外
 
-有一种形态突破了曳光弹规则：**宽幅重构**——一次机械性的变更（重命名列、重定义共享符号），其**爆炸半径**波及整个代码库，以至于单次编辑会同时破坏成千上万的调用点，没有任何垂直切片能独自变绿。`to-tickets` 将其以**扩展-收缩**方式拆分：扩展（在旧形态旁边添加新形态，确保不破坏任何东西），迁移（按爆炸半径分批迁移调用点，每批一个 ticket，全程 CI 保持绿色，因为旧形态依然存在），然后收缩（在没有任何调用者后删除旧形态）。当即使是批次也无法独立保持绿色时，它们共享一个集成分支，所有批次都阻塞最后一个"集成并验证"的 ticket，并仅在那里承诺绿色通过。
+有一种形状打破曳光弹规则。**宽幅重构**是一个单一的机械变更——重命名一列、改一个共享符号的类型——它的**爆炸半径**横扫整个代码库，所以一次编辑破坏成千上万的调用点，没有垂直切片能绿色落地。
+
+`to-tickets` 把它按**扩展–收缩**排序：
+
+- **扩展**——在旧形态旁边添加新形态，什么都不破坏。
+- **迁移**——按爆炸半径（按包、按目录）分批把调用点搬过去，每批一个 ticket，每个都被扩展阻塞。CI 保持绿色，因为旧形态还在。
+- **收缩**——一旦没有调用者留下，删除旧形态，用一个被每个迁移批次阻塞的 ticket。
+
+当连批次都无法单独保持绿色时，它们共享一个集成分支，全部阻塞一个最终的集成并验证 ticket。绿色只在那个地方承诺。
+
+## 常见问题
+
+**它为一个三行变更产出了十二个 ticket。**
+过度分解是本 skill 被报告最多的摩擦点，跨实践者一致： [模型](https://www.aihero.dev/ai-coding-dictionary/model) 默认原子单位，丢掉会让它们有意义的归组。考问步骤正是为此存在——让它合并，它会合并。更深的答案是 tickets 有地板：如果整个变更装得进一个上下文窗口，你根本不需要这个 skill。直奔 [implement](https://aihero.dev/skills-implement)。
+
+**tickets 出来是一层一个——所有 schema 在一个里，所有 API 在另一个里。**
+这正是垂直切片规则写来要防的失败，skill 有时还是产出它。在考问步骤抓住它：对每个 ticket 问一个问题——这个完成后我能演示什么？答不上的 ticket 就是水平切片。有人因此给每个 ticket 加一行"演示路径"，报告说这会把模型推向垂直分解。
+
+**在 GitHub 上 tickets 没被创建为规格 issue 的子 issue。**
+已知且未修复。它在十几次运行和好几个模型上被报告过，[最完整地记录在 issue #554](https://github.com/mattpocock/skills/issues/554)，而且在 Codex 上比在 Claude 上更糟。`gh` 自 v2.94 起原生支持这个：`gh issue create --parent <n>`，事后用 `gh issue edit <parent> --add-sub-issue <n>`。在追踪器模板优先用它们之前，跑完一次后自己接父链接是可靠的做法。
+
+**"Blocked by" 被写进 issue 正文，而不是真正的阻塞链接。**
+同一类问题，[报告在 issue #513](https://github.com/mattpocock/skills/issues/513)，那里的 Agent 甚至断言 GitHub 根本没有原生阻塞关系。它有——`gh issue create --blocked-by 12,15`。因为阻塞项先发布，它们的编号在创建时总是可用的。正文文本是为了没有原生边的追踪器准备的回退，不是默认。
+
+**本地 tickets 去哪了？v1.1 的说明说有一个根级 `tickets.md`。**
+确实有过，而那是个 bug——当并行 Agent 写它时，单个共享文件还会竞态。本地模式现在在 `.scratch/<feature-slug>/issues/<NN>-<slug>.md` 下按依赖顺序写，每个 ticket 一个文件，匹配本地追踪器模板已经描述的布局。`NN` 前缀是真实的 ticket ID，所以 `/implement 03` 能用，不必重打一长串标题。
+
+**它读我的规格时一直截断。**
+非常大的规格可能超出追踪器 issue 能干净回传的范围，又没有本地副本可回退——Agent 然后烧 [工具调用](https://www.aihero.dev/ai-coding-dictionary/tool-call) 重新抓取块，永远到不了结尾。不要在 `/to-spec` 和 `/to-tickets` 之间 [清掉](https://www.aihero.dev/ai-coding-dictionary/clearing) 或 [压缩](https://www.aihero.dev/ai-coding-dictionary/compaction)。在同一个上下文窗口里跑它们，规格就根本不必再被取回。
+
+**验收标准什么都没评分——有些在任何工作做完之前就通过了。**
+模板要标准却没说它们能不能失败，所以这会发生。三种形状反复出现：一个在基础提交时已经为真的标准、一个只能被另一个 ticket 拥有的工作满足的标准、以及一个复述请求而非从工件推导的标准。垂直切片防掉大部分——一个交付先前不存在行为的切片，在基础提交时按构造就是红的——但这个检查值得手工做。对每条标准，说出会证明它为假的观察，并确认它在实现者起跑的那个提交上确实失败。
+
+**tickets 已发布。我到底怎么跑它们？**
+skill 停在工件处，没有自动派发模式。派发是手工的：看板，数没有未关闭阻塞项的 tickets，开那么多场 Agent 会话。一个全新上下文一个 ticket，之间清掉。注意 [implement](https://aihero.dev/skills-implement) 完成后不会可靠地关闭或勾掉 ticket——GitHub 上或本地 markdown 里都不行——所以 ticket 的状态要你自己更新。
+
+## 有效的标志
+
+- 每个 ticket 都能回答"这个完成后我能演示什么？"——而答案是一个行为，不是一层。
+- 在发布任何东西之前，列表以编号形式回到你手里，每个带一行 "Blocked by"。
+- 顶部的 ticket 没有阻塞项，可以立即开始。
+- ticket 正文里没有文件路径或行号，除非是原型产出的片段。
+- 每个 ticket 读起来像一场新会话能在你不在场的情况下完成的东西。
+- 预重构——如果有找到任何——排在顺序最前，而不是混进功能 tickets。
 
 ## 在系统中的位置
 
-`to-tickets` 是主构建链中的一个步骤：
+`to-tickets` 是主构建链中的一步：
 
 ```txt
 grill-with-docs → to-spec → to-tickets → implement → code-review
 ```
 
-它位于 [to-spec](https://aihero.dev/skills-to-spec)（提供带有用户故事的已确定规范供其拆分）和 [implement](https://aihero.dev/skills-implement)（构建每个 ticket，在内部驱动 [tdd](https://aihero.dev/skills-tdd) 以测试优先方式编写测试，并在其后进行 [code-review](https://aihero.dev/skills-code-review) 审查）之间。在前沿之上，一次一个 ticket，在之间清空上下文。当你不确定哪个技能或流程适合时，[ask-matt](https://aihero.dev/skills-ask-matt) 会为你导航。
+上游是 [to-spec](https://aihero.dev/skills-to-spec)，递给它一份定稿的规格来切片——把两者都留在同一个不断裂的上下文窗口里。下游是 [implement](https://aihero.dev/skills-implement)，每个全新会话构建一个 ticket，驱动 [tdd](https://aihero.dev/skills-tdd) 写测试、以 [code-review](https://aihero.dev/skills-code-review) 收尾。拿不准哪个 skill 或流程合适时，[ask-matt](https://aihero.dev/skills-ask-matt) 为你路由。

@@ -1,10 +1,10 @@
 # 编写文档页面
 
-`engineering/` 和 `productivity/` 中的每个 skill 在 `docs/<bucket>/<skill-name>.md` 处有一个面向用户的**文档页面**——文档树镜像 `skills/` 下的这两个分类目录。发布地址为 `https://aihero.dev/skills-<skill-name>`；URL 始终为 `skills-<skill-name>`，无论属于哪个分类，因此文档路径仅用于仓库组织。页面不是 skill，也不是 `SKILL.md` 的副本。只有这两个分类是推广的；其余分类（`misc/`、`personal/`、`in-progress/`、`deprecated/`）不提供文档页面。
+`engineering/` 和 `productivity/` 中的每个 skill 在 `docs/<bucket>/<skill-name>.md` 处有一个面向用户的**文档页面**——文档树镜像 `skills/` 下的这两个分类目录。发布地址为 `https://aihero.dev/skills-<skill-name>`；URL 始终为 `skills-<skill-name>`，无论属于哪个分类，因此文档路径仅用于仓库组织。页面不是 skill，也不是 `SKILL.md` 的副本。只有这两个分类是推广的；其余分类（`misc/`、`in-progress/`、`deprecated/`）不提供文档页面。
 
 这些 skill 大多为**用户调用**：agent 永远不会为您触发它们，因此*您*是必须记住它们存在以及何时使用它们的索引。这种记忆是**认知负担**。文档页面的工作就是减轻它——围绕一个 skill 引导一位读者，使其能够理解、知道何时使用它，并了解它在系统中的位置。这些页面共同构成一个分布式路由器；每个页面是一个节点。
 
-当推广 skill 被添加、重命名或行为变更时采取行动：创建或重新同步其文档页面。重命名也会移动文件（`docs/<bucket>/<old>.md` → `docs/<bucket>/<new>.md`），因为发布的 URL 跟踪名称；在 `engineering/` 和 `productivity/` 之间移动的 skill 将其文档文件移动到匹配的文件夹。`misc/`、`personal/`、`in-progress/` 和 `deprecated/` 中的 skill 没有页面——这些分类都不推广。从这些分类*移入* `engineering/` 或 `productivity/` 的 skill 获得页面；反向移动则失去页面。
+当推广 skill 被添加、重命名或行为变更时采取行动：创建或重新同步其文档页面。重命名也会移动文件（`docs/<bucket>/<old>.md` → `docs/<bucket>/<new>.md`），因为发布的 URL 跟踪名称；在 `engineering/` 和 `productivity/` 之间移动的 skill 将其文档文件移动到匹配的文件夹。`misc/`、`in-progress/` 和 `deprecated/` 中的 skill 没有页面——这些分类都不推广。从这些分类*移入* `engineering/` 或 `productivity/` 的 skill 获得页面；反向移动则失去页面。
 
 由于这些页面发布在 `aihero.dev` 上，**每个链接都是绝对链接**——永远不要使用仓库相对路径。指向另一个 skill 的链接指向 `https://aihero.dev/skills-<name>`；指向仓库的链接指向其完整的 `https://github.com/mattpocock/skills/...` URL。在仓库中有效的相对链接一旦发布就会失效。
 
@@ -12,21 +12,13 @@
 
 ## 页面结构
 
-填写以下模板。**固定框架**（Quickstart 块、源链接、`## What it does`、`## When to reach for it`、`## Where it fits`）出现在每个页面上。**可适应的中间部分**——`## Prerequisites` 和自由形式的内容章节——仅承载该特定 skill 所需的内容；删除其余部分。
+填写下面的模板，保持其顺序。**固定框架**（`## What it does`、`## When to reach for it`、`## Where it fits`）出现在每个页面上。`## Prerequisites` 和自由形式的内容章节仅承载该特定 skill 所需的内容；删除其余部分。
+
+四个章节使页面值得一读：`What it does`、`When to reach for it`、`Common questions`、`It's working if`。前两个引导读者；后两个是页面停止总结技能、开始回答读者自身处境的地方。后两个各有其门槛，见下文——但把两个门槛都没过的页面当作未完成，而不是"完成了但很短"。
+
+**页面不携带任何安装命令。** ai-hero 页面模板自己渲染安装组件——一个复制按钮、单技能命令、整套命令和更新行——位于正文上方。页面再把它们写一遍，会让读者看到同一条命令两次，而且两份副本会漂移：每个页面上的手写命令对都相对旁边的组件过时了。安装措辞是网站的属性，不是页面的。如果需要修改，请在 ai-hero 中修改；规范措辞存在于[安装块](./install-block.md)中。
 
 <page-template>
-
-Quickstart:
-
-```bash
-npx skills add mattpocock/skills --skill=<name>
-```
-
-```bash
-npx skills update <name>
-```
-
-[Source](https://github.com/mattpocock/skills/tree/main/skills/<bucket>/<name>)
 
 ## 功能说明
 
@@ -49,9 +41,23 @@ npx skills update <name>
 
 唯一的硬性要求：**展示 skill 的主导词/定义性理念**——`tight` 反馈循环、`deep module`、一次性代码回答问题、红-绿。这有双重回报：读者了解 skill *是什么*，并学到他们以后*思考使用*时需要的关键词。
 
+## 常见问题
+
+读者真正会问的关于此 skill 的问题，每个以粗体呈现，答案在下面的行中——没有子标题。
+
+观察到的问题永远胜过发明的问题，所以写任何问题之前先去寻找：
+
+- **Wiki。** 如果这台机器上存在 `~/repos/matt/personal-wiki`，它就是最丰富的来源。它的 `wiki/audience/` 区域围绕受众想要什么、讨论什么以及**被什么困惑**来组织——先读 `wiki/index.md` 获取页面注册表，然后读与该 skill 相关的页面。每个页面都携带 `sources:` 链接回原始的 X、Discord、GitHub 和 email 线程；wiki 是二手来源，所以引用提问者自己的问题，而不是 wiki 对它的总结。目录不存在时跳过此条。
+- **本仓库的 issues。** `gh issue list --repo mattpocock/skills --search "<skill-name>" --state all`。被提交两次的问题，就是页面欠一个答案的问题。
+- **`CHANGELOG.md`。** 任何被重命名、移动或行为变更的内容都会产生一个"它去哪儿了？"的问题，页面必须回答。
+
+当寻找结果贫乏时，该节也可以承载读者显然会问的问题——但**数量要对证据诚实**。一个被充分讨论的 skill 配得上六个；一个冷门的只有一两个，或者一个都没有。把贫乏的 skill 撑到和丰富的 skill 一样多，正是该节塞满没人问的问题的方式，而一个发明的问题教不了读者任何东西。
+
+按出现频率排序，最尖锐的在前；在属实的地方说不中听的话——一次很长的 grilling 会话通常意味着范围太大；被要求写自己的 skill 的模型会产出啰嗦的东西。当没有值得回答的问题时省略此标题。
+
 ## 有效的标志
 
-可选。一份简短、可检查的列表，包含告诉读者 skill 确实在正常工作的可观察信号——当它触发时应看到什么，以及缺少时表明未触发。当 skill 有清晰的指示时包含（例如，`to-spec` 写入而不重新访谈您；主导词在追踪中重新出现）；当信号模糊时省略标题。几条要点，仅此而已。
+几条要点，说出 skill 在正常工作时读者能看到什么。每条的门槛是读者无需打开 `SKILL.md` 就能检查——是出现在他们自己工作中的信号，或是眼前追踪中的信号。"文档随着变好而变短"通过；"库部分与 `template.sh` 逐字节相同"是借这个章节的名字做的一次对 skill 内部的合规检查，不通过。指示清晰的地方都包含此节；信号模糊的地方省略此标题。
 
 ## 在系统中的位置
 
@@ -66,16 +72,25 @@ npx skills update <name>
 ## 约定
 
 - 解释**为什么**，而非过程。页面引导和定位 skill；从不复现 `SKILL.md` 的步骤或模板转储——选择工具的人不需要操作手册。
+- **绝不提及作者。** 页面是技术文档，不是"谁说了什么"的记录。"Matt says"、"Matt's own answer"、"his position is"、一条引用的回复——全部去掉。问题搜寻中的发现值得保留；其署名不值得。把实质内容陈述为关于 skill 的平实论断（"修复方法是一条直接指令：……"、"分歧归结为会话数量"），并去掉框架。读者正在决定是否使用一个工具；无论哪种方式，观点承载的分量相同，而带署名的观点一旦立场移动就立即过时。引用*用户*仍然可以——"一位用户报告……"是关于该 skill 在现实中的证据，并保持匿名。
 - 使用 skill 的**主导词**（*seam*、*deep module*、*tracer bullet*），使页面和 skill 使用同一语言。
+- **在存在 [AI Coding Dictionary](https://www.aihero.dev/ai-coding-dictionary) 术语的地方使用它，并在页面首次使用时链接。** 该词典是 AI 编码的家用词汇——_context window_、_subagent_、_harness_、_primary source_、_agent mode_。优先用它的词，而不是你发明的同义词。把每个术语的首次出现链接到 `https://www.aihero.dev/ai-coding-dictionary/<slug>`（slug 是术语小写、非字母数字字符转为连字符：_context window_ → `context-window`），之后的每次出现都不链接。只在词语承载词典含义时才链接——领域*模型*、背景*上下文*或认证*令牌*是碰巧同形的不同词。绝不在标题、代码跨度或现有链接内链接，也绝不链接命名本仓库中某个 skill 而非概念的词。完整术语列表，如果这台机器上存在 `~/repos/ai/ai-coding-dictionary/dictionary/` 就读取它——每个术语一个文件，文件名*就是*术语——否则看 [mattpocock/dictionary-of-ai-coding](https://github.com/mattpocock/dictionary-of-ai-coding)，无论如何它都是事实来源。
+- **分支放进表格或列表，绝不放进段落。** 当页面呈现一个选择——skill 能产生的两种产物、触发它的四种情境、边界处的五个选项——读者在扫描与自己情况匹配的那一行。段落让他们把整段读完才能找到。一个短的 markdown 表格（条件在左列，该怎么做在右列）或项目符号列表一眼就给出答案。这适用于分支出现的任何地方，最常见于 `## When to reach for it` 和自由形式的中间部分。
 - 保持页面本身低负担。它是关于*低认知负担 skill* 的文档；装饰性内容（多余的标题、重复的链接）正是它所反对的东西。
 
 ## 完成标准
 
 - 页面存在于 `docs/<bucket>/<name>.md`，并且没有因重命名或分类移动而残留的过时页面。
-- Quickstart 块和源链接命名了正确的分类和 skill；更新行命名了 skill。
+- 页面不携带源链接，也不写入任何自己的安装命令。
 - `## 功能说明` 以平实散文陈述定义性约束，而非标记式旁白。
+- 页面不提及作者、不引用作者——每个论断独立成立。
 - `## 何时使用` 陈述了调用模式和触发边界。
 - `## 在系统中的位置` 命名了角色并链接到 `ask-matt`。
 - 前置条件（工作区、前置设置、工具）在存在时被声明，不存在时该节被省略。
 - 中间部分展示了主导词。
+- 页面使用的每个 AI Coding Dictionary 术语都按词典的拼写，且其首次使用——且仅首次使用——链接到词典条目。
+- 每个多向分支都是表格或列表，而不是读者必须完整阅读的段落。
+- 真实问题的搜寻执行了——wiki、issues、changelog——`## 常见问题` 按找到的内容定规模，而不是撑到匹配更丰富 skill 的页面。
+- 每个 `## 有效的标志` 条目都可以在不打开 `SKILL.md` 的情况下检查。
+- 各节按模板的顺序出现。
 - 每个链接都是绝对链接，且每个链接都能解析。
