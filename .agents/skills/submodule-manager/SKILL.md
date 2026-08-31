@@ -2,7 +2,7 @@
 name: submodule-manager
 description: |
   Manage git submodules for the learning-open-code mono-repo. Use when the user wants to:
-  (1) Add a new git submodule — auto-detect or specify the category (open-ai-skills/open-sdd/open-ai-agent/open-ai-desktop/open-knowledge/open-productivity/open-java/open-trading/open-data),
+  (1) Add a new git submodule — auto-detect or specify the category (open-ai-skills/open-sdd/open-ai-agent/open-ai-desktop/open-knowledge/open-productivity/open-java/open-go/open-trading/open-data),
       record the tracking branch in .gitmodules, clone the repo, and update README.md index.
   (2) Sync all existing submodules to their configured branches (git fetch + checkout branch + pull).
   (3) Update the root README.md with an up-to-date index of all synced projects grouped by category.
@@ -27,6 +27,7 @@ Manage git submodules in this learning-open-code mono-repo. Every submodule live
 | 知识管理与编辑器 | `open-knowledge/` | Note apps, knowledge bases, markdown/rich-text editors |
 | 效率工具 | `open-productivity/` | Productivity tools (todo, time tracking) |
 | Java 企业开发 | `open-java/` | Java enterprise backend projects |
+| Go 语言项目 | `open-go/` | Go libraries, services, developer tools |
 | 量化交易与金融数据 | `open-trading/` | Quantitative trading, backtesting, stock data tools |
 | 数据开发 | `open-data/` | Data engineering, data tools, financial data platforms |
 
@@ -43,7 +44,7 @@ python3 .agents/skills/submodule-manager/scripts/add_submodule.py \
   --branch main
 ```
 
-- If `--category` is omitted, the script will prompt to choose from the 9 categories.
+- If `--category` is omitted, the script will prompt to choose from the 10 categories.
 - If `--branch` is omitted, the script auto-detects the default branch via `git ls-remote`.
 - The script writes the `branch = ...` entry into `.gitmodules` (required for sync).
 - After cloning, it runs `scripts/update_readme.py` to refresh the index.
@@ -71,6 +72,7 @@ python3 .agents/skills/submodule-manager/scripts/update_readme.py
 
 - Reads `.gitmodules` to enumerate all submodules by category.
 - For each submodule, extracts GitHub description from the local clone's remote URL.
+- Reuses an authenticated GitHub CLI session when available and preserves existing descriptions if a metadata lookup fails.
 - Generates a markdown table per category with: submodule name, description, URL, branch.
 - Writes `README.md` at the repo root.
 

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>15 分钟配置 sub2api-plus 提示词审计</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <h1>记录用户问了什么</h1>
+      <p class="lede">目标：让经过 sub2api-plus 的正常用户提示词也进入“提示词审计 → 事件”，先只记录，不阻断请求。</p>
+      <p class="meta">预计 15 分钟 · 需要管理员账号、可用的 PostgreSQL/Redis、一个 Qwen3Guard 兼容节点</p>
+    </div>
+  </header>
+  <main class="shell">
+    <div class="callout success"><strong>最关键的开关：</strong>“保存安全事件”必须开启。只开“启用提示词审计”，默认只保存被标记或判为严重的提示词。</div>
+
+    <h2>一、先认清两个模型</h2>
+    <p>用户调用的 GPT、Claude、Gemini 等是<strong>业务模型</strong>。配置页要求填写的是另一个<strong>审计模型</strong>：sub2api-plus 会把提取出的用户文字发给它判断安全性。这个节点必须兼容 OpenAI Chat Completions，并返回 Qwen3Guard 格式，例如：</p>
+    <pre><code>Safety: Safe
+Categories: None</code></pre>
+    <p>普通聊天模型即使接口兼容，也可能因不返回这两行而报 <code>invalid_response</code>。项目页面默认模型 ID 是 <code>sileader/qwen3guard:0.6b</code>，但最终要填 Guard 服务实际暴露的 ID。若按 Qwen 官方方式自建 vLLM，则填写 <code>Qwen/Qwen3Guard-Gen-0.6B</code>。</p>
+
+    <h2>二、按顺序配置</h2>
+    <div class="step"><span class="step-number">1</span><strong>打开总开关</strong><p>管理员 → 系统设置 → 功能设置 → 风控中心，开启“启用风控中心”并保存。不开这个总开关，提示词审计页面即使有配置也不会执行。</p></div>
+    <div class="step"><span class="step-number">2</span><strong>添加审计节点</strong><p>进入“提示词审计 → 配置 → 新增节点”。名称可填 <code>Qwen3Guard</code>，稳定 ID 填 <code>guard-primary</code>；Base URL 填服务根地址，不要填完整的 <code>/v1/chat/completions</code>，系统会自动追加。填写 API Key、实际模型 ID，超时初次可设 <code>10000</code> ms，单片上限先保留 <code>4000</code>，并启用节点。</p></div>
+    <div class="callout warning">Docker 部署时，容器里的 <code>127.0.0.1</code> 是容器自己。Guard 在 Mac 宿主机上时通常使用 <code>http://host.docker.internal:端口</code>；同一 Compose 网络中则使用 Guard 的服务名。</div>
+    <div class="step"><span class="step-number">3</span><strong>先点“连接测试”</strong><p>只有显示连接正常，才继续。若保存 API Key，请为服务设置固定的 <code>TOTP_ENCRYPTION_KEY</code>，否则重启后密钥可能无法解密。</p></div>
+    <div class="step"><span class="step-number">4</span><strong>设置范围与底部开关</strong><p>审计策略选“全部分组”，九类风险先全选，Worker 保留 4、队列保留 32768。底部开启“启用提示词审计”和<strong>“保存安全事件”</strong>；关闭“同步阻止”，然后保存。</p></div>
+
+    <h2>三、发一条请求并验收</h2>
+    <p>通过真实中转发送一条带唯一标记的请求，例如：<code>AUDIT_TEST_20260828 请只回复 OK</code>。回到“提示词审计”，刷新运行态和事件页。验收标准：</p>
+    <ul>
+      <li>生效模式是 <span class="good">异步只审计</span>，进程、数据库、Redis 和 Guard 节点均健康。</li>
+      <li>“提取成功”和“处理”计数增加，“丢弃”不增加。</li>
+      <li>事件列表出现该请求；打开详情，在“完整提示词（未脱敏）”看到唯一标记。</li>
+    </ul>
+    <p>异步处理可能延迟几秒。这里保存的是用户编写的提示词，不保存业务模型的正常响应；响应记录不是当前页面可配置的能力。</p>
+
+    <h2>四、检索练习</h2>
+    <p><strong>判断：</strong>某条正常问题没有出现在事件列表，但风险问题能出现。最可能漏了哪个开关？</p>
+    <details><summary>查看答案</summary><p>漏了“保存安全事件”。它对应 <code>store_pass_events</code>；关闭时安全请求仍会被审计，但不会入事件表。</p></details>
+    <p>还没有 Guard 服务或连接失败时，继续看 <a href="../reference/prompt-audit-checklist.html">自建方法、字段清单与错误排查</a>。内容边界以项目的 <a href="../../../../../open-ai-agent/sub2api-plus/docs/SECURITY_AUDIT_CONTENT_COVERAGE.md">覆盖矩阵</a>为准。</p>
+  </main>
+  <footer><div class="shell">完整提示词以未脱敏形式存入 PostgreSQL。上线前应限制管理员权限、告知用户并制定删除周期。</div></footer>
+</body>
+</html>

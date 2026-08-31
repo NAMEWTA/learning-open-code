@@ -27,6 +27,7 @@ CATEGORIES = {
     "open-knowledge":    "知识管理与编辑器",
     "open-productivity": "效率工具",
     "open-java":         "Java 企业开发",
+    "open-go":           "Go 语言项目",
     "open-trading":      "量化交易与金融数据",
     "open-data":         "数据开发",
 }

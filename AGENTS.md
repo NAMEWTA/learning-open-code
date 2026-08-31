@@ -14,7 +14,7 @@
 
 ## 仓库概览
 
-`learning-open-code` 是一个**开源项目学习仓库**，通过 git submodule 方式收录 36 个优质开源项目，按功能领域分为 8 大类别。每个子模块独立管理自己的 git 历史与分支，可独立拉取更新。
+`learning-open-code` 是一个**开源项目学习仓库**，通过 git submodule 方式收录优质开源项目，按功能领域分为 10 大类别。每个子模块独立管理自己的 git 历史与分支，可独立拉取更新。
 
 ### 顶层目录结构
 
@@ -67,6 +67,8 @@ learning-open-code/
 ├── open-java/                      # ☕ Java 企业开发（2 个项目）
 │   ├── RuoYiVuePlus/
 │   └── snail-ai/
+├── open-go/                        # ⚙️ Go 语言项目
+│   └── backplane/
 ├── open-trading/                   # 📈 量化交易与金融数据（3 个项目）
 │   ├── TradingAgents-astock/
 │   ├── Vibe-Research/
@@ -91,6 +93,7 @@ learning-open-code/
 | `open-knowledge/` | 知识管理与编辑器 | 6 |
 | `open-productivity/` | 效率工具 | 1 |
 | `open-java/` | Java 企业开发 | 2（含多子模块） |
+| `open-go/` | ⚙️ Go 语言项目 | 1 |
 | `open-trading/` | 量化交易与金融数据 | 3 |
 | `open-data/` | 数据开发 | 3 |
 
@@ -165,3 +168,26 @@ git submodule update --init --recursive --remote
 - 需要添加/同步子模块 → 使用 `submodule-manager` skill
 - 需要翻译文档 → 使用 `chinese-documentation-translator` skill
 - 需要跨项目深度分析 → 启动 Agent Team
+
+<SPECULO>
+## Speculo 运行时配置
+
+### 初始化状态检查
+
+运行时必须读取以下文件以确认 Speculo 初始化状态：
+
+- ./speculo/.speculo/workspace.json — 工作区根别名配置
+- ./speculo/config.json — 项目配置文件
+
+若上述文件不存在或内容为空，说明项目尚未完成 Speculo 初始化。
+此时必须提示用户：请先运行 speculo init 完成初始化配置。
+
+`speculo init` 会直接替换受管理静态资产，并依据 refresh contract 保留用户 runtime state、合并持久配置。
+结构化状态不兼容时初始化会在替换前停止，当前安装保持不变。
+
+### 工作流入口（强制读取）
+
+初始化时已选择以下工作流，运行时必须强制读取对应入口文件：
+
+- ./speculo/workflows/specdev/INDEX.md
+</SPECULO>

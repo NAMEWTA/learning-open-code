@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
@@ -25,6 +26,7 @@ CATEGORY_INFO = {
     "open-knowledge":    ("📝 知识管理与编辑器", "笔记应用、知识库、Markdown/富文本编辑器"),
     "open-productivity": ("✅ 效率工具", "个人生产力、任务管理、时间追踪"),
     "open-java":         ("☕ Java 企业开发", "Java 后端框架、企业级管理系统"),
+    "open-go":           ("⚙️ Go 语言项目", "Go 库、服务与开发工具"),
     "open-trading":      ("📈 量化交易与金融数据", "量化交易策略、回测框架、A股数据工具"),
     "open-data":         ("📊 数据开发", "数据工程、数据分析工具、金融数据平台"),
 }
@@ -47,7 +49,39 @@ def parse_gitmodules():
         submodules.append(current)
     return submodules
 
-def fetch_github_description(url):
+@lru_cache(maxsize=1)
+def get_github_token():
+    """Reuse an existing GitHub CLI login without making it a requirement."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def parse_existing_descriptions():
+    """Keep valid descriptions when a remote metadata lookup fails."""
+    readme_path = REPO_ROOT / "README.md"
+    if not readme_path.exists():
+        return {}
+
+    descriptions = {}
+    pattern = re.compile(r'^\| \[[^]]+\]\(([^)]+)\) \| (.*) \| `[^`]+` \|$')
+    for line in readme_path.read_text().splitlines():
+        match = pattern.match(line)
+        if match and match.group(2) != "(N/A)":
+            descriptions[match.group(1)] = match.group(2)
+    return descriptions
+
+
+def fetch_github_description(url, fallback="(N/A)"):
     """Fetch the repo description from GitHub/Gitee API."""
     # GitHub
     m = re.match(r'https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$', url)
@@ -55,7 +89,11 @@ def fetch_github_description(url):
         owner, repo = m.group(1), m.group(2)
         try:
             api_url = f"https://api.github.com/repos/{owner}/{repo}"
-            req = urllib.request.Request(api_url, headers={"User-Agent": "submodule-manager"})
+            headers = {"User-Agent": "submodule-manager"}
+            token = get_github_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(api_url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
                 desc = data.get("description", "")
@@ -63,7 +101,7 @@ def fetch_github_description(url):
                 star_str = f" ⭐{stars//1000}k" if stars >= 1000 else (f" ⭐{stars}" if stars > 0 else "")
                 return (desc or "(no description)") + star_str
         except Exception:
-            return "(N/A)"
+            return fallback
 
     # Gitee - try API
     m = re.match(r'https://gitee\.com/([^/]+)/([^/]+?)(?:\.git)?$', url)
@@ -79,9 +117,9 @@ def fetch_github_description(url):
                 star_str = f" ⭐{stars//1000}k" if stars >= 1000 else (f" ⭐{stars}" if stars > 0 else "")
                 return (desc or "(no description)") + star_str
         except Exception:
-            return "(N/A)"
+            return fallback
 
-    return "(N/A)"
+    return fallback
 
 def get_short_name(name, url):
     """Get a display-friendly name."""
@@ -89,6 +127,8 @@ def get_short_name(name, url):
 
 def generate_readme(submodules):
     """Generate README.md content."""
+    existing_descriptions = parse_existing_descriptions()
+
     # Group by category
     grouped = {}
     for sm in submodules:
@@ -112,7 +152,7 @@ def generate_readme(submodules):
     for cat, (title, _) in CATEGORY_INFO.items():
         count = len(grouped.get(cat, []))
         if count > 0:
-            anchor = title.split(" ", 1)[-1] if " " in title else title
+            anchor = re.sub(r"^[^\w]+", "", title)
             lines.append(f"- [{title}](#{anchor.replace(' ', '-').replace('(', '').replace(')', '')})（{count} 个项目）")
     lines.append("")
     lines.append("---")
@@ -134,7 +174,7 @@ def generate_readme(submodules):
             url = sm.get("url", "")
             branch = sm.get("branch", "main")
             name = get_short_name(sm.get("name", path), url)
-            desc_text = fetch_github_description(url)
+            desc_text = fetch_github_description(url, existing_descriptions.get(url, "(N/A)"))
             lines.append(f"| [{name}]({url}) | {desc_text} | `{branch}` |")
         lines.append("")
 

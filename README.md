@@ -2,7 +2,7 @@
 
 > 开源项目学习仓库 — 按功能分类整理的优质开源项目集合，涵盖 AI 编程、Agent 框架、知识管理、Java 企业开发等领域。
 
-**共收录 60 个开源项目**，通过 git submodule 方式管理，可独立更新。
+**共收录 62 个开源项目**，通过 git submodule 方式管理，可独立更新。
 
 ---
 
@@ -10,11 +10,12 @@
 
 - [🧠 AI 编程 Skills 与工作流](#AI-编程-Skills-与工作流)（12 个项目）
 - [📋 规范驱动开发 (SDD)](#规范驱动开发-SDD)（4 个项目）
-- [🤖 AI Agent 与编程工具](#AI-Agent-与编程工具)（14 个项目）
+- [🤖 AI Agent 与编程工具](#AI-Agent-与编程工具)（15 个项目）
 - [🖥️ AI 桌面应用与 IDE](#AI-桌面应用与-IDE)（10 个项目）
 - [📝 知识管理与编辑器](#知识管理与编辑器)（6 个项目）
 - [✅ 效率工具](#效率工具)（2 个项目）
 - [☕ Java 企业开发](#Java-企业开发)（4 个项目）
+- [⚙️ Go 语言项目](#Go-语言项目)（1 个项目）
 - [📈 量化交易与金融数据](#量化交易与金融数据)（4 个项目）
 - [📊 数据开发](#数据开发)（4 个项目）
 
@@ -26,18 +27,18 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [addyosmani-agent-skills](https://github.com/addyosmani/agent-skills.git) | (N/A) | `main` |
-| [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills.git) | (N/A) | `main` |
-| [caveman](https://github.com/JuliusBrussee/caveman.git) | 🪨 why use many token when few token do trick — Claude Code skill that cuts 65% of tokens by talking like caveman ⭐96k | `main` |
-| [guizang-ppt-skill](https://github.com/op7418/guizang-ppt-skill.git) | AI-agent Skill for generating polished HTML slide decks: editorial magazine and Swiss layouts, image prompts, social covers, and a WebGL/low-power presentation runtime. ⭐23k | `main` |
-| [gzh-design-skill](https://github.com/isjiamu/gzh-design-skill.git) | 把 Markdown 一键排成可直接粘进公众号编辑器的精致 HTML —— 6 套精选主题 + 主题生成器 + 双关卡校验。An AI-agent skill that turns Markdown into paste-ready WeChat article HTML. ⭐2k | `main` |
-| [huashu-design](https://github.com/alchaincyf/huashu-design.git) | (N/A) | `master` |
-| [khazix-skills](https://github.com/KKKKhazix/khazix-skills.git) | (N/A) | `main` |
-| [matt-pocock-skills](https://github.com/mattpocock/skills.git) | (N/A) | `main` |
-| [pm-skills](https://github.com/phuryn/pm-skills.git) | (N/A) | `main` |
-| [qiaomu-ai-prd](https://github.com/joeseesun/qiaomu-ai-prd.git) | (N/A) | `main` |
-| [superpowers](https://github.com/obra/superpowers.git) | (N/A) | `main` |
-| [superpowers-zh](https://github.com/jnMetaCode/superpowers-zh.git) | (N/A) | `main` |
+| [addyosmani-agent-skills](https://github.com/addyosmani/agent-skills.git) | Production-grade engineering skills for AI coding agents. ⭐90k | `main` |
+| [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills.git) | A single CLAUDE.md file to improve Claude Code behavior, derived from Andrej Karpathy's observations on LLM coding pitfalls. ⭐208k | `main` |
+| [caveman](https://github.com/JuliusBrussee/caveman.git) | 🪨 why use many token when few token do trick — Claude Code skill that cuts 65% of tokens by talking like caveman ⭐101k | `main` |
+| [guizang-ppt-skill](https://github.com/op7418/guizang-ppt-skill.git) | AI-agent Skill for generating polished HTML slide decks: editorial magazine and Swiss layouts, image prompts, social covers, and a WebGL/low-power presentation runtime. ⭐25k | `main` |
+| [gzh-design-skill](https://github.com/isjiamu/gzh-design-skill.git) | 把 Markdown 一键排成可直接粘进公众号编辑器的精致 HTML —— 6 套精选主题 + 主题生成器 + 双关卡校验。An AI-agent skill that turns Markdown into paste-ready WeChat article HTML. ⭐3k | `main` |
+| [huashu-design](https://github.com/alchaincyf/huashu-design.git) | Huashu Design · HTML-native design skill for Claude Code · Claude Code 里 HTML 原生的设计 skill · 高保真原型 / 幻灯片 / 动画 + 20 设计哲学 + 5 维评审 + MP4 导出 · Agent-agnostic ⭐23k | `master` |
+| [khazix-skills](https://github.com/KKKKhazix/khazix-skills.git) | 数字生命卡兹克开源的 AI Skills 合集 | Agent Skills: leader（帮你定义目标）, neat-freak 洁癖, hv-analysis, khazix-writer & more — Claude Code, Codex & 40+ agents ⭐20k | `main` |
+| [matt-pocock-skills](https://github.com/mattpocock/skills.git) | Skills for Real Engineers. Straight from my .agents directory. ⭐240k | `main` |
+| [pm-skills](https://github.com/phuryn/pm-skills.git) | PM Skills Marketplace: 100+ agentic skills, commands, and plugins — from discovery to strategy, execution, launch, and growth. ⭐25k | `main` |
+| [qiaomu-ai-prd](https://github.com/joeseesun/qiaomu-ai-prd.git) | Turn one-line product ideas into AI-implementable PRDs with speed-read cards, constraint layers, overdelivery ideas, metrics, and acceptance scripts. ⭐204 | `main` |
+| [superpowers](https://github.com/obra/superpowers.git) | An agentic skills framework & software development methodology that works. ⭐279k | `main` |
+| [superpowers-zh](https://github.com/jnMetaCode/superpowers-zh.git) | 🦸 AI 编程超能力 · 中文增强版 — superpowers（116k+ ⭐）完整汉化 + 6 个中国原创 skills，让 Claude Code / Copilot CLI / Hermes Agent / Cursor / Windsurf / Kiro / Gemini CLI 等 16 款 AI 编程工具真正会干活 ⭐7k | `main` |
 
 ## 📋 规范驱动开发 (SDD)
 
@@ -45,10 +46,10 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [OpenSpec](https://github.com/Fission-AI/OpenSpec.git) | (N/A) | `main` |
-| [flow-kit](https://github.com/rihebty/flow-kit.git) | (N/A) | `main` |
-| [spec-kit](https://github.com/github/spec-kit.git) | (N/A) | `main` |
-| [specforge](https://github.com/NAMEWTA/specforge.git) | (N/A) | `main` |
+| [OpenSpec](https://github.com/Fission-AI/OpenSpec.git) | Spec-driven development (SDD) for AI coding assistants. ⭐66k | `main` |
+| [flow-kit](https://github.com/rihebty/flow-kit.git) | 一套融合了bmad、spec-kit、OpenSpec、GSD、claude-task-master、superpowers、gstack、skills的 AI 编程规范化流程 ⭐392 | `main` |
+| [spec-kit](https://github.com/github/spec-kit.git) | 💫 Toolkit to help you get started with Spec-Driven Development ⭐132k | `main` |
+| [specforge](https://github.com/NAMEWTA/specforge.git) | SpecForge's job is to keep the good parts — artifact gating, progressive loading, profile tailoring, sub-agent hand-offs — and unify them behind one CLI so you get the benefits without adopting five separate tools. ⭐8 | `main` |
 
 ## 🤖 AI Agent 与编程工具
 
@@ -56,20 +57,21 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [OpenHarness](https://github.com/HKUDS/OpenHarness.git) | (N/A) | `main` |
-| [claude-code](https://github.com/anthropics/claude-code.git) | (N/A) | `main` |
-| [codex](https://github.com/openai/codex.git) | (N/A) | `main` |
-| [deer-flow](https://github.com/bytedance/deer-flow.git) | (N/A) | `main` |
-| [gstack](https://github.com/garrytan/gstack.git) | (N/A) | `main` |
-| [hermes-agen](https://github.com/NousResearch/hermes-agent.git) | (N/A) | `main` |
-| [langchain](https://github.com/langchain-ai/langchain.git) | (N/A) | `master` |
-| [langgraph](https://github.com/langchain-ai/langgraph.git) | (N/A) | `main` |
-| [openwiki](https://github.com/langchain-ai/openwiki.git) | (N/A) | `main` |
-| [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code.git) | (N/A) | `main` |
-| [nanobot](https://github.com/HKUDS/nanobot.git) | (N/A) | `main` |
-| [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode.git) | (N/A) | `main` |
-| [pi](https://github.com/earendil-works/pi.git) | (N/A) | `main` |
-| [pi-subagents](https://github.com/nicobailon/pi-subagents.git) | (N/A) | `main` |
+| [OpenHarness](https://github.com/HKUDS/OpenHarness.git) | "OpenHarness: Open Agent Harness with a Built-in Personal Agent--Ohmo!" ⭐15k | `main` |
+| [claude-code](https://github.com/anthropics/claude-code.git) | Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflows - all through natural language commands. ⭐143k | `main` |
+| [codex](https://github.com/openai/codex.git) | Lightweight coding agent that runs in your terminal ⭐119k | `main` |
+| [deer-flow](https://github.com/bytedance/deer-flow.git) | An open-source long-horizon SuperAgent harness that researches, codes, and creates. With the help of sandboxes, memories, tools, skill, subagents and message gateway, it handles different levels of tasks that could take minutes to hours. ⭐81k | `main` |
+| [gstack](https://github.com/garrytan/gstack.git) | Use Garry Tan's exact Claude Code setup: 23 opinionated tools that serve as CEO, Designer, Eng Manager, Release Manager, Doc Engineer, and QA ⭐130k | `main` |
+| [hermes-agen](https://github.com/NousResearch/hermes-agent.git) | The agent that grows with you ⭐237k | `main` |
+| [langchain](https://github.com/langchain-ai/langchain.git) | The agent engineering platform. ⭐145k | `master` |
+| [langgraph](https://github.com/langchain-ai/langgraph.git) | Build resilient agents. ⭐40k | `main` |
+| [openwiki](https://github.com/langchain-ai/openwiki.git) | OpenWiki is a CLI that writes and maintains agent documentation for your codebase. ⭐15k | `main` |
+| [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code.git) | Bash is all you need -  A nano claude code–like 「agent harness」, built from 0 to 1 ⭐75k | `main` |
+| [nanobot](https://github.com/HKUDS/nanobot.git) | Ultra-lightweight, open-source, self-hosted personal AI agent framework in Python with WebUI, tools, memory, MCP, multi-agent workflows, automation, and chat apps ⭐47k | `main` |
+| [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode.git) | Teams-first Multi-agent orchestration for Claude Code ⭐38k | `main` |
+| [pi](https://github.com/earendil-works/pi.git) | AI agent toolkit: unified LLM API, agent loop, TUI, coding agent CLI ⭐98k | `main` |
+| [pi-subagents](https://github.com/nicobailon/pi-subagents.git) | Pi extension for async subagent delegation with truncation, artifacts, and session sharing ⭐3k | `main` |
+| [sub2api-plus](https://github.com/LuckyKuang/sub2api-plus) | 个人使用，不保证没有bug，使用前请仔细斟酌！ ⭐26 | `main` |
 
 ## 🖥️ AI 桌面应用与 IDE
 
@@ -77,16 +79,16 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [aioncore](https://github.com/iOfficeAI/AionCore.git) | (N/A) | `main` |
-| [aionrs](https://github.com/iOfficeAI/aionrs.git) | (N/A) | `main` |
-| [aionui](https://github.com/iOfficeAI/AionUi.git) | (N/A) | `main` |
-| [eidon](https://github.com/NAMEWTA/eidon.git) | (N/A) | `main` |
-| [electron](https://github.com/electron/electron.git) | (N/A) | `main` |
-| [hello-halo](https://github.com/openkursar/hello-halo.git) | (N/A) | `main` |
-| [nezha](https://github.com/hanshuaikang/nezha.git) | (N/A) | `main` |
-| [openclaw](https://github.com/openclaw/openclaw.git) | (N/A) | `main` |
-| [openhanako](https://github.com/liliMozi/openhanako.git) | (N/A) | `main` |
-| [orca](https://github.com/stablyai/orca.git) | (N/A) | `main` |
+| [aioncore](https://github.com/iOfficeAI/AionCore.git) | (no description) ⭐100 | `main` |
+| [aionrs](https://github.com/iOfficeAI/aionrs.git) | A multi-provider AI agent CLI with tool orchestration support ⭐121 | `main` |
+| [aionui](https://github.com/iOfficeAI/AionUi.git) | Open-source 24/7 Cowork app for OpenClaw, Hermes, Claude Code, Codex, OpenCode and 20+ more CLI Agent | Customize your assistants | Team them up｜Star if you like it! ⭐32k | `main` |
+| [eidon](https://github.com/NAMEWTA/eidon.git) | (no description) ⭐1 | `main` |
+| [electron](https://github.com/electron/electron.git) | :electron: Build cross-platform desktop apps with JavaScript, HTML, and CSS ⭐122k | `main` |
+| [hello-halo](https://github.com/openkursar/hello-halo.git) | 7×24 Desktop AI Agent for Everyone. Visual AI assistant with remote access, file management, and built-in AI browser. ⭐1k | `main` |
+| [nezha](https://github.com/hanshuaikang/nezha.git) | Code Editor for the AI Agents Era. Run multiple Claude Code and Codex agents across projects on your machine. ⭐1k | `main` |
+| [openclaw](https://github.com/openclaw/openclaw.git) | Your own personal AI assistant. Any OS. Any Platform. The lobster way. 🦞  ⭐387k | `main` |
+| [openhanako](https://github.com/liliMozi/openhanako.git) | A personal AI agent with memory, personality, and autonomy. ⭐6k | `main` |
+| [orca](https://github.com/stablyai/orca.git) | Orca is the ADE for working with a fleet of parallel agents. Run any coding agent with your own subscription. Available on desktop, mobile and VPS. ⭐56k | `main` |
 
 ## 📝 知识管理与编辑器
 
@@ -94,11 +96,11 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [AFFiNE](https://github.com/toeverything/AFFiNE.git) | (N/A) | `canary` |
+| [AFFiNE](https://github.com/toeverything/AFFiNE.git) | There can be more than Notion and Miro. AFFiNE(pronounced [ə‘fain]) is a next-gen knowledge base that brings planning, sorting and creating all together. Privacy first, open-source, customizable and ready to use.  ⭐71k | `canary` |
 | [BlockNote](https://github.com/TypeCellOS/BlockNote.git) | A React Rich Text Editor that's block-based (Notion style) and extensible. Built on top of Prosemirror and Tiptap. ⭐10k | `main` |
 | [Trilium](https://github.com/TriliumNext/Trilium.git) | Build your personal knowledge base with Trilium Notes ⭐37k | `main` |
-| [marktext](https://github.com/marktext/marktext.git) | 📝A simple and elegant markdown editor, available for Linux, macOS and Windows. ⭐59k | `develop` |
-| [solomd](https://github.com/zhitongblog/solomd.git) | A markdown editor — and the bridge to your LLM. Local-first, MIT, ~15 MB. Bundled MCP server lets Claude Code / Codex / Cursor drive your vault directly. 14 AI providers BYOK. ⭐726 | `main` |
+| [marktext](https://github.com/marktext/marktext.git) | 📝A simple and elegant markdown editor, available for Linux, macOS and Windows. ⭐60k | `develop` |
+| [solomd](https://github.com/zhitongblog/solomd.git) | A markdown editor — and the bridge to your LLM. Local-first, MIT, ~15 MB. Bundled MCP server lets Claude Code / Codex / Cursor drive your vault directly. 14 AI providers BYOK. ⭐934 | `main` |
 | [tolaria](https://github.com/refactoringhq/tolaria.git) | Desktop app to manage markdown knowledge bases ⭐19k | `main` |
 
 ## ✅ 效率工具
@@ -107,8 +109,8 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [n8n](https://github.com/n8n-io/n8n.git) | Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host or cloud, 400+ integrations. ⭐199k | `master` |
-| [super-productivity](https://github.com/super-productivity/super-productivity.git) | (N/A) | `master` |
+| [n8n](https://github.com/n8n-io/n8n.git) | Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host or cloud, 400+ integrations. ⭐202k | `master` |
+| [super-productivity](https://github.com/super-productivity/super-productivity.git) | Super Productivity is an advanced todo list app with integrated Timeboxing and time tracking capabilities. It also comes with integrations for Jira, GitLab, GitHub and Open Project. ⭐21k | `master` |
 
 ## ☕ Java 企业开发
 
@@ -116,12 +118,20 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [ruoyi-react](https://gitee.com/JavaLionLi/plus-ui.git) | RuoYi-Vue-Plus 5.X 与 RuoYi-Cloud-Plus 2.X 统一 UI 前端代码仓库
+| [ruoyi-react](https://gitee.com/JavaLionLi/plus-ui.git) | RuoYi-Vue-Plus 与 RuoYi-Cloud-Plus 统一 UI 前端代码仓库
 问题请到主框架反馈 ⭐2k | `6.X-React` |
-| [ruoyi-vue](https://gitee.com/JavaLionLi/plus-ui.git) | RuoYi-Vue-Plus 5.X 与 RuoYi-Cloud-Plus 2.X 统一 UI 前端代码仓库
+| [ruoyi-vue](https://gitee.com/JavaLionLi/plus-ui.git) | RuoYi-Vue-Plus 与 RuoYi-Cloud-Plus 统一 UI 前端代码仓库
 问题请到主框架反馈 ⭐2k | `6.X-Vue` |
 | [ruoyi-vue-plus](https://gitee.com/dromara/RuoYi-Vue-Plus.git) | 多租户后台管理系统 重写RuoYi-Vue所有功能 集成 Sa-Token、Mybatis-Plus、WarmFlow、SpringDoc、Hutool、OSS 定期同步 ⭐16k | `6.X` |
-| [snail-ai](https://gitee.com/aizuda/snail-ai.git) | Snail AI 企业级 AI Agent 平台 - 让 AI 更智能，让开发更高效 ⭐767 | `master` |
+| [snail-ai](https://gitee.com/aizuda/snail-ai.git) | Snail AI 企业级 AI Agent 平台 - 让 AI 更智能，让开发更高效 ⭐818 | `master` |
+
+## ⚙️ Go 语言项目
+
+> Go 库、服务与开发工具
+
+| 项目 | 描述 | 分支 |
+|------|------|------|
+| [backplane](https://github.com/kar1hsu/backplane) | 模块化 Go 管理框架 — Gin + GORM + Casbin + JWT，带有嵌入式 Vue 3 面板：按钮级 RBAC、审计日志记录、动态配置和分布式任务队列。 ⭐27 | `master` |
 
 ## 📈 量化交易与金融数据
 
@@ -129,10 +139,10 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [TradingAgents-astock](https://github.com/simonlin1212/TradingAgents-astock.git) | (N/A) | `main` |
-| [Vibe-Research](https://github.com/simonlin1212/Vibe-Research.git) | Vibe-Research: Your Personal Trading Research Agent · A股/美股/港股 的个人投研 Agent：每日复盘、资讯雷达、个股数据、板块中心、我的持仓、研究记录。Vibe-Research 把数据和功能配齐，由你自己的 AI 驱动投资研究。 ⭐1k | `main` |
-| [a-stock-data](https://github.com/simonlin1212/a-stock-data.git) | A股全栈数据工具包 · 10层架构 · 43端点(含3官方备胎) · 15数据源 · 行情/研报/资金面/筹码/公告/打板/ETF期权/舆情互动全覆盖+备用源降级 | China A-Share full-stack data toolkit (43 endpoints) ⭐8k | `main` |
-| [tickflow-stock-panel](https://github.com/shy3130/tickflow-stock-panel.git) | TSP自托管、零运维的 A 股「选股 + 监控 + 回测」量化工作台 | 基于 TickFlow 数据源  | LLM能力驱使策略定制+个股分析+复盘 | 自由接入第三方数据源与个性化扩展数据 | 个人开源 ,非TickFlow官方项目 ⭐2k | `main` |
+| [TradingAgents-astock](https://github.com/simonlin1212/TradingAgents-astock.git) | A股多Agent投研框架 — 适配A股数据源(龙虎榜/游资/解禁等)，7位分析师基于A股规则的辩论决策，基于TradingAgents深度改造，适配大A。A-share multi-agent investment research framework — 7 AI analysts, bull/bear debate, risk assessment。 ⭐3k | `main` |
+| [Vibe-Research](https://github.com/simonlin1212/Vibe-Research.git) | Vibe-Research: Your Personal Trading Research Agent · A股/美股/港股 的个人投研 Agent：每日复盘、资讯雷达、个股数据、板块中心、我的持仓、研究记录、回测。Vibe-Research 把数据和功能配齐，由你自己的 Agent 驱动投资研究。基于开源的 Codex Harness 打造。 ⭐2k | `main` |
+| [a-stock-data](https://github.com/simonlin1212/a-stock-data.git) | A股全栈数据工具包 · 十一层架构 · 54端点 · 19数据源 · 零鉴权 | Full-stack China A-share data toolkit for AI agents — 11 layers, 54 endpoints, 19 sources, zero-auth ⭐9k | `main` |
+| [tickflow-stock-panel](https://github.com/shy3130/tickflow-stock-panel.git) | TSP自托管、零运维的 A 股「选股 + 监控 + 回测」量化工作台 | 基于 TickFlow 数据源  | LLM能力驱使策略定制+个股分析+复盘 | 自由接入第三方数据源与个性化扩展数据 | 个人开源 ,非第三方官方项目 ⭐3k | `main` |
 
 ## 📊 数据开发
 
@@ -140,9 +150,9 @@
 
 | 项目 | 描述 | 分支 |
 |------|------|------|
-| [OpenBB](https://github.com/OpenBB-finance/OpenBB.git) | Open Data Platform for analysts, quants and AI agents. ⭐71k | `develop` |
-| [data-agent-tutorial](https://github.com/qifan777/data-agent-tutorial.git) | Data-Agent：从 0 到 1 构建 Text2SQL 智能体实战教程，覆盖 StateGraph 编排、双重 RAG、关系图谱、HITL 人工确认、SQL 自动纠错、Python Docker 沙盒执行与 A2A + SSE 流式交互。 ⭐93 | `main` |
-| [datanote](https://github.com/datanote1018/datanote.git) | 轻量级一站式数据开发平台 — 数据同步、SQL开发、任务调度、数据地图、数据质量、AI辅助 ⭐37 | `master` |
+| [OpenBB](https://github.com/OpenBB-finance/OpenBB.git) | Open Data Platform for analysts, quants and AI agents. ⭐72k | `develop` |
+| [data-agent-tutorial](https://github.com/qifan777/data-agent-tutorial.git) | Data-Agent：从 0 到 1 构建 Text2SQL 智能体实战教程，覆盖 StateGraph 编排、双重 RAG、关系图谱、HITL 人工确认、SQL 自动纠错、Python Docker 沙盒执行与 A2A + SSE 流式交互。 ⭐101 | `main` |
+| [datanote](https://github.com/datanote1018/datanote.git) | 轻量级一站式数据开发平台 — 数据同步、SQL开发、任务调度、数据地图、数据质量、AI辅助 ⭐39 | `master` |
 | [protege](https://github.com/protegeproject/protege.git) | Protege Desktop ⭐1k | `master` |
 
 ---
